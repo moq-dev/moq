@@ -3,10 +3,13 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { defined } from "../src/defined.test-util.ts";
+import { hooks } from "../src/internal.ts";
 import { ALPN_07_WIP } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
+import { Timestamp } from "../src/time.ts";
 
 console.debug = () => {};
 console.log("retained,tracks,joined,refresh_us");
@@ -20,7 +23,7 @@ for (const retained of [1, 64, 1024])
 			const broadcastRoute = source.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
 			const producers = Array.from({ length: tracks }, (_, i) =>
-				broadcast.createTrack(`data${i}`, { refresh: 1 }),
+				defined(broadcast.createTrack(`data${i}`, { refresh: { ratio: 1 } })),
 			);
 			const pair = createMockTransportPair(ALPN_07_WIP);
 			const url = new URL("https://localhost/refresh");
@@ -32,14 +35,12 @@ for (const retained of [1, 64, 1024])
 				const announcements = destination.announced();
 				while ((await announcements.next())?.kind !== "present") {}
 				const request = destination.request(Path.from("room"));
-				while (!request.active.peek()) await request.active.changed();
-				const remote = request.active.peek();
-				if (!remote) throw new Error("broadcast missing");
+				const remote = await request.broadcast();
 				const consumers = producers.map((_, i) => remote.track(`data${i}`));
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {
-					const group = producers[i].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
+					const group = hooks.appendNext(producers[i]);
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[i].recvGroup();
 					if (!received) throw new Error("baseline group missing");
@@ -49,8 +50,8 @@ for (const retained of [1, 64, 1024])
 				// Keep this track's historical groups in its cache. Only the touched
 				// track grows, so scanning that cache appears independently of fanout.
 				for (let old = 1; old < retained; old++) {
-					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
+					const group = hooks.appendNext(producers[0]);
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("historical group missing");
@@ -60,9 +61,9 @@ for (const retained of [1, 64, 1024])
 
 				const samples: number[] = [];
 				for (let round = 0; round < 9; round++) {
-					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
-					group.writeFrame({ payload: new Uint8Array(4) });
+					const group = hooks.appendNext(producers[0]);
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
+					group.writeFrame({ payload: new Uint8Array(4), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("measured group missing");
@@ -71,8 +72,8 @@ for (const retained of [1, 64, 1024])
 					received.close();
 					const start = performance.now();
 					const joins = Array.from({ length: joined }, () => consumers[0].subscribe());
-					const wanted = producers[0].demand().wanted;
-					while (wanted.peek() !== group.sequence + 1n) await wanted.changed();
+					const refresh = producers[0].demand().refresh;
+					while (!refresh.peek()) await refresh.changed();
 					if (round > 0) samples.push((performance.now() - start) * 1000);
 					for (const join of joins) join.close();
 				}

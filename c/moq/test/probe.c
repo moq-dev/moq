@@ -259,13 +259,13 @@ static void on_announce(void *user_data, moq_error *error, moq_announce_event *v
 	on_value(user_data, error, value);
 }
 
-/* Over moq-lite-06, whose wire carries no instance, the session mints the announced one.
- * Passed back as is, it pins request and follow; its text, parsed, names another instance. */
-static void minted_instance(void)
+/* Over moq-lite-06, whose wire carries no identity, the session mints the announced one.
+ * Passed back as is, it pins request and follow; its text, parsed, names another identity. */
+static void minted_identity(void)
 {
-	moq_instance *empty = NULL;
-	moq_error *error = moq_instance_parse("", &empty);
-	CHECK(error && error->tag == MOQ_ERROR_INVALID_INSTANCE && !empty);
+	moq_identity *empty = NULL;
+	moq_error *error = moq_identity_parse("", &empty);
+	CHECK(error && error->tag == MOQ_ERROR_INVALID_IDENTITY && !empty);
 	moq_error_free(error);
 
 	moq_origin_config origin_config = moq_origin_config_default();
@@ -322,37 +322,37 @@ static void minted_instance(void)
 	moq_announce_event *event = await(&next, "announce event");
 	moq_task_free(task);
 	CHECK(event && event->tag == MOQ_ANNOUNCE_EVENT_PRESENT);
-	moq_instance *minted = event->present.announce.route.instance;
-	CHECK(moq_instance_is_minted(minted));
+	moq_identity *minted = event->present.announce.route.identity;
+	CHECK(moq_identity_is_minted(minted));
 
 	result requested = {0};
 	task = moq_origin_consumer_request(consumer, "live", minted, on_broadcast, &requested);
-	moq_broadcast_consumer_free(await(&requested, "request the minted instance"));
+	moq_broadcast_consumer_free(await(&requested, "request the minted identity"));
 	moq_task_free(task);
 	moq_following *following = NULL;
-	ok(moq_origin_consumer_follow(consumer, "live", minted, &following), "follow the minted instance");
+	ok(moq_origin_consumer_follow(consumer, "live", minted, &following), "follow the minted identity");
 	result available = {0};
 	task = moq_following_available(following, on_broadcast, &available);
-	moq_broadcast_consumer *followed = await(&available, "available the minted instance");
+	moq_broadcast_consumer *followed = await(&available, "available the minted identity");
 	CHECK(followed);
 	moq_broadcast_consumer_free(followed);
 	moq_task_free(task);
 
-	/* A handle's == compares pointers, so moq_instance_eq compares instances. */
-	char *text = moq_instance_text(minted);
-	moq_instance *named = NULL;
-	ok(moq_instance_parse(text, &named), "parse the minted text");
+	/* A handle's == compares pointers, so moq_identity_eq compares identities. */
+	char *text = moq_identity_text(minted);
+	moq_identity *named = NULL;
+	ok(moq_identity_parse(text, &named), "parse the minted text");
 	moq_string_free(text);
-	CHECK(!moq_instance_is_minted(named));
-	CHECK(!moq_instance_eq(named, minted) && moq_instance_ne(named, minted));
-	CHECK(moq_instance_eq(minted, minted));
+	CHECK(!moq_identity_is_minted(named));
+	CHECK(!moq_identity_eq(named, minted) && moq_identity_ne(named, minted));
+	CHECK(moq_identity_eq(minted, minted));
 	result refused = {0};
 	task = moq_origin_consumer_request(consumer, "live", named, on_broadcast, &refused);
 	CHECK(pump(&refused.done, 5000));
 	CHECK(refused.error && refused.error->tag == MOQ_ERROR_PROTOCOL && !refused.value);
 	moq_error_free(refused.error);
 	moq_task_free(task);
-	moq_instance_free(named);
+	moq_identity_free(named);
 	moq_announce_event_free(event);
 
 	moq_following_cancel(following);
@@ -385,15 +385,15 @@ int main(void)
 	moq_dispatcher dispatcher = {loop_dispatch, loop_shutdown, NULL};
 	moq_set_dispatcher(&dispatcher);
 
-	/* Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset. */
+	/* Only the defaults carry moq-net's zero max delay, with no min; a bare record leaves both unset. */
 	moq_subscription *defaults = moq_subscription_defaults();
-	CHECK(defaults->delay.min.has_value && defaults->delay.min.value == 0);
+	CHECK(!defaults->delay.min.has_value);
 	CHECK(defaults->delay.max.has_value && defaults->delay.max.value == 0);
 	moq_subscription_free(defaults);
 	moq_subscription bare = moq_subscription_default();
 	CHECK(!bare.delay.max.has_value);
 
-	minted_instance();
+	minted_identity();
 
 	/* A synchronous error is a returned value with Rust's Display message. */
 	moq_server_config unbound_config = moq_server_config_default();
@@ -415,12 +415,12 @@ int main(void)
 	moq_route *route = NULL;
 	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
 	moq_broadcast_producer *broadcast = moq_route_broadcast(route);
-	moq_instance *instance = moq_route_instance_id(route);
-	CHECK(instance && !moq_instance_is_minted(instance));
-	char *text = moq_instance_text(instance);
+	moq_identity *identity = moq_route_identity(route);
+	CHECK(identity && !moq_identity_is_minted(identity));
+	char *text = moq_identity_text(identity);
 	CHECK(text && text[0] != '\0');
 	moq_string_free(text);
-	moq_instance_free(instance);
+	moq_identity_free(identity);
 	moq_track_info info = moq_track_info_default();
 	info.timescale.has_value = true;
 	info.timescale.value = 1000000;
@@ -495,11 +495,10 @@ int main(void)
 	result reading = {0};
 	task = moq_track_consumer_read_frame(consumer, on_frame, &reading);
 	const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
-	moq_frame frame = moq_frame_default();
-	frame.payload.data = hello;
-	frame.payload.len = sizeof(hello);
-	moq_timestamp timestamp = {1000, 1000000};
-	frame.timestamp = &timestamp;
+	moq_frame frame = {
+		.payload = {.data = hello, .len = sizeof(hello)},
+		.timestamp = {.value = 1000, .scale = {.has_value = true, .value = 1000000}},
+	};
 	ok(moq_track_producer_write_frame(track, &frame), "write_frame");
 	moq_frame *received = await(&reading, "read_frame");
 	moq_task_free(task);
@@ -507,7 +506,8 @@ int main(void)
 	CHECK(received->payload.len == sizeof(hello));
 	CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
 	/* Lite-07 carries both the Implementation parameter and frame timestamps, at any scale. */
-	CHECK(received->timestamp && received->timestamp->value * 1000000 == 1000 * received->timestamp->scale);
+	CHECK(received->timestamp.scale.has_value &&
+	      received->timestamp.value * 1000000 == 1000 * received->timestamp.scale.value);
 	moq_frame_free(received);
 	CHECK(!cancelled.done);
 

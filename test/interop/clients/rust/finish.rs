@@ -78,15 +78,18 @@ async fn main() -> anyhow::Result<()> {
 	if args.role == "publish" {
 		let route = origin.route(&args.broadcast, moq_net::origin::RouteOptions::hidden())?;
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut route.broadcast().clone(), Default::default())?;
-		let mut media = moq_mux::import::TrackStream::video(
-			route.broadcast().reserve_track("video")?,
+		let mut stream = moq_mux::import::TrackStream::video(
+			route
+				.broadcast()
+				.reserve_track("video")
+				.context("the track already exists")?,
 			catalog.reserve(),
-			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::Avc3, Vec::new()),
+			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::H264, Vec::new()),
 		)?;
 		let mut data = Vec::new();
 		stdin.read_to_end(&mut data).await?;
-		media.decode(&data)?;
-		media.finish()?;
+		stream.decode(&data)?;
+		let media = stream.finish()?;
 		catalog.finish()?;
 		route.announce()?;
 		// Keep the finished broadcast up for the late readers, then take it offline.
@@ -98,10 +101,14 @@ async fn main() -> anyhow::Result<()> {
 			format!("{}.health", args.broadcast),
 			moq_net::origin::RouteOptions::hidden(),
 		)?;
-		let mut track = health
+		let track = health
 			.broadcast()
-			.create_track("live", moq_net::track::Info::default())?;
-		track.write_frame(None, b"session-alive".to_vec())?;
+			.create_track("live", moq_net::track::Info::default())
+			.context("the track already exists")?;
+		let start = moq_net::Timestamp::unscaled(0);
+		let mut group = track.append_group(start)?;
+		group.write_frame(start, b"session-alive".to_vec())?;
+		group.finish()?;
 		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
@@ -138,8 +145,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
-						.with_range(0..),
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;
@@ -177,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;
-			// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+			// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 			ensure!(frame.payload.as_ref() == b"session-alive", "health payload");
 			ensure!(
 				group.read_frame().await?.is_none() && track.recv_group().await?.is_none(),

@@ -19,7 +19,6 @@ export type DecoderConfig = Pick<
 /** The routing and decoder state whose changes require a replacement subscription. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.AudioConfig["broadcast"];
-	instance: Catalog.AudioConfig["instance"];
 	track: Catalog.AudioConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -45,19 +44,43 @@ export function decoderConfigKey(config: Catalog.AudioConfig): string {
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
-		instance: config.instance,
 		track: config.track,
 		decoder: decoderConfig(config),
 	};
 }
 
+const OPUS_HEAD = new TextEncoder().encode("OpusHead");
+
 /**
- * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
+ * The description to configure WebCodecs with: the catalog's, or the init segment's when it has none.
+ *
+ * An Opus stream past stereo cannot decode without its OpusHead's channel mapping, but Chromium then
+ * trims the header's pre-skip itself, again after every flush. The decoder's Terminal owns that trim,
+ * gap resumes included, so WebCodecs gets a copy with the pre-skip zeroed. WebCodecs reads only a
+ * signed OpusHead, so a dOps or an unsigned header stays dropped, as before.
+ */
+export function decoderDescription(codec: string, description: Uint8Array | undefined): Uint8Array | undefined {
+	if (!description || codec !== "opus") return description;
+	if (!OPUS_HEAD.every((byte, index) => description[index] === byte)) return undefined;
+	// Validates the header's length.
+	Util.Opus.preSkip(description);
+	const copy = description.slice();
+	// The two little-endian bytes after the version and channel count.
+	copy.fill(0, OPUS_HEAD.length + 2, OPUS_HEAD.length + 4);
+	return copy;
+}
+
+/**
+ * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it. AAC
+ * with an AudioSpecificConfig is reckoned by its core's frame length and rate instead, which SBR
+ * may double.
  *
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Duration | undefined {
+export function frameDuration(config: FrameConfig): Duration | undefined {
+	const aac = aacFrameDuration(config);
+	if (aac !== undefined) return aac;
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -75,7 +98,14 @@ export function packetDuration(codec: string, frame: Container.Frame): Duration 
 	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
-function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {
+// A catalog rendition (hex `description`) or the WebCodecs config built from one (bytes).
+type FrameConfig = {
+	readonly codec: string;
+	readonly sampleRate: number;
+	readonly description?: string | AllowSharedBufferSource;
+};
+
+function frameSamples(config: FrameConfig): number | undefined {
 	switch (Util.Aac.objectType(config.codec)) {
 		case 2:
 			return AAC_LC_FRAME_SAMPLES;
@@ -89,4 +119,19 @@ function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">)
 		return config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
 	}
 	return undefined;
+}
+
+// How long an AAC track's AudioSpecificConfig codes each frame, or undefined without an AAC-LC core.
+function aacFrameDuration(config: FrameConfig): Duration | undefined {
+	const description = config.description;
+	if (!description || Util.Aac.objectType(config.codec) === undefined) return undefined;
+	const bytes =
+		typeof description === "string"
+			? Util.Hex.toBytes(description)
+			: ArrayBuffer.isView(description)
+				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+				: new Uint8Array(description);
+	const asc = Util.Aac.parseConfig(bytes);
+	if (asc?.frameSamples === undefined) return undefined;
+	return Duration.millis((asc.frameSamples * 1000) / asc.coreSampleRate);
 }

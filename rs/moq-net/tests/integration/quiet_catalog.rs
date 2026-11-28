@@ -6,10 +6,12 @@
 //! must still get it.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::{future::Future, time::Duration};
 
-use moq_net::{Error, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -19,15 +21,17 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// The versions that forward a resume's floor upstream; the IETF relay subscribes without one.
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -51,8 +55,8 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Produce
 	let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), b"snapshot").unwrap();
 	group.finish().unwrap();
 	(broadcast, track)
 }
@@ -88,9 +92,9 @@ async fn read_snapshot(remote: &broadcast::Consumer) -> Result<track::Subscriber
 		.map_err(|_| "group had no frame")?
 		.map_err(|err| format!("read: {err}"))?
 		.ok_or("group ended empty")?;
-	match (group.sequence, frame.payload.as_ref()) {
+	match (group.start, frame.payload.as_ref()) {
 		(0, b"snapshot") => Ok(sub),
-		(sequence, payload) => Err(format!("got group {sequence} {payload:?}")),
+		(key, payload) => Err(format!("got group {key} {payload:?}")),
 	}
 }
 
@@ -180,13 +184,13 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 			resume_remote
 				.track("catalog.json")
 				.unwrap()
-				.subscribe(track::Subscription::default().with_range(1..))
+				.subscribe(track::Subscription::default().with_ranges([support::keys(1..)]))
 				.await
 				.map_err(|err| format!("resume subscribe: {err}"))
 		},
 		async {
 			// The fresh reader widens the existing upstream subscription.
-			let resumed = vec![track::Range::groups(1..)];
+			let resumed = vec![support::keys(1..)];
 			kio::clock::timeout(TIMEOUT, async {
 				while track.subscription().map(|sub| sub.ranges).as_ref() != Some(&resumed) {
 					track.subscription_changed().await.unwrap();

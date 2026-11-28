@@ -55,28 +55,16 @@ public enum Video {
         public func pixels(format: PixelFormat) throws -> Data { try ffi.pixels(format: format) }
 
         /// The decoder's platform surface, or `nil` when the frame is in CPU memory.
-        public func surface() -> Surface? { ffi.surface().map(Surface.init) }
+        public func surface() -> Surface? { ffi.surface() }
     }
 
-    /// The platform image backing a `DecodedFrame`, when `DecoderOutput` asked for one.
-    public enum Surface: Sendable, Equatable {
-        /// A borrowed `CVPixelBufferRef` address, valid while its frame lives.
-        case pixelBuffer(pointer: UInt64)
-        /// A surface kind this version of the package does not know yet.
-        case unknown
-
-        init(_ surface: MoqVideoSurface) {
-            // `if case` rather than `switch`, so a variant this package predates maps to `.unknown`.
-            if case .pixelBuffer(let pointer) = surface {
-                self = .pixelBuffer(pointer: pointer)
-            } else {
-                self = .unknown
-            }
-        }
-    }
+    /// The platform image backing a `DecodedFrame`, when `DecoderOutput` asked for one: a borrowed
+    /// `CVPixelBufferRef` address (`.pixelBuffer`), valid while its frame lives, or `.unknown` for a
+    /// kind this version cannot name yet.
+    public typealias Surface = MoqVideoSurface
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
-    /// A video codec identifier (H.264 or H.265).
+    /// Selects the video encoder codec. Build one with `Codec.h264()` or `Codec.h265()`.
     public typealias Codec = VideoCodec
     /// A CPU pixel layout (I420 or RGBA).
     public typealias PixelFormat = VideoPixelFormat
@@ -102,11 +90,41 @@ public enum Video {
             bandwidth: Allocator? = nil,
             lower: Producer? = nil
         ) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoProducer(
                 catalog: catalog.ffi,
                 options: MoqVideoProducerOptions(
                     input: input, output: output, track: track, bandwidth: bandwidth?.ffi,
                     lower: lower?.ffi))
+        }
+
+        private init(_ ffi: MoqVideoProducer) {
+            self.ffi = ffi
+        }
+
+        /// Open a video track on the track a subscriber's `request` asks for, which names it.
+        ///
+        /// This is how an on-demand publisher serves a track asked for again after its producer
+        /// was released while read: pass the settings it was first published with. Settings that
+        /// change the track info its readers hold end the track with `MalformedTrack` and throw here;
+        /// nothing checks the codec settings, which its readers decode with, so keep those too.
+        /// The request must belong to the catalog's broadcast, and a config that can't be encoded
+        /// rejects it with `NotFound`.
+        public static func requested(
+            catalog: Media.CatalogProducer,
+            request: TrackRequest,
+            input: EncoderInput,
+            output: EncoderOutput,
+            bandwidth: Allocator? = nil,
+            lower: Producer? = nil
+        ) throws -> Producer {
+            try checkDuration(output.join, "join")
+            return Producer(
+                try MoqVideoProducer.requested(
+                    catalog: catalog.ffi, request: request.ffi,
+                    options: MoqVideoProducerOptions(
+                        input: input, output: output, track: nil, bandwidth: bandwidth?.ffi,
+                        lower: lower?.ffi)))
         }
 
         /// A watch-only handle to whether the video track has subscribers.
@@ -174,7 +192,8 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqVideoConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -208,6 +227,7 @@ public enum Video {
 
         /// Open a codec-only encoder.
         public init(input: EncoderInput, output: EncoderOutput) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoEncoder(input: input, output: output)
         }
 

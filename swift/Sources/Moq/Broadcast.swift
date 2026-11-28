@@ -18,26 +18,34 @@ public final class BroadcastConsumer: Sendable {
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.
     public func subscribeTrack(name: String, subscription: Subscription? = nil) async throws -> TrackConsumer {
-        TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
+        try checkSubscription(subscription)
+        return TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
-    /// Fetch one complete group by track name and group sequence without holding
+    /// Subscribe to a track's metadata by name: its groups and each frame's header, without
+    /// the payload. A subscription of its own beside any `subscribeTrack` of the same track; to
+    /// read the payload after all, subscribe to the track from the group reached.
+    /// `subscription` works as in `subscribeTrack`.
+    public func subscribeMeta(name: String, subscription: Subscription? = nil) async throws -> MetaConsumer {
+        try checkSubscription(subscription)
+        return MetaConsumer(try await ffi.subscribeMeta(name: name, subscription: subscription))
+    }
+
+    /// Fetch one complete group by track name and group start without holding
     /// a live subscription. The group may still be receiving frames.
     public func fetchGroup(
         name: String,
-        sequence: UInt64,
+        start: UInt64,
         options: FetchGroupOptions? = nil
     ) async throws -> GroupConsumer {
-        GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
+        GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
     }
 
     /// Resolve a catalog rendition to the broadcast serving its track.
     ///
     /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
-    /// names a sibling relative to it (e.g. `./source`). Its `instance` is the stream the reference
-    /// names: a broadcast proven to serve another one throws instead of resolving, while a route
-    /// over a wire that carries no instance cannot prove one, so there it is best effort. Call it on a
-    /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
+    /// names a sibling relative to it (e.g. `./source`). Call it on a rendition that carries a
+    /// reference before `subscribeTrack` or `fetchGroup`, which take a
     /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
     /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
     /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve it themselves.
@@ -45,7 +53,8 @@ public final class BroadcastConsumer: Sendable {
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
     public func resolve(_ rendition: Media.Rendition) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(rendition: rendition))
+        try checkRendition(rendition)
+        return BroadcastConsumer(try await ffi.resolve(rendition: rendition))
     }
 
 }
@@ -82,7 +91,8 @@ public final class BroadcastProducer: Sendable {
     /// Open a track for arbitrary byte payloads, with no codec or container.
     /// `info` sets track properties (priority, cache, timescale); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
-        TrackProducer(try ffi.publishTrack(name: name, info: info))
+        try checkTrackInfo(info)
+        return TrackProducer(try ffi.publishTrack(name: name, info: info))
     }
 
     /// End the broadcast for good: retract it and serve no new tracks.

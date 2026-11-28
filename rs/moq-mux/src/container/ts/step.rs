@@ -1,11 +1,11 @@
 //! Whether the source's clock stepped onto another timeline, or its PAT named another
-//! program, either of which ends the import's instance.
+//! program, either of which ends the import's identity.
 //!
 //! A contribution switched between two encoders whose clocks were never locked steps every
 //! timestamp at once without `discontinuity_indicator`. Splicing the two would put two sources
 //! on one timeline, and a step back would break the rule that group starts never go
-//! backwards within an instance, so the import ends its instance at the step and hands the
-//! input from there to a caller that republishes it under a new instance.
+//! backwards within an identity, so the import ends its identity at the step and hands the
+//! input from there to a caller that republishes it under a new identity.
 //!
 //! The step is judged the way ffmpeg infers an unflagged one: the program clock and every
 //! elementary stream that keeps a timestamp cadence step together, forward by more than
@@ -15,7 +15,7 @@
 //! streams stepping back is a rewind; one stepping forward splices as before.
 //!
 //! A PAT naming another `transport_stream_id` or program number is another source too, even
-//! when it arrives before the new source's first clock reading. The new instance reads from
+//! when it arrives before the new source's first clock reading. The new identity reads from
 //! the packet that completes that PAT, so one spanning packets is read at its next repetition.
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +25,7 @@ use bytes::Bytes;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::demux::Demux;
+use super::error::Result;
 use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
@@ -32,26 +33,24 @@ use super::passthrough::PCR_HZ;
 use super::psi::{Pat, PesStart};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
-const LEAP: Duration = Duration::from_secs(10);
+pub(super) const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
-/// [`Import`](super::Import) ended its instance there.
+/// [`Import`](super::Import) ended its identity there.
 ///
-/// What follows is another broadcast. A caller that carries on finishes this import and
-/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance.
-#[derive(Clone, Debug, thiserror::Error)]
-#[non_exhaustive]
-#[error("the source {step}; what follows is a new broadcast")]
-pub struct Restart {
+/// Only [`Republish`](super::Republish) sees it, and reads [`remainder`](Self::remainder) into a
+/// new identity on the same path; a raw import fails with [`Error::Restarted`](super::Error::Restarted).
+#[derive(Clone, Debug)]
+pub(super) struct Restart {
 	/// How the source changed.
 	pub step: Step,
 	/// The input from the step on, which this import did not read.
 	pub remainder: Bytes,
 }
 
-/// How the source changed, ending an import's instance.
+/// How the source changed, ending an import's identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Step {
@@ -113,7 +112,7 @@ pub(super) enum Verdict {
 	Route,
 	/// Route nothing yet: a step is being judged on input still to come.
 	Hold,
-	/// The clock stepped at it: end the instance there.
+	/// The clock stepped at it: end the identity there.
 	Restart(Step),
 }
 
@@ -239,7 +238,7 @@ impl Headers {
 				return (Some(chain), None);
 			}
 		}
-		// The import refuses a malformed adaptation field and cannot read a scrambled payload.
+		// The import ends on a malformed adaptation field and cannot read a scrambled payload.
 		if !adaptation_valid(pkt) || pkt[3] & 0xc0 != 0 {
 			chain.begun = None;
 			return (Some(chain), None);
@@ -247,7 +246,7 @@ impl Headers {
 		let Payload::Bytes(payload) = payload(pkt) else {
 			return (Some(chain), None);
 		};
-		// A PES start abandons whatever header was begun before it, as the import's does.
+		// A PES start abandons whatever header was begun before it, where the import ends.
 		let begun = chain.begun.take();
 		let header = if pkt[1] & 0x40 != 0 {
 			payload.to_vec()
@@ -284,10 +283,10 @@ impl Headers {
 
 /// A step being judged, from the packet that showed it on.
 struct Ahead {
-	/// The input offset of that packet, where a new instance starts.
+	/// The input offset of that packet, where a new identity starts.
 	at: u64,
 	/// The way it stepped and by how much, or `None` for the clock PID's flagged break, which
-	/// ends the instance only if the streams step back.
+	/// ends the identity only if the streams step back.
 	stepped: Option<(Way, Duration)>,
 	/// Whether the PCR still has to step with it.
 	pcr: bool,
@@ -507,7 +506,7 @@ impl Ahead {
 	}
 
 	/// The step every clock heard from agreed on, `stepped` when that is enough to end the
-	/// instance, or the offset judged through when it is not.
+	/// identity, or the offset judged through when it is not.
 	fn verdict(&self, end: u64, stepped: bool) -> Result<Step, u64> {
 		match self.stepped {
 			Some((Way::Back, by)) if stepped => Ok(Step::Rewind { by, flagged: false }),

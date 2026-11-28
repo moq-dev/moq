@@ -35,6 +35,7 @@ use ndk::media::media_codec::{self, DequeuedInputBufferResult, DequeuedOutputBuf
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
+use super::submitted::Submitted;
 use super::{Backend, Codec, Config, Stream};
 use crate::frame::{
 	Surface,
@@ -121,6 +122,10 @@ pub(crate) struct MediaCodec {
 	/// Whether the last acquire found every slot held, so the stall is reported
 	/// once on the way in rather than on every poll.
 	stalled: bool,
+	/// Access units the codec has taken, for the timestamp to give their
+	/// pictures: it carries whole microseconds, which would change a
+	/// [`Timestamp`] at its own scale.
+	submitted: Submitted,
 	/// Pictures acquired from the reader, waiting for `receive`.
 	ready: VecDeque<Frame>,
 }
@@ -241,6 +246,7 @@ impl MediaCodec {
 			pending_images: 0,
 			input: Input::Idle,
 			stalled: false,
+			submitted: Submitted::default(),
 			ready: VecDeque::new(),
 		}))
 	}
@@ -251,7 +257,7 @@ impl MediaCodec {
 	/// none free: a decoder that skips one produces a broken picture until the
 	/// next keyframe, which is a far worse trade than the wait.
 	fn submit(&mut self, access_unit: &[u8], timestamp: Timestamp) -> Result<(), Error> {
-		let time = timestamp.as_micros().min(u64::MAX as u128) as u64;
+		let time = self.submitted.key(timestamp)?;
 
 		for _ in 0..SUBMIT_ROUNDS {
 			let queued = match self
@@ -262,9 +268,14 @@ impl MediaCodec {
 				DequeuedInputBufferResult::Buffer(mut buffer) => {
 					let target = buffer.buffer_mut();
 					if target.len() < access_unit.len() {
+						let capacity = target.len();
+						// Handed back empty: a dequeued buffer the codec never gets back
+						// is one fewer for the rest of the stream.
+						self.codec
+							.queue_input_buffer(buffer, 0, 0, time, 0)
+							.map_err(|e| codec_err("return an unused input buffer", e))?;
 						return Err(Error::codec(anyhow::anyhow!(
-							"MediaCodec input buffer is {} bytes, needs {} for this access unit",
-							target.len(),
+							"MediaCodec input buffer is {capacity} bytes, needs {} for this access unit",
 							access_unit.len()
 						)));
 					}
@@ -283,6 +294,7 @@ impl MediaCodec {
 					self.codec
 						.queue_input_buffer(buffer, 0, access_unit.len(), time, 0)
 						.map_err(|e| codec_err("queue an input buffer", e))?;
+					self.submitted.remember(time, timestamp);
 					self.input = Input::Fed;
 					true
 				}
@@ -363,7 +375,9 @@ impl MediaCodec {
 					let nanos = image
 						.timestamp()
 						.map_err(|e| reader_err("read an image's timestamp", e))?;
-					let timestamp = Timestamp::from_nanos(nanos.max(0) as u64)?;
+					// The codec's microseconds, scaled to nanoseconds, name the access
+					// unit whose exact timestamp the picture gets back.
+					let timestamp = self.submitted.restore(nanos.max(0) as u64 / 1_000)?;
 					let (left, top, width, height) = image_size(&image)?;
 					let buffer = HardwareBuffer::new(self.reader.clone(), image, left, top, width, height);
 					self.ready
@@ -495,6 +509,7 @@ impl Backend for MediaCodec {
 		// Whatever the codec still held is dropped by the flush, so no image is
 		// owed any more.
 		self.pending_images = 0;
+		self.submitted.clear();
 		if let Err(err) = self.codec.flush() {
 			self.input = Input::Failed;
 			return Err(codec_err("flush", err));

@@ -29,15 +29,12 @@ use crate::{Error, IntoBytes, Result, Timestamp, stats};
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp, or `None` on an untimed track. It must match the track
-	/// ([`Error::TimestampMismatch`] otherwise).
+	/// Presentation timestamp, or on a scale-less track [`Timestamp::unscaled`] at its
+	/// group's key. It must match the track ([`Error::TimestampMismatch`] otherwise).
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// No receiver fills one in, so an untimed track stays untimed across hops, except
-	/// over moq-lite 05 and 06, which can't mark a track untimed and carry the encoder's
-	/// send time instead.
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 }
 
 /// A completed frame: an optional timestamp, its full, contiguous payload, and when it
@@ -49,8 +46,9 @@ pub struct Info {
 /// [`Consumer::poll_read_chunk`] hands out each segment without a copy.
 #[derive(Clone, Debug)]
 pub struct Frame {
-	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
-	pub timestamp: Option<Timestamp>,
+	/// Presentation timestamp, at the parent track's timescale, or on a scale-less track
+	/// [`Timestamp::unscaled`] at its group's key.
+	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
 	// Stamped as the frame enters a group's cache; see [`Self::arrived`].
@@ -58,10 +56,11 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// A frame of `payload` presented at `timestamp`, or `None` on an untimed track.
-	pub fn new(timestamp: impl Into<Option<Timestamp>>, payload: impl IntoBytes) -> Self {
+	/// A frame of `payload` presented at `timestamp`, or on a scale-less track at
+	/// [`Timestamp::unscaled`] of its group's key.
+	pub fn new(timestamp: Timestamp, payload: impl IntoBytes) -> Self {
 		Self {
-			timestamp: timestamp.into(),
+			timestamp,
 			payload: payload.into_bytes(),
 			// Stamped when written to a group, so building one never reads the clock.
 			arrived: Instant::ZERO,
@@ -246,7 +245,7 @@ impl Buf for Payload {
 /// A completed frame as its group stores it.
 #[derive(Clone, Debug)]
 pub(crate) struct Cached {
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 	pub payload: Payload,
 	// When the frame's last byte landed in this node's cache; see [`Frame::arrived`].
 	pub arrived: Instant,
@@ -1350,7 +1349,13 @@ impl Producer {
 	/// segment is the rest of the frame.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn unsealed(&self) -> usize {
-		let written = self.buf.written(Ordering::Acquire);
+		self.unsealed_after(0)
+	}
+
+	/// [`Self::unsealed`] once `more` bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unsealed_after(&self, more: usize) -> usize {
+		let written = self.buf.written(Ordering::Acquire) + more;
 		let end = (written / SEGMENT + 1).saturating_mul(SEGMENT).min(self.buf.size());
 		end - written
 	}
@@ -1389,6 +1394,15 @@ impl Producer {
 	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, window: u64) -> Poll<()> {
 		self.group()
 			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64, window)
+	}
+
+	/// How many more bytes of this frame the group's writer may take before
+	/// [`Self::poll_ready`] holds it at `window`, or `None` while nothing would, once `more`
+	/// bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, window: u64, more: usize) -> Option<u64> {
+		self.group()
+			.room((self.buf.written(Ordering::Acquire) + more) as u64, window)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
@@ -1442,10 +1456,7 @@ impl Drop for Producer {
 			&& let Some(group) = self.group.as_mut()
 		{
 			if !group.is_aborted() && !self.cancel_on_drop {
-				tracing::warn!(
-					group = group.sequence,
-					"frame::Producer dropped before writing all bytes"
-				);
+				tracing::warn!(group = group.start, "frame::Producer dropped before writing all bytes");
 			}
 			group.frame_abort(if self.cancel_on_drop {
 				Error::Cancel
@@ -1524,9 +1535,34 @@ pub struct Consumer {
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
 	expired: bool,
-	// Read from a front's logical track: carries the read across route changes, with
-	// this frame's index in its group. Boxed: it is the rare case.
-	recover: Option<Box<(super::resume::Recover, u64)>>,
+	// What continues the read once its copy fails.
+	resume: Resume,
+}
+
+/// What carries a frame's read past the copy it reads. The rare cases are boxed: a frame
+/// handed out still arriving, as most a relay forwards are, allocates nothing until its copy
+/// fails.
+#[derive(Clone)]
+enum Resume {
+	/// Nothing: a failure ends the read.
+	None,
+	/// Handed out still arriving as frame `frame` of group `key`, which a flight of the group
+	/// from it continues once the pool evicts the copy.
+	Arriving { key: u64, frame: u64 },
+	/// A front's logical track, across route changes.
+	Route(Box<Routed>),
+	/// The flight continuing it since the pool evicted the copy.
+	Flight(Box<super::track::Refly>),
+}
+
+/// A frame of a front's logical track.
+#[derive(Clone)]
+struct Routed {
+	recover: super::resume::Recover,
+	/// The frame's index in its group.
+	index: u64,
+	/// The flight continuing it since the pool evicted the copy, while the route serves on.
+	flight: Option<super::track::Refly>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -1550,24 +1586,74 @@ impl Consumer {
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
-			recover: None,
+			resume: Resume::None,
 		}
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
-		self.recover = Some(Box::new((recover, index)));
+		self.resume = Resume::Route(Box::new(Routed {
+			recover,
+			index,
+			flight: None,
+		}));
 		self
+	}
+
+	/// Continue this frame, handed out still arriving as frame `frame` of group `key`, on a
+	/// flight of the group once the pool evicts its copy; see [`super::track::Refly`].
+	pub(super) fn with_flight(mut self, key: u64, frame: u64) -> Self {
+		self.resume = Resume::Arriving { key, frame };
+		self
+	}
+
+	/// The flight continuing this frame, asked of its track once the pool evicted the copy.
+	fn flight(&mut self) -> Option<&mut super::track::Refly> {
+		match &self.resume {
+			Resume::Arriving { key, frame } => {
+				let refly = self.refly(*key, *frame)?;
+				self.resume = Resume::Flight(Box::new(refly));
+			}
+			Resume::Route(routed) if routed.flight.is_none() => {
+				let refly = self.refly(routed.recover.key(), routed.index)?;
+				if let Resume::Route(routed) = &mut self.resume {
+					routed.flight = Some(refly);
+				}
+			}
+			_ => {}
+		}
+		match &mut self.resume {
+			Resume::Flight(refly) => Some(refly),
+			Resume::Route(routed) => routed.flight.as_mut(),
+			_ => None,
+		}
+	}
+
+	/// A flight of group `key` from frame `frame`, asked of the track holding this frame's copy.
+	fn refly(&self, key: u64, frame: u64) -> Option<super::track::Refly> {
+		let cache = self.state.read().account()?.clone();
+		let asking = super::group::asking(self.expiry.as_ref().map(|expiry| &expiry.policy));
+		Some(super::track::Refly::new(cache, key, frame, asking))
+	}
+
+	/// Poll the flight continuing this frame for the frame and its index, `None` when nothing
+	/// can ask one.
+	fn poll_flight(&mut self, waiter: &kio::Waiter) -> Option<Poll<Result<(Consumer, u64)>>> {
+		let refly = self.flight()?;
+		let index = refly.frame();
+		Some(refly.poll_frame(waiter).map(|res| res.map(|frame| (frame, index))))
 	}
 
 	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
 	/// serves, continue from the serving route's copy of the same frame, past the bytes
-	/// already read.
+	/// already read. A copy the pool evicted continues the same way on a flight.
 	fn poll_resumed<T>(
 		&mut self,
 		waiter: &kio::Waiter,
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<T>>,
 	) -> Poll<Result<T>> {
+		// A flight evicted before it gave a byte would fare no better asked again now.
+		let mut flown = false;
 		loop {
 			let res = read(self, waiter);
 			if self.expired {
@@ -1575,61 +1661,104 @@ impl Consumer {
 			}
 			// Read to its end: no route is needed for it any more.
 			if matches!(res, Poll::Ready(Ok(_))) && self.read_idx >= self.size() {
-				self.recover = None;
+				self.resume = Resume::None;
 			}
-			let Some(recover) = self.recover.as_mut() else {
-				return res;
-			};
 			let failed = match &res {
 				Poll::Ready(Ok(_)) => return res,
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
-			let (recover, index) = &mut **recover;
-			if !recover.wants(failed.as_ref(), waiter) {
-				return res;
-			}
-			if self.state.read().sparse() {
-				return Poll::Ready(Err(Error::Unsupported));
-			}
-			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
-				Poll::Ready(Ok(group)) => group,
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => return Poll::Pending,
+			let evicted = failed.is_some() && self.evicted();
+			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+			let reroute = match &mut self.resume {
+				Resume::Route(routed) => {
+					routed.recover.wants(&cause, waiter)
+						// A route that would only repeat the eviction, as one the front concluded on
+						// this copy does, leaves the frame to its flight.
+						&& !(evicted && cause.error().is_some_and(|err| routed.recover.repeats(err)))
+				}
+				_ => false,
 			};
-			// A cached group can precede this frame's header. Keep the old generation
-			// until the replacement frame is actually available.
-			if let Some(expiry) = &mut self.expiry {
-				expiry.policy = expiry.policy.for_track(&replacement.copy);
-			}
-			// A stored compressed frame continues from the replacement's stored form, where
-			// the byte offset means the same thing.
-			if self.inflated.is_some() {
-				replacement.group = replacement.group.compressed();
-			}
-			let frame = match replacement.group.poll_next_frame(waiter) {
-				Poll::Ready(Ok(Some(frame))) => frame,
-				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => {
-					return match self.poll_expired(waiter) {
-						true => Poll::Ready(Err(Error::Old)),
-						false => Poll::Pending,
+			let (route, frame, index) = match &mut self.resume {
+				Resume::None => return res,
+				Resume::Route(routed) if reroute => {
+					let Routed { recover, index, .. } = &mut **routed;
+					if self.state.read().sparse() {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					let mut replacement = match recover.poll(*index, &cause, waiter) {
+						Poll::Ready(Ok(group)) => group,
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => return Poll::Pending,
 					};
+					let index = *index;
+					// A cached group can precede this frame's header. Keep the old generation
+					// until the replacement frame is actually available.
+					if let Some(expiry) = &mut self.expiry {
+						expiry.policy = expiry.policy.for_track(&replacement.copy);
+					}
+					// A stored compressed frame continues from the replacement's stored form,
+					// where the byte offset means the same thing. A flight never carries one.
+					if self.inflated.is_some() {
+						replacement.group = replacement.group.compressed();
+					}
+					match replacement.group.poll_next_frame(waiter) {
+						Poll::Ready(Ok(Some(frame))) => (Some(replacement), frame, index),
+						Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
+					}
+				}
+				// Only the pool's eviction: any other failure is the group's own. It is no route's
+				// doing either, so a routed frame takes a flight too, until its route moves.
+				Resume::Arriving { .. } | Resume::Flight(_) | Resume::Route(_) => {
+					if !evicted || flown {
+						return res;
+					}
+					match self.poll_flight(waiter) {
+						Some(Poll::Ready(Ok((frame, index)))) => {
+							flown = true;
+							(None, frame, index)
+						}
+						// The flight's verdict, such as `Old` for a group refused as stale.
+						Some(Poll::Ready(Err(err))) => return Poll::Ready(Err(err)),
+						// A read waiting on its flight is stalled like one waiting on its bytes.
+						Some(Poll::Pending) => return self.poll_expired_or(waiter, Poll::Pending),
+						None => return res,
+					}
 				}
 			};
 			// This copy was dense through its frame, so the replacement's must be the same
 			// Object ID: a copy that begins past a gap holds different content there.
-			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != index) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			recover.adopt(&replacement);
+			if let (Some(replacement), Resume::Route(routed)) = (&route, &mut self.resume) {
+				routed.recover.adopt(replacement);
+				// A flight of the replaced copy brings nothing the new copy lacks.
+				routed.flight = None;
+			}
 			self.state = frame.state;
 			self.source = frame.source;
+		}
+	}
+
+	/// Whether the pool evicted this frame's copy, which a flight continues only when dense:
+	/// a flight asks from the frame's ordinal, which names the frame only on a dense copy.
+	fn evicted(&self) -> bool {
+		let state = self.state.read();
+		state.outcome.evicted() && !state.sparse()
+	}
+
+	/// `Old` once the drift budget gives up on a stalled read, else `res`.
+	fn poll_expired_or<T>(&mut self, waiter: &kio::Waiter, res: Poll<Result<T>>) -> Poll<Result<T>> {
+		match self.poll_expired(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => res,
 		}
 	}
 
@@ -1664,7 +1793,10 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		let recover = self.recover.as_ref().map(|recover| &recover.0);
+		let recover = match &self.resume {
+			Resume::Route(routed) => Some(&routed.recover),
+			_ => None,
+		};
 		if !expiry.policy.is_expired(recover, waiter) {
 			return false;
 		}
@@ -1685,7 +1817,7 @@ impl Consumer {
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		if self.recover.is_none() {
+		if matches!(self.resume, Resume::None) {
 			return self.poll_read_chunk_once(waiter);
 		}
 		self.poll_resumed(waiter, Self::poll_read_chunk_once)
@@ -1748,7 +1880,7 @@ impl Consumer {
 	/// Return all remaining bytes once the frame is finished.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
-		if self.recover.is_none() {
+		if matches!(self.resume, Resume::None) {
 			return self.poll_read_all_once(waiter);
 		}
 		self.poll_resumed(waiter, Self::poll_read_all_once)
@@ -1810,7 +1942,7 @@ mod tests {
 	#[test]
 	fn activating_shared_content_transfers_payload_without_recording_it_twice() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut delivery = account.charge();
 		delivery.add(8);
 		let before = pool.used();
@@ -2066,7 +2198,7 @@ mod tests {
 	#[test]
 	fn canonical_and_delivery_charges_follow_their_last_owners() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::growing(8);
@@ -2115,7 +2247,7 @@ mod tests {
 	#[test]
 	fn admission_allocates_nothing_and_completed_payload_needs_none() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::new(8);

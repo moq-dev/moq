@@ -7,9 +7,10 @@
 
 use std::time::Duration;
 
+use moq_relay::sim::{self, Net};
 use moq_relay::{auth, cluster, shutdown};
 
-use crate::memory::{self, Net};
+use crate::memory;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -34,10 +35,10 @@ impl Mesh {
 	/// version the relays dial each other with.
 	async fn start(cluster_version: Option<moq_net::Version>) -> Self {
 		let net = Net::new();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let mut relays = Vec::new();
 		for (name, peers) in [("a", &[][..]), ("b", &["a"]), ("c", &["a", "b"]), ("d", &["c"])] {
-			let cluster = memory::spawn_cluster(net.options(peers));
+			let cluster = memory::spawn_cluster(net.options(name, peers));
 			net.relay(name, &cluster, &auth, &shutdown::Observer::disabled());
 			let mut connect = moq_tokio::connect::Config::default();
 			connect.version.extend(cluster_version);
@@ -78,7 +79,7 @@ impl Publisher {
 }
 
 async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &str) -> Publisher {
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let broadcast = origin
 		.route(PATH, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -95,9 +96,13 @@ async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &
 	let running = streaming.clone();
 	let streamer = kio::clock::sim::spawn(async move {
 		while running.load(std::sync::atomic::Ordering::Relaxed) {
-			let mut group = track.append_group().expect("append group");
+			let mut group = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("append group");
 			group
-				.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 				.expect("write frame");
 			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(100)).await;
@@ -136,7 +141,7 @@ async fn publish_unknown(relay: &cluster::Cluster, auth: &auth::Auth) -> Publish
 
 /// A viewer of `relay` speaking the newest version, and the origin it reads into.
 async fn viewer(relay: &cluster::Cluster, auth: &auth::Auth) -> (moq_net::Session, moq_net::origin::Producer) {
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let session = kio::clock::timeout(
 		TIMEOUT,
 		memory::connect(
@@ -166,13 +171,17 @@ async fn read_first_frame(relay: &cluster::Cluster, auth: &auth::Auth) -> Result
 		.await
 		.map_err(|_| "never announced".to_string())?
 		.map_err(|err| format!("broadcast unroutable: {err}"))?
-		.ok_or("the first change is an instance")?;
+		.ok_or("the first change is an identity")?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
 	// selected group's frame is still crossing the redundant mesh.
-	let subscription = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::from_secs(1)),
+		},
+	)]);
 	let mut track = kio::clock::timeout(
 		TIMEOUT,
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -317,10 +326,13 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }

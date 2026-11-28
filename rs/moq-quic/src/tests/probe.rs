@@ -47,6 +47,9 @@ const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
+/// The seeds for a competing upload, whose loss-driven sharing spreads one seed's late frames
+/// wider than the deadline budget, so eight seeds' mean decides the budget by seed alone
+const COMPETING_SEEDS: ops::RangeInclusive<u64> = 1..=32;
 /// The seed the merge gate runs
 const GATE: ops::RangeInclusive<u64> = 1..=1;
 
@@ -359,7 +362,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
+			while matches!(stream.try_write(&mut &[0; 16_384][..]), Poll::Ready(Ok(_))) {}
 		}
 
 		pair.drive_client();
@@ -381,7 +384,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			if let Some(id) = *recv {
 				let mut stream = pair.server_recv(*server, id);
 				let mut chunks = stream.read().unwrap();
-				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+				while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
 				chunks.finalize();
@@ -486,10 +489,10 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&mut &group.backlog[..]) {
-				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(send::Error::Blocked) => return,
-				Err(e) => panic!("write: {e}"),
+			match stream.try_write(&mut &group.backlog[..]) {
+				Poll::Ready(Ok(n)) => drop(group.backlog.drain(..n)),
+				Poll::Pending => return,
+				Poll::Ready(Err(e)) => panic!("write: {e}"),
 			}
 		}
 		if group.ended.is_some() {
@@ -542,21 +545,29 @@ fn receive(
 			reading.done = true;
 			continue;
 		};
-		loop {
-			match chunks.next(usize::MAX) {
-				Ok(Some(chunk)) => reading.read += chunk.bytes.len() as u64,
-				Ok(None) => {
+		let reset = loop {
+			match chunks.try_next(usize::MAX) {
+				Poll::Ready(Ok(Some(chunk))) => reading.read += chunk.bytes.len() as u64,
+				Poll::Ready(Ok(None)) => {
 					reading.done = true;
-					break;
+					break false;
 				}
-				Err(recv::Error::Blocked) => break,
-				Err(_) => {
+				Poll::Pending => break false,
+				Poll::Ready(Err(_)) => {
 					reading.done = true;
-					break;
+					break true;
 				}
 			}
-		}
+		};
 		chunks.finalize();
+		// A read that reaches an expired group's reset keeps its stream, and the stream ID credit
+		// the sender opens later groups with, until the reset's code is asked for.
+		if reset {
+			assert!(
+				stream.received_reset().expect("an expiry ends a read early").is_some(),
+				"only an expiry ends a read early"
+			);
+		}
 
 		// The sender opens each group's stream in order, after any it opened before the media
 		let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;
@@ -973,14 +984,26 @@ fn probe_inflight_limits_only_an_attempt() {
 }
 
 /// A controller that always probes, allowing [`Cluster::INFLIGHT`] in flight, and never limits
-/// the window or the pace
+/// the pace
 #[derive(Clone)]
 struct Cluster {
 	paces_probe: bool,
+	window: u64,
+	/// How many times the sender reported the window limited it
+	cwnd_limited: Arc<AtomicU64>,
 }
 
 impl Cluster {
 	const INFLIGHT: u64 = 20_000;
+
+	/// One that never limits the window either
+	fn new(paces_probe: bool) -> Self {
+		Self {
+			paces_probe,
+			window: u64::MAX / 2,
+			cwnd_limited: Default::default(),
+		}
+	}
 }
 
 impl Controller for Cluster {
@@ -997,7 +1020,11 @@ impl Controller for Cluster {
 	fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
 	fn window(&self) -> u64 {
-		u64::MAX / 2
+		self.window
+	}
+
+	fn on_cwnd_limited(&mut self) {
+		self.cwnd_limited.fetch_add(1, Ordering::Relaxed);
 	}
 
 	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
@@ -1031,6 +1058,80 @@ impl Factory for Cluster {
 	}
 }
 
+/// A window too small for the probe's next duplicate holds the probe back, but leaves the sender,
+/// which had nothing else to send, limited by the probe rather than the window
+#[test]
+fn probe_held_by_the_window_is_not_cwnd_limited() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(20);
+	let window = 4 * DEFAULT_MTU as u64;
+	let controller = Cluster {
+		window,
+		..Cluster::new(false)
+	};
+	let limited = controller.cwnd_limited.clone();
+	let mut config = client_config();
+	config.transport.congestion = Arc::new(controller);
+	let (client_ch, _) = pair.connect_with(config);
+	limited.store(0, Ordering::Relaxed);
+
+	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
+	let id = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
+	pair.drive_client();
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.stats().path.sent_bandwidth_probes > 0, "nothing probed");
+	assert!(
+		conn.bytes_in_flight() + DEFAULT_MTU as u64 > window,
+		"the window never held the probe back"
+	);
+	assert_eq!(limited.load(Ordering::Relaxed), 0);
+}
+
+/// A probe packet opened by an ACK whose receive timestamps fill the room left, as a peer that
+/// takes many timestamps gets after many ACK-only packets, still holds a duplicate
+#[test]
+fn probe_packet_keeps_room_after_a_full_ack() {
+	let _guard = subscribe();
+	let mut server = server_config();
+	server.transport.receive_timestamps = NonZeroU32::new(10_000);
+	let mut pair = Pair::new(Default::default(), server);
+	pair.latency = Duration::from_millis(20);
+	let mut config = client_config();
+	config.transport.congestion = Arc::new(Cluster::new(false));
+	let (client_ch, server_ch) = pair.connect_with(config);
+	// Paced by the target, so a duplicate is still due after the first packets go
+	pair.client_conn_mut(client_ch).set_probe_target(TARGET);
+	let id = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
+	pair.drive_client();
+	pair.server.inbound.clear();
+
+	// Enough ACK-only arrivals to fill an ACK with timestamps, and to make the next packet carry
+	// one
+	let now = pair.time;
+	for _ in 0..DEFAULT_MTU {
+		let packet = pair
+			.server_conn_mut(server_ch)
+			.forge_packet(now, SpaceId::Data, &[0; 8]);
+		pair.client.inbound.push_back((now, None, packet.as_slice().into()));
+	}
+	let probes = pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probes;
+	pair.time = pair.time.saturating_add(Duration::from_millis(10));
+	let now = pair.time;
+	pair.client.drive(now, pair.server.addr);
+	let stats = pair.client_conn_mut(client_ch).stats();
+	assert!(stats.path.sent_bandwidth_probes > probes, "nothing probed");
+	assert!(stats.frame_tx.acks > 0);
+}
+
 /// A controller that paces its own probe gets the inflight it allows filled at its pace, past
 /// what the target's pace would let leave at once; any other is held to the target
 #[test]
@@ -1040,7 +1141,7 @@ fn paced_probe_fills_past_the_target() {
 		let mut pair = Pair::default();
 		pair.latency = Duration::from_millis(20);
 		let mut config = client_config();
-		config.transport.congestion = Arc::new(Cluster { paces_probe });
+		config.transport.congestion = Arc::new(Cluster::new(paces_probe));
 		let (client_ch, _) = pair.connect_with(config);
 		pair.client_conn_mut(client_ch).set_probe_target(TARGET);
 		let id = pair
@@ -1175,7 +1276,7 @@ fn competing(label: &str, upload: Upload) {
 		competitor: Some(upload),
 		..Scenario::default()
 	};
-	compare(label, scenario, SEEDS);
+	compare(label, scenario, COMPETING_SEEDS);
 }
 
 #[test]

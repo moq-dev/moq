@@ -1,0 +1,78 @@
+name: Mutants
+
+# cargo-mutants edits the route and resume code one small change at a time
+# (`.cargo/mutants.toml` names the files and the tests), and a job fails on any
+# edit its tests miss. Each mutant costs a rebuild of moq-net's tests, too many
+# for a merge gate, so Nightly runs it; sh/rs/mutants.sh says what each shard takes.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+jobs:
+  # Sizes the changed shards to the day's diff, so a heavy day adds jobs instead
+  # of outgrowing one.
+  plan:
+    name: Plan the mutants
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The changed mutants are those since the previous scheduled Nightly's commit.
+      actions: read
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - id: plan
+        run: nix develop --command just rs mutants plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  mutants:
+    name: Mutants (${{ matrix.mode }} ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    # A rotation shard takes about an hour, and a changed shard at most as long.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # Every mutant's build is a one-off, so the job reads the shared cache
+      # with the repository's key and publishes nothing.
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
+          write: false
+      # The checkout is thrown away, so mutating it in place keeps the build
+      # incremental and cached instead of copying the tree per mutant. The step
+      # times out before the job, so an overrun still keeps its outcomes.
+      - name: Mutate
+        timeout-minutes: 140
+        run: nix develop --command just rs mutants "$MODE" "$SHARD" "$SHARDS"
+        env:
+          MODE: ${{ matrix.mode }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          MUTANTS_BASE: ${{ needs.plan.outputs.base }}
+      - name: Keep the outcomes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mutants-${{ matrix.mode }}-${{ matrix.shard }}
+          path: |
+            target/mutants/*/mutants.out
+            target/mutants/missed.txt
+          retention-days: 14

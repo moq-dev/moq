@@ -1,17 +1,21 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import * as z from "zod/mini";
 import { hooks } from "../../../net/src/internal.ts";
+import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
+beforeEach(resetKeys);
+
 type Value = Record<string, unknown>;
 
-// These tests inspect complete finished timelines through raw ordered reads, so request a
-// replay window instead of the transport's live-edge default. A snapshot consumer ignores it.
-const REPLAY_LATENCY = Duration.millis(30_000);
+// These tests inspect complete finished timelines through raw ordered reads, so they read history
+// instead of the transport's live-edge default. A snapshot consumer ignores it.
+const HISTORY: Track.Subscription = { ranges: [{}] };
 
 // Reconstruct every state a consumer reading `track` yields from `next()`, in order.
 async function drain(track: Track.Producer | Consumer<Value>): Promise<Value[]> {
@@ -50,41 +54,41 @@ async function structure(track: Track.Ordered): Promise<number[]> {
 test("a cut makes the next update a snapshot group", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: 1 } });
-	producer.update({ value: { a: 1, b: 2 } });
+	producer.update({ a: 1, b: 1 }, key());
+	producer.update({ a: 1, b: 2 }, key());
 	producer.cut();
-	producer.update({ value: { a: 1, b: 3 } });
+	producer.update({ a: 1, b: 3 }, key());
 	producer.finish();
 
 	// The ratio would have kept every update in one group; the cut rolled it anyway. The replacement
 	// opens with a full snapshot, so it is one frame rather than a delta appended to the first group.
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([2, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([2, 1]);
 	expect(await drain(track)).toEqual([{ a: 1, b: 3 }]);
 });
 
 test("a cut republishes an unchanged value", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	producer.cut();
 
 	// An unchanged value normally writes nothing. After a cut it must still open the replacement
 	// group, or the value would only exist in a group no new consumer reads.
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	producer.finish();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([1, 1]);
 });
 
 test("a cut opens no replacement group", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	producer.cut();
 	producer.finish();
 
 	// Cutting closes the open group and stops there: no empty group for a consumer to advance into.
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([1]);
 });
 
 test("a cut is idempotent", async () => {
@@ -94,43 +98,43 @@ test("a cut is idempotent", async () => {
 	// Nothing published yet, so there is no group to cut.
 	producer.cut();
 	producer.cut();
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 
 	// And a repeated cut rolls once, not once per call.
 	producer.cut();
 	producer.cut();
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	producer.finish();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([1, 1]);
 });
 
 test("a cut is inert without deltas", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 
 	// With deltas off every frame already closes its own group, so there is never one to cut.
 	producer.cut();
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	producer.finish();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([1, 1]);
 });
 
 test("deltas off: a snapshot group per change", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
 	const consumer = new Consumer<Value>({ track });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	expect((await consumer.next())?.value).toEqual({ a: 2 });
 	producer.finish();
 
 	// Two changes => two single-frame snapshot groups. A reader arriving after both reads only the
 	// newest: the older group holds superseded state (mirrors the Rust consumer).
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([1, 1]);
 	expect(await drain(track)).toEqual([{ a: 2 }]);
 	expect(await drainLatest(track)).toEqual([{ a: 2 }]);
 });
@@ -144,13 +148,13 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track });
 
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	expect((await consumer.latest())?.value).toEqual({ a: 1 });
 
 	// A delta lands in the held group, then a cut rolls a new snapshot group.
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	producer.cut();
-	producer.update({ value: { a: 3 } });
+	producer.update({ a: 3 }, key());
 	producer.finish();
 
 	expect((await consumer.latest())?.value).toEqual({ a: 3 });
@@ -163,7 +167,7 @@ test("latest reads the newest snapshot group", async () => {
 	const producer = new Producer<Value>({ track, deltas: false });
 	const consumer = new Consumer<Value>({ track });
 
-	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
+	for (let n = 0; n < 4; n++) producer.update({ a: n }, key());
 	expect((await consumer.latest())?.value).toEqual({ a: 3 });
 	producer.finish();
 });
@@ -174,12 +178,12 @@ test("next reads a held group out before a newer snapshot group", async () => {
 	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track });
 
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	producer.cut();
-	producer.update({ value: { a: 3 } });
+	producer.update({ a: 3 }, key());
 	producer.finish();
 
 	expect((await consumer.next())?.value).toEqual({ a: 2 });
@@ -193,11 +197,11 @@ test("next reads a held group out before a newer snapshot group", async () => {
 test("next skips every superseded group, whatever budget another reader asks for", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 	const producer = new Producer<Value>({ track, deltas: false });
-	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
+	for (let n = 1; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 1_000));
 	producer.finish();
 
-	for (const max of [Duration.ZERO, Duration.millis(500), REPLAY_LATENCY, null]) {
-		const other = track.subscribe({ delay: { max } });
+	for (const max of [Duration.ZERO, Duration.millis(500), Duration.millis(30_000), null]) {
+		const other = track.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
 		expect(await drain(track)).toEqual([{ n: 3 }]);
 		other.close();
 	}
@@ -214,12 +218,15 @@ test("reads skip a group the subscription still owes", async () => {
 		for (const max of [Duration.ZERO, Duration.millis(1_000), null]) {
 			const track = new Track.Producer("test").accept({});
 			hooks.receiveTrack(track);
-			const other = track.subscribe({ delay: { max } });
+			const other = track.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
 			const latest = new Consumer<Value>({ track });
 			const next = new Consumer<Value>({ track });
 			const put = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
+				group.writeFrame({
+					payload: new TextEncoder().encode(`{"n":${sequence}}`),
+					timestamp: Time.Timestamp.unscaled(sequence),
+				});
 				group.finish();
 			};
 
@@ -250,15 +257,15 @@ test("close ends a pending read", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	expect((await consumer.latest())?.value).toEqual({ a: 1 });
 
 	const pending = [consumer.latest(), consumer.next()];
-	producer.update({ value: { a: 2 } });
+	producer.update({ a: 2 }, key());
 	consumer.close();
 	expect(await Promise.all(pending)).toEqual([undefined, undefined]);
 	// The subscription the consumer owned is gone.
-	expect(track.demand().wanted.peek()).toBeUndefined();
+	expect(track.demand().wanted.peek()).toBe(false);
 	expect(await consumer.latest()).toBeUndefined();
 	producer.finish();
 });
@@ -269,15 +276,15 @@ test("overlapping reads take turns", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track });
-	producer.update({ value: { a: 1, keep: true } });
+	producer.update({ a: 1, keep: true }, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1, keep: true });
 
-	const next = consumer.next();
-	producer.update({ value: { a: 2, keep: true } });
+	const reading = consumer.next();
+	producer.update({ a: 2, keep: true }, key());
 	producer.cut();
-	producer.update({ value: { b: 3 } });
+	producer.update({ b: 3 }, key());
 	const latest = consumer.latest();
-	expect((await next)?.value).toEqual({ a: 2, keep: true });
+	expect((await reading)?.value).toEqual({ a: 2, keep: true });
 	expect((await latest)?.value).toEqual({ b: 3 });
 	producer.finish();
 });
@@ -288,16 +295,29 @@ test("live consumer sees each update", async () => {
 	const consumer = new Consumer<Value>({ track });
 
 	for (let n = 1; n <= 3; n++) {
-		producer.update({ value: { a: n } });
+		producer.update({ a: n }, key());
 		expect((await consumer.next())?.value).toEqual({ a: n });
 	}
+});
+
+test("a key past the safe number range opens its group", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+	const consumer = new Consumer<Value>({ track });
+	const wide = 1n << 53n;
+
+	producer.update({ a: 1 }, Time.Timestamp.unscaled(wide));
+	expect(track.largest()?.group).toBe(wide);
+	expect((await consumer.next())?.value).toEqual({ a: 1 });
+	producer.update({ a: 2 }, Time.Timestamp.unscaled(wide + 1n));
+	expect((await consumer.next())?.value).toEqual({ a: 2 });
 });
 
 test("unchanged value writes nothing", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
-	producer.update({ value: { a: 1 } });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
+	producer.update({ a: 1 }, key());
 	producer.finish();
 
 	expect(await structure(track.subscribe().ordered())).toEqual([1]);
@@ -306,9 +326,9 @@ test("unchanged value writes nothing", async () => {
 test("deltas share one group", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: 1 } });
-	producer.update({ value: { a: 1, b: 2 } });
-	producer.update({ value: { a: 1, b: 3 } });
+	producer.update({ a: 1, b: 1 }, key());
+	producer.update({ a: 1, b: 2 }, key());
+	producer.update({ a: 1, b: 3 }, key());
 	producer.finish();
 
 	// All updates fit in a single group as snapshot + two deltas.
@@ -318,9 +338,9 @@ test("deltas share one group", async () => {
 test("deltas reconstruct to the final value", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: 1 } });
-	producer.update({ value: { a: 1, b: 2 } });
-	producer.update({ value: { a: 5, b: 2 } });
+	producer.update({ a: 1, b: 1 }, key());
+	producer.update({ a: 1, b: 2 }, key());
+	producer.update({ a: 5, b: 2 }, key());
 	producer.finish();
 
 	expect((await drain(track)).at(-1)).toEqual({ a: 5, b: 2 });
@@ -336,13 +356,13 @@ test("mutate composes independent owners", async () => {
 
 	producer.mutate((v) => {
 		v.video = "v1";
-	});
+	}, key());
 	expect((await consumer.next())?.value).toEqual({ video: "v1" });
 
 	// A second owner starts from the latest value and adds its own key without clobbering the first.
 	producer.mutate((v) => {
 		v.scte35 = { id: 1 };
-	});
+	}, key());
 	expect((await consumer.next())?.value).toEqual({ video: "v1", scte35: { id: 1 } });
 });
 
@@ -353,8 +373,29 @@ test("mutate starts from the configured initial value", async () => {
 
 	producer.mutate((v) => {
 		v.a = 1;
-	});
+	}, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
+});
+
+// JSON null is a published value: mutate must hand it over rather than the stale `initial`, and
+// must not refuse it as if nothing had been published.
+test("mutate starts from a published null", async () => {
+	for (const initial of [undefined, { a: 1 }]) {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Value | null>({ track, initial });
+		producer.update(null, key());
+
+		let seen: Value | null | undefined;
+		producer.mutate((v) => {
+			seen = v;
+		}, key());
+		expect(seen).toBeNull();
+		producer.finish();
+		const consumer = new Consumer<Value | null>({ track });
+		const states: (Value | null)[] = [];
+		for (let state = await consumer.latest(); state; state = await consumer.latest()) states.push(state.value);
+		expect(states).toEqual([null]);
+	}
 });
 
 // A rejected edit never reached the wire, so the next owner starts from the last value that did.
@@ -365,25 +406,25 @@ test("a rejected mutate leaves the value at the last one written", async () => {
 	const producer = new Producer<Value>({ track, initial: {} });
 	producer.mutate((v) => {
 		v.video = "v1";
-	});
+	}, key());
 
 	// Serializes past the group cache limit, so the frame cannot be published.
 	expect(() =>
 		producer.mutate((v) => {
 			v.big = "x".repeat(32 * 1024 * 1024 + 1);
-		}),
+		}, key()),
 	).toThrow(NetError.FrameTooLarge);
 
 	producer.mutate((v) => {
 		v.scte35 = 42;
-	});
+	}, key());
 	producer.finish();
 	expect(await drainLatest(track)).toEqual([{ video: "v1", scte35: 42 }]);
 });
 
 test("mutate without a prior value or initial throws", () => {
 	const producer = new Producer<Value>({ track: new Track.Producer("test") });
-	expect(() => producer.mutate(() => {})).toThrow();
+	expect(() => producer.mutate(() => {}, key())).toThrow();
 });
 
 // Removing a section drops it from the reconstructed value, so a consumer detects the removal.
@@ -396,12 +437,12 @@ test("mutate removes a section", async () => {
 	producer.mutate((v) => {
 		v.a = 1;
 		v.scte35 = { id: 1 };
-	});
+	}, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1, scte35: { id: 1 } });
 
 	producer.mutate((v) => {
 		delete v.scte35;
-	});
+	}, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 });
 
@@ -412,17 +453,17 @@ async function settle(): Promise<void> {
 
 // Publish `{"n":0}` through `{"n":3}`: a 7-byte snapshot and 21 bytes of deltas.
 function fill(producer: Producer<Value>): void {
-	for (let n = 0; n <= 3; n++) producer.update({ value: { n } });
+	for (let n = 0; n <= 3; n++) producer.update({ n }, key());
 }
 
 test("deltas never roll without a joiner", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 } });
 	const producer = new Producer<Value>({ track });
-	for (let n = 0; n <= 10; n++) producer.update({ value: { n } });
+	for (let n = 0; n <= 10; n++) producer.update({ n }, key());
 	producer.finish();
 
 	// The deltas outweigh the snapshot ten times over, but nobody joined to ask for a fresh group.
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([11]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([11]);
 });
 
 test("a joiner over the ratio gets a fresh snapshot", async () => {
@@ -430,7 +471,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		[8, [4]],
 		[1, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh, maxAge: null });
+		const track = new Track.Producer("test").accept({ refresh: { ratio: refresh }, maxAge: null });
 		const producer = new Producer<Value>({ track });
 		fill(producer);
 
@@ -440,22 +481,54 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		producer.finish();
 		joiner.close();
 
-		expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([...layout]);
+		expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([...layout]);
 		expect(await drainLatest(track)).toEqual([{ n: 3 }]);
 	}
 });
 
+// An interval caps how often readers make the producer restate: a subscriber's refresh waits for
+// the newest group to age, then restates without a ratio to outweigh.
+test("a subscriber's refresh restates the value once the interval passes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const refresh = { interval: Duration.secs(5) };
+		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh, maxAge: null });
+		const producer = new Producer<Value>({ track });
+		const subscriber = track.subscribe();
+		for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
+
+		const sent = subscriber.refresh();
+		await clock.advance(Duration.secs(4));
+		expect(track.demand().refresh.peek()).toBe(false);
+		await clock.advance(Duration.secs(1));
+		// Restated as soon as it came due, which sent and answered it.
+		await sent;
+		expect(track.demand().refresh.peek()).toBe(false);
+		producer.finish();
+		subscriber.close();
+
+		expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([4, 1]);
+	} finally {
+		installed.close();
+	}
+});
+
 test("a refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 1 },
+		maxAge: null,
+	});
 	const producer = new Producer<Value>({ track });
-	for (let n = 0; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 10) });
+	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
 
 	const joiner = track.subscribe();
 	await settle();
 	producer.finish();
 	joiner.close();
 
-	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
+	const ordered = track.subscribe(HISTORY).ordered();
 	const timestamps: (number | undefined)[] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const frame = await group.readFrame();
@@ -466,29 +539,70 @@ test("a refresh reuses the newest timestamp", async () => {
 	expect(timestamps).toEqual([0, 30]);
 });
 
-test("a refresh after an older update starts at the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
+// A delta may carry a timestamp older than its group's first frame, but a new group must start past
+// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
+// update, then restates the value there. (Mirrors the Rust
+// `a_refresh_after_older_updates_waits_for_a_later_one`.)
+test("a refresh after older updates waits for a later one", async () => {
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 1 },
+		maxAge: null,
+	});
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
-	for (const [n, ms] of [30, 10, 20, 15].entries())
-		producer.update({ value: { n }, at: Time.Timestamp.fromMillis(ms) });
+	for (const [n, ms] of [30, 10, 20, 15].entries()) producer.update({ n }, Time.Timestamp.fromMillis(ms));
 
 	const joiner = track.subscribe();
 	await settle();
+	// No group may share the open group's start.
+	expect(track.largest()?.group).toBe(30n);
+
+	producer.update({ n: 4 }, Time.Timestamp.fromMillis(40));
 	producer.finish();
 	joiner.close();
 
-	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
+	const ordered = track.subscribe(HISTORY).ordered();
 	const restated: [number | undefined, unknown][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const frame = await group.readFrame();
 		restated.push([frame?.timestamp?.asMillis(), frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
 		while ((await group.readFrame()) !== undefined) {}
 	}
-	// Restating at the last update's 15 would rewind past group 0's start and be refused.
 	expect(restated).toEqual([
 		[30, { n: 0 }],
-		[30, { n: 3 }],
+		[40, { n: 4 }],
+	]);
+});
+
+// A scale-less refresh at the newest key written would share the open group's key, so it waits for a
+// later update, then restates the value there. (Mirrors the Rust
+// `a_refresh_after_older_updates_waits_for_a_later_one`.)
+test("a scale-less refresh waits for an update past the open group's key", async () => {
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 }, maxAge: null });
+	const producer = new Producer<Value>({ track });
+	// A snapshot and deltas, all at the open group's key.
+	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.unscaled(5n));
+
+	const joiner = track.subscribe();
+	await settle();
+	expect(track.largest()?.group).toBe(5n);
+
+	// The next update rides as a delta, and the refresh it unblocks restates the value at its key.
+	producer.update({ n: 4 }, Time.Timestamp.unscaled(6n));
+	producer.finish();
+	joiner.close();
+
+	const ordered = track.subscribe(HISTORY).ordered();
+	const restated: [bigint, unknown][] = [];
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+		const frame = await group.readFrame();
+		restated.push([group.start, frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
+		while ((await group.readFrame()) !== undefined) {}
+	}
+	expect(restated).toEqual([
+		[5n, { n: 0 }],
+		[6n, { n: 4 }],
 	]);
 });
 
@@ -496,21 +610,21 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 // update rides as a delta against it. (Mirrors the Rust
 // `a_refresh_after_a_rejected_update_restates_the_last_written_value`.)
 test("a refresh after a rejected update restates the last written value", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 }, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	fill(producer);
 
 	// Serializes past the group cache limit, so the frame cannot be published.
 	const oversized = { big: "x".repeat(32 * 1024 * 1024 + 1) };
-	expect(() => producer.update({ value: oversized })).toThrow(NetError.FrameTooLarge);
+	expect(() => producer.update(oversized, key())).toThrow(NetError.FrameTooLarge);
 
 	const joiner = track.subscribe();
 	await settle();
-	producer.update({ value: { n: 4 } });
+	producer.update({ n: 4 }, key());
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([4, 2]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([4, 2]);
 	expect(await drain(track)).toEqual([{ n: 3 }, { n: 4 }]);
 });
 
@@ -524,23 +638,23 @@ test("no ratio never refreshes", async () => {
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([4]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([4]);
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compression: "deflate", maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 0 }, compression: "deflate", maxAge: null });
 	const producer = new Producer<Value>({ track });
-	producer.update({ value: { a: 1, b: 1 } });
-	producer.update({ value: { a: 1, b: 2 } });
+	producer.update({ a: 1, b: 1 }, key());
+	producer.update({ a: 1, b: 2 }, key());
 
 	const joiner = track.subscribe();
 	await settle();
 	// The change after the restatement rides as a delta in the new group.
-	producer.update({ value: { a: 1, b: 3 } });
+	producer.update({ a: 1, b: 3 }, key());
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([2, 2]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([2, 2]);
 	const consumer = new Consumer<Value>({ track });
 	const values: Value[] = [];
 	for await (const { value } of consumer) values.push(value);
@@ -553,8 +667,8 @@ test("a compressed refresh opens a fresh group", async () => {
 test("array change is a wholesale delta", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { list: [1, 2] } });
-	producer.update({ value: { list: [1, 2, 3] } });
+	producer.update({ list: [1, 2] }, key());
+	producer.update({ list: [1, 2, 3] }, key());
 	producer.finish();
 
 	// The array is replaced wholesale in a delta, so it stays in the same group.
@@ -567,7 +681,7 @@ test("a late joiner reads a buffered backlog state by state, or collapses it to 
 	const subscriber = new Consumer<Value>({ track });
 	const collapsed = new Consumer<Value>({ track });
 	for (let n = 0; n <= 20; n++) {
-		producer.update({ value: { n } });
+		producer.update({ n }, key());
 	}
 	producer.finish();
 
@@ -582,11 +696,11 @@ test("frame cap rolls snapshot", async () => {
 	const producer = new Producer<Value>({ track, deltas: true });
 	// First update is the snapshot; deltas fill the group until the frame cap forces a roll.
 	for (let i = 0; i <= 256; i++) {
-		producer.update({ value: { n: i } });
+		producer.update({ n: i }, key());
 	}
 	producer.finish();
 
-	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([256, 1]);
+	expect(await structure(track.subscribe(HISTORY).ordered())).toEqual([256, 1]);
 });
 
 test("a rejected update leaves the previous value readable", async () => {
@@ -595,11 +709,11 @@ test("a rejected update leaves the previous value readable", async () => {
 	// A snapshot consumer jumps to the newest, so that value would vanish on a failed update.
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
-	producer.update({ value: { keep: true } });
+	producer.update({ keep: true }, key());
 
 	// Serializes past the group cache limit, so the frame cannot be published.
 	const oversized = { big: "x".repeat(32 * 1024 * 1024 + 1) };
-	expect(() => producer.update({ value: oversized })).toThrow(NetError.FrameTooLarge);
+	expect(() => producer.update(oversized, key())).toThrow(NetError.FrameTooLarge);
 	producer.finish();
 
 	// A reader arriving now still finds the last good value, not an empty superseding group.
@@ -617,14 +731,14 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, maxGroupBytes: 64 });
 
-	producer.update({ value: { v: "x".repeat(size) } });
-	producer.update({ value: { v: "y".repeat(size) } });
+	producer.update({ v: "x".repeat(size) }, key());
+	producer.update({ v: "y".repeat(size) }, key());
 	producer.finish();
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
-	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
-	expect((await subscriber.nextGroup())?.sequence).toBe(0n);
-	expect((await subscriber.nextGroup())?.sequence).toBe(1n);
+	const subscriber = track.subscribe(HISTORY).ordered();
+	expect((await subscriber.nextGroup())?.start).toBe(0n);
+	expect((await subscriber.nextGroup())?.start).toBe(1n);
 	expect(await subscriber.nextGroup()).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.
@@ -654,49 +768,85 @@ test("a snapshot past the budget is refused", () => {
 // A publisher gives up a group a reader is still on once a newer one supersedes it, which every
 // moq-lite version reports as OLD. The reader skips to the newer snapshot instead of failing.
 test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const first = track.appendGroup();
-	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.now() });
+	const first = track.appendGroup(Time.Timestamp.fromMillis(1));
+	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.fromMillis(1) });
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
 	first.abort(new NetError.Stream(StreamCode.Old));
-	const second = track.appendGroup();
-	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.now() });
+	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
+	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.fromMillis(2) });
 	expect((await next)?.value).toEqual({ v: 1 });
 });
 
 // A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
 test("snapshot consumer propagates a non-gap frame failure", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const group = track.appendGroup();
-	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
+	const group = track.appendGroup(Time.Timestamp.fromMillis(1));
+	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.fromMillis(1) });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 
-test("an update without a timestamp goes out untimed", async () => {
+test("a value that fails the schema rejects the read", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const consumer = new Consumer({ track, schema: z.object({ n: z.number() }) });
+	track
+		.appendGroup(Time.Timestamp.fromMillis(1))
+		.writeFrame({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+	await expect(consumer.latest()).rejects.toBeInstanceOf(z.core.$ZodError);
+});
+
+test("a scale-less snapshot opens its group at its key, and a delta carries that key", async () => {
 	const track = new Track.Producer("test").accept({});
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: "x".repeat(64) } });
+	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.unscaled(5n));
+	// A delta names a later key, but rides in the open group under its key.
 	producer.mutate((value) => {
 		value.a = 2;
-	});
+	}, Time.Timestamp.unscaled(9n));
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp).toBeUndefined();
-	expect((await group?.readFrame())?.timestamp).toBeUndefined();
+	expect(group?.start).toBe(5n);
+	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
+	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
+});
+
+test("a scale-less snapshot at a key not past the newest group is refused", async () => {
+	const track = new Track.Producer("test").accept({ maxAge: null });
+	const producer = new Producer<Value>({ track, deltas: false });
+	producer.update({ n: 0 }, Time.Timestamp.unscaled(5n));
+	// Two groups never share a key, and a new one must pass the newest.
+	for (const key of [5n, 4n])
+		expect(() => producer.update({ n: 1 }, Time.Timestamp.unscaled(key))).toThrow(NetError.TimestampMismatch);
+	producer.update({ n: 1 }, Time.Timestamp.unscaled(8n));
+	producer.finish();
+
+	const ordered = track.subscribe(HISTORY).ordered();
+	const sequences: bigint[] = [];
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) sequences.push(group.start);
+	expect(sequences).toEqual([5n, 8n]);
+	expect(await drain(track)).toEqual([{ n: 1 }]);
+});
+
+test("an unscaled update is refused on a timed track", () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const producer = new Producer<Value>({ track, deltas: true });
+	expect(() => producer.update({ a: 1 }, Time.Timestamp.unscaled(0n))).toThrow(NetError.TimestampMismatch);
+	producer.update({ a: 1 }, Time.Timestamp.fromMillis(1));
+	producer.finish();
 });
 
 test("a capture timestamp is written on snapshots and deltas alike", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(1_000) });
-	producer.update({ value: { a: 2, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(2_000) });
+	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.fromMillis(1_000));
+	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.fromMillis(2_000));
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
@@ -704,16 +854,17 @@ test("a capture timestamp is written on snapshots and deltas alike", async () =>
 	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });
 
-test("an untimed state reads back untimed", async () => {
+test("a scale-less state reads back with its group's key", async () => {
 	const track = new Track.Producer("test").accept({});
 	const producer = new Producer<Value>({ track, deltas: true });
-	producer.update({ value: { a: 1, b: "x".repeat(64) } });
-	producer.update({ value: { a: 2, b: "x".repeat(64) } });
+	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.unscaled(7n));
+	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.unscaled(8n));
 	producer.finish();
 
 	const consumer = new Consumer<Value>({ track });
-	expect(await consumer.next()).toEqual({ value: { a: 1, b: "x".repeat(64) }, at: undefined });
-	expect(await consumer.next()).toEqual({ value: { a: 2, b: "x".repeat(64) }, at: undefined });
+	const at = Time.Timestamp.unscaled(7n);
+	expect(await consumer.next()).toEqual({ value: { a: 1, b: "x".repeat(64) }, at });
+	expect(await consumer.next()).toEqual({ value: { a: 2, b: "x".repeat(64) }, at });
 });
 
 // Each state carries the timestamp of the frame that produced it, snapshot or delta, so a caller can
@@ -722,7 +873,7 @@ test("each state reads back with its frame's timestamp", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compression: "deflate" });
 	const producer = new Producer<Value>({ track, deltas: true });
 	for (let n = 1; n <= 3; n++) {
-		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });
+		producer.update({ n, b: "x".repeat(64) }, Time.Timestamp.fromMillis(n * 1_000));
 	}
 	producer.finish();
 
@@ -745,8 +896,8 @@ test("each state reads back with its frame's timestamp", async () => {
 // compile time and at run time.
 test("finishing returns a value that publishes nothing", () => {
 	const producer = new Producer<Value>({ track: new Track.Producer("test") });
-	producer.update({ value: { a: 1 } });
+	producer.update({ a: 1 }, key());
 	const finished = producer.finish();
 	// @ts-expect-error a finished value takes no update
-	expect(() => finished.update({ value: { a: 2 } })).toThrow();
+	expect(() => finished.update({ a: 2 }, key())).toThrow();
 });

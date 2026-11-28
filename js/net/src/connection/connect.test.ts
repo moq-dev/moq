@@ -88,6 +88,9 @@ test("WebTransport offers lite-06 first by default", async () => {
 	const { protocols } = await offered(ALPN_06);
 	expect(protocols?.[0]).toBe("moq-lite-06");
 	expect(protocols).not.toContain(ALPN_07_WIP);
+	// The draft-23 port is partial, so it is offered only when named.
+	expect(protocols).not.toContain(Ietf.ALPN.DRAFT_23);
+	expect(protocols).toContain(Ietf.ALPN.DRAFT_22);
 });
 
 test("WebTransport negotiates lite-07-wip only when explicitly offered", async () => {
@@ -539,6 +542,69 @@ test("the removed per-transport protocols fail loudly", async () => {
 	}
 });
 
+test("urlAuth cannot reach a supplied transport, which never dials the URL", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	await expect(connect(url, { transport: pair.client, urlAuth: true, tokens: ["a"] })).rejects.toThrow(
+		"urlAuth cannot reach a supplied transport",
+	);
+});
+
+test("a keep-alive refuses a connect that would dial WebTransport, before dialing", async () => {
+	let dialed = false;
+	function StubWebTransport() {
+		dialed = true;
+	}
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	try {
+		const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+		await expect(connect(url, { keepAlive })).rejects.toThrow("would dial WebTransport");
+		expect(dialed).toBe(false);
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a supplied transport that refuses the keep-alive is closed", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	await expect(connect(url, { transport: pair.client, keepAlive })).rejects.toThrow("WebTransport cannot");
+	await settle();
+	expect(closed).toBe(true);
+});
+
+test("accept reads a qmux session's protocol once the keep-alive waits for its parameters", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	// The server side as a qmux session whose parameters have not arrived: no protocol yet, and
+	// a keep-alive refused until they do.
+	let ready = false;
+	const params = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server, "protocol", { get: () => (ready ? ALPN_06 : "") });
+	Object.defineProperty(pair.server, "ready", { value: params.promise });
+	Object.assign(pair.server, {
+		stale: false,
+		keepAlive() {
+			if (!ready) throw new Error("keep-alive needs the peer's transport parameters; await ready");
+		},
+		staleChanged: () => new Promise(() => {}),
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	const accepting = accept({ url, transport: pair.server, keepAlive });
+	const connecting = connect(url, { transport: pair.client });
+	await settle();
+	ready = true;
+	params.resolve();
+	const [server, client] = await Promise.all([accepting, connecting]);
+	expect(server.version).toBe(client.version);
+	expect(server.liveness?.peek()).toBe("live");
+	client.abort();
+	server.abort();
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);
@@ -707,6 +773,11 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const defaults = await websocketOffer({});
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_06))).toBe(true);
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_07_WIP))).toBe(false);
+	expect(defaults.some((protocol) => protocol.endsWith(Ietf.ALPN.DRAFT_23))).toBe(false);
+
+	// Named, draft-23 rides qmux-01 like the other moq-transport drafts.
+	const named = await websocketOffer({ versions: ["moq-transport-23"] });
+	expect(named.filter((protocol) => protocol.includes("."))).toEqual([`qmux-01.${Ietf.ALPN.DRAFT_23}`]);
 
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
@@ -721,6 +792,7 @@ interface ReceiveWindows {
 	initialMaxStreamDataBidiLocal: bigint;
 	initialMaxStreamDataBidiRemote: bigint;
 	initialMaxStreamDataUni: bigint;
+	maxIdleTimeout: bigint;
 }
 
 // How many streams the WebSocket fallback lets a server open in each direction: a qmux
@@ -818,9 +890,10 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 		uni: 10_000,
 		params: {
 			initialMaxData: 4_194_304n,
-			initialMaxStreamDataBidiLocal: 1_048_576n,
-			initialMaxStreamDataBidiRemote: 1_048_576n,
-			initialMaxStreamDataUni: 1_048_576n,
+			initialMaxStreamDataBidiLocal: 4_194_304n,
+			initialMaxStreamDataBidiRemote: 4_194_304n,
+			initialMaxStreamDataUni: 4_194_304n,
+			maxIdleTimeout: 30_000n,
 		},
 	});
 	expect(
@@ -829,6 +902,7 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 				maxStreams: 3,
 				receiveWindow: 65_537,
 				streamReceiveWindow: 16_385,
+				idleTimeout: null,
 			},
 		}),
 	).toMatchObject({
@@ -839,6 +913,7 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 			initialMaxStreamDataBidiLocal: 16_385n,
 			initialMaxStreamDataBidiRemote: 16_385n,
 			initialMaxStreamDataUni: 16_385n,
+			maxIdleTimeout: 0n,
 		},
 	});
 });
@@ -849,6 +924,7 @@ test("WebSocket limits must be positive safe integers", async () => {
 			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
 		}
 	}
+	await expect(connect(url, { websocket: { idleTimeout: Duration.ZERO } })).rejects.toThrow(RangeError);
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.

@@ -28,7 +28,7 @@ use bytes::Bytes;
 use kio::clock::sim::{self, JoinHandle};
 
 use crate::{
-	Client, Pattern, Patterns, Server, Session, Version, broadcast, cache,
+	Client, Prefixes, Server, Session, Version, broadcast, cache,
 	coding::{Encoder, Form},
 	origin, track,
 	transport::{
@@ -475,17 +475,18 @@ impl Bystander {
 	}
 
 	/// Write the next group: two frames of the same size every time, so groups charge the
-	/// cache alike, holding the sequence so a misplaced one shows.
+	/// cache alike, holding the key so a misplaced one shows.
 	fn publish(&self) {
 		let mut sent = self.sent.borrow_mut();
-		let sequence = sent.len() as u64;
-		let mut group = self.track.append_group().expect("the bystander's group");
+		let key = sent.len() as u64;
+		let mut group = self.track.append_next().expect("the bystander's group");
 		let mut frames = Vec::new();
 		for frame in 0..2u8 {
-			let mut payload = sequence.to_be_bytes().repeat(8);
+			let mut payload = key.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
-			group.write_frame(None, payload.clone()).expect("the bystander's frame");
+			let key = crate::Timestamp::unscaled(group.start);
+			group.write_frame(key, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
 		group.finish().expect("the bystander's group finish");
@@ -512,8 +513,8 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 	let Ok(track) = broadcast.track(TRACK) else {
 		return;
 	};
-	// Never skip a superseded group, so every one the publisher wrote must arrive.
-	let every = track::Subscription::default().with_delay(track::Delay::default().with_max(None));
+	// History from the oldest group skips nothing, so every one the publisher wrote must arrive.
+	let every = track::Subscription::default().with_ranges([track::Range::ALL]);
 	let Ok(mut subscriber) = track.subscribe(every).await else {
 		return;
 	};
@@ -528,7 +529,10 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 
 /// An origin with a fixed hop, so the run does not depend on a random one.
 fn produce(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(hop.try_into().expect("a nonzero hop")));
+	let (producer, driver) = origin::Producer::new(origin::Config {
+		node: Some(hop.try_into().expect("a nonzero hop")),
+		..Default::default()
+	});
 	spawn(driver);
 	producer
 }
@@ -569,12 +573,15 @@ struct Victim {
 
 impl Relay {
 	async fn new(version: Version) -> Self {
-		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
+		let mut config = origin::Config {
+			node: Some(1.try_into().expect("a nonzero hop")),
+			..Default::default()
+		};
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
-		let (origin, driver) = origin::Producer::new(config);
 		// A relay carries every peer's routes on to the others.
-		let origin = origin.with_proxy(true);
+		config.proxy = true;
+		let (origin, driver) = origin::Producer::new(config);
 		let driver = Rc::new(RefCell::new(driver));
 		let driving = {
 			let driver = driver.clone();
@@ -601,10 +608,7 @@ impl Relay {
 	/// Accept the peer's session as a relay would: it may publish only beneath [`PEER`], and
 	/// subscribe to anything.
 	fn serve(&self, versions: &[Version], transport: memory::Session) -> Victim {
-		let publish = self
-			.origin
-			.scope(PEER, &Patterns::from(Pattern::all()))
-			.expect("the peer's scope");
+		let publish = self.origin.scope(PEER, &Prefixes::all()).expect("the peer's scope");
 		let server = Server::new()
 			.with_versions(versions.to_vec().into())
 			.with_publisher(self.origin.consume())
@@ -637,7 +641,7 @@ impl Relay {
 				let mut routes = origin.routes();
 				while let Some(event) = routes.next().await {
 					let path = event.announce.prefix;
-					// A restart is a new instance at the path, which the reader before it never
+					// A restart is a new identity at the path, which the reader before it never
 					// follows onto.
 					let started = matches!(event.kind, origin::RouteKind::Start | origin::RouteKind::Restart);
 					if !started || !path.as_str().starts_with(PEER) {
@@ -777,8 +781,9 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					route.announce().expect("the client's announce");
 					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
-					let mut group = track.append_group().expect("the client's group");
-					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
+					let mut group = track.append_next().expect("the client's group");
+					let key = crate::Timestamp::unscaled(group.start);
+					group.write_frame(key, Bytes::from_static(b"frame")).expect("a frame");
 					group.finish().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;
 				}
@@ -946,8 +951,8 @@ impl poll::Session for Recorder {
 		self.inner.receive_window()
 	}
 
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.export_keying_material(label, context)
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
 	}
 }
 
@@ -977,6 +982,15 @@ impl Recorder {
 impl poll::SendStream for Recorded<memory::SendStream> {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
+	type Offset = u64;
+
+	fn offset(&self) -> u64 {
+		self.inner.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
+		self.inner.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let written = std::task::ready!(self.inner.poll_write(waiter, buf))?;
@@ -1008,20 +1022,17 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 		self.inner.reset(code);
 	}
 
+	/// Recorded as a plain reset, which is all a replay can ask of its stream.
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		log(&self.log).push(Action::Reset {
+			stream: self.stream,
+			code: code as u8,
+		});
+		self.inner.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_closed(waiter)
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.inner.acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.inner.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_delivered(waiter)
 	}
 }
 

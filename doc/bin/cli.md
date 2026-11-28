@@ -23,16 +23,16 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 | Verb | Endpoint | |
 | --- | --- | --- |
-| `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
+| `import` | `ts`, `fmp4`, `flv`, `h264` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Follow a remote live HLS playlist. |
-| `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `rtmp`, `srt`, `webrtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `mp4 --output <file>` | Record a regular MP4 that stays playable if the recording is cut short. |
 | `export` | `hls --hls-listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
-| `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `rtmp`, `srt`, `webrtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
@@ -69,7 +69,7 @@ none and are closed the same way. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
-the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+the handshake, so `--listen-timeout` (default `30s`) bounds it too; `0s` leaves admission without
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
@@ -141,10 +141,20 @@ keyframe when it re-enables. The muxed exports declare only enabled renditions
 in their header; one disabled afterwards keeps its track, idle until it
 re-enables.
 
+A rendition whose track fails ends alone while the export still reads another, with
+a warning: the muxed exports keep the other media, and the export fails only when
+nothing else is left reading. A rendition of the same medium that the catalog
+lists afterwards takes its place, as `import capture` publishes a reopened
+microphone. `ts` adds it as a new stream; `fmp4`, `mkv`, and `flv` continue the
+failed track with it, from its first sync frame past what was written, as long as
+it has the same codec configuration.
+
 fMP4 writes one fragment per publisher group; `--fragment-duration` caps it.
 The init segment declares every enabled rendition, so it is written only once each can
 be described, and the track set is then fixed: a new rendition or a changed
-codec configuration ends the export. Restart it to pick up the change.
+codec configuration ends the export. Restart it to pick up the change. A new
+rendition waits instead while a track of its medium could still fail, to take
+that track's place.
 Annex-B H.264 and H.265 whose catalog codec string and dimensions fix the sample
 entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
 the samples, so an encoder restarting with a new SPS does not end the export.
@@ -160,7 +170,17 @@ and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that
 joins mid-recording is kept, though only the finished file indexes it.
 `moq repair mp4 <file>` finishes a recording that a crash or second signal left
 fragmented, in place and the same way: it indexes every fragment written in full,
-late renditions included, and cuts a partial one at the end.
+late renditions included, and cuts a partial one at the end. Finishing syncs to
+disk in an order that keeps the file playable if it is itself cut short, and
+`repair` also finishes such a file. It leaves a file alone only when its index is
+exactly what its fragments hold.
+
+The recorder holds an exclusive file lock on its output while it records, and the
+OS drops the lock with a killed recorder. `repair` refuses a file it can't lock,
+since a recorder still has it open and repairing it would corrupt it. A filesystem
+without file locks (some network mounts) is refused by both: the recorder won't start there.
+On Windows the lock also blocks other programs from reading the file until the
+recording finishes, so copy or preview it afterwards.
 
 ```bash
 moq ... export mp4 --output recording.mp4
@@ -213,14 +233,14 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-instance. A refused broadcast request or a catalog with nothing this build can
+identity. A refused broadcast request or a catalog with nothing this build can
 play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
+cargo install moq-cli --no-default-features --features play,openh264
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -234,13 +254,18 @@ moq ... import capture --window 39193 --audio off        # one window (macOS, Wi
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --rendition sd=0.25              # add a quarter-size simulcast rendition
 moq ... import capture --audio on                        # encode audio continuously
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. An audio device that fails or stops ends the import with its source
-error; restart the command after the device is available again. Audio appears
+backends. An audio device that fails mid-session, such as a USB microphone
+re-enumerating, is reopened every 0.5 to 4 seconds as a new audio track. One
+still failing after 10 seconds ends only the audio track: video keeps
+publishing, and the import exits with the audio error once it stops. A muxed
+export of the broadcast follows each reopened track. A device
+that fails to open at startup ends the import at once. Audio appears
 in the catalog once its device opens; a microphone permission prompt leaves
 other media available. The camera and
 microphone stay open while publishing, so a late
@@ -254,6 +279,12 @@ has a subscriber, leaving nothing to fetch from before the first viewer; video
 still opens its source once at startup to probe the mode it negotiates.
 `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
+`--rendition NAME=SCALE`, repeatable, also publishes `video/NAME` from the same
+capture, each frame scaled to SCALE of its pixels (0.25 is half the width and
+height) at a bitrate derived from that size, like the web publisher's simulcast.
+Each one encodes only while watched, and with `--video demand` the source stays
+open while any rendition is. The renditions share the connection smallest
+first: under congestion the smallest keeps playing while larger ones pause.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
@@ -290,9 +321,14 @@ resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
 A restarted source retires the old ladder and publishes a fresh derivative
-instance at the same output path. A clean end waits for the source to return;
+identity at the same output path. A clean end waits for the source to return;
 stop the command to finish following. A refused source request or an encoding
 failure ends the command.
+
+Hardware encoders cap open sessions per device, and a device shared with other work
+refuses one sooner. `--encoder-sessions N` lets at most N encoders serve at once, across
+live rungs and fetched groups, plus one that opens briefly to probe a new rung; past N, an
+encoder waits for one to close. Without it, every rung and fetch opens its own.
 
 ## Announced
 
@@ -311,12 +347,12 @@ starting with `.` stays hidden unless `prefix` names it.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang fetch catalog.json | jq
-moq ... fetch video/hd --group 42 --json
+moq ... fetch video/hd --group 42000 --json
 ```
 
-Writes one group of a track (the newest unless `--group` says otherwise) to
-stdout over MoQ: the counterpart of the relay's HTTP `/fetch`. It exits
-non-zero when the broadcast or group is not found. [Inspect a
+Writes one group of a track to stdout over MoQ, the counterpart of the relay's
+HTTP `/fetch`: the newest, or the one that starts at `--group` in the track's
+timescale. It exits non-zero when the broadcast or group is not found. [Inspect a
 relay](/bin/inspect) walks through `announced` and `fetch` next to their `curl`
 equivalents.
 
@@ -333,25 +369,28 @@ for how, and for storage and serving limits.
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<token>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
 with [moq-archive](https://docs.rs/moq-archive), each stream under
-`<broadcast>/@<instance>` in the store, until the connection ends. Like
+`<broadcast>/@<token>` in the store, until the connection ends. The `<token>` is the
+same 16-hex-digit hash of the stream's identity that its [HLS](/bin/hls) URLs carry, and the
+export logs it beside the identity as each recording starts. Like
 `announced`, it leaves out a broadcast whose name starts with `.` unless
 `--broadcast` names it. A broadcast path segment that starts with `@` is
 stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
 of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
-[instance](/concept/moq-lite#publisher-instances) records under its own key; a route
-over an older wire gets a fresh instance each time it announces, so it never
-resumes or stitches into an older recording. Any recording that fails ends the export.
+[identity](/concept/moq-lite#publisher-identities) records under its own key; a route
+over an older wire gets a fresh identity each time it announces, so it never
+resumes or stitches into an older recording. A broadcast whose recording fails is logged and
+dropped, and every other keeps recording; only the origin failing ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes one recorded broadcast, the `<broadcast>/@<instance>`
-prefix `export archive` wrote, as an ordinary broadcast under a new instance: every
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<token>`
+prefix `export archive` wrote, as an ordinary broadcast under a new identity: every
 track, the catalog included, with its original groups, frames, timescale, and
 priority. Each track is live from its newest stored group and serves older
 groups from the store on request, with no max age, so the whole recording stays
@@ -360,13 +399,15 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
-Instances are percent-encoded as one key segment. When passing a stored key in an
-import URL, URL-encode its literal `%` characters too: instance `a/b` records under
-`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+Broadcast path segments are percent-encoded as one key segment each. When passing a stored
+key in an import URL, URL-encode its literal `%` characters too: broadcast `a\/b` records
+under `a%2Fb/@<token>`, which the import URL names as `s3://recordings/a%252Fb/@<token>`.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
-usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables.
+usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. A store URL
+with a password, query, or fragment is refused, since no store reads them, and
+logs and errors print it without its userinfo.
 
 ## Multiple stages
 
@@ -386,23 +427,23 @@ here needs no network track discovery.
 ## Publisher runs
 
 Each run of `moq` announces under a fresh random
-[instance](/concept/moq-lite#publisher-instances), kept across reconnects.
+[identity](/concept/moq-lite#publisher-identities), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
-No importer continues its group sequences across a restart, so `moq` has no
-flag to set a stable instance and refuses one. A publisher that does continue
-them sets it on its route in a library, such as `RouteOptions::with_instance` in Rust
-or `origin.route(path, { instance: { id, epoch } })` in JavaScript; see
+No importer continues its timeline across a restart, so `moq` has no
+flag to set a stable identity and refuses one. A publisher that does continue
+its timeline sets one on its route in a library, such as `RouteOptions::with_identity` in Rust
+or `origin.route(path, { identity: { id, epoch } })` in JavaScript; see
 [identity and recovery](/concept/identity).
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. A relay ranks the route that entered it for exactly the
 path newest first at an equal cost, so the restart wins over the old run's
-lingering session. Instances cross a connection only on moq-lite 07, which is
+lingering session. Identities cross a connection only on moq-lite 07, which is
 opt-in; over other versions the receiving session mints one per announcement.
 
-Each independent importer publishes its own instance, even when two importers
+Each independent importer publishes its own identity, even when two importers
 read one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
 same-path switching, subscriber-controlled selection on separate paths, and
 several routes to one publisher.
@@ -426,7 +467,8 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+so it needs no `--connect`. `--connect-token` goes only to `--connect`, never to
+a cluster peer: give those `--cluster-token`. WAN cluster dials (`--cluster-connect`,
 `--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
 session takes its own ephemeral port, so a redial leaves from a fresh one. A
 fixed port pins every WAN cluster dial to it, while LAN dials still take
@@ -438,13 +480,14 @@ both `--connect` and a WAN cluster peer is refused at startup: use port 0, or dr
 
 ```bash
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
+moq auth sign --key private.jwk --root rooms/123 --publish alice --subscribe '' > alice.jwt
 moq auth verify --key public.jwk --in alice.jwt
-moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
+moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe anon
 ```
 
-`--publish` and `--subscribe` take patterns: `alice` is one broadcast,
-`alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
+`--publish` and `--subscribe` take prefixes: `alice` covers `alice` and
+everything beneath it, and `''` is everything under `--root`. A wildcard such as
+`alice/**` is refused. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
 server](/bin/relay/auth#auth-server)). It also reads every setting from an
 optional TOML file (`moq auth serve auth.toml`), where flags win and
@@ -471,10 +514,10 @@ import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
 broadcast at once. A reconnect publishes a new
-[instance](/concept/moq-lite#publisher-instances) at the same path, which takes over
+[identity](/concept/moq-lite#publisher-identities) at the same path, which takes over
 the path while the old broadcast finishes its linger. `import rtsp` redials
 after every session, so it closes each run at once and refuses `--linger`, as
-do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
+do `import archive`, `import capture`, and a WHEP pull (`import webrtc --connect`).
 
 `export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
@@ -504,26 +547,30 @@ finishing only the media tracks leaves it waiting for catalog updates.
 buffered are out, even while the catalog stays open; only a catalog that ends
 without naming the track ends it first. A publisher that leaves still gets what
 the export buffered of it out on schedule first. `export ts --follow 10s` then
-waits that long for the same publisher instance to come back, and carries on
+waits that long for the same publisher identity to come back, and carries on
 with the same stream. A return that refuses its catalog keeps it waiting for the
 next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
-[instance](/concept/moq-lite#publisher-instances)) exits 1 unless `--stitch` follows
+[identity](/concept/moq-lite#publisher-identities)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
-starting. After the catalog arrives, the old instance keeps feeding for up to
+starting. After the catalog arrives, the old identity keeps feeding for up to
 `--follow` while the replacement acquires its clock and first usable media.
 Its subscriptions take lower priority so the replacement can acquire on a
-congested link. The marked switch drops the old instance's buffered tail, so
+congested link. The marked switch drops the old identity's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
-usable within that window adds no gap. Congestion can starve the old instance
-sooner or leave the replacement acquiring past the window, causing a gap.
-Timestamps across instances are not aligned. Without `--stitch` the export
+usable within that window adds no gap. Congestion can starve the old identity
+sooner or leave the replacement acquiring past the window, causing a gap. With
+`--passthrough`, `--stitch` instead switches as soon as the replacement's catalog
+subscription is served, with no overlap window: the old identity's buffered tail
+goes out on its clock, then the replacement's packets verbatim from the first
+group its live subscription delivers, so the seam is each PID's continuity break.
+Timestamps across identities are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
-instances, so on the default version every return is a replacement. A failure other than the
+identities, so on the default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling
 of `--follow`.

@@ -18,8 +18,8 @@ RELAY_IMAGE = "moq-interop-relay:local"
 REQUIRED = {(client, "moq-dev-rs") for client in OWN}
 
 
-def matrices(registry):
-    """Keep published images and partition the pairs around our relay and clients."""
+def matrices(registry, missing=frozenset()):
+    """Keep the published images not in `missing` and partition the pairs around our relay and clients."""
     registry = copy.deepcopy(registry)
     implementations = registry["implementations"]
     relay = implementations["moq-dev-rs"]["roles"]["relay"]["docker"]
@@ -33,16 +33,14 @@ def matrices(registry):
                 continue
             image = docker["image"]
             # Local adapter tags need a build even when their base is published.
-            local = bool(docker.get("build")) and "/" not in image
-            inventory.append(
-                {
-                    "implementation": name,
-                    "role": role,
-                    "image": image,
-                    "status": "not run: local build only" if local else "selected",
-                }
-            )
-            if local:
+            if docker.get("build") and "/" not in image:
+                status = "not run: local build only"
+            elif image in missing:
+                status = "not run: image unavailable"
+            else:
+                status = "selected"
+            inventory.append({"implementation": name, "role": role, "image": image, "status": status})
+            if status != "selected":
                 del implementation["roles"][role]["docker"]
     if any("docker" not in implementations[name]["roles"]["client"] for name in OWN):
         raise ValueError("the registry must provide both moq-dev client images")
@@ -59,25 +57,32 @@ def matrices(registry):
     return (to_relay, from_clients), inventory
 
 
-def expected_pairs(registry):
+def modes(docker):
+    """The runner's modes for a docker relay: one per declared endpoint, else plain docker."""
+    return [f"docker-{endpoint['transport']}" for endpoint in docker.get("endpoints", [])] or ["docker"]
+
+
+def expected_runs(registry):
+    """Every (client, relay, mode) run the runner should report for this registry."""
     implementations = registry["implementations"]
     return {
-        (client, relay)
+        (client, relay, mode)
         for client, client_info in implementations.items()
         if client_info.get("roles", {}).get("client", {}).get("docker")
         for relay, relay_info in implementations.items()
         if relay_info.get("roles", {}).get("relay", {}).get("docker")
         and set(client_info["draft_versions"]) & set(relay_info["draft_versions"])
+        for mode in modes(relay_info["roles"]["relay"]["docker"])
     }
 
 
 def validate_summary(summary, expected):
     runs = summary["runs"]
-    actual = {(run["client"], run["relay"]) for run in runs}
+    actual = {(run["client"], run["relay"], run["mode"]) for run in runs}
     if actual != expected or len(runs) != len(expected):
         raise ValueError(f"incomplete runner coverage: expected {sorted(expected)}, got {sorted(actual)}")
-    if any(run["mode"] != "docker" or run["status"] not in ("pass", "fail", "timeout") for run in runs):
-        raise ValueError("unexpected mode, skipped image, or unknown verdict in runner summary")
+    if any(run["status"] not in ("pass", "fail", "timeout") for run in runs):
+        raise ValueError("skipped image or unknown verdict in runner summary")
 
 
 def run(upstream, output):
@@ -85,18 +90,28 @@ def run(upstream, output):
         raise ValueError(f"report destination already exists: {output}")
     registry_file = upstream / "implementations.json"
     original = registry_file.read_text()
-    plans, inventory = matrices(json.loads(original))
+    registry = json.loads(original)
     for command in (["docker", "info"], ["docker", "compose", "version"]):
         subprocess.run(command, check=True)
+    unfiltered, inventory = matrices(registry)
+    own = {registry["implementations"][name]["roles"]["client"]["docker"]["image"] for name in OWN}
+    missing = set()
     images = {entry["image"] for entry in inventory if entry["status"] == "selected"}
     for image in sorted(images - {RELAY_IMAGE}):
         # A registry blip would otherwise abort both matrices before any report.
         for attempt in range(1, 4):
             if not subprocess.run(["docker", "pull", image]).returncode:
                 break
-            if attempt == 3:
+            if attempt < 3:
+                time.sleep(attempt * 2)
+            elif image in own:
                 raise SystemExit(f"failed to pull {image}")
-            time.sleep(attempt * 2)
+            else:
+                # A third party's unpublished image only removes its optional pairs, listed under Not run.
+                missing.add(image)
+    if missing:
+        print(f"::warning::images unavailable, their pairs not run: {sorted(missing)}")
+    plans, inventory = matrices(registry, missing)
     subprocess.run(["docker", "image", "inspect", RELAY_IMAGE], check=True)
     subprocess.run(["make", "certs"], cwd=upstream, check=True)
     results = upstream / "results"
@@ -107,8 +122,11 @@ def run(upstream, output):
     try:
         for index, plan in enumerate(plans):
             registry_file.write_text(json.dumps(plan))
-            expected = expected_pairs(plan)
+            expected = expected_runs(plan)
             if not expected:
+                # Unpublished images can empty the optional matrix; the registry alone must not.
+                if expected_runs(unfiltered[index]):
+                    continue
                 raise ValueError(f"runner matrix {index} has no compatible pairs")
             # The runner exits nonzero on any red pair; the validated summary decides instead.
             subprocess.run(["bash", "run-interop-tests.sh", "--docker-only"], cwd=upstream)
@@ -137,7 +155,7 @@ def run(upstream, output):
         if skipped:
             rows = "".join(
                 f"<li>{html.escape(entry['implementation'])} {entry['role']}: "
-                f"{html.escape(entry['image'])} (local build only)</li>"
+                f"{html.escape(entry['image'])} ({html.escape(entry['status'].removeprefix('not run: '))})</li>"
                 for entry in skipped
             )
             index_file = results / "index.html"
@@ -150,12 +168,13 @@ def run(upstream, output):
         )
     # Fail only after the report shows every pair. A required pair the registry
     # no longer pairs fails too, rather than passing unchecked.
-    status = {(run["client"], run["relay"]): run["status"] for run in combined["runs"]}
-    optional = sorted(pair for pair, verdict in status.items() if verdict != "pass" and pair not in REQUIRED)
+    red = {(run["client"], run["relay"], run["mode"]) for run in combined["runs"] if run["status"] != "pass"}
+    optional = sorted(run for run in red if run[:2] not in REQUIRED)
     if optional:
         # A workflow annotation, so a green job still shows them.
-        print(f"::warning::optional pairs not passing (reported only): {optional}")
-    failed = sorted(pair for pair in REQUIRED if status.get(pair) != "pass")
+        print(f"::warning::optional runs not passing (reported only): {optional}")
+    ran = {(run["client"], run["relay"]) for run in combined["runs"]}
+    failed = sorted(pair for pair in REQUIRED if pair not in ran or any(run[:2] == pair for run in red))
     if failed:
         raise SystemExit(f"required pairs failed: {failed}; see the report")
 

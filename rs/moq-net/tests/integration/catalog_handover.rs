@@ -3,7 +3,7 @@
 //! A catalog's one open group (a snapshot at frame 0, deltas after) survives its
 //! route changing in the middle of that group, end to end over real sessions.
 //!
-//! A publisher `P` is pulled by two relays `A` and `B` carrying its instance, and `R`
+//! A publisher `P` is pulled by two relays `A` and `B` carrying its identity, and `R`
 //! reads through `A` until the route changes mid-group. The reader already on `R`
 //! continues with the next delta, and every reader after the change (a fresh one, a
 //! returning one, and a burst of short ones) still starts from the snapshot. The
@@ -12,6 +12,7 @@
 //! no catalog.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -35,9 +36,11 @@ fn timed() -> track::Info {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: Option<u64>) -> MockPair {
@@ -67,8 +70,8 @@ enum Trigger {
 	Unannounce,
 	/// `R` gains a direct route to `P` that beats `A`.
 	BetterRoute,
-	/// The session `A -> R` dies with no standby, then reconnects. The broadcast closes
-	/// with its last route, so a viewer's subscription ends rather than resuming.
+	/// The session `A -> R` dies with no standby, then reconnects within the claim's
+	/// debounce: the claim comes back on the new session, and a viewer resumes on it.
 	Reconnect,
 }
 
@@ -109,7 +112,7 @@ impl Topology {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 		broadcast.announce().unwrap();
-		let group = track.append_group().unwrap();
+		let group = track.append_next().unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;
@@ -210,12 +213,12 @@ impl Reader {
 					let sent = match group.read_frame().await {
 						Ok(Some(frame)) => tx.unbounded_send(Ok(format!(
 							"{}:{}",
-							group.sequence,
+							group.start,
 							String::from_utf8_lossy(&frame.payload)
 						))),
 						Ok(None) => break,
 						Err(err) => {
-							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.sequence)));
+							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.start)));
 							break;
 						}
 					};
@@ -246,15 +249,6 @@ impl Reader {
 	async fn expect_all(&mut self, topology: &Topology, who: &str) {
 		let expected: Vec<String> = topology.written.iter().map(|payload| format!("0:{payload}")).collect();
 		assert_eq!(self.take(expected.len(), who).await, expected, "{who}");
-	}
-
-	/// The subscription fails or ends, rather than hanging or delivering more.
-	async fn expect_end(&mut self, who: &str) {
-		match kio::clock::timeout(READ_TIMEOUT, self.rx.next()).await {
-			Ok(None | Some(Err(_))) => {}
-			Ok(Some(Ok(frame))) => panic!("{who}: delivered {frame:?} past its route"),
-			Err(_) => panic!("{who}: hung instead of ending"),
-		}
 	}
 
 	/// Nothing more has arrived: no duplicate frame or group trails.
@@ -300,9 +294,6 @@ async fn handover(version: &str, trigger: Trigger, holder: Holder) {
 	};
 
 	topology.trigger(trigger).await;
-	if let (Trigger::Reconnect, Some(mut ended)) = (trigger, viewer.take()) {
-		ended.expect_end(&format!("{tag}: viewer")).await;
-	}
 	topology.write("delta2");
 
 	if let Some(viewer) = &mut viewer {
@@ -348,7 +339,7 @@ enum Before {
 	Resume,
 }
 
-/// The minimal sequences the release-line splice left a late reader stuck on: it
+/// The minimal keys the release-line splice left a late reader stuck on: it
 /// subscribes, and nothing ever arrives.
 async fn late_reader(version: &str, before: Before) {
 	let version: Version = version.parse().unwrap();
@@ -479,7 +470,7 @@ macro_rules! handover_tests {
 	};
 }
 
-// Only an instance lets `R` resume onto another route; older wires end the subscription
+// Only an identity lets `R` resume onto another route; older wires end the subscription
 // with its route instead (see `route_change`).
 handover_tests! {
 	lite_07: "moq-lite-07-wip",
@@ -509,7 +500,7 @@ macro_rules! fetch_tests {
 	};
 }
 
-// A fetch needs no instance. moq-transport is left out: its copy goes idle on the leave
+// A fetch needs no identity. moq-transport is left out: its copy goes idle on the leave
 // and still answers from the open group it can no longer feed.
 fetch_tests! {
 	fetch_lite_06: "moq-lite-06",

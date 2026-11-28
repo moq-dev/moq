@@ -8,6 +8,7 @@ import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import { NativeSession } from "./session.ts";
@@ -62,7 +63,12 @@ async function subscribed(largest?: bigint) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: Duration.millis(60_000) } });
+		.subscribe(
+			withMax({
+				ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
+				delay: { max: Duration.millis(60_000) },
+			}),
+		);
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -218,7 +224,7 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 
 	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
 	await done(TRACK_ENDED, 2n);
-	expect((await reader.recvGroup())?.sequence).toBe(0n);
+	expect((await reader.recvGroup())?.start).toBe(0n);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(hooks.subscriberEnd(reader)).toEqual({ group: 2n, frame: 0 });
 });
@@ -254,7 +260,7 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	const group = groupStream(subscriber, 6n, { ...FLAGS, hasSubgroupObject: true });
 	group.write(object("6.0"));
 	group.finish();
-	expect((await reader.recvGroup())?.sequence).toBe(6n);
+	expect((await reader.recvGroup())?.start).toBe(6n);
 });
 
 // A live join starts at the publisher's Largest, and QUIC does not order streams, so the
@@ -273,13 +279,14 @@ test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a hi
 
 	// Asked before the lower groups land: a reader that ended early returns nothing.
 	const held = reader.recvGroup();
-	for (const sequence of [3n, 4n]) {
-		const low = groupStream(subscriber, sequence);
-		low.write(object(`${sequence}.0`));
+	for (const key of [3n, 4n]) {
+		const low = groupStream(subscriber, key);
+		low.write(object(`${key}.0`));
 		low.finish();
 	}
-	expect(await readAll(await held)).toEqual(["3.0"]);
-	expect(await readAll(await reader.recvGroup())).toEqual(["4.0"]);
+	// Both land before the held read takes one, so it takes the newer first.
+	expect(await readAll(await held)).toEqual(["4.0"]);
+	expect(await readAll(await reader.recvGroup())).toEqual(["3.0"]);
 	expect(await reader.recvGroup()).toBeUndefined();
 	await done(TRACK_ENDED, 4n);
 	expect(await reader.closed).toBeNull();

@@ -1,7 +1,8 @@
 //! Tokio construction helpers for [`moq_net::origin`].
 
 /// Build an origin producer and spawn its [`moq_net::origin::Driver`] on the
-/// ambient tokio runtime, else moq-tokio's fallback runtime.
+/// ambient tokio runtime, else moq-tokio's fallback runtime, or on the `kio::clock`
+/// simulator when called inside one.
 ///
 /// The tokio shorthand for [`moq_net::origin::Producer::new`]: the driver runs
 /// as its own task, finishing once every producer handle drops and the
@@ -20,7 +21,7 @@ pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Produce
 	use futures::FutureExt;
 
 	let (producer, driver) = moq_net::origin::Producer::new(config);
-	crate::runtime::spawn(async move {
+	crate::runtime::Spawner::current().spawn(async move {
 		if let Err(payload) = std::panic::AssertUnwindSafe(moq_net::time::run(driver))
 			.catch_unwind()
 			.await
@@ -41,14 +42,10 @@ mod tests {
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Present(route) => Some((route, true)),
-				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
-					Some((route, false))
-				}
-				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
+			event => panic!("unexpected announce event {event:?}"),
 		}
 	}
 

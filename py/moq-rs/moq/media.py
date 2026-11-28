@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, cast
 
 from moq_ffi import MoqAudio as Audio
@@ -221,21 +222,22 @@ class TrackProducer:
         """Draw a group boundary here.
 
         Audio has no boundary of its own (every packet is independently
-        decodable), so this is the only thing that gives it groups: call it
-        after every frame for one group (one QUIC stream) the relay forwards
-        without waiting, or at a segment cadence to align with video. Video
+        decodable), so this is the only thing that gives it groups (one QUIC
+        stream each): call it after the frame that brings a group to about
+        100 ms, so the relay sees the group finish at once. Frames forward as
+        they are written either way. Video
         groups at its own keyframes and needs this only to override that.
         """
         self._inner.cut()
 
-    def seek(self, sequence: int) -> None:
-        """Draw a group boundary and number the next group ``sequence``.
+    def seek(self, start: int) -> None:
+        """Draw a group boundary and number the next group ``start``.
 
-        :meth:`cut` with an explicit sequence, for a publisher whose group
+        :meth:`cut` with an explicit start, for a publisher whose group
         numbers have to be deterministic: two encoders aligning per GOP so a
         consumer can fail over between them.
         """
-        self._inner.seek(sequence)
+        self._inner.seek(start)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
@@ -265,9 +267,9 @@ class ContainerProducer:
         """
         self._inner.cut()
 
-    def seek(self, sequence: int) -> None:
-        """Start a new segment and number its groups ``sequence``."""
-        self._inner.seek(sequence)
+    def seek(self, start: int) -> None:
+        """Start a new segment and number its groups ``start``."""
+        self._inner.seek(start)
 
     def finish(self) -> None:
         """Finish every track this container publishes."""
@@ -371,16 +373,18 @@ class GroupConsumer(_Stream[MediaFrame]):
     async context manager that cancels on exit.
     """
 
-    def __init__(self, group: _subscribe.GroupConsumer, container: Container) -> None:
-        """Decode ``group`` with the track's container, as each frame lands.
+    def __init__(self, group: _subscribe.GroupConsumer, id: str, rendition: Video | Audio) -> None:
+        """Decode ``group`` with the catalog rendition ``id``'s container and media role, as each frame lands.
 
+        Only the rendition's role and container are used, since ``group`` is
+        already the track's; the role tells an endpoint marker from a frame.
         Frame timestamps are container media time, not the transport's. Which
         groups arrive, and how long a stalled one stays readable, is the
         subscription's ``delay.max``. Takes over ``group``, whose handle is
         closed afterward; raises ``Error.AlreadyCommitted`` if it has already
         read a frame.
         """
-        self._inner = MoqMediaGroupConsumer(group._inner, container)
+        self._inner = MoqMediaGroupConsumer(group._inner, _rendition(id, rendition))
 
     @classmethod
     def _from_inner(cls, inner: MoqMediaGroupConsumer) -> GroupConsumer:
@@ -394,18 +398,18 @@ class GroupConsumer(_Stream[MediaFrame]):
         broadcast: BroadcastConsumer,
         id: str,
         rendition: Video | Audio,
-        sequence: int,
+        start: int,
         *,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
         """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
-        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), start=start, options=options)
         return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
 
     async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
@@ -417,16 +421,23 @@ class GroupConsumer(_Stream[MediaFrame]):
 
 
 class CatalogConsumer(_Stream[Catalog]):
-    """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
+    """Async-iterable stream of :class:`Catalog` updates as the broadcast changes.
 
-    Construct with :meth:`subscribe`. Each item is the latest
-    catalog describing the broadcast's tracks; usable as an async context manager.
+    Construct with :meth:`subscribe`. Each item describes the broadcast's tracks from its
+    ``timestamp`` on the media timeline: hold one read before the media reaches it, and apply one
+    read late, or the first one read, at once. Usable as an async context manager.
     """
 
     @classmethod
-    async def subscribe(cls, broadcast: BroadcastConsumer) -> CatalogConsumer:
-        """Subscribe to the broadcast's catalog snapshots."""
-        return cls(await MoqMediaCatalogConsumer.subscribe(broadcast._inner))
+    async def subscribe(cls, broadcast: BroadcastConsumer, *, delay: timedelta = timedelta(0)) -> CatalogConsumer:
+        """Subscribe to the broadcast's catalog updates, for a reader playing ``delay`` behind the live edge.
+
+        A zero ``delay`` reads only the newest catalog, for a reader that applies each on arrival. A
+        reader that holds each update until its media reaches the update's ``timestamp`` passes its
+        playout delay instead, and reads in order every update it may still need: one stays
+        deliverable until it falls ``delay`` behind the live edge.
+        """
+        return cls(await MoqMediaCatalogConsumer.subscribe(broadcast._inner, delay))
 
     def __init__(self, inner: MoqMediaCatalogConsumer) -> None:
         self._inner = inner

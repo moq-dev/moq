@@ -52,6 +52,7 @@ harness:
     python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
+    python3 mesh-replay/replay.test.py
     cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
     uv run --no-project python ../sh/js/install.py frozen
     cd interop/clients/js && bash ../../../../sh/local.sh bun test {{ replace(harness_browser_tests, "\n", " ") }}
@@ -60,7 +61,7 @@ harness:
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
-# moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
+# libmoq C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # `--versions ietf` reruns them with every client pinned to each even moq-transport draft.
@@ -68,15 +69,15 @@ harness:
 [positional-arguments]
 interop *args:
     uv run --no-project python ../sh/js/install.py frozen
-    just rs test -p moq-net -p moq-crypto --lib \
+    just rs test -p moq-net --features moq-net/async --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
-        sign_interop \
         tracks_interop \
+        meta_interop \
         varint_interop \
         --run-ignored all
     ./interop/interop.sh "$@"
@@ -101,6 +102,12 @@ wire-compat *args:
 ietf-conformance *args:
     ./ietf-conformance/run.sh "$@"
 
+# moq-quic against pinned QUIC stacks through the QUIC Interop Runner, both roles.
+# Narrow it with e.g. `--peers quic-go --cases handshake --roles server`.
+[positional-arguments]
+quic-interop *args:
+    ./quic-interop/run.sh "$@"
+
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
 # recipe and the rest pass through, e.g. `just test smoke full` or `just test
@@ -114,6 +121,10 @@ smoke *args:
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:
     ./portrait/run.sh
+
+# Import a VR180 MP4 with ambisonic Opus and check demo/vr lays it out by the catalog's VR fields.
+vr:
+    ./vr/run.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
@@ -189,6 +200,12 @@ audio-quality-record *args:
 drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
+# A mesh of real relays through link reopens, a crash, and a roll between the newest
+# release and this checkout, reporting what each costs. See mesh-replay/README.md.
+[positional-arguments]
+mesh-replay *args:
+    cd {{ quote(invocation_directory()) }} && {{ quote(source_directory() / "mesh-replay" / "run.sh") }} "$@"
+
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
@@ -197,7 +214,8 @@ drill-sensitivity *args:
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
 # `--open-gop` (an open-GOP clip whose orphan leading pictures are trimmed), `--hrd`
 # (1080p video filling a broadcast-sized CPB), `--mpeg2` (MPEG-2 video carried whole,
-# decoded from the capture), `--delay 2s` (the exporter's). See
+# decoded from the capture), `--delay 2s` (the exporter's), `--passthrough
+# --restart 10` (the import killed and restarted under the export). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.
@@ -213,6 +231,7 @@ ts *args:
     python3 ./ts/klv.test.py
     python3 ./ts/revision.test.py
     python3 ./ts/clockless.test.py
+    python3 ./ts/splice.test.py
     ./ts/run.sh "$@"
 
 # Carry a hardware encoder's capture, which the T-STD model passes, whole through the round-trip.
@@ -278,7 +297,7 @@ stream-limits:
     uv run --no-project python ../sh/js/install.py frozen
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^stream_limits::/)' --run-ignored only
 
-# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted.
+# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted, and passes the lite-07 range table.
 relay-fill:
     uv run --no-project python ../sh/js/install.py frozen
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^relay_fill::/)' --run-ignored all
@@ -306,13 +325,21 @@ resume-model:
 tla *paths:
     bash ../sh/tla.sh {{ paths }}
 
-# Prove the route key model, and that each variant breaks the lemmas it names.
-route-key-model:
-    bash route-key-model.sh
+# Type-check the route rule's convergence proof (rs/moq-net/verify/route-algebra) with its own pinned Agda.
+route-proof:
+    nix build ..#route-proof --no-link --print-build-logs
 
 # Check random lite-07 meshes against the route rules from a fresh replayable seed.
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh
+
+# Print the route benchmarks' tables: the multicast bake-off, warmth, and node layers.
+route-bench:
+    bash ../sh/local.sh bash route-bench.sh
+
+# Race a lite-07 relay's session tasks in seeded orders from a fresh replayable seed.
+route-race:
+    bash ../sh/local.sh bash route-race.sh
 
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which
@@ -323,8 +350,3 @@ qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     uv run --no-project python ../sh/js/install.py frozen
     cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
-
-# Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
-p2p:
-    uv run --no-project python ../sh/js/install.py frozen
-    cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts

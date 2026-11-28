@@ -134,7 +134,14 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 			headless: true,
 			handleSIGTERM: false,
 			env,
-			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
+			firefoxUserPrefs: {
+				"media.autoplay.default": 1,
+				"media.autoplay.block-webaudio": true,
+				// Firefox records an async stack at every await and promise reaction only in a page a
+				// debugger watches, and Playwright's Juggler watches every page. That is a quarter to a
+				// third of a player's main-thread time through a resume's burst, which no user pays.
+				"javascript.options.asyncstack": false,
+			},
 		});
 	}
 	// WebKit's WebCodecs decode through the system GStreamer. The Nix dev shell points GStreamer at

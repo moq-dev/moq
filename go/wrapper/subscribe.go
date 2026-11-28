@@ -37,20 +37,35 @@ func (b *BroadcastConsumer) SubscribeTrack(
 	return &TrackConsumer{inner: inner}, nil
 }
 
-// FetchGroup fetches one complete group by track name and group sequence
+// SubscribeMeta subscribes to a track's metadata: its groups and each frame's header,
+// without the payload. It is a subscription of its own beside any SubscribeTrack of the same
+// track; to read the payload after all, subscribe to the track from the group reached.
+// subscription works as in SubscribeTrack.
+func (b *BroadcastConsumer) SubscribeMeta(
+	ctx context.Context,
+	name string,
+	subscription *Subscription,
+) (*MetaConsumer, error) {
+	sub, err := subscriptionFFI(subscription)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.SubscribeMeta(ctx, name, sub)
+	if err != nil {
+		return nil, err
+	}
+	return &MetaConsumer{inner: inner}, nil
+}
+
+// FetchGroup fetches one complete group by track name and group start
 // without holding a live subscription.
 func (b *BroadcastConsumer) FetchGroup(
 	ctx context.Context,
 	name string,
-	sequence uint64,
+	start uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
-	if options != nil {
-		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
-			return nil, err
-		}
-	}
-	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
+	inner, err := b.inner.FetchGroup(ctx, name, start, options)
 	if err != nil {
 		return nil, err
 	}
@@ -60,10 +75,7 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, built with
 // media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
 // empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
-// Its Instance is the stream the reference names: a broadcast proven to serve another one
-// errors instead of resolving, while a route over a wire that carries no instance cannot prove
-// one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
-// FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
+// Call it on a rendition that carries a reference before SubscribeTrack or FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
 // when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
 // video.Subscribe resolve it themselves.
 //
@@ -85,9 +97,9 @@ type GroupConsumer struct {
 	inner *ffi.MoqGroupConsumer
 }
 
-// Sequence is this group's sequence number within the track.
-func (g *GroupConsumer) Sequence() uint64 {
-	return g.inner.Sequence()
+// Start is this group's start within the track.
+func (g *GroupConsumer) Start() uint64 {
+	return g.inner.Start()
 }
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
@@ -111,16 +123,17 @@ type TrackConsumer struct {
 	inner *ffi.MoqTrackConsumer
 }
 
-// RecvGroup returns the next group in arrival order (possibly out of sequence),
-// or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
-// consumption.
+// RecvGroup returns the next group in arrival order (possibly out of start order),
+// or (nil, nil) when the track ends. Groups already held come in the
+// subscription's group order, newest first unless it asks ascending. Prefer this
+// for live, latency-sensitive consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 	return t.group(ctx, t.inner.RecvGroup)
 }
 
-// NextGroup returns the next group in sequence order, skipping forward if
+// NextGroup returns the next group in start order, skipping forward if
 // behind, or (nil, nil) when the track ends. Prefer this when order matters
-// more than latency. Shares the sequence cursor with ReadFrame: a group one
+// more than latency. Shares the ordered cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 	return t.group(ctx, t.inner.NextGroup)
@@ -153,7 +166,7 @@ func (t *TrackConsumer) Info() TrackInfo {
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a time anchor the track can't serve.
+// negative delay, or a range time the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
@@ -162,13 +175,26 @@ func (t *TrackConsumer) Update(subscription Subscription) error {
 	return t.inner.Update(sub)
 }
 
-// Groups ranges over groups in sequence order.
+// Refresh asks the publisher for a group newer than the newest held, and
+// returns once the request is sent. It is judged by the track's TrackRefresh:
+// sent once the newest group is old enough, when whatever serves the track
+// reads it (the session forwarding it upstream, or a local publisher blocked in
+// TrackDemand.Refresh). Concurrent calls share one request and all return when
+// it is sent. Cancelling ctx before then withdraws this call's request. It
+// returns at once when there is nothing to send, or when a newer group lands
+// first. The new group arrives through the normal reads, such as NextGroup.
+func (t *TrackConsumer) Refresh(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Refresh)
+}
+
+// Groups ranges over groups in start order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.NextGroup)
 }
 
 // GroupsAsArrived ranges over groups in arrival order, including
-// out-of-sequence deliveries.
+// out-of-order deliveries. Groups already held come in the subscription's
+// order, newest first unless it asks ascending, as RecvGroup returns them.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.RecvGroup)
 }
@@ -176,6 +202,77 @@ func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupCon
 // Cancel stops the stream.
 func (t *TrackConsumer) Cancel() {
 	t.inner.Cancel()
+}
+
+// MetaConsumer is a metadata subscription: a stream of groups from a track, each a stream of
+// frame headers without their payloads.
+type MetaConsumer struct {
+	inner *ffi.MoqMetaConsumer
+}
+
+// RecvGroup returns the next group in arrival order, as TrackConsumer.RecvGroup does, or
+// (nil, nil) when the track ends.
+func (m *MetaConsumer) RecvGroup(ctx context.Context) (*MetaGroup, error) {
+	res, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqMetaGroup, error) {
+		res, err := m.inner.RecvGroup(ctx)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return &MetaGroup{inner: res}, nil
+}
+
+// Info returns the publisher-side track properties learned during subscription.
+func (m *MetaConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(m.inner.Info())
+}
+
+// Update changes this subscriber's delivery preferences, as TrackConsumer.Update does.
+func (m *MetaConsumer) Update(subscription Subscription) error {
+	sub, err := subscription.ffi()
+	if err != nil {
+		return err
+	}
+	return m.inner.Update(sub)
+}
+
+// GroupsAsArrived ranges over groups in arrival order, as RecvGroup returns them.
+func (m *MetaConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*MetaGroup, error] {
+	return bridge.Seq(ctx, m.inner.Cancel, m.RecvGroup)
+}
+
+// Cancel stops the stream.
+func (m *MetaConsumer) Cancel() {
+	m.inner.Cancel()
+}
+
+// MetaGroup is a stream of frame headers within a single group of a metadata subscription.
+type MetaGroup struct {
+	inner *ffi.MoqMetaGroup
+}
+
+// Start is this group's start within the track.
+func (g *MetaGroup) Start() uint64 {
+	return g.inner.Start()
+}
+
+// NextHeader returns the next frame's header, or (nil, nil) when the group ends.
+func (g *MetaGroup) NextHeader(ctx context.Context) (*FrameHeader, error) {
+	return bridge.Call(ctx, nil, g.inner.NextHeader)
+}
+
+// All ranges over frame headers until the group ends or the loop breaks.
+func (g *MetaGroup) All(ctx context.Context) iter.Seq2[*FrameHeader, error] {
+	return bridge.Seq(ctx, g.inner.Cancel, g.NextHeader)
+}
+
+// Cancel stops the stream.
+func (g *MetaGroup) Cancel() {
+	g.inner.Cancel()
 }
 
 // VideoDecodedFrame is one decoded video frame. It owns the decoder's surface
@@ -201,7 +298,7 @@ func (f *VideoDecodedFrame) Height() uint32 {
 }
 
 // Pixels converts the frame to tightly packed pixels in format.
-func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
+func (f *VideoDecodedFrame) Pixels(format *VideoPixelFormat) ([]byte, error) {
 	return f.inner.Pixels(format)
 }
 
@@ -209,37 +306,21 @@ func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
 // memory. Only a video.Consumer with DecoderOutput.Surface set produces one,
 // and it stays valid until Close.
 func (f *VideoDecodedFrame) Surface() VideoSurface {
-	return videoSurface(f.inner.Surface())
-}
-
-// VideoSurface is a decoded frame's platform surface: VideoSurfacePixelBuffer on macOS and iOS.
-// Switch on it with a default case, since new platforms add kinds.
-type VideoSurface interface {
-	isVideoSurface()
-}
-
-// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
-type VideoSurfacePixelBuffer struct {
-	Pointer uint64
-}
-
-// VideoSurfaceUnknown is a surface kind this version of the package does not know yet.
-type VideoSurfaceUnknown struct{}
-
-func (VideoSurfacePixelBuffer) isVideoSurface() {}
-func (VideoSurfaceUnknown) isVideoSurface()     {}
-
-func videoSurface(surface *ffi.MoqVideoSurface) VideoSurface {
-	if surface == nil {
-		return nil
+	if surface := f.inner.Surface(); surface != nil {
+		return *surface
 	}
-	switch surface := (*surface).(type) {
-	case ffi.MoqVideoSurfacePixelBuffer:
-		return VideoSurfacePixelBuffer{Pointer: surface.Pointer}
-	default:
-		return VideoSurfaceUnknown{}
-	}
+	return nil
 }
+
+type (
+	// VideoSurface is a decoded frame's platform surface: VideoSurfacePixelBuffer on macOS and
+	// iOS, or VideoSurfaceUnknown for a kind this version cannot name yet.
+	VideoSurface = ffi.MoqVideoSurface
+	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
+	// VideoSurfaceUnknown is a surface kind this version of the package cannot name yet.
+	VideoSurfaceUnknown = ffi.MoqVideoSurfaceUnknown
+)
 
 // Close releases the frame's surface back to the decoder.
 func (f *VideoDecodedFrame) Close() {

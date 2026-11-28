@@ -48,6 +48,9 @@ pub(super) struct PacketSpace {
 	/// distinguishing between ECN bleaching and counts having been updated by a near-simultaneous
 	/// ACK already processed in another space.
 	pub(super) ecn_feedback: frame::EcnCounts,
+	/// Whether a packet sent marked on an earlier path was acknowledged since the last ECN
+	/// feedback was read, so the next increase may hold its marks
+	pub(super) ecn_prior_path: bool,
 
 	/// Incoming cryptographic handshake stream
 	pub(super) crypto_stream: Assembler,
@@ -85,6 +88,7 @@ impl PacketSpace {
 			lost_packets: Slots::default(),
 			ecn_counters: frame::EcnCounts::ZERO,
 			ecn_feedback: frame::EcnCounts::ZERO,
+			ecn_prior_path: false,
 
 			crypto_stream: Assembler::new(),
 			crypto_offset: 0,
@@ -267,6 +271,8 @@ pub(super) struct SentPacket {
 	/// Whether `stream_frames` only resend data in flight in other packets, to probe for
 	/// bandwidth, so they are not retransmitted when lost
 	pub(super) bandwidth_probe: bool,
+	/// Whether it was sent marked ECT(0), so its acknowledgement must raise the peer's ECN counts
+	pub(super) ecn: bool,
 }
 
 /// Represents one or more packets that are deemed lost.
@@ -274,6 +280,10 @@ pub(super) struct SentPacket {
 pub(super) struct LostPacket {
 	/// The time the packet was sent.
 	pub(super) time_sent: Instant,
+	/// The generation of the path it was sent marked ECT(0) on, if marked
+	pub(super) ecn_path: Option<u64>,
+	/// The generation of the path whose controller answered its loss, if one did
+	pub(super) congestion_path: Option<u64>,
 }
 
 /// Retransmittable data queue
@@ -331,7 +341,7 @@ impl Retransmits {
 			&& !(self.data_blocked && streams.can_send_data_blocked())
 			&& !self.max_stream_id.into_iter().any(|x| x)
 			&& !self.streams_blocked.into_iter().any(|x| x)
-			&& self.reset_stream.is_empty()
+			&& self.reset_stream.iter().all(|&(id, _)| !streams.can_send_reset(id))
 			&& self.stop_sending.is_empty()
 			&& self
 				.max_stream_data
@@ -355,10 +365,21 @@ impl Retransmits {
 	const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
 }
 
+/// Queue CRYPTO frames in offset order, so the lowest the peer may be missing goes first
+///
+/// A peer buffers only so far past the offset it is missing, so a retransmission sent behind
+/// later offsets can exceed its CRYPTO buffer and close the handshake.
+pub(super) fn queue_crypto(queue: &mut VecDeque<frame::Crypto>, frames: impl IntoIterator<Item = frame::Crypto>) {
+	for frame in frames {
+		let at = queue.partition_point(|queued| queued.offset <= frame.offset);
+		queue.insert(at, frame);
+	}
+}
+
 impl ::std::ops::BitOrAssign for Retransmits {
 	fn bitor_assign(&mut self, rhs: Self) {
 		// We reduce in-stream head-of-line blocking by queueing retransmits before other data for
-		// STREAM and CRYPTO frames.
+		// STREAM frames.
 		self.max_data |= rhs.max_data;
 		self.data_blocked |= rhs.data_blocked;
 		for dir in Dir::iter() {
@@ -369,9 +390,7 @@ impl ::std::ops::BitOrAssign for Retransmits {
 		self.stop_sending.extend_from_slice(&rhs.stop_sending);
 		self.max_stream_data.extend(&rhs.max_stream_data);
 		self.stream_data_blocked.extend(&rhs.stream_data_blocked);
-		for crypto in rhs.crypto.into_iter().rev() {
-			self.crypto.push_front(crypto);
-		}
+		queue_crypto(&mut self.crypto, rhs.crypto);
 		self.new_cids.extend(&rhs.new_cids);
 		self.retire_cids.extend(rhs.retire_cids);
 		self.ack_frequency |= rhs.ack_frequency;
@@ -661,8 +680,9 @@ impl PendingAcks {
 
 	/// Returns the delay since the packet with the largest packet number was received
 	pub(super) fn ack_delay(&self, now: Instant) -> Duration {
-		self.largest_packet
-			.map_or_else(Duration::default, |(_, received)| now - received)
+		self.largest_packet.map_or_else(Duration::default, |(_, received)| {
+			now.saturating_duration_since(received)
+		})
 	}
 
 	/// Handle receipt of a new packet

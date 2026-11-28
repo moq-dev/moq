@@ -59,7 +59,10 @@ fn max_concurrent_streams_lowered() {
 /// How many bytes a fresh client stream can write, up to `limit`
 fn writable(pair: &mut Pair, ch: ConnectionHandle, limit: usize) -> usize {
 	let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
-	pair.client_send(ch, s).write(&mut &vec![0; limit][..]).unwrap_or(0)
+	match pair.client_send(ch, s).try_write(&mut &vec![0; limit][..]) {
+		Poll::Ready(Ok(n)) => n,
+		_ => 0,
+	}
 }
 
 /// Reads everything the server has buffered on every client uni stream, returning the total
@@ -71,7 +74,7 @@ fn read_buffered(pair: &mut Pair, ch: ConnectionHandle, streams: &mut Vec<Stream
 		let Ok(mut chunks) = recv.read() else {
 			continue;
 		};
-		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+		while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 			total += chunk.bytes.len();
 		}
 		chunks.finalize();

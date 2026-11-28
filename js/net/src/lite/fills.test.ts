@@ -1,34 +1,40 @@
 // The rules a lite-07 copy's `RangeFills` settles its fills by. Mirrors the tests in the Rust
 // `lite/subscriber/fills.rs`.
 import { expect, spyOn, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
+import { manual } from "../mock.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Tail } from "../tail.ts";
-import type { Fill, Producer } from "../track.ts";
-import { dropped, passing, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
+import { Timestamp } from "../time.ts";
+import type { FillGroups, Producer } from "../track.ts";
+import { dropped, passing, RangeFills, type RecoveryHandle, type Refused, Stall } from "./fills.ts";
+import { Version } from "./version.ts";
 
 const enc = new TextEncoder();
 
 // A copy whose first group is 4, read from group 0 with no budget, and the fill for 0 to 4 its
 // reader asks of it.
-async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: Fill; close(): void }> {
+async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: FillGroups; close(): void }> {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { maxAge: null });
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	const group = track.createGroup(4n);
-	group.writeFrame({ payload: enc.encode("live 4") });
+	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
-	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });
+	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" }));
 	// Reading is what asks.
 	void reader
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
 	const fill = await requests.requestedFill();
-	if (!fill) throw new Error("no fill");
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 4n]);
 	return {
 		broadcast,
@@ -53,6 +59,7 @@ function recoveries() {
 		cancelled: boolean;
 		reading: boolean;
 		readingChanged: Signal<number>;
+		walk: Run[];
 	}[] = [];
 	const recover = (groups: Run, priority: number): RecoveryHandle => {
 		let finish!: (refused: Refused[]) => void;
@@ -73,10 +80,13 @@ function recoveries() {
 			cancelled: false,
 			reading: false,
 			readingChanged: new Signal(0),
+			walk: [] as Run[],
 		};
 		opened.push(entry);
 		return {
+			groups: () => entry.groups,
 			done,
+			walk: () => entry.walk,
 			takeRefused: () => soFar.splice(0),
 			changed,
 			readingChanged: entry.readingChanged,
@@ -93,7 +103,7 @@ function recoveries() {
 test("range fills: a fill of more than one group joins the subscription's ranges", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	fills.push(peer.fill);
 	expect(fills.poll(new Tail(), true)).toBe(true);
 	expect(fills.ask.groups).toEqual([{ start: 0n, end: 4n }]);
@@ -106,10 +116,113 @@ test("range fills: a fill of more than one group joins the subscription's ranges
 	peer.close();
 });
 
+// A run no fill owes stays asked for a stream of it still arriving only while someone reads the
+// track: once nobody does, the fills ask for nothing, so the subscription they hold can end.
+// Mirrors the Rust `a_drained_run_goes_once_nobody_reads`.
+test("range fills: a drained run goes once nobody reads", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	const arriving = track.createGroup(0n);
+	arriving.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(0n) });
+	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: null } }));
+	const { recover } = recoveries();
+	const fills = new RangeFills(track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	fills.ask = { groups: [{ start: 0n, end: 1n }], priority: 0 };
+	expect(fills.poll(tail, true)).toBe(false);
+	expect(fills.isEmpty()).toBe(false);
+
+	// The reader leaving wakes the fills.
+	const woken = fills.changed(tail, track.demand());
+	reader.close();
+	await woken;
+	expect(fills.poll(tail, false)).toBe(true);
+	expect(fills.isEmpty()).toBe(true);
+
+	fills.close();
+	broadcast.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: behind a relay of the previous release a
+// lite-06 recovery stalls on keys that relay never accounts for, and the fill owing them goes to
+// FETCH instead. Mirrors the Rust `a_stalled_recovery_walks_its_keys`.
+test("range fills: a stalled recovery hands its fill to FETCH", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_06, recover);
+	fills.push(peer.fill);
+	fills.poll(new Tail(), true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 0n, end: 4n }]);
+	expect(fills.takeWalks()).toEqual([]);
+
+	const stalled = defined(opened[0]);
+	stalled.walk = [{ start: 0n, end: 4n }];
+	stalled.finish([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	fills.poll(new Tail(), true);
+	expect(fills.takeWalks()).toEqual([peer.fill]);
+	// The copy stays open for the FETCH as for a recovery.
+	expect(fills.recovering).toBe(true);
+	fills.walked();
+	expect(fills.recovering).toBe(false);
+	expect(fills.isEmpty()).toBe(true);
+	peer.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: a fill handed to FETCH takes what the
+// recovery of the rest of its run refused in the same pass, such as the keys below that recovery's
+// START, which answer only the fills owing them and are not recorded on the copy.
+test("range fills: a walked fill takes a refusal from the same pass", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_06, recover);
+	fills.push(peer.fill);
+	fills.poll(new Tail(), true);
+	// The recovery stops past the first group that arrives, 1, and the rest of the run goes out on a
+	// second one.
+	const first = defined(opened[0]);
+	first.groups = { start: 0n, end: 2n };
+	fills.poll(new Tail(), true);
+	const rest = defined(opened[1]);
+	expect(rest.groups).toEqual({ start: 2n, end: 4n });
+
+	// The second starts at 3, and the first stalls, both before the next poll.
+	rest.refuse({ start: 2n, end: 3n, refusal: passing(new StreamError(StreamCode.NotFound)) });
+	first.walk = [{ start: 0n, end: 1n }];
+	first.finish([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	fills.poll(new Tail(), true);
+	expect(fills.takeWalks()).toEqual([peer.fill]);
+	expect(peer.fill.isWanted(0n)).toBe(true);
+	expect(peer.fill.isWanted(2n)).toBe(false);
+	expect(peer.fill.isWanted(3n)).toBe(true);
+	fills.close();
+	peer.close();
+});
+
+// TEMPORARY MIGRATION, delete with `Stall`: progress in the tick the grace passes, before its timer's
+// callback runs, restarts the grace rather than being overwritten by the expiry.
+test("stall: progress as the grace passes restarts it", async () => {
+	using clock = manual();
+	const tail = new Tail();
+	const stall = new Stall(tail);
+	// Fires the timer at once, queueing its callback.
+	clock.jump(GRACE);
+	stall.restart();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(stall.poll(tail)).toBe(false);
+
+	await clock.advance(GRACE.saturatingSub(Duration.millis(1)));
+	expect(stall.poll(tail)).toBe(false);
+	await clock.advance(Duration.millis(1));
+	expect(stall.poll(tail)).toBe(true);
+	stall.close();
+});
+
 test("range fills: a stale drop of asked groups is recovered once, on a subscription of its own", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -118,8 +231,7 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 3n }]);
 	// With the fill's priority. The recovered run leaves the subscription, though the rest of the
-	// fill's run stays asked: left in, any later update would reopen its stale drop there, and the
-	// publisher would serve it on both.
+	// fill's run stays asked: the subscription dropped it for good.
 	expect(opened[0]?.priority).toBe(peer.fill.priority);
 	expect(fills.ask.groups).toEqual([
 		{ start: 0n, end: 1n },
@@ -134,7 +246,7 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.poll(tail, true);
 	expect(opened.length).toBe(1);
 	expect(peer.fill.wanted()).toBe(0n);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	// Refused for this fill, which moves on past them.
 	expect(peer.fill.wanted()).toBe(3n);
@@ -148,7 +260,7 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 test("range fills: the last recovery finishing reports the fills empty", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -159,8 +271,8 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 
 	// Every group arrives while a stream of the recovery is still read, which keeps it.
 	recovery.reading = true;
-	for (let sequence = peer.fill.wanted(); sequence !== undefined; sequence = peer.fill.wanted())
-		peer.fill.accept(sequence).finish();
+	for (let key = peer.fill.wanted(); key !== undefined; key = peer.fill.wanted())
+		defined(peer.fill.accept(key)).finish();
 	expect(fills.poll(tail, true)).toBe(true);
 	expect(fills.ask.groups).toEqual([]);
 	expect(fills.isEmpty()).toBe(false);
@@ -182,7 +294,7 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 test("range fills: a recovery's refusals stand until the fill reaches them", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -195,13 +307,24 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	// The fill still waits on group 0.
 	expect(peer.fill.wanted()).toBe(0n);
 
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	// Recorded as lost: a later reader is told so rather than waiting on them.
-	const later = peer.track.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: null } });
-	const next = hooks.tryRecvGroup(later, true);
-	expect(next.kind === "drop" ? [next.start, next.end] : next.kind).toEqual([1n, 3n]);
+	// From time 0, which names group 0 whatever is held: a time start of 1 would look up whether a
+	// group between 0 and 4 contains it, as the Rust tests' `missed` notes.
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
+	const drops: bigint[][] = [];
+	for (let next = hooks.tryRecvGroup(later, true); next.kind !== "idle"; next = hooks.tryRecvGroup(later, true)) {
+		if (next.kind === "drop") drops.push([next.start, next.end]);
+	}
+	expect(drops).toEqual([[1n, 3n]]);
 
 	later.close();
 	fills.close();
@@ -213,7 +336,7 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 test("range fills: a lost wait releases what it listened to", async () => {
 	const peer = await missing();
 	const { recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -247,9 +370,9 @@ test("range fills: a lost wait releases what it listened to", async () => {
 	} as typeof original);
 	try {
 		// Woken by the tail each time, as live groups arriving wake the serve loop.
-		for (let sequence = 10n; sequence < 110n; sequence++) {
-			const wait = fills.changed(tail);
-			tail.account(sequence, sequence + 1n);
+		for (let key = 10n; key < 110n; key++) {
+			const wait = fills.changed(tail, peer.track.demand());
+			tail.account(key, key + 1n);
 			await wait;
 		}
 		expect(live).toBe(0);
@@ -264,7 +387,7 @@ test("range fills: a lost wait releases what it listened to", async () => {
 test("range fills: a range start past the asked groups refuses only the fills owing them now", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -278,11 +401,13 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	// Nothing recorded: the track still holds no verdict on groups 0 and 1, so a later reader asks
 	// for them again.
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 0n } }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	void later
 		.ordered()
 		.nextGroup()
@@ -297,12 +422,56 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	peer.close();
 });
 
+// As in Rust: a group the subscription delivered, recovered once and evicted again before its
+// reader took it, is recovered again rather than refused, since a key a reader is owed is never
+// lost to the cache.
+test("range fills: an accounted group evicted again is recovered again", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	tail.account(1n, 2n);
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 2n }]);
+	// The recovery delivered group 1, which the cache evicted again before the reader took it.
+	opened[0]?.finish([]);
+	await Promise.resolve();
+	fills.poll(tail, true);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([
+		{ start: 1n, end: 2n },
+		{ start: 1n, end: 2n },
+	]);
+
+	fills.close();
+	peer.close();
+});
+
+// A group the subscription already accounted for is recovered even when the run owing it starts
+// with keys the subscription will not deliver: a refusal answers only its own keys.
+test("range fills: an accounted group past a refused run is recovered", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	tail.account(0n, 4n);
+	fills.push(peer.fill);
+	// The subscription's range starts past group 0.
+	fills.skip({ start: 0n, end: 4n }, 0n, 1n);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 4n }]);
+
+	fills.close();
+	peer.close();
+});
+
 // A recovery opened on the first poll that holds its fill asks with that fill's priority, not the
 // empty ask's lowest.
 test("range fills: a recovery the first poll opens asks with the fill's priority", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	// The subscription accounted for groups 1 and 2 before the fill arrived.
 	tail.account(1n, 3n);
@@ -320,7 +489,7 @@ test("range fills: a recovery the first poll opens asks with the fill's priority
 test("range fills: a passing refusal ends with the fills it answered", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -328,24 +497,30 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	fills.poll(tail, true);
 	opened[0]?.finish([{ start: 1n, end: 3n, refusal: passing(new StreamError(StreamCode.Cancel)) }]);
 	await yieldNow();
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	peer.fill.close();
 	fills.poll(tail, true);
 
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
-		delay: { max: null },
-		order: "ascending",
-	});
-	void later
-		.ordered()
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -362,18 +537,18 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 test("range fills: a recovery's refusal answers before it is over", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(1n);
 
 	// Group 1 is refused while group 2's stream is still out.
-	const woken = fills.changed(tail);
+	const woken = fills.changed(tail, peer.track.demand());
 	opened[0]?.refuse({ start: 1n, end: 2n, refusal: dropped(new StreamError(StreamCode.NotFound)) });
 	await woken;
 	fills.poll(tail, true);
@@ -388,7 +563,7 @@ test("range fills: a recovery's refusal answers before it is over", async () => 
 test("range fills: a recovery's refusal is taken once", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -398,7 +573,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	if (!recovery) throw new Error("no recovery");
 	// Still reading another of its streams, so it stays out with no fill owing it.
 	recovery.reading = true;
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	recovery.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(2n);
@@ -407,17 +582,23 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	expect(fills.recovering).toBe(true);
 
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
-		delay: { max: null },
-		order: "ascending",
-	});
-	void later
-		.ordered()
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -436,7 +617,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 test("range fills: an older recovery ending keeps a newer one's coverage", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -446,7 +627,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	if (!older) throw new Error("no recovery");
 	// It refuses group 1 and keeps reading group 2, past the fill.
 	older.reading = true;
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	older.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
 	fills.poll(tail, true);
 	peer.fill.close();
@@ -455,17 +636,23 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	// A later fill finds group 1 accounted for on the subscription, so a newer recovery asks for it.
 	tail.account(1n, 2n);
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
-		delay: { max: null },
-		order: "ascending",
-	});
-	void later
-		.ordered()
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([
@@ -492,7 +679,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 test("range fills: a stale drop repeated during its recovery waits on it", async () => {
 	const peer = await missing();
 	const { recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -500,7 +687,7 @@ test("range fills: a stale drop repeated during its recovery waits on it", async
 	fills.poll(tail, true);
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(1n);
 
@@ -513,7 +700,7 @@ test("range fills: a stale drop repeated during its recovery waits on it", async
 test("range fills: a recovery's stream ending wakes the fills", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -526,7 +713,7 @@ test("range fills: a recovery's stream ending wakes the fills", async () => {
 	fills.poll(tail, true);
 	expect(recovery.cancelled).toBe(false);
 
-	const wait = fills.changed(tail).then(() => true);
+	const wait = fills.changed(tail, peer.track.demand()).then(() => true);
 	recovery.reading = false;
 	recovery.readingChanged.update((revision) => revision + 1);
 	const idle = (async () => {

@@ -27,7 +27,7 @@ Async code reads the ambient clock: `now()`, `wall()`, `sleep()`,
 current runtime's clock. That is tokio's, including paused tokio. Nothing is
 plumbed through. Every unpaused runtime and every plain thread share one
 clock, so their instants compare. A paused tokio runtime has its own clock,
-and it pauses the instant but not wall time. The simulator is its own clock
+and its wall time moves with its instants. The simulator is its own clock
 too. A runtime that reads the time itself, like a moq-uring worker, enters a
 `Deadlines` queue on its thread, and the ambient clock is that queue.
 
@@ -47,7 +47,10 @@ running clock, and keeps only durations on paused tokio or the simulator.
 `kio::clock::Clock::current()` captures the ambient clock, and the handle keeps
 reading that clock from any thread or runtime. Stamp with it when one timeline
 is shared by calls that may come from different contexts. A moq-mux broadcast
-does this: it stamps every track on the clock it was created under.
+does this: it stamps every track on the clock it was created under. Its
+`suspended()` is how long the host has slept, which the monotonic instant does
+not count, so elapsed time across a suspend is the instants' difference plus its
+growth.
 
 ## Caller-driven code
 
@@ -88,12 +91,14 @@ Inside the simulator the clock starts at `Instant::ZERO` and 2025-01-01 UTC
 has stalled: the clock jumps to the earliest armed timer, so a test of a 30
 second timeout takes no real time. A run where every task is parked and no
 timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
-`sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
+`sim::step_wall()` move time by hand, `sim::set_drift(ppm)` runs the wall clock
+off the instant as a host oscillator runs off UTC, `sim::suspend(duration)`
+sleeps the host, moving wall time but not the instant, and `sim::attach(&deadlines)` keeps a
 `Deadlines` queue in step until it drops.
 
 Draw jitter and other randomness from `kio::clock::rng()`. Inside the simulator
-it comes from one seed per run, picked at random or set with `MOQ_SIM_SEED`. A
-run that panics prints its seed, so rerunning the test with `MOQ_SIM_SEED` set to
+it comes from one seed per run, picked at random or set with `KIO_SIM_SEED`. A
+run that panics prints its seed, so rerunning the test with `KIO_SIM_SEED` set to
 that seed replays it bit-exact. A sweep that derives each case's seed itself
 passes it to `sim::run_seeded(seed, future)` instead, so one setting replays a
 case. Outside the simulator `rng()` is rand's thread generator.

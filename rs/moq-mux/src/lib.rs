@@ -31,7 +31,7 @@
 //! - [`sync`] holds a broadcast's tracks on one playout clock without letting a slow one stall the rest.
 //! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
 //!   by audio, video, and transcode senders.
-//! - [`follow`] follows a broadcast across the publisher instances that
+//! - [`follow`] follows a broadcast across the publisher identities that
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
@@ -60,6 +60,7 @@ mod pace;
 pub mod rate;
 pub mod select;
 mod source;
+mod start;
 mod stats;
 pub mod sync;
 

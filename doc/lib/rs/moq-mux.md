@@ -36,9 +36,10 @@ identity changes, such as an SPS with a new profile or level or an audio header
 with a new sample rate, continues under a new track name
 (`<name>/<n>` for the codec importers) while the old track ends; everything else,
 such as the coded size, updates the rendition in place. A
-timeline that rewinds ends the import. The MPEG-TS import ends at a clock step
-onto another timeline with `ts::Restart`, which carries the input from the step
-for the caller to publish as a new broadcast. fMP4 export fixes its track
+timeline that rewinds ends the import. The MPEG-TS import ends with an error at
+a clock step onto another timeline, or a PAT naming another program;
+`ts::Republish` carries on past it, publishing what follows as a new identity of
+the broadcast. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [MPEG-TS guide](/bin/ts) covers the MPEG-TS specifics: one program
 per broadcast, private PES, passthrough, acquisition, and loss.

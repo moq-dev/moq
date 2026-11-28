@@ -6,8 +6,6 @@
 //! bottleneck runs below the track's bitrate behind a deep but finite queue, and the run checks
 //! that the queue overflowed, so the congestion loss came from the sender filling it.
 
-#![cfg(feature = "quic")]
-
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
@@ -155,8 +153,8 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		driver::endpoint::Endpoint::new(endpoint(seed, 1).with_server(server_config), network.bind(SERVER)).unwrap();
 	let client = driver::endpoint::Endpoint::new(endpoint(seed, 2), network.bind(CLIENT)).unwrap();
 
-	let publisher = origin_producer(1);
-	let viewer = origin_producer(2);
+	let publisher = origin_producer();
+	let viewer = origin_producer();
 	let broadcast = publisher
 		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
@@ -207,7 +205,12 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
+		.subscribe(
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Some(TIMEOUT),
+				max: Some(TIMEOUT),
+			})]),
+		)
 		.await
 		.unwrap();
 
@@ -215,7 +218,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		let mut source = source.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();
@@ -226,7 +229,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	let read = async {
 		let mut arrivals = Vec::new();
 		while let Some(mut group) = reader.recv_group().await.unwrap() {
-			let sequence = group.sequence;
+			let sequence = group.start;
 			let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 			assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
 			assert!(
@@ -286,8 +289,8 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 	)
 }
 
-fn origin_producer(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+fn origin_producer() -> origin::Producer {
+	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	spawn(driver);
 	origin
 }
@@ -297,4 +300,117 @@ fn spawn<D: moq_net::time::Driver + Unpin + 'static>(mut driver: D) {
 	drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 		moq_net::time::Driver::poll(&mut driver, now, waiter)
 	})));
+}
+
+/// A session's keep-alive: stale after this long unheard, closed after [`HARD`]
+const SOFT: Duration = Duration::from_secs(2);
+const HARD: Duration = Duration::from_secs(10);
+
+/// Collapse a path's rate to nothing: its queue holds one packet and drops the rest, as a
+/// bufferbloated link does once its queue fills
+fn collapse(network: &Network) {
+	for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+		network.path(from, to, |path| {
+			path.link.bottleneck = Some(Bottleneck::timed(1, Duration::from_millis(200)))
+		});
+	}
+}
+
+fn heal(network: &Network) {
+	for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+		network.path(from, to, |path| path.link = Link::default());
+	}
+}
+
+/// Both sides of a session under a keep-alive stay live while idle, turn stale within `soft`
+/// once the path collapses into a full queue, live again once it heals before `hard`, and close
+/// as an idle timeout once it stays dead past `hard`.
+#[test]
+fn keep_alive() {
+	use moq_net::transport::{KeepAlive, Liveness};
+	for version in VERSIONS {
+		let version: Version = version.parse().unwrap();
+		kio::clock::sim::run(async move {
+			let network = Network::new(3);
+			for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+				network.path(from, to, |path| path.latency = Duration::from_millis(20));
+			}
+			let (server_config, client_config) = tls(version);
+			let server =
+				driver::endpoint::Endpoint::new(endpoint(3, 1).with_server(server_config), network.bind(SERVER))
+					.unwrap();
+			let client = driver::endpoint::Endpoint::new(endpoint(3, 2), network.bind(CLIENT)).unwrap();
+			let keep_alive = KeepAlive::new(SOFT, HARD);
+			let publisher = origin_producer();
+			let viewer = origin_producer();
+
+			let accept = async {
+				let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+				let (session, driver) = moq_net::Server::new()
+					.with_versions(version.into())
+					.with_publisher(publisher.consume())
+					.with_keep_alive(keep_alive)
+					.accept(kio::clock::now(), web::Session::raw(conn))
+					.await
+					.unwrap();
+				spawn(driver);
+				session
+			};
+			let connect = async {
+				let conn = client
+					.connect(&client_config, SERVER, "localhost")
+					.unwrap()
+					.await
+					.unwrap();
+				let (session, driver) = moq_net::Client::new()
+					.with_versions(version.into())
+					.with_subscriber(viewer.clone())
+					.with_keep_alive(keep_alive)
+					.connect(kio::clock::now(), web::Session::raw(conn))
+					.await
+					.unwrap();
+				spawn(driver);
+				session
+			};
+			let (server, client) = futures::join!(accept, connect);
+
+			// Idle well past `soft`: the probes keep both sides live.
+			kio::clock::sleep(5 * SOFT).await;
+			assert_eq!(client.liveness(), Some(Liveness::Live), "{version}");
+			assert_eq!(server.liveness(), Some(Liveness::Live), "{version}");
+
+			collapse(&network);
+			let collapsed = kio::clock::now();
+			let stale = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Live)).await;
+			assert_eq!(stale, Ok(Some(Liveness::Stale)), "{version}");
+			let after = kio::clock::now() - collapsed;
+			// Packets already past the queue still arrive, a round trip at most.
+			assert!(
+				after <= SOFT + Duration::from_millis(40),
+				"{version}: stale {after:?} after the collapse"
+			);
+
+			heal(&network);
+			let healed = kio::clock::now();
+			let live = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
+			assert_eq!(live, Ok(Some(Liveness::Live)), "{version}");
+			let after = kio::clock::now() - healed;
+			assert!(
+				after <= SOFT / 2 + Duration::from_millis(100),
+				"{version}: live {after:?} after healing"
+			);
+
+			collapse(&network);
+			let collapsed = kio::clock::now();
+			let err = kio::clock::timeout(2 * HARD, client.closed()).await.unwrap();
+			assert!(matches!(err, moq_net::Error::IdleTimeout), "{version}: {err:?}");
+			let after = kio::clock::now() - collapsed;
+			assert!(
+				after > HARD - SOFT && after <= HARD + Duration::from_millis(40),
+				"{version}: closed {after:?} after the collapse"
+			);
+			let ended = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
+			assert_eq!(ended, Ok(None), "{version}");
+		});
+	}
 }

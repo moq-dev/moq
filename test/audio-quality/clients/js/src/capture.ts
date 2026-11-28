@@ -4,7 +4,7 @@ import { Duration, Instant, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
-import { type Group, Error as NetError } from "@moq/net";
+import { type Group, Error as NetError, type Track } from "@moq/net";
 import { Effect, type Getter } from "@moq/signals";
 import type { Broadcast } from "@moq/watch";
 import { frameDuration, packetDuration } from "../../../../../js/watch/src/audio/config.ts";
@@ -32,6 +32,7 @@ export class Capture {
 	readonly #seen = new Set<string>();
 	readonly #readers = new Set<Promise<void>>();
 	#failure?: string;
+	#largest?: number;
 
 	constructor(input: Input) {
 		this.#signals.run((effect) => {
@@ -43,36 +44,48 @@ export class Capture {
 				const decoder = format(config);
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
-				const track = active.track(name).subscribe({
-					priority: Catalog.PRIORITY.audio,
-					delay: {
-						max: maxDelay({
-							delay: input.delay.peek(),
-							maxDelay: input.maxDelay.peek(),
-						}).add(Duration.millis(config.warmup ?? 0)),
-					},
+				// The decoder's live join: its delay behind the live edge and its max, both with the warmup.
+				const asked = { priority: Catalog.PRIORITY.audio };
+				const playout = (delay: Duration, max: Duration, warmup: number): Container.Delay => ({
+					min: delay.add(Duration.millis(warmup)),
+					max: maxDelay({ delay, maxDelay: max }).add(Duration.millis(warmup)),
 				});
+				const track = active
+					.track(name)
+					.subscribe(
+						Container.subscription(
+							playout(input.delay.peek(), input.maxDelay.peek(), config.warmup ?? 0),
+							asked,
+						),
+					);
 				const groups = new Set<Group.Consumer>();
+				const tuned = Promise.withResolvers<void>();
+				effect.spawn(async () => {
+					try {
+						// The first subscription's: a resubscribe after a rerun joins a track already flowing.
+						this.#largest ??= await joined(track, tuned.promise);
+					} catch (error) {
+						if (!effect.abort.aborted) this.#failure ??= String(error);
+					}
+				});
 				effect.cleanup(() => {
 					track.close();
 					for (const group of groups) group.close();
 				});
-				effect.run((inner) =>
-					track.update({
-						priority: Catalog.PRIORITY.audio,
-						delay: {
-							max: maxDelay({
-								delay: inner.get(input.delay),
-								maxDelay: inner.get(input.maxDelay),
-							}).add(Duration.millis(inner.get(input.config)?.warmup ?? 0)),
-						},
-					}),
-				);
+				effect.run((inner) => {
+					const delay = playout(
+						inner.get(input.delay),
+						inner.get(input.maxDelay),
+						inner.get(input.config)?.warmup ?? 0,
+					);
+					track.update(Container.update(delay, track.subscription.peek() ?? {}, asked));
+				});
 				effect.spawn(async () => {
 					try {
 						for (;;) {
 							const group = await effect.race(track.recvGroup());
 							if (!group) throw new Error("the captured track ended");
+							tuned.resolve();
 							groups.add(group);
 							// Closing a group ends its reader cleanly after the buffered frames, so any
 							// other error here is a real failure, even one surfacing during close.
@@ -80,7 +93,7 @@ export class Capture {
 								try {
 									for await (const arrival of arrivals(group, { decoder, config })) {
 										// A resubscribe after a rerun re-delivers cached frames with a later stamp.
-										const key = `${group.sequence}:${arrival[1]}`;
+										const key = `${group.start}:${arrival[1]}`;
 										if (this.#seen.has(key)) continue;
 										this.#seen.add(key);
 										this.#arrivals.push(arrival);
@@ -111,6 +124,11 @@ export class Capture {
 		return this.#arrivals.splice(0);
 	}
 
+	/** The publisher's largest group as the subscription began, once known. */
+	largest(): number | undefined {
+		return this.#largest;
+	}
+
 	/** Return the failure that stopped capture, if any. */
 	error(): string | undefined {
 		return this.#failure;
@@ -121,6 +139,17 @@ export class Capture {
 		this.#signals.close();
 		await Promise.all(this.#readers);
 	}
+}
+
+/**
+ * The publisher's largest group as `track`'s subscription began, read the way the container consumer
+ * reads it: once the track's info or `tuned`, its first group, shows the subscription established, so
+ * live groups landing after it don't set it.
+ */
+export async function joined(track: Track.Subscriber, tuned: Promise<unknown>): Promise<number | undefined> {
+	await Promise.race([track.info().catch(() => undefined), tuned]);
+	const largest = await track.largest();
+	return largest === undefined ? undefined : Number(largest.group);
 }
 
 /** Decode the audio container selected by the catalog. */
@@ -151,7 +180,7 @@ export async function* arrivals(
 				if (duration === undefined || duration.isZero()) {
 					throw new Error(`no encoded frame duration for ${config.codec}`);
 				}
-				yield [at, frame.timestamp.asMillis(), Number(group.sequence), duration.asMillis()];
+				yield [at, frame.timestamp.asMillis(), Number(group.start), duration.asMillis()];
 			}
 		}
 	} finally {

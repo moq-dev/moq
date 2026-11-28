@@ -18,7 +18,7 @@ import type { Demand } from "./track.ts";
 /**
  * One demanded track's claim, snapshotted for {@link allocate}.
  *
- * `id` is the allocator's, not the track's sequence: two reservations of the
+ * `id` is the allocator's, not the track's key: two reservations of the
  * same track are still two claims.
  */
 export interface Want {
@@ -153,10 +153,7 @@ interface Registry {
 }
 
 function demanded(entry: Entry): boolean {
-	return (
-		!entry.demand ||
-		(hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek() !== undefined)
-	);
+	return !entry.demand || (hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek());
 }
 
 /** A division and what it divided, so a read that finds them unchanged reuses it. */
@@ -179,7 +176,7 @@ interface Division {
 function shareOf(plan: Plan, entry: Entry): number | undefined {
 	if (entry.demand) {
 		if (entry.demand.closed.peek() !== undefined) return undefined;
-		if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
+		if (!entry.demand.wanted.peek()) return plan.rejoin(entry);
 	}
 	return plan.grant(entry.id);
 }
@@ -410,7 +407,7 @@ export function reserved(allocator: Allocator): Getter<boolean> {
  * all (PCM audio has a fixed bitrate), still sends what it sends; the transport
  * sheds the excess by dropping groups.
  *
- * Hand the same instance to every sender on the connection.
+ * Hand the same identity to every sender on the connection.
  */
 export class Allocator implements Handle {
 	#divider: Divider;

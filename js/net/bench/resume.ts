@@ -6,11 +6,12 @@
  * direct read does, and each swap should leave nothing behind once its groups are read.
  */
 
-import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
 import { Front } from "../src/resume.ts";
+import { Timestamp } from "../src/time.ts";
 import type { Subscriber } from "../src/track.ts";
 
 const readerCounts = [1, 4, 16];
@@ -45,11 +46,11 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 	const sources: { broadcast: BroadcastProducer; write: () => void }[] = [];
 	const source = () => {
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("seq");
+		const track = defined(broadcast.createTrack("seq"));
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload });
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		};
 		sources.push({ broadcast, write });
@@ -142,16 +143,14 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
-	const tracks = sources.map((source) => source.createTrack("seq"));
+	const tracks = sources.map((source) => defined(source.createTrack("seq")));
 	const groups = tracks.map((track) => {
-		const group = track.appendGroup();
-		group.writeFrame({ payload });
+		const group = hooks.appendNext(track);
+		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 		return group;
 	});
 	front.serve(handles[0]);
-	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } }),
-	);
+	const subscribers = Array.from({ length: readers }, () => front.consumer.track("seq").subscribe({ ranges: [{}] }));
 	const held = subscribers.map((subscriber) => {
 		const group = subscriber.tryRecvGroup();
 		if (!group) throw new Error("missing held group");
@@ -193,10 +192,10 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 	const producer = new GroupProducer(0n);
 	const replacement = new GroupProducer(0n);
 	for (let index = 0; index < replayed; index++) {
-		producer.writeFrame({ payload });
-		replacement.writeFrame({ payload });
+		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.start) });
+		replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.start) });
 	}
-	replacement.writeFrame({ payload });
+	replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.start) });
 	const consumers = Array.from({ length: readers }, () => producer.mirror());
 	for (const consumer of consumers) {
 		for (let index = 0; index < replayed; index++) {
@@ -219,8 +218,8 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 	await Promise.all(consumers.map((consumer) => consumer.readable()));
 	const elapsed = performance.now() - start;
 	for (const consumer of consumers) {
-		const frame = consumer.tryReadFrameSequence();
-		if (frame?.sequence !== replayed) throw new Error("readiness did not preserve the unread frame");
+		const frame = consumer.tryReadFrameIndex();
+		if (frame?.index !== replayed) throw new Error("readiness did not preserve the unread frame");
 		checksum += frame.payload.byteLength;
 		consumer.close();
 	}

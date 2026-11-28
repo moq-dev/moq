@@ -23,9 +23,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const TRACK: &str = "audio";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -111,16 +113,17 @@ async fn a_datagram_track_crosses_a_session() {
 		let chain = Chain::new(&["moq-lite-07-wip"]).await;
 		let info = datagram::Info::default().with_timescale(timescale).with_priority(3);
 		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, info).unwrap();
-		let timestamp = |ms| timescale.map(|_| millis(ms));
+		// A scale-less datagram's timestamp names its sequence.
+		let timestamp = |ms, sequence| timescale.map_or(moq_net::Timestamp::unscaled(sequence), |_| millis(ms));
 		// Nobody reads it yet, so nobody ever will.
-		assert_eq!(producer.append(timestamp(1), &b"early"[..]).unwrap(), 0);
+		assert_eq!(producer.append(timestamp(1, 0), &b"early"[..]).unwrap(), 0);
 
 		let mut consumer = chain.consume(&producer, 0).await;
 		assert_eq!(consumer.info().await.unwrap(), info, "{timescale:?}");
-		assert_eq!(producer.append(timestamp(2), &b"live"[..]).unwrap(), 1);
+		assert_eq!(producer.append(timestamp(2, 1), &b"live"[..]).unwrap(), 1);
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(datagram.sequence, 1, "{timescale:?}");
-		assert_eq!(datagram.timestamp, timestamp(2), "{timescale:?}");
+		assert_eq!(datagram.timestamp, timestamp(2, 1), "{timescale:?}");
 		assert_eq!(&datagram.payload[..], b"live", "{timescale:?}");
 
 		producer.finish();
@@ -179,7 +182,7 @@ async fn a_relay_carries_a_datagram_track() {
 	assert_eq!(producer.append(millis(5), &b"relayed"[..]).unwrap(), 0);
 	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 	assert_eq!(datagram.sequence, 0);
-	assert_eq!(datagram.timestamp, Some(millis(5)));
+	assert_eq!(datagram.timestamp, millis(5));
 	assert_eq!(&datagram.payload[..], b"relayed");
 
 	consumer.set_priority(4);
@@ -224,7 +227,8 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	assert_eq!(group.sequence, 0);
+	// A one-frame group starts at its frame, in the track's milliseconds.
+	assert_eq!(group.start, 2);
 	assert_eq!(
 		&group.read_frame().await.unwrap().expect("a frame").payload[..],
 		b"frame"
@@ -235,7 +239,7 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	assert_eq!(group.sequence, 1);
+	assert_eq!(group.start, 3);
 }
 
 /// On lite-07 a name that has only a datagram track has no stream track to subscribe to.
@@ -283,7 +287,13 @@ async fn legacy_versions_map_a_datagram_track_onto_a_subscription() {
 		assert_eq!(producer.append(millis(9), &b"mapped"[..]).unwrap(), 1);
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(datagram.sequence, 1, "{version}");
-		assert_eq!(datagram.timestamp, Some(millis(9)), "{version}");
+		// moq-transport carries no Timestamp: a datagram's time is its sequence, in the
+		// track's units.
+		let expected = match version.starts_with("moq-transport") {
+			true => millis(1),
+			false => millis(9),
+		};
+		assert_eq!(datagram.timestamp, expected, "{version}");
 		assert_eq!(&datagram.payload[..], b"mapped", "{version}");
 
 		consumer.set_priority(6);
@@ -307,8 +317,8 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 		&["moq-lite-06"],
 		&["moq-lite-06", "moq-lite-06"],
 		&["moq-transport-18"],
-		&["moq-transport-22"],
-		&["moq-transport-18", "moq-transport-22"],
+		&["moq-transport-22", "moq-transport-23"],
+		&["moq-transport-18", "moq-transport-22", "moq-transport-23"],
 	] {
 		let chain = Chain::new(hops).await;
 		let mut track = chain
@@ -338,8 +348,14 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 		producer.append(millis(1), &b"datagram"[..]).unwrap();
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"datagram", "{hops:?}");
-		let timestamp = datagram.timestamp.expect("a timestamp");
-		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), millis(1), "{hops:?}");
+		let timestamp = datagram.timestamp;
+		// moq-transport carries no Timestamp: a datagram's time is its sequence, 0, in the
+		// units TRACK_INFO declares.
+		let expected = match hops[0].starts_with("moq-transport") {
+			true => millis(0),
+			false => millis(1),
+		};
+		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), expected, "{hops:?}");
 
 		track.write_frame(millis(2), &b"frame"[..]).unwrap();
 		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
@@ -392,7 +408,7 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 }
 
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
-/// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
+/// does, so the datagram fallback ends with SUBSCRIBE_END ahead of its FIN: a FIN alone
 /// is a protocol violation there.
 #[kio::test]
 async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expects() {
@@ -418,7 +434,7 @@ async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expect
 			.expect("end timeout");
 		match end {
 			Ok(None) => {}
-			Ok(Some(group)) => panic!("{version}: a group {}", group.sequence),
+			Ok(Some(group)) => panic!("{version}: a group {}", group.start),
 			Err(err) => panic!("{version}: {err:?}"),
 		}
 	}
@@ -451,7 +467,7 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 		producer.append(millis(1), &b"requested"[..]).unwrap();
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"requested", "{version}");
-		assert_eq!(datagram.timestamp, Some(millis(1)), "{version}");
+		assert_eq!(datagram.timestamp, millis(1), "{version}");
 	}
 }
 
@@ -495,7 +511,7 @@ async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
 	producer.append(millis(4), &b"relayed"[..]).unwrap();
 	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 	assert_eq!(&datagram.payload[..], b"relayed");
-	assert_eq!(datagram.timestamp, Some(millis(4)));
+	assert_eq!(datagram.timestamp, millis(4));
 }
 
 /// A relay's upstream datagram subscription outlives its last demanding reader while an old
@@ -612,7 +628,7 @@ async fn a_datagram_track_needs_datagrams() {
 /// readers attached to the old shared producer or accept stale stream metadata as an answer.
 #[kio::test]
 async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
-	let chain = Chain::new(&["moq-transport-18", "moq-transport-22"]).await;
+	let chain = Chain::new(&["moq-transport-18", "moq-transport-22", "moq-transport-23"]).await;
 	let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	for priority in [2, 3] {
@@ -751,7 +767,12 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 /// Ending a track must preserve its queued datagrams across the receiver's budget.
 #[kio::test]
 async fn an_ietf_datagram_burst_sent_with_its_end_arrives() {
-	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+	for version in [
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let chain = Chain::new(&[version]).await;
 		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		let mut consumer = chain.consume(&producer, 5).await;

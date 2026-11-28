@@ -126,10 +126,10 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 `hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
 consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
 pair of `.echo` snapshots. Each report names the broadcast it was read from
-(its path and instance), which observed every number in it; the caller states the
-interval between the two and how long ago the newer one arrived. Both
-languages compute the same result from the shared fixtures in
-`rs/hang/fixtures/health.json`.
+(its path and identity), which observed every number in it; the caller states the
+interval between the two and how long ago the newer one arrived, as a `Duration`
+in both languages. Both languages compute the same result from the shared
+fixtures in `rs/hang/fixtures/health.json`.
 
 The result holds the deltas over the interval (frames, bytes, and bitrate per
 rendition; lost bytes and packets for the connection) and a verdict for the
@@ -137,10 +137,10 @@ connection and each rendition: `unknown`, `healthy`, `degraded`, or
 `unhealthy`. Each verdict carries its evidence, every input with its value and
 grade, and is the worst graded input. An input the report cannot show is
 listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
-publisher that knows only its PROBE RTT grades on RTT alone. A report older
+publisher that knows only its PROBE RTT grades its connection on RTT alone. A report older
 than the stale limit is `unknown` throughout, as is a transport sample whose
 `age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
-path or instance (`replaced`) or a decreasing counter (`decrease`) is a reset:
+path or identity (`replaced`) or a decreasing counter (`decrease`) is a reset:
 the deltas start over, so only gauges are graded until the next pair.
 Container sections such as `mpegts` are not read.
 
@@ -159,9 +159,9 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's transport counters by the
 report's own media, so they hold when the broadcast is the only one its
 connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals. Only `import capture`
-emits `skipped`, and no CLI reporter emits `late`, `errors`, or `stalled`, so
-those limits are not measured.
+through a shaped link over five-second intervals. The rendition limits are not
+measured against real traffic, and no CLI viewer reports `late`, `errors`, or
+`stalled`.
 
 A publisher whose link falls below its media rate sends no report at all,
 since its report track sits below every media track. Its health goes stale
@@ -184,16 +184,47 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
+carries a fresh [identity](/concept/moq-lite#publisher-identities) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old instance. A reader
-treats each instance as its own set of counters. The instance rides moq-lite 07
+old one, and no relay serves it groups cached under the old identity. A relay
+taking over through [handoff](/bin/relay/config#handoff) announces its broadcast
+only once the relay it replaced exits, so a node has one identity at a time;
+its counters run from its start, and its first publish carries them. A reader
+treats each identity as its own set of counters. The identity rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
-An aggregating reader pins each node's subscription to its instance.
+A minted identity also changes on every reconnect, so it cannot tell a restart from a
+redial. When a minted identity follows a minted one while the departed one is still
+within the aggregating reader's grace ([`Config::grace`](https://docs.rs/moq-stats/latest/moq_stats/aggregate/struct.Config.html#structfield.grace)),
+its first frame decides: counters that continue are the same node, and a new bucket
+epoch or a counter going down is a restart, which adds to the old counters. A return
+after the grace starts over, so its earlier traffic counts twice.
+An aggregating reader pins each node's subscription to its identity.
 
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
 reads every bucket's tracks; scope by bucket with an aggregating reader instead.
+
+### Root broadcasts
+
+A relay with [`roots`](/bin/relay/config#stats) on also gives each root its own
+stats, readable with a grant on that root alone. A session scoped to a root reads
+them at the same `<prefix>/node/<node>` paths, relative to its root, carrying the
+same tracks:
+
+- traffic on the broadcast paths at or under the root, named relative to it, and
+- the sessions and HTTP requests scoped to the root or to a root beneath it.
+
+Nothing of another root's sessions or paths appears, and reading them counts as
+no root's traffic. Traffic another root's session causes on the root's paths,
+such as reading them through a grant's mount, counts on those paths; what the
+root's own sessions read through a mount counts on the mount's target instead.
+Each node announces a root's broadcast while it serves a session scoped to
+exactly that root, plus the linger, so a returning root is a new identity.
+
+The relay publishes each root's broadcast at
+`<prefix>/root/<root>/node/<node>`, with the root escaped into one segment, and
+mounts `<prefix>/root/<root>` read-only at `<root>/<prefix>`: no session can
+publish there, and the top-level node broadcast is the empty root's.
 
 ## Tracks
 
@@ -267,7 +298,7 @@ its publish's scheduled time divided by the interval, so the interval is its
 timescale. Publishes are scheduled at least an interval
 apart, even after a late one, so each opens its groups in an interval of its
 own, and a track recreated later numbers its groups past every group its
-earlier instance wrote.
+earlier identity wrote.
 
 ### Totals
 
@@ -300,14 +331,14 @@ node stays announced. Billing reads this track.
 }
 ```
 
-`epoch` is a UUIDv7 minted for each instance of the bucket's track, and a
-reader keeps each epoch's counters apart, as it does for a broadcast's instances.
+`epoch` is a UUIDv7 minted for each identity of the bucket's track, and a
+reader keeps each epoch's counters apart, as it does for a broadcast's identities.
 `tiers` maps each tier the bucket recorded on since then. Its top-level
 `publisher`, `subscriber`, and `sessions` are the bucket's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
 every entry that ended. A lingering bucket's frames repeat its final totals: a
 reader that misses every frame from the bucket's last change until it is
-unlisted loses that instance's tail, so a meter reads the node's totals.
+unlisted loses that identity's tail, so a meter reads the node's totals.
 
 `paths` holds each broadcast path's egress (`publisher`) and ingress
 (`subscriber`) [Traffic](#traffic). A path appears from its first nonzero
@@ -376,10 +407,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
-    "stale": { "bytes": 0, "frames": 0, "groups": 0 },
-    "announced": 1, "announced_closed": 0,
-    "broadcasts": 3, "broadcasts_closed": 1,
-    "subscriptions": 6, "subscriptions_closed": 2
+    "stale": { "bytes": 0, "frames": 0, "groups": 0 }
   }
 }
 ```
@@ -396,22 +424,25 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 | `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with `bytes`, `frames`, and `groups`. Disjoint from the top-level payload counters. |
 
-The last six fields are legacy spellings of the `*_started` and `*_ended`
-counters, still written so an older consumer reads a newer relay. A reader
-should prefer the canonical name and fall back to the legacy one.
-
 ### Presence
 
 ```json
 {
   "acme": {
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
-    "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0
+    "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
+    "credit_held_readers_us": 120000, "pacing_blocked_us": 40000,
+    "routes_refused": 0,
+    "routes": {
+      "changed": 4, "rewritten": 120,
+      "sent": { "dead": 1, "drain": 0 }, "received": { "dead": 0, "drain": 1 },
+      "refused": { "path": 0, "scope": 0, "looped": 0 },
+      "closed": { "stalled": 0, "overrun": 0, "malformed": 0, "role": 0, "unasked": 0, "other": 0 }
+    }
   }
 }
 ```
@@ -419,8 +450,7 @@ should prefer the canonical name and fall back to the legacy one.
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
 or not any data flows: under a stats label on the tier for a bucket's `labels`,
 under the label on each tier for `presence.json`, and under every label in the
-bucket or node on the tier for its totals. `sessions` and `sessions_closed` are their
-legacy spellings. A session moved to a new tier ends on the old one and starts
+bucket or node on the tier for its totals. A session moved to a new tier ends on the old one and starts
 on the new. `sent_bytes` and `received_bytes` count the payload this node sent
 to and received from those sessions and HTTP requests, the same bytes a
 bucket's `paths` count. A changed label moves later presence and bytes; bytes
@@ -440,11 +470,54 @@ flushes the old tier and label first; closing a session records its final delta.
 An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
 records its connection's cumulative totals on it, and holds the returned guard.
 Dropping the guard records the final reading.
+`moq-srt` fills one per connection through the `wire` field of its `Import` and
+`Export`: SRT packet bytes, headers and retransmits included, without IP and
+UDP, refreshed every 250 ms, so a connection's last quarter second goes uncounted.
 
-Unsupported transports, including browsers and the current WebSocket/qmux
-adapter, contribute zero. WebSocket wire accounting requires the separate
-qmux counter source; unavailable counters are never estimated from payload.
-Readers default missing wire fields to zero for older relays.
+A qmux session over TCP, which is every WebSocket session, counts the kernel's
+`TCP_INFO` bytes for its socket. `wire_tx` includes TLS, WebSocket, and qmux
+framing and TCP retransmits, and excludes TCP and IP headers. `wire_rx` is the
+bytes TCP delivered, so a peer's duplicate retransmissions are not counted. The
+session copies them at most four times a second, and once more when it ends.
+Only Linux (4.19 or later) reports them: a session on another platform, or on a
+socket the relay holds no handle for, contributes zero.
+
+Other unsupported transports, including browsers, contribute zero. Unavailable
+counters are never estimated from payload. Readers default missing wire fields
+to zero for older relays.
+
+`wire_lost` counts the sent bytes QUIC declared lost. It lands on the label and
+tier current when the loss is declared, so a session retagged in between moves
+loss away from the row that counted those bytes in `wire_tx`; across a whole
+node, the ratio of the two is the loss rate. `cwnd_blocked_us` and `pacing_blocked_us` count
+the microseconds a connection had data ready to send held back by its congestion
+controller: by a full congestion window, or by the pacer spreading sends at the
+controller's rate. Time growing here points at the path setting the pace,
+though a peer's stream-level credit can still hold other streams back. Native QUIC and WebTransport report them, at the
+same lag as the credit counters below; other transports contribute zero.
+
+`credit_stalls` and `credit_stalled_us` count how often, and for how many
+microseconds, a connection had a write blocked with all of the peer's
+connection-level flow-control credit (QUIC `MAX_DATA`) spent. An episode starts
+when a write blocks with every credited byte sent and ends when the peer grants
+more, the writer gives up, or the connection closes; a write held only by this
+node's own send buffer is not one. A rising count means the peer is not reading
+or not granting credit, as opposed to loss or congestion. Native QUIC,
+WebTransport, and Rust qmux sessions report them through the same wire counters
+as `wire_tx`; other transports contribute zero. A wait in progress counts up to
+the transport's latest step, at most a keep-alive behind.
+
+`credit_held_readers_us` and `credit_held_evicted_us` are the receiving side of
+the same wait: the microseconds a peer had a connection's whole receive window
+spent while this node evicted nothing to free it. `readers` counts while a
+reader had data it had not looked at yet, or waited behind a gap, so a reader
+running behind holds the window. `evicted` counts while an evicted reader had
+yet to stop its stream, keeping the credit of the bytes it took. A window held
+by a rate cap rather than by readers counts in neither. The same transports
+report them, at the same lag.
+
+The four credit fields and the three congestion fields above are omitted while
+zero, as they are on most labels, and readers default a missing one to zero.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired
@@ -482,10 +555,29 @@ never goes down while the track lives. Summing
 nodes or labels takes the largest.
 
 `routes_refused` counts the routes and claims that the label's moq-lite-07
-sessions forwarded and the relay refused, such as a route with a flag this
-release does not know. The relay withdraws each one and keeps the session, so a
-neighbour on a newer release costs only that route. A rising count during a
-rollout means the releases disagree on route content.
+sessions forwarded and the relay refused, keeping the session: the total of
+`routes.refused`. The relay withdraws each one, so a neighbour on a newer
+release costs only that route.
+
+`routes` counts what the label's moq-lite-07 sessions did on the route layer,
+each under the label of the session whose peer caused it. Its size never
+depends on how many broadcasts or relays the mesh has, and a label with nothing
+counted leaves it out, which readers read as zeros. When rolling a mesh onto
+a new release one relay at a time, compare a canary's rates with its
+neighbours':
+
+| Field | Counts | A rise during a rollout means |
+| --- | --- | --- |
+| `changed` | Times a route to a relay changed on what the peer sent or how its session ended, counting only changes that alter how its broadcasts are served (not a move to another path of the same rank). | The mesh churns through this peer: links flapping, or two releases ranking routes differently. |
+| `rewritten` | Broadcasts rewritten into the origin behind those changes: every broadcast the relay still claims, once per change. | Each change is costing the relay work in proportion to what lies behind it. Divide by `changed` for the cost of one. |
+| `sent` / `received` | DEAD (a relay-to-relay session closed) and DRAIN (a relay sent GOAWAY) withdrawals, by kind. | Relays restarting or draining. A DRAIN rate without matching DEADs is a drain that never finishes. |
+| `refused` | Refused routes and claims by reason: `path` (a path this relay cannot hold), `scope` (outside the session's root or grant, or what the relay serves), `looped` (the way already crosses this relay, or exceeds the hop limit). | `path` or `looped`: the releases disagree on route content. `scope`: a grant narrower than what the peer announces. |
+| `closed` | Sessions the route layer closed, by kind: `stalled` (the peer stopped reading its route stream), `overrun` (it read too slowly for what changed), `malformed` (it sent what the rule never builds, or broke the stream), `role` (what its role never sends), `unasked` (its stream fell out of step), `other` (such as announcing past the session's cap). | Anything here on a canary that its neighbours lack: the releases disagree on the route wire. `stalled` and `overrun` alone point at an overloaded peer. |
+
+A route that ended takes its claims with it, so they count as claims ending
+rather than in `rewritten`. On moq-lite-07 a route change updates a broadcast
+in place: the broadcast's `announces_started` and `announces_ended` count it
+coming and going, not its routes changing.
 
 ### Counters
 
@@ -493,12 +585,12 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A new instance starts every counter from zero, so a reader summing a node over
-time adds each instance's counters rather than diffing across them. Within one
-instance the totals never go down. A bucket's path or label counter going **down**
+A new identity starts every counter from zero, so a reader summing a node over
+time adds each identity's counters rather than diffing across them. Within one
+identity the totals never go down. A bucket's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
-rather than a negative rate. On a route whose instance a session minted (an older relay, or
+rather than a negative rate. On a route whose identity a session minted (an older relay, or
 a session older than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and

@@ -1,10 +1,7 @@
 import { expect, test } from "bun:test";
-import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { maxAgeFromSetup, maxAgeIntoSetup } from "./max_age.ts";
-import { Parameters } from "./parameters.ts";
-import { SetupOptions } from "./setup_options.ts";
-import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { framed } from "./message.test-util.ts";
+import { SubscribeOk } from "./subscribe.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 async function bytes(version: IetfVersion, encode: (writer: Writer) => Promise<void>) {
@@ -39,50 +36,8 @@ for (const version of Object.values(Version)) {
 				for (const field of [0, 0, 4]) await writer.u53(field);
 				await writer.u62(age);
 			});
-			const framed = await bytes(version, async (writer) => {
-				await writer.u16(payload.length);
-				await writer.write(payload);
-			});
-			const decoded = await SubscribeOk.decode(new Reader(undefined, framed, version), version);
+			const decoded = await SubscribeOk.decode(new Reader(undefined, framed(payload, version), version), version);
 			expect(decoded.properties.maxCacheDuration).toBe(age);
 		}
 	});
 }
-
-for (const version of Object.values(Version)) {
-	test(`subscriber max age round trips on ${version}`, async () => {
-		for (const maxAge of [undefined, 0, 250, Number.MAX_SAFE_INTEGER]) {
-			const msg = new Subscribe({
-				requestId: 0n,
-				trackNamespace: Path.from("live"),
-				trackName: "catalog",
-				subscriberPriority: 128,
-				maxAge,
-			});
-			const encoded = await bytes(version, (w) => msg.encode(w, version));
-			expect((await Subscribe.decode(new Reader(undefined, encoded, version), version)).maxAge).toBe(maxAge);
-			const parameters = new Parameters();
-			parameters.maxAge = maxAge;
-			const update = new SubscribeUpdate({ requestId: 2n, parameters });
-			const encodedUpdate = await bytes(version, (w) => update.encode(w, version));
-			expect(
-				(await SubscribeUpdate.decode(new Reader(undefined, encodedUpdate, version), version)).parameters
-					.maxAge,
-			).toBe(maxAge);
-		}
-	});
-}
-
-test("subscriber max age has its own Setup Option and refuses unsafe budgets", () => {
-	const params = new SetupOptions();
-	expect(maxAgeFromSetup(params)).toBeFalse();
-	maxAgeIntoSetup(params);
-	expect(maxAgeFromSetup(params)).toBeTrue();
-	const budget = new Parameters();
-	for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1])
-		expect(() => {
-			budget.maxAge = value;
-		}).toThrow();
-	budget.vars.set(0x915c6n, 1n << 53n);
-	expect(() => budget.maxAge).toThrow();
-});

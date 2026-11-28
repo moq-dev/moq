@@ -1,13 +1,16 @@
-// Fills a lite-07 copy asks of its upstream through a subscription rather than FETCH. Mirrors the
-// Rust `lite/subscriber/fills.rs`.
+// Fills a copy asks of its upstream through a subscription rather than FETCH: lite-07's own, or
+// before it, one of its own per run. Mirrors the Rust `lite/subscriber/fills.rs`.
 
+import { type Instant, now, sleepUntil } from "@moq/clock";
 import { type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
-import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
+import { hooks, insertRun, type Run, removeRun, runGaps, subtractRuns } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
 import type { Tail } from "../tail.ts";
 import type * as track from "../track.ts";
-import { max, min } from "../util/sequence.ts";
+import { max, min } from "../util/key.ts";
+import { hasRanges, type Version } from "./version.ts";
 
 /** The lowest priority, which any fill's outranks. */
 const NO_PRIORITY = -128;
@@ -47,12 +50,19 @@ export function refuseRun(runs: readonly Refused[], start: bigint, end: bigint, 
 }
 
 /**
- * A subscription asking again, with no max delay, for groups another one dropped as stale or
+ * A subscription asking again, as history that never goes stale, for groups another one dropped as stale or
  * already delivered, which a fill still owes: what the subscriber opens for a {@link RangeFills}.
  */
 export interface RecoveryHandle {
+	/** The groups it still asks for: before lite-07, only up to the group it starts at. */
+	groups(): Run;
 	/** Resolves once it is over, with the groups it refused. */
 	done: Promise<Refused[]>;
+	/**
+	 * TEMPORARY MIGRATION, delete at the next version cut with the Rust `Recovery::walk`: once it
+	 * is over, the keys it stalled on, which FETCH asks a key at a time instead.
+	 */
+	walk(): Run[];
 	/**
 	 * The groups it refused since the last call, each handed over once, which answer the fills
 	 * owing them before it is over. Its {@link done} resolves with only those never taken.
@@ -69,21 +79,26 @@ export interface RecoveryHandle {
 }
 
 class Recovery {
-	readonly groups: Run;
 	readonly handle: RecoveryHandle;
 	refused?: Refused[];
+	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`.
+	walk: Run[] = [];
 	// The groups it refused and handed over, which it no longer covers, so a later request for
 	// them asks again rather than waiting on its other streams.
 	readonly released: Run[] = [];
 
 	// `ended` is called once it is over, so a wait need not hold a reaction on `done`.
-	constructor(groups: Run, handle: RecoveryHandle, ended: () => void) {
-		this.groups = groups;
+	constructor(handle: RecoveryHandle, ended: () => void) {
 		this.handle = handle;
 		void handle.done.then((refused) => {
+			this.walk = handle.walk();
 			this.refused = refused;
 			ended();
 		});
+	}
+
+	get groups(): Run {
+		return this.handle.groups();
 	}
 }
 
@@ -106,16 +121,26 @@ export interface FillAsk {
  * refuses a fill. A range start speaks only for its range: once the range retires, a later one
  * asking for the same groups may start lower. A group it drops as stale is officially dropped,
  * and one it already accounted for (delivered before and since evicted) it never sends again, so
- * a recovery asks for either on its own subscription with no max delay, once. Nothing newer
+ * a recovery asks for either on its own history subscription: a stale run once, and an
+ * accounted group as often as it is evicted again before its fill answers. This cache evicts only
+ * groups idle past their expiry, so each recovery lands a group its fill answers. Nothing newer
  * judges it stale there, so once every hop forgot a run, a narrow reader takes its stale groups.
  *
  * A group stays asked until its stream finishes, since narrowing the subscription under a stream
  * still arriving would reset it.
+ *
+ * Before lite-07 a subscription carries one range, so each run goes out on a recovery of its own
+ * instead. Its publisher names no keys between two group starts (no GROUP_END or SUBSCRIBE_SKIP),
+ * and the keys of a timed track are its media time, so FETCHing a run key by key would cost a
+ * round trip per microsecond. A SUBSCRIBE from the run's first key answers in one round trip
+ * instead: its start is the first group at or past that key, and nothing below it is delivered.
  */
 export class RangeFills {
 	readonly #copy: track.Producer;
+	// Whether each run goes out on its own subscription, before lite-07.
+	readonly #perRun: boolean;
 	readonly #recover: (groups: Run, priority: number) => RecoveryHandle;
-	#held: track.Fill[] = [];
+	#held: track.FillGroups[] = [];
 	/** What the subscription asks for the fills now. */
 	ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 	// Bumped on every input `poll` reads that no other signal reports.
@@ -136,10 +161,16 @@ export class RangeFills {
 	// Groups recovered once already, which a second stale drop refuses.
 	#recovered: Run[] = [];
 	#recoveries = new Set<Recovery>();
+	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: fills handed back to FETCH, and how many of
+	// those taken are still being fetched.
+	#walking: track.FillGroups[] = [];
+	#walksOut = 0;
 	#closed = false;
 
-	constructor(copy: track.Producer, recover: (groups: Run, priority: number) => RecoveryHandle) {
+	/** The fills of `copy`, whose upstream speaks `version`, each recovery opened by `recover`. */
+	constructor(copy: track.Producer, version: Version, recover: (groups: Run, priority: number) => RecoveryHandle) {
 		this.#copy = copy;
+		this.#perRun = !hasRanges(version);
 		this.#recover = recover;
 	}
 
@@ -148,12 +179,27 @@ export class RangeFills {
 		return this.#held.length === 0 && this.ask.groups.length === 0 && this.#recoveries.size === 0;
 	}
 
-	/** Whether a recovery is still out. */
-	get recovering(): boolean {
-		return this.#recoveries.size > 0;
+	/**
+	 * TEMPORARY MIGRATION, see `RecoveryHandle.walk`: take the fills a stalled recovery handed back,
+	 * each counted as recovering until {@link walked} reports it fetched.
+	 */
+	takeWalks(): track.FillGroups[] {
+		this.#walksOut += this.#walking.length;
+		return this.#walking.splice(0);
 	}
 
-	push(fill: track.Fill): void {
+	/** TEMPORARY MIGRATION, see {@link takeWalks}: a fill taken from it was fetched. */
+	walked(): void {
+		this.#walksOut--;
+		this.#bump();
+	}
+
+	/** Whether a recovery, or a fill one handed to FETCH, is still out. */
+	get recovering(): boolean {
+		return this.#recoveries.size > 0 || this.#walksOut > 0;
+	}
+
+	push(fill: track.FillGroups): void {
 		this.#held.push(fill);
 		this.#bump();
 	}
@@ -200,7 +246,8 @@ export class RangeFills {
 	poll(tail: Tail, read: boolean): boolean {
 		const empty = this.isEmpty();
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, once.
+		// recovered on their own, as often as the cache evicts them before a reader takes them: a key
+		// a reader is owed is never lost to the cache. Mirrors the Rust `RangeFills::poll`.
 		const asked: Run[] = [];
 		for (const fill of this.#held) {
 			const run = nextRun(fill);
@@ -208,51 +255,68 @@ export class RangeFills {
 		}
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
-				for (const gap of runGaps(this.#recovering, gone.start, gone.end)) {
-					const done = clip(this.#recovered, gap.start, gap.end);
-					for (const again of done) {
-						// Recovered once for these fills; a later request may recover it again.
-						if (!this.#refusal(again.start))
-							this.#setRefused(again.start, again.end, passing(new NotFound(`group ${again.start}`)));
-					}
-					for (const fresh of runGaps(done, gap.start, gap.end)) {
-						if (!this.#refusal(fresh.start)) insertRun(this.#toRecover, fresh.start, fresh.end);
-					}
-				}
+				for (const gap of runGaps(this.#recovering, gone.start, gone.end))
+					for (const owed of this.#unrefused(gap.start, gap.end))
+						insertRun(this.#toRecover, owed.start, owed.end);
 			}
 		}
-		// Each stale run goes out on its own subscription with no max delay, once, with the priority
+		// Each stale run goes out on its own history subscription, once, with the priority
 		// of the fills held now: the last ask may predate them.
 		let priority = this.ask.priority;
 		for (const fill of this.#held) priority = Math.max(priority, fill.priority);
 		for (const run of this.#toRecover.splice(0)) {
 			insertRun(this.#recovered, run.start, run.end);
 			insertRun(this.#recovering, run.start, run.end);
-			this.#recoveries.add(new Recovery(run, this.#recover(run, priority), () => this.#bump()));
+			this.#recoveries.add(new Recovery(this.#recover(run, priority), () => this.#bump()));
 		}
 		// What a finished recovery did not deliver stands refused.
+		const walk: Run[] = [];
 		for (const done of this.#recoveries) {
 			if (!done.refused) continue;
 			this.#recoveries.delete(done);
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
+			for (const run of done.walk) insertRun(walk, run.start, run.end);
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
-		// rather than waiting on its other streams. Taken once, so once those fills end, a later
-		// request for the same groups asks again rather than reading it back.
+		// rather than waiting on its other streams, including a fill handed to FETCH below. Taken
+		// once, so once those fills end, a later request for the same groups asks again rather than
+		// reading it back.
 		for (const recovery of this.#recoveries) {
 			for (const refused of recovery.handle.takeRefused()) {
 				this.#setRefused(refused.start, refused.end, refused.refusal);
 				insertRun(recovery.released, refused.start, refused.end);
 			}
 		}
+		// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: a fill owing keys a stalled recovery left
+		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused already,
+		// which it may not have reached yet.
+		if (walk.length > 0) {
+			const kept: track.FillGroups[] = [];
+			for (const fill of this.#held) {
+				if (clip(walk, fill.start, fill.end).length === 0) {
+					kept.push(fill);
+					continue;
+				}
+				for (const refused of this.#refused) {
+					const start = max(refused.start, fill.start);
+					const end = min(refused.end, fill.end);
+					if (start < end) answer(refused.refusal, fill, start, end);
+				}
+				this.#walking.push(fill);
+			}
+			this.#held = kept;
+		}
 		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
 		// groups intact.
 		this.#cover();
+		// A run's own subscription answers only below its start, so what lies past it is asked
+		// again rather than counted recovered.
+		if (this.#perRun) this.#recovered = [...this.#recovering];
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 		// Every run a held fill still owes, recovered or not.
 		const owed: Run[] = [];
-		const held: track.Fill[] = [];
+		const held: track.FillGroups[] = [];
 		// Not asked of the subscription: a run being recovered waits on its own, and a group already
 		// refused is answered once its fill reaches it.
 		const waiting = [...this.#recovering];
@@ -290,6 +354,12 @@ export class RangeFills {
 			clip(covered, run.start, run.end).map((part) => ({ ...part, refusal: run.refusal })),
 		);
 
+		// Each run goes out on its own subscription, asked again by the next pass, which polls it.
+		if (this.#perRun && ask.groups.length > 0) {
+			this.#toRecover = ask.groups;
+			return this.poll(tail, read) || this.isEmpty() !== empty;
+		}
+
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is still
 		// being read or nobody reads the track, and a group is recovered once for the fills owing it
 		// now: a later request for it may recover it again.
@@ -304,9 +374,9 @@ export class RangeFills {
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once
 		// as a run is asked and once as it is done, and the streams of its answered groups keep
-		// arriving. One no fill owes stays while any of its streams is still arriving, each group
-		// searched for once.
-		for (const [sequence, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(sequence);
+		// arriving. One no fill owes stays while any of its streams is still arriving and someone
+		// reads the track, each group searched for once.
+		for (const [key, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(key);
 		const groups = ask.groups.map((run) => ({ ...run }));
 		const draining: Run[] = [];
 		for (const run of this.ask.groups) {
@@ -314,42 +384,44 @@ export class RangeFills {
 				insertRun(groups, run.start, run.end);
 				continue;
 			}
+			if (!read) continue;
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
-				for (const sequence of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
+				for (const key of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
 					// Only watched until it ends, never taken over, so it is not held.
-					const arriving = hooks.arrivingGroup(this.#copy, sequence);
+					const arriving = hooks.arrivingGroup(this.#copy, key);
 					arriving?.release();
-					if (arriving !== undefined) this.#reading.set(sequence, arriving.settled);
+					if (arriving !== undefined) this.#reading.set(key, arriving.settled);
 				}
 			}
-			if ([...this.#reading.keys()].some((sequence) => run.start <= sequence && sequence < run.end)) {
+			if ([...this.#reading.keys()].some((key) => run.start <= key && key < run.end)) {
 				insertRun(groups, run.start, run.end);
 				insertRun(draining, run.start, run.end);
 			}
 		}
-		for (const sequence of this.#reading.keys())
-			if (!draining.some((run) => run.start <= sequence && sequence < run.end)) this.#reading.delete(sequence);
+		for (const key of this.#reading.keys())
+			if (!draining.some((run) => run.start <= key && key < run.end)) this.#reading.delete(key);
 		this.#draining = draining;
-		// A run being recovered leaves the subscription, even out of a run kept whole: any later update
-		// reopens its stale drop there, and the publisher would serve it on both.
+		// A run being recovered leaves the subscription, even out of a run kept whole: the subscription
+		// dropped it for good, so asking it there again would never be answered.
 		const remaining = this.#recovering.reduce((runs, run) => removeRun(runs, run.start, run.end), groups);
 		// What finishes a stream still asks with what its fills asked.
 		if (this.#held.length === 0 && remaining.length > 0) ask.priority = this.ask.priority;
 		ask.groups = remaining;
 		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups))
 			return this.isEmpty() !== empty;
-		this.#retireSkipped(ask.groups);
 		this.ask = ask;
 		return true;
 	}
 
-	/** Resolves once any input {@link poll} reads may have changed. */
-	changed(tail: Tail): Promise<unknown> {
+	/** Resolves once any input {@link poll} reads may have changed, whether `demand` reads among them. */
+	changed(tail: Tail, demand: track.Demand): Promise<unknown> {
 		const wakes: unknown[] = [
 			Signal.race(
 				this.#bumped,
 				tail.changed,
+				demand.wanted,
+				hooks.demandReleased(demand),
 				...[...this.#recoveries].flatMap((recovery) => [
 					recovery.handle.changed,
 					recovery.handle.readingChanged,
@@ -377,6 +449,13 @@ export class RangeFills {
 		return this.#closed;
 	}
 
+	// The keys of `[start, end)` neither the subscription nor a recovery said it will not deliver,
+	// nor the subscriber's own range starts past: a refusal answers only its own keys, so a group
+	// past a skipped run is still owed.
+	#unrefused(start: bigint, end: bigint): Run[] {
+		return subtractRuns(subtractRuns([{ start, end }], this.#refused), this.#skipped);
+	}
+
 	// Why the subscription or a recovery will not deliver the run of groups from `first`, if it
 	// said so.
 	#refusal(first: bigint): Refused | undefined {
@@ -400,9 +479,18 @@ export class RangeFills {
 		this.#refused = refuseRun(this.#refused, start, end, refusal);
 	}
 
-	// Asking for `asked` from now on retires the range of each run not asked whole any more, and
-	// what its start skipped with it.
-	#retireSkipped(asked: readonly Run[]): void {
+	/** The groups the ask leaves out on purpose: refused, or recovered on their own. */
+	avoid(): Run[] {
+		const avoid = [...this.#recovering];
+		for (const refused of this.#refused) insertRun(avoid, refused.start, refused.end);
+		return avoid;
+	}
+
+	/**
+	 * Asking for `asked` from now on, the runs the subscription carries, retires the range of each
+	 * run not asked whole any more, and what its start skipped with it.
+	 */
+	retireSkipped(asked: readonly Run[]): void {
 		this.#skipped = this.#skipped.filter((skipped) =>
 			asked.some((run) => run.start === skipped.asked.start && run.end === skipped.asked.end),
 		);
@@ -414,14 +502,64 @@ export class RangeFills {
 }
 
 // The run `fill` owes first in its order, extending from the group it owes first.
-function nextRun(fill: track.Fill): Run | undefined {
+function nextRun(fill: track.FillGroups): Run | undefined {
 	const owed = wantedRuns(fill);
 	return fill.order === "ascending" ? owed[0] : owed.at(-1);
 }
 
 // Answer `[start, end)` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 // anything else is refused for now, recorded nowhere.
-function answer(refusal: Refusal, fill: track.Fill, start: bigint, end: bigint): void {
+/**
+ * TEMPORARY MIGRATION, delete at the next version cut with `RecoveryHandle.walk`: how long a capped
+ * recovery may go without progress before what it still owes is left to FETCH. Mirrors the Rust
+ * `Stall`.
+ *
+ * A relay of the previous release never answers the keys below the first group. A current one
+ * answers them once its own upstream does, which may take longer than the grace behind a slow or
+ * deep chain, so the grace restarts on every response and data stream instead of running from the
+ * cap.
+ */
+export class Stall {
+	#timer = new AbortController();
+	#deadline!: Instant;
+	// The tail's streams received and whether one is being read, when last seen.
+	#seen: [number, boolean];
+	/** Settles once the grace may have passed, to wake whoever polls it. */
+	wake!: Promise<void>;
+
+	/** Start the grace for a recovery reading `tail`. */
+	constructor(tail: Tail) {
+		this.#seen = [tail.streams, tail.reading];
+		this.restart();
+	}
+
+	/** Restart the grace, as the publisher made progress. */
+	restart(): void {
+		this.#timer.abort();
+		this.#timer = new AbortController();
+		this.#deadline = now().saturatingAdd(GRACE);
+		// Only a wake: whether the grace passed is read from the clock, so a timer that fired just
+		// before a restart counts for nothing.
+		this.wake = sleepUntil(this.#deadline, { signal: this.#timer.signal }).catch(() => undefined);
+	}
+
+	/** Whether the grace passed with no stream arriving, being read, or finishing. */
+	poll(tail: Tail): boolean {
+		const reading = tail.reading;
+		if (reading || tail.streams !== this.#seen[0] || reading !== this.#seen[1]) {
+			this.#seen = [tail.streams, reading];
+			this.restart();
+		}
+		return now().ge(this.#deadline);
+	}
+
+	/** Stop the timer. */
+	close(): void {
+		this.#timer.abort();
+	}
+}
+
+function answer(refusal: Refusal, fill: track.FillGroups, start: bigint, end: bigint): void {
 	if (refusal.lost) fill.dropGroups(start, end);
 	else fill.refuseGroups(start, end, refusal.error);
 }

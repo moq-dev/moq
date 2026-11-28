@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{Sink, Stream};
 use kio::clock::{Interval, MissedTickBehavior, Sleep};
 use tokio_tungstenite::tungstenite;
 
-use super::Transport;
+use super::{READ_BUFFER, Transport};
 use crate::ws::KeepAlive;
 use crate::{Config, Error, MAX_FRAME_SIZE};
 
@@ -38,6 +38,8 @@ pub struct WsTransport<T> {
 	deadline: Option<(Sleep, Duration)>,
 	/// The largest message the session accepts.
 	recv_limit: usize,
+	/// Where received records are copied, so each pins no more than the session counts.
+	read: BytesMut,
 	socket_stats: Option<crate::SharedSocketStats>,
 	address: moq_net::transport::Address,
 }
@@ -51,6 +53,7 @@ impl<T: WsStream> WsTransport<T> {
 			ping_due: false,
 			deadline: None,
 			recv_limit: MAX_FRAME_SIZE,
+			read: BytesMut::new(),
 			socket_stats: None,
 			address,
 		}
@@ -74,23 +77,29 @@ impl<T: WsStream> WsTransport<T> {
 		self
 	}
 
-	/// Queue a keep-alive Ping once one is due and the socket has room; the driver's next flush
-	/// sends it.
-	fn poll_ping(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
+	/// Copy a received message into a read buffer of our own, as [`Stream`](super::Stream)
+	/// reads into one.
+	///
+	/// tungstenite slices messages out of its own read buffer, which its growth policy can
+	/// leave several times larger than the session counts a record as pinning.
+	fn record(&mut self, data: &[u8]) -> Bytes {
+		// Reuse the buffer in place once no record still points into it.
+		if self.read.capacity() < data.len() && !self.read.try_reclaim(data.len()) {
+			self.read = BytesMut::with_capacity(READ_BUFFER.max(data.len()));
+		}
+		self.read.extend_from_slice(data);
+		self.read.split().freeze()
+	}
+
+	/// Note a keep-alive Ping that came due; the driver's next flush sends it.
+	fn poll_ping(&mut self, waiter: &kio::Waiter) {
 		let Some(ping) = &mut self.ping else {
-			return Ok(());
+			return;
 		};
 		let mut cx = waiter.context();
 		while ping.poll_tick(&mut cx).is_ready() {
 			self.ping_due = true;
 		}
-		if self.ping_due && Pin::new(&mut self.ws).poll_ready(&mut cx).is_ready() {
-			Pin::new(&mut self.ws)
-				.start_send(Message::Ping(Bytes::new()))
-				.map_err(|_| Error::Closed)?;
-			self.ping_due = false;
-		}
-		Ok(())
 	}
 }
 
@@ -114,7 +123,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 	}
 
 	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
-		self.poll_ping(waiter)?;
+		self.poll_ping(waiter);
 
 		let mut cx = waiter.context();
 		// Prefer a message over the deadline: if both are ready, the peer is alive.
@@ -125,6 +134,11 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			}
 			let message = match message {
 				Some(Ok(message)) => message,
+				// The socket is capped at the record limit, so it refuses a larger message
+				// before buffering it whole; the socket stays writable for the close.
+				Some(Err(tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+					..
+				}))) => return Poll::Ready(Err(Error::FrameTooLarge)),
 				// Keep the WebSocket error, so callers can still tell a protocol fault apart.
 				Some(Err(err)) => return Poll::Ready(Err(Error::websocket(err))),
 				None => return Poll::Ready(Err(Error::Closed)),
@@ -133,8 +147,13 @@ impl<T: WsStream> Transport for WsTransport<T> {
 				// The binding makes an empty message a no-op, unlike an empty record.
 				Message::Binary(data) if data.is_empty() => {}
 				Message::Binary(data) if data.len() > self.recv_limit => return Poll::Ready(Err(Error::FrameTooLarge)),
-				Message::Binary(data) => return Poll::Ready(Ok(data)),
-				Message::Close(_) => return Poll::Ready(Err(Error::Closed)),
+				Message::Binary(data) => return Poll::Ready(Ok(self.record(&data))),
+				// tungstenite queued the Close reply and refuses any other write now, so a due
+				// Ping would fail the flush that sends the reply.
+				Message::Close(_) => {
+					self.ping_due = false;
+					return Poll::Ready(Err(Error::Closed));
+				}
 				// QMux rides binary messages only; text means the peer speaks something else.
 				Message::Text(_) => return Poll::Ready(Err(Error::ProtocolViolation)),
 				// tungstenite queues a Pong reply when it reads a Ping; the next flush sends it.
@@ -164,10 +183,18 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			.map_err(|_| Error::Closed)
 	}
 
+	/// Queues a due keep-alive Ping first. Waiting for its room here, on the driver's waiter,
+	/// matters: the socket keeps a single write waker, which the driver's own writes take.
 	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		Pin::new(&mut self.ws)
-			.poll_flush(&mut waiter.context())
-			.map_err(|_| Error::Closed)
+		let mut cx = waiter.context();
+		if self.ping_due {
+			ready!(Pin::new(&mut self.ws).poll_ready(&mut cx)).map_err(|_| Error::Closed)?;
+			Pin::new(&mut self.ws)
+				.start_send(Message::Ping(Bytes::new()))
+				.map_err(|_| Error::Closed)?;
+			self.ping_due = false;
+		}
+		Pin::new(&mut self.ws).poll_flush(&mut cx).map_err(|_| Error::Closed)
 	}
 
 	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {

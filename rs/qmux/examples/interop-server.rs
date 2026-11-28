@@ -48,6 +48,9 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	let response = format!("pong:{}", version.alpn());
 	send_all(&mut send, response.as_bytes(), "the bidirectional response").await?;
 
+	// A reset that keeps its prefix, which must reach the peer ahead of the reset.
+	send_reset_at(&session, version).await?;
+
 	// DATAGRAM is available only on record-framed drafts (QMux01+).
 	if version.uses_records() {
 		session.send_datagram(Bytes::from_static(b"rust-datagram"), SendOptions::default())?;

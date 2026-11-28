@@ -151,7 +151,7 @@ Selection and an empty JS selection do not wait for admission. For a build
 outside these entrypoints, use `bash sh/quest.sh gate COMMAND [ARGS...]`; gate thresholds
 come from the host and have no configuration.
 
-Run `just ci` before pushing. Ready PRs into `main` also run Check as a signal; only GitHub's merge queue gates landing. `just ci` runs what the merge queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+Run `just ci` before pushing. Check runs on PRs into `release`; for `main`, only GitHub's merge queue gates landing. `just ci` runs what the merge queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 
@@ -162,4 +162,4 @@ Licensed under either:
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
 
-**Exception:** the OBS plugin under [`cpp/obs/`](cpp/obs) is licensed under **GPL-2.0-or-later** (see [`cpp/obs/LICENSE`](cpp/obs/LICENSE)), because it links OBS Studio's `libobs`, which is GPL-2.0. This is a separately-distributable work; per GPLv2 its presence in this repository is mere aggregation and does not affect the MIT/Apache licensing of the rest of the project. `moq-c` and the other moq crates remain MIT/Apache.
+**Exception:** the OBS plugin under [`cpp/obs/`](cpp/obs) is licensed under **GPL-2.0-or-later** (see [`cpp/obs/LICENSE`](cpp/obs/LICENSE)), because it links OBS Studio's `libobs`, which is GPL-2.0. This is a separately-distributable work; per GPLv2 its presence in this repository is mere aggregation and does not affect the MIT/Apache licensing of the rest of the project. `libmoq` and the other moq crates remain MIT/Apache.

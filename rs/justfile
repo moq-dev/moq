@@ -13,32 +13,27 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz --exclude qmux-fuzz --exclude moq-auth-fuzz"
 
 default:
     just check
 
-# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/failover/FailoverChain.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
 # sh/tlc.py says how a run shares the host.
 tla spec *args:
     python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
-# Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
-# Pass `-D=<VARIANT>` for a variant the model defines.
-tamarin spec *args:
-    nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover --prove {{ args }} rs/{{ spec }}
-
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both
 # compiles the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
-# Compile, lint, format-check, doc-check, and verify dependency hygiene.
+# Compile, lint, format-check, doc-check (under CI_STRICT), and verify dependency hygiene.
 [positional-arguments]
 check *args:
     bash sh/local.sh cargo clippy --locked --all-targets "$@" -- -D warnings
@@ -56,18 +51,36 @@ check-test *args:
 # Everything `check` verifies besides clippy.
 [positional-arguments]
 lint *args:
-    python3 sh/rs/stats-docs.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
+    pids=()
+    run python3 sh/rs/stats-docs.py & pids+=($!)
     # The environment is process-wide, so nothing writes it. A text check, because the
     # clock lint's test allowances also silence clippy's disallowed_methods.
-    git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
-    cargo fmt --all --check
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear --deny-warnings
+    (
+        rc=0
+        git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs' || rc=$?
+        [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
+    ) & pids+=($!)
+    run cargo fmt --all --check & pids+=($!)
+    # Rustdoc is never shared across checkouts by the build cache, so only
+    # `just ci` (CI_STRICT), which the merge queue runs, builds the docs.
+    if [[ -n "${CI_STRICT:-}" ]]; then
+        RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    fi
+    run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
-    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
-    cargo hakari generate --diff
-    python3 sh/rs/hakari.py
-    python3 sh/rs/crypto.py
+    (
+        mapfile -t manifests < <(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+        run cargo sort --check --no-format . "${manifests[@]}"
+    ) & pids+=($!)
+    run cargo hakari generate --diff & pids+=($!)
+    run python3 sh/rs/hakari.py & pids+=($!)
+    run python3 sh/rs/crypto.py & pids+=($!)
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit "$fail"
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -95,6 +108,12 @@ lint-changed $LIST:
 check-test-changed $LIST:
     sh/rs/select.sh check-test "$LIST"
 
+# Clippy for macOS and Windows from this host, on the crates in a changed-file
+# list (or `--all`) plus their dependents; the gate runs it on every Rust diff.
+# Outside CI_STRICT it lints only those that name a platform (sh/rs/select.sh).
+cross-lint-changed $LIST:
+    sh/rs/select.sh cross "$LIST"
+
 # Like `fix`, but only the crates in a changed-file list plus their dependents.
 fix-changed $LIST:
     sh/rs/select.sh fix "$LIST"
@@ -102,11 +121,6 @@ fix-changed $LIST:
 # Like `test`, but only the crates in a changed-file list plus their dependents.
 test-changed $LIST:
     sh/rs/select.sh test "$LIST"
-
-# Compile moq-tokio at its feature extremes; --all also isolates crypto and transport modes.
-[positional-arguments]
-tokio-features *args:
-    sh/rs/tokio-features.sh "$@"
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
@@ -137,25 +151,15 @@ uring-changed base="":
     bash sh/changed.sh "$1" > "$changed"
     bash sh/rs/select.sh uring "$changed"
 
-# Compile and test the io_uring relay path, which is off the default feature set.
+# Test the io_uring relay path on a kernel that supports it.
 # Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
-    just rs uring-check "$@"
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --tests "$@"
     # Signal ownership and scoped tracing must also survive sharing one process.
     cargo test --locked -p moq-relay --test integration
     # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
-
-# Compile the io_uring relay path, off the default feature set.
-[positional-arguments]
-uring-check *args:
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
-    # Without the default `quic`, so moq-tokio's `driver` is off: the relay's io_uring path must not lean on it.
-    bash sh/local.sh cargo clippy --locked -p moq-relay --no-default-features --features io-uring --all-targets "$@" -- -D warnings
 
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
@@ -171,6 +175,8 @@ macos-test:
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
+    # AVFoundation, the reader behind QuickTime Player and Safari, lists a finished MP4's chapters.
+    run just rs test -p moq-mux --lib -E 'test(=container::mp4::tests::apple_lists_the_chapters)'
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
     # Runner has no camera; these tests need none.
     run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'
@@ -185,10 +191,15 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
-# moq-net without its `async` feature: the lib, its tests, and its docs.
+# moq-net without its `async` feature: the lib, its tests, and (under CI_STRICT, as for `lint`) its docs.
 no-async:
     bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+    [ -z "${CI_STRICT:-}" ] || RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+
+# moq-net's `fuzz` module alone, as the fuzz crates build it: every other build
+# unifies `test-support` back in, which hides a call into a test-only door.
+net-fuzz:
+    bash sh/local.sh cargo clippy --locked -p moq-net --features fuzz --lib -- -D warnings
 
 # Lint media tests without the device features the gate's test build enables.
 media-defaults:
@@ -205,6 +216,7 @@ capture-test *args:
 # first); without one the tests skip, or fail under CI_STRICT.
 v4l2:
     just rs test -p moq-video --no-default-features --features capture --lib --run-ignored only -E 'test(/^capture::v4l2::tests::vivid::/)'
+    just rs test -p moq-v4l --lib --run-ignored only -E 'test(/::tests::vivid::/)'
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
@@ -255,9 +267,10 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
-c-tests:
-    sh/rs/c-tests.sh
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a; `--syntax` only compiles them against moq.h. Must run on Unix.
+[positional-arguments]
+c-tests *args:
+    sh/rs/c-tests.sh "$@"
 
 # The workspace-hack would supply third-party features a crate forgets to
 # declare, so CI runs this after `cargo hakari disable && cargo update
@@ -271,17 +284,11 @@ features:
     run just rs net-features --all
     run just rs coroutines
     run just rs quic-features --all
-    run just rs crypto-key
-    run just rs tokio-features --all
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    run just rs test -p moq-relay --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
-    run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
-    run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
-    run bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    run just rs test -p moq-cli --no-default-features --features capture -E 'test(capture_window)'
+    run just rs test -p moq-cli --no-default-features --features capture,pipewire -E 'test(capture_window)'
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
@@ -313,27 +320,11 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features sign,e2ee,provider,serde
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features sign,e2ee,provider,serde
+    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features provider
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features provider
+    run bash sh/rs/coroutines.sh moq-e2ee
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-e2ee --no-deps
     run bash sh/rs/coroutines.sh rs/moq-auth/Cargo.toml -- --no-default-features
-    finish
-
-# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport, then lint and test it alone; a workspace build unifies the default features back in.
-crypto-key:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source sh/checks.sh
-    key_only_dependencies() {
-        graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none) || return
-        if grep -E '^moq-net ' <<<"$graph"; then
-            echo "moq-crypto without sign or e2ee must not depend on moq-net" >&2
-            return 1
-        fi
-    }
-    run key_only_dependencies
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
-    run bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
     finish
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
@@ -369,10 +360,10 @@ media-features *args:
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
 # wrapper enforces lint findings from the same compile. `--tests` builds library,
-# binary, and integration-test targets, including binary-only crates. The gate
-# (sh/rs/select.sh's `test`) adds `--benches --examples` and the features those
-# targets require, so their lints fail the PR rather than Nightly; nextest's
-# default filter leaves the benches unrun. `build.warnings` denies warnings
+# binary, and integration-test targets, including binary-only crates. Benches
+# and examples stay out of nextest so they are not codegenned or linked (mbx
+# bypasses them as uncacheable binaries); `lint-targets` checks them with
+# clippy-driver in metadata-only mode instead. `build.warnings` denies warnings
 # without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
 # A test whose timer waits on the host clock aborts (see `kio::clock::host_time`).
@@ -382,6 +373,11 @@ media-features *args:
 [positional-arguments]
 test *args:
     {{ if args =~ '--run-ignored' { '' } else { 'KIO_DENY_HOST_TIMERS=1' } }} CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
+
+# Lint benches and examples in check mode without codegen or linking.
+[positional-arguments]
+lint-targets *args:
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/local.sh cargo check --locked --benches --examples "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:
@@ -410,7 +406,25 @@ doctest *args:
 miri *args:
     bash sh/rs/miri.sh "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
+# Run kio's thread-spawning unit tests under Miri across many scheduler seeds (nightly with miri). Random schedules, not exhaustive: a pass is evidence, not proof.
+miri-seeds seeds="8":
+    bash sh/rs/miri-seeds.sh {{ seeds }}
+
+# Run kio's library tests under ThreadSanitizer (nightly with rust-src, Linux). Observes the schedules that happen to run: a pass is evidence, not proof.
+tsan:
+    bash sh/rs/tsan.sh
+
+# Run kio's suite under each adversarial sim schedule with the lost-wakeup probe. Each run draws a fresh seed and prints it on failure.
+sweep:
+    for schedule in random pct; do KIO_SIM_PROBE=1 KIO_SIM_SCHEDULE=$schedule just rs test -p kio || exit 1; done
+
+# Prove rs/kio/src/log.rs's Verus proof. Needs Verus: run it in `nix develop .#verus`
+# (Linux only). The `verify` package builds kio's sources with `vstd`, which kio itself
+# never depends on.
+verify:
+    cargo verus verify --locked --manifest-path rs/kio/verify/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}/verus"
+
+# Run the moq-quic simulation's random workloads from a fresh seed, each datagram checked against QUIC's rules, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -428,6 +442,8 @@ quic-sim:
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
+    # A hundred bulk transfers on one relay connection, past its live-edge budget: the highest-priority ones arrive losslessly. The merge gate runs twelve.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-relay --features test-support --test integration --run-ignored only -E 'test(/^quic_sim::many_/)'
     # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
 
@@ -435,8 +451,8 @@ quic-sim:
 rung-disable:
     just rs test -p moq-ffi --lib --run-ignored only --no-capture -E 'test(/^test::rung::/)'
 
-# Prove downstream futures are Send at the default recursion limit on the
-# flake's pinned nightly. Nightly runs it; the land gate does not.
+# Prove the session driver and downstream futures are Send at the default recursion limit on the
+# flake's pinned nightly. The gate's rs lint phase runs it when moq-net is selected; Nightly runs it too.
 send-depth:
     bash sh/rs/send-depth.sh
 
@@ -471,8 +487,8 @@ render-sw:
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
-    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+    just rs test -p moq-tokio --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
+    just rs test -p moq-relay --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.
 ts-recovery:
@@ -485,7 +501,7 @@ audio-devices:
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
     python3 test/lib/pulse.py --dir "$dir/run" -- \
-        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+        just rs test -p moq-audio --features capture,playback,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
 
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See the README in each rs/<crate>/fuzz/.
@@ -502,6 +518,11 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
+
+# Mutate the route and resume code (`.cargo/mutants.toml`), failing on any mutant the tests miss.
+[positional-arguments]
+mutants *args:
+    bash sh/local.sh bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:
@@ -555,10 +576,10 @@ package-nfpm *args:
 package-ffi *args:
     rs/moq-ffi/build.sh "$@"
 
-# Build and package moq-c.
+# Build and package libmoq.
 [positional-arguments]
-package-moq-c *args:
-    rs/moq-c/build.sh "$@"
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
 
 # Build and package the moq-gst GStreamer plugin.
 [positional-arguments]
@@ -570,45 +591,14 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
-# Build the Criterion benches CodSpeed simulates; CI runs them with `cargo codspeed run`.
-# Only single-threaded benches without I/O, whose instruction counts repeat. CodSpeed skips
-# `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
-# Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
-# rind is built to skip that one startup check, or it refuses the simulated CPU.
-# CodSpeed rejects an upload of more than about 1,000 benchmarks, so CI builds and uploads each
-# shard (net, mux, rest) as its own matrix job, and CodSpeed merges them into one report.
-codspeed shard:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    build() { VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation "$@"; }
-    case "{{ shard }}" in
-    net)
-        build -p moq-net --features moq-net/fuzz \
-            --bench announce --bench auth --bench bandwidth --bench canonical --bench codec --bench frame \
-            --bench interests --bench priority --bench retirement --bench schedule --bench stats \
-            --bench synced --bench tail --bench tracks --bench varint --bench viewers
-        ;;
-    mux)
-        build -p moq-mux \
-            --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-            --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video
-        ;;
-    rest)
-        build -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
-            --features moq-audio/bus,moq-json/bench,moq-quic/fuzz \
-            --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
-            --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \
-            --bench chunk_interleaving
-        # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
-        # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
-        # replaces only its own packages' benches, so `cargo codspeed run` runs both.
-        cd rs/moq-auth && build --bench jwt
-        ;;
-    *)
-        echo "unknown shard '{{ shard }}': expected net, mux, or rest" >&2
-        exit 1
-        ;;
-    esac
+# Count the deterministic Criterion benches' instructions under stock Valgrind with rust2-bench
+# (x86-64 Linux), as CI's nightly count does: `just rs instructions run --out metrics.json`,
+# `just rs instructions compare <base>` for each bench's change since a commit, or `just rs
+# instructions fingerprint`. `--benchmarks <file>` counts, and builds the targets of, only the
+# benchmarks it names; bench/README.md has the rest.
+[positional-arguments]
+instructions *args:
+    sh/rs/instructions.sh "$@"
 
 # Run the tests the arguments select in a release build, printing their output; benchmarks add `--run-ignored only`.
 [positional-arguments]

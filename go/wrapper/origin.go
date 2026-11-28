@@ -36,33 +36,33 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 }
 
 // RouteOptions is how a [Route] or [Claim] advertises itself. The zero value is visible at
-// once, at cost 0, under a fresh instance the route keeps for its lifetime, so a restarted
+// once, at cost 0, under a fresh identity the route keeps for its lifetime, so a restarted
 // publisher is a new stream viewers restart onto.
 type RouteOptions struct {
 	// Hidden creates the route invisible and unroutable until [Route.Announce].
 	Hidden bool
 	// Cost is the static production cost: lower wins among routes covering the same prefix.
 	Cost uint64
-	// Instance is a stable stream to serve, or nil to mint a fresh one. Set it only for a
-	// publisher that continues its group sequences across restarts and raises Epoch on each,
+	// Identity is a stable stream to serve, or nil to mint a fresh one. Set it only for a
+	// publisher that continues its group starts across restarts and raises Epoch on each,
 	// or to forward an announced route's stream as is: readers stitch every route of one
-	// instance together, so restarting the sequences under an old instance splices unrelated
+	// identity together, so restarting the starts under an old identity splices unrelated
 	// groups into their tracks.
-	Instance *Instance
-	// Epoch is which run of a stable Instance this is: only the highest is eligible. Ignored without one.
+	Identity *Identity
+	// Epoch is which run of a stable Identity this is: only the highest is eligible. Ignored without one.
 	Epoch uint64
 }
 
 func (o RouteOptions) ffi() ffi.MoqRouteOptions {
-	return ffi.MoqRouteOptions{Hidden: o.Hidden, Cost: o.Cost, Instance: optional(o.Instance), Epoch: o.Epoch}
+	return ffi.MoqRouteOptions{Hidden: o.Hidden, Cost: o.Cost, Identity: optional(o.Identity), Epoch: o.Epoch}
 }
 
-// optional lowers a nil instance to the ffi's None.
-func optional(instance *Instance) **ffi.MoqInstance {
-	if instance == nil {
+// optional lowers a nil ffi object to the ffi's None.
+func optional[T any](object *T) **T {
+	if object == nil {
 		return nil
 	}
-	return &instance
+	return &object
 }
 
 // Route creates a route at exactly path, owning a new broadcast to fill.
@@ -70,7 +70,7 @@ func optional(instance *Instance) **ffi.MoqInstance {
 // The route is visible at once unless options.Hidden: a hidden route is
 // invisible and unroutable, for this origin's consumers and peers alike, until
 // [Route.Announce], so create it hidden to fill the catalog first. It serves a
-// fresh instance, kept across [Route.Withdraw] and [Route.Announce], unless
+// fresh identity, kept across [Route.Withdraw] and [Route.Announce], unless
 // options names one. Keep the route reachable: [Route.Cancel], or the collector
 // reclaiming it, retracts it, and [BroadcastProducer.Close] ends both.
 func (o *OriginProducer) Route(path string, options RouteOptions) (*Route, error) {
@@ -114,15 +114,15 @@ func (r *Route) Broadcast() *BroadcastProducer {
 	return r.broadcast
 }
 
-// Instance returns the stream this route serves now. A named instance never
+// Identity returns the stream this route serves now. A named identity never
 // changes. A job's route takes its claim's current one when it first announces
 // or when this first reads it. Read first, the job announces under it, and
 // [Route.Announce] fails with Unroutable once the claim has moved past it, so a
 // signer built from it stays valid. Once cancelled, it is the last one read or
 // announced, or nil for a hidden route that did neither.
-func (r *Route) Instance() *Instance {
-	if instance := r.inner.InstanceId(); instance != nil {
-		return *instance
+func (r *Route) Identity() *Identity {
+	if identity := r.inner.Identity(); identity != nil {
+		return *identity
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func (r *Route) Announce() error {
 }
 
 // Withdraw hides the route from local consumers and peers alike, keeping its
-// broadcast and instance. Tracks already in flight carry on, and Announce
+// broadcast and identity. Tracks already in flight carry on, and Announce
 // brings the same stream back.
 func (r *Route) Withdraw() error {
 	return r.inner.Withdraw()
@@ -172,11 +172,11 @@ type Claim struct {
 	inner *ffi.MoqClaim
 }
 
-// Instance returns the stream this claim serves now. A named instance never
+// Identity returns the stream this claim serves now. A named identity never
 // changes. Unnamed, the claim moves to a fresh one each time a job holding its
 // current one ends.
-func (c *Claim) Instance() *Instance {
-	return c.inner.InstanceId()
+func (c *Claim) Identity() *Identity {
+	return c.inner.Identity()
 }
 
 // Announce makes the claim visible, or keeps it so.
@@ -185,7 +185,7 @@ func (c *Claim) Announce() error {
 }
 
 // Withdraw hides the claim from local consumers and peers alike, keeping its
-// instance: Announce brings it back. Requests beneath it are rejected
+// identity: Announce brings it back. Requests beneath it are rejected
 // meanwhile.
 func (c *Claim) Withdraw() error {
 	return c.inner.Withdraw()
@@ -241,11 +241,11 @@ func (r *BroadcastRequest) Path() (string, error) {
 
 // Route answers with the path's own exact route, owning a new broadcast.
 //
-// Unless options names an instance, it takes the one its claim lends when it
-// first announces or [Route.Instance] first reads it, so readers that resolved
+// Unless options names an identity, it takes the one its claim lends when it
+// first announces or [Route.Identity] first reads it, so readers that resolved
 // the path through the claim continue on it; its end then moves the claim to a
-// fresh instance, so a restarted job is a new stream. A claim that names its
-// instance lends none, and the route mints its own. Created visible, it announces now and answers
+// fresh identity, so a restarted job is a new stream. A claim that names its
+// identity lends none, and the route mints its own. Created visible, it announces now and answers
 // the waiting requesters; created hidden, they wait
 // until [Route.Announce], so the job can fill its catalog first.
 func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
@@ -256,7 +256,7 @@ func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
 	return newRoute(inner), nil
 }
 
-// Serve answers with held content under the claim's continuous sequence space,
+// Serve answers with held content under the claim's continuous group starts,
 // without announcing an exact route. The broadcast remains the caller's to release.
 func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
 	return r.inner.Serve(broadcast.inner)
@@ -283,7 +283,7 @@ type AnnounceOptions struct {
 }
 
 // Announced lists the paths under a literal prefix matching an optional pattern filter, as each
-// becomes present, absent, or offline, or changes availability. To see another publisher instance take a path over, use Follow.
+// becomes present or absent. To see another publisher identity take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
@@ -297,32 +297,32 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 }
 
 // Follow follows an exact path, resolving each stream that serves it and reporting
-// when it goes offline. A non-nil instance follows only that stream: another one
+// when it goes offline. A non-nil identity follows only that stream: another one
 // taking over reads as offline, and the stream is handed out again if it returns.
-func (o *OriginConsumer) Follow(path string, instance *Instance) (*Following, error) {
-	inner, err := o.inner.Follow(path, optional(instance))
+func (o *OriginConsumer) Follow(path string, identity *Identity) (*Following, error) {
+	inner, err := o.inner.Follow(path, optional(identity))
 	if err != nil {
 		return nil, err
 	}
 	return &Following{inner: inner}, nil
 }
 
-// Request resolves one publisher instance of the broadcast at path as soon as
+// Request resolves one publisher identity of the broadcast at path as soon as
 // it can be served, through the best announced route covering it: an announced
 // broadcast on this origin, a route a session announced (served on demand by
 // that session), or a dynamic handler on the origin; errors if nothing can
 // serve it, including a broadcast created but not announced. Unlike Follow, it
-// does not wait for a future announcement. A non-nil instance refuses any
+// does not wait for a future announcement. A non-nil identity refuses any
 // other stream. Blocks until resolved.
-func (o *OriginConsumer) Request(ctx context.Context, path string, instance *Instance) (*BroadcastConsumer, error) {
-	inner, err := o.inner.Request(ctx, path, optional(instance))
+func (o *OriginConsumer) Request(ctx context.Context, path string, identity *Identity) (*BroadcastConsumer, error) {
+	inner, err := o.inner.Request(ctx, path, optional(identity))
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceConsumer is a listing of paths, each present, absent, or offline.
+// AnnounceConsumer is a listing of paths, each present or absent.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }
@@ -346,18 +346,18 @@ func (a *AnnounceConsumer) Cancel() {
 	a.inner.Cancel()
 }
 
-// Following follows a specific broadcast across its publisher instances.
+// Following follows a specific broadcast across its publisher identities.
 type Following struct {
 	inner *ffi.MoqFollowing
 }
 
-// Available blocks until the publisher instance serving the broadcast changes and
+// Available blocks until the publisher identity serving the broadcast changes and
 // returns its consumer, or (nil, nil) once the path goes offline. The first call
-// resolves the instance serving the path once one is announced, and is never nil.
-// Each later call returns another instance taking over (a restarted publisher, or a
+// resolves the identity serving the path once one is announced, and is never nil.
+// Each later call returns another identity taking over (a restarted publisher, or a
 // replacement session), nil once the path goes offline (or, when following a pinned
-// instance, once another instance takes it over), then whatever serves it next. Drop
-// what was read from the previous instance then: its tracks end when its route does.
+// identity, once another identity takes it over), then whatever serves it next. Drop
+// what was read from the previous identity then: its tracks end when its route does.
 func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
 	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
 		res, err := a.inner.Available(ctx)

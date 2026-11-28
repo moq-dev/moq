@@ -37,7 +37,7 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	Ok(reconnect.closed().await?)
 }
 
-// List the announced broadcasts and play the first: follow it across publisher instances,
+// List the announced broadcasts and play the first: follow it across publisher identities,
 // playing afresh when another replaces it, until it goes offline.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	let mut announced = consumer.announced();
@@ -63,30 +63,18 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
-			moq_net::announce::Event::Offline(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast offline");
-				if let Some(old) = playing.take() {
-					old.abort();
-				}
-			}
-			// The follow resumes on its own once the path is reachable again.
-			moq_net::announce::Event::Unavailable(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast unreachable");
-			}
-			moq_net::announce::Event::Available(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast reachable again");
-			}
+			_ => {}
 		}
 	}
 	anyhow::bail!("origin closed")
 }
 
-// Play each publisher instance serving `path`, starting afresh when another replaces it.
+// Play each publisher identity serving `path`, starting afresh when another replaces it.
 async fn follow(consumer: moq_net::origin::Consumer, path: moq_net::Path) -> anyhow::Result<()> {
 	let mut following = consumer.follow(&path, None)?;
 	let mut next = following.available().await?;
 	while let Some(broadcast) = next {
-		tracing::info!(%path, instance = ?broadcast.info().instance, "broadcast online");
+		tracing::info!(%path, identity = ?broadcast.info().identity, "broadcast online");
 		next = tokio::select! {
 			played = play(broadcast) => {
 				if let Err(err) = played {
@@ -100,12 +88,16 @@ async fn follow(consumer: moq_net::origin::Consumer, path: moq_net::Path) -> any
 	Ok(())
 }
 
-// Read the catalog and media frames of one publisher instance.
+// Read the catalog and media frames of one publisher identity.
 async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 	// Read the catalog to discover available tracks.
 	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(broadcast.track(hang::Catalog::DEFAULT_NAME)?);
 
-	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
+	let info = catalog
+		.next()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("no catalog"))?
+		.value;
 
 	// Find the first video track.
 	let (name, config) = info
@@ -123,16 +115,19 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		"subscribing to video track"
 	);
 
-	// Subscribe to the video track.
+	// Subscribe to the video track. No min delay, since this plays nothing out: a missing group is
+	// waited for the whole latency budget.
 	let latency = Duration::from_millis(500);
-	let track_consumer = broadcast
-		.track(hang::catalog::Reference::track(config, name))?
-		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_priority(1)
-				.with_delay(moq_net::track::Delay::default().with_max(latency)),
-		)
-		.await?;
+	let track_consumer =
+		broadcast
+			.track(hang::catalog::Reference::track(config, name))?
+			.subscribe(moq_net::track::Subscription::default().with_priority(1).with_ranges([
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(latency),
+					max: Some(latency),
+				}),
+			]))
+			.await?;
 	let mut ordered =
 		moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::try_from(config)?);
 

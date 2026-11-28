@@ -3,7 +3,6 @@
 //!
 //! Each dialer runs on its own runtime, shut down right after, as a process exit
 //! would: a dropped link only queues its close, which nothing sends then.
-#![cfg(feature = "quic")]
 
 use std::time::Duration;
 
@@ -89,7 +88,6 @@ async fn closing_a_cluster_closes_its_static_dials() {
 
 /// `Client::close` reaches only QUIC, so a WebSocket link ends only because the
 /// close stops its dial task. The runtime keeps running, as an embedder's would.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn closing_a_cluster_ends_its_websocket_dials() {
 	use tokio::io::AsyncReadExt;
@@ -136,7 +134,7 @@ async fn a_relay_shutdown_closes_its_cluster_dials() {
 	config.connect = connect;
 	config.quic.idle_timeout = quic.idle_timeout;
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url(&server))];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 
 	let runtime = dialer_runtime();
 	let (trigger, running) = runtime

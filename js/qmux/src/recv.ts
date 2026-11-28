@@ -1,4 +1,5 @@
 import type { Window } from "./credit.ts";
+import { TransportCode, TransportError } from "./error.ts";
 import { Queue } from "./queue.ts";
 
 /** A receive half's phase, each carrying its own data: the RFC 9000 §3.2 states,
@@ -133,17 +134,20 @@ export class RecvStream {
 		return this.#window;
 	}
 
-	/** The end of the bytes received, and the final size once known. */
-	get end(): bigint {
-		return this.#end;
-	}
-
 	/** Receive a STREAM frame, charging both windows. Throws on a frame that doesn't
-	 *  continue the stream or that exceeds a window. A frame after the final size
-	 *  is known is dropped. */
+	 *  continue the stream or that exceeds a window. Once the final size is known, a
+	 *  frame past it, or a FIN that moves it, is a FINAL_SIZE_ERROR, and any other is
+	 *  dropped. */
 	data(offset: bigint | undefined, chunk: Uint8Array, fin: boolean): void {
 		const phase = this.#phase;
-		if (phase.state !== "recv" && (phase.state !== "stopped" || phase.sizeKnown)) return;
+		if (this.sizeKnown) {
+			const end = (offset ?? this.#end) + BigInt(chunk.byteLength);
+			if (end > this.#end || (fin && end !== this.#end)) {
+				throw new TransportError(TransportCode.FINAL_SIZE_ERROR, "STREAM data past the final size");
+			}
+			return;
+		}
+		if (phase.state !== "recv" && phase.state !== "stopped") return;
 		// The transport is ordered, so a frame must start exactly where the last one
 		// ended (draft-02 §4.1): there is nothing to reassemble, and anything else
 		// would deliver bytes out of order or twice. An absent offset comes from a
@@ -154,7 +158,8 @@ export class RecvStream {
 		const bytes = BigInt(chunk.byteLength);
 		const end = this.#end + bytes;
 		const total = this.#conn.received + bytes;
-		if (!this.#window.allows(end) || !this.#conn.allows(total)) throw new Error("flow control error");
+		if (!this.#window.allows(end) || !this.#conn.allows(total))
+			throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		this.#window.receiveTo(end);
 		this.#conn.receiveTo(total);
 		this.#end = end;
@@ -176,10 +181,17 @@ export class RecvStream {
 	 *  is known is dropped.
 	 *
 	 * Drafts through -02 were emitted by implementations that used an incorrect zero
-	 * final size, so a final size below the bytes received counts as those bytes. */
+	 * final size, so a final size below the bytes received counts as those bytes, and a
+	 * reset after the final size is known is dropped unless it claims a larger one, a
+	 * FINAL_SIZE_ERROR. */
 	reset(err: Error, finalSize: bigint, reliableSize = 0n): void {
 		const phase = this.#phase;
-		if (phase.state !== "recv" && (phase.state !== "stopped" || phase.sizeKnown)) return;
+		if (this.sizeKnown) {
+			if (finalSize > this.#end)
+				throw new TransportError(TransportCode.FINAL_SIZE_ERROR, "RESET_STREAM moved the final size");
+			return;
+		}
+		if (phase.state !== "recv" && phase.state !== "stopped") return;
 		// The transport is ordered, so every byte the peer sent arrived before this
 		// frame. A reliable prefix longer than that promises bytes that will never come.
 		if (reliableSize > this.#end) throw new Error("RESET_STREAM_AT reliable_size exceeds the bytes received");
@@ -187,7 +199,8 @@ export class RecvStream {
 		const size = finalSize > this.#end ? finalSize : this.#end;
 		const gap = size - this.#end;
 		const total = this.#conn.received + gap;
-		if (!this.#window.allows(size) || !this.#conn.allows(total)) throw new Error("flow control error");
+		if (!this.#window.allows(size) || !this.#conn.allows(total))
+			throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		this.#window.receiveTo(size);
 		this.#conn.receiveTo(total);
 		this.#end = size;

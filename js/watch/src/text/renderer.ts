@@ -91,7 +91,7 @@ function merge<T>(stored: T[], incoming: T[], key: (value: T) => number): T[] {
 /**
  * Add one payload's cues to the store, keeping it sorted by start time.
  *
- * Groups arrive in delivery order rather than sequence order, so a cue can legitimately land
+ * Groups arrive in delivery order rather than start order, so a cue can legitimately land
  * before one that is already stored. Each end is clamped to `MAX_CUE` past its start, so a
  * declared end cannot hold a cue past the prune horizon. Exported for tests.
  *
@@ -267,23 +267,30 @@ export class Renderer {
 		const [_enabled, container, track, config, broadcast] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.instance);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
 
 		// A new track gets its own chance to complain about its clock.
 		this.#skewWarned = false;
 
-		// Pick the frame container. Text uses the timestamped `legacy` container or LOC; anything else
+		// Pick the frame container. Text uses `legacy`, `loc`, `raw`, or `cts`; anything else
 		// (e.g. `cmaf`) would misread the cue payload, so skip it rather than render garbage.
 		let format: Container.Format;
 		if (config.container.kind === "legacy") {
 			format = new Container.Legacy.Format("data");
 		} else if (config.container.kind === "loc") {
 			format = new Container.Loc.Format();
+		} else if (config.container.kind === "raw") {
+			format = new Container.Raw.Format("data");
+		} else if (config.container.kind === "cts") {
+			format = new Container.Cts.Format("data");
 		} else {
 			console.warn(`captions: unsupported container "${config.container.kind}" for track ${track}`);
 			return;
 		}
+
+		// Each track warns of a decode failure once, not once per group.
+		let decodeWarned = false;
 
 		const abort = effect.abort;
 		effect.spawn(async () => {
@@ -347,14 +354,24 @@ export class Renderer {
 					effect.spawn(async () => {
 						try {
 							for (;;) {
-								const frame = await group.readFrame();
+								// A stream error is the group ending, as routine as a clean end.
+								const frame = await group.readFrame().catch((err) => {
+									if (!(err instanceof NetError.Stream)) throw err;
+									return undefined;
+								});
 								if (!frame) break;
-								for (const sample of format.decode(frame.payload, frame.timestamp)) {
-									await this.#ingest(config.format, sample, store);
+								// A decode failure is the track's framing, such as a raw or cts track without a
+								// timescale, so it drops the group and says so once rather than passing for an end.
+								let samples: Container.Frame[];
+								try {
+									samples = format.decode(frame.payload, frame.timestamp);
+								} catch (err) {
+									if (!decodeWarned) console.warn(`captions: failed to decode track ${track}`, err);
+									decodeWarned = true;
+									break;
 								}
+								for (const sample of samples) await this.#ingest(config.format, sample, store);
 							}
-						} catch (err) {
-							if (!(err instanceof NetError.Stream)) throw err;
 						} finally {
 							group.close();
 						}

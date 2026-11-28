@@ -1,5 +1,5 @@
 //! `moq export ts --follow` and `--stitch` over a real relay: the export rides out the same
-//! publisher instance leaving and coming back, switches to a replacement only when asked, and
+//! publisher identity leaving and coming back, switches to a replacement only when asked, and
 //! exits with the verdict of the broadcast's last end. The other formats fail once the route
 //! they read dies.
 //!
@@ -87,7 +87,7 @@ struct Relay {
 }
 
 /// A public relay on ephemeral loopback ports that also accepts lite-07, the version that
-/// carries instances, for a client that opts in with `--connect-version`. Its generated
+/// carries identities, for a client that opts in with `--connect-version`. Its generated
 /// certificate is trusted blindly, since nothing but loopback reaches it.
 async fn relay() -> Relay {
 	moq_tokio::crypto::install_default().unwrap();
@@ -98,7 +98,7 @@ async fn relay() -> Relay {
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	let relay = moq_relay::Relay::load(config).await.expect("test relay");
 	let url = format!("https://{}/", relay.quic_addr().expect("QUIC address"));
 	let ready = relay.ready();
@@ -111,7 +111,8 @@ async fn relay() -> Relay {
 const LITE_07: &str = "moq-lite-07-wip";
 
 fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	let mut command =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"));
 	// The guard on host timers is for tests, not the binaries they run.
 	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
@@ -441,7 +442,7 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	len
 }
 
-/// A restarted publisher is another instance, so the export does not splice it in: it exits 1
+/// A restarted publisher is another identity, so the export does not splice it in: it exits 1
 /// as soon as the replacement shows up, naming the flag that would follow it.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
@@ -514,16 +515,16 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
 }
 
-/// One publisher reconnects within the follow, continuing its capture under the same instance
+/// One publisher reconnects within the follow, continuing its capture under the same identity
 /// and program before delivering a clean final finish.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn the_same_instance_within_the_follow_continues() {
+async fn the_same_identity_within_the_follow_continues() {
 	let relay = relay().await;
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.route("demo", moq_net::origin::RouteOptions::hidden()).unwrap();
-	let instance = broadcast.instance();
+	let identity = broadcast.identity();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
@@ -563,8 +564,8 @@ async fn the_same_instance_within_the_follow_continues() {
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
-	assert_eq!(old.info().instance.as_ref(), Some(&instance));
-	let clock = catalog.snapshot().media.clock;
+	assert_eq!(old.info().identity.as_ref(), Some(&identity));
+	let clock = catalog.snapshot().sync.clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
 	kio::clock::timeout(TIMEOUT, old.closed())
@@ -577,14 +578,14 @@ async fn the_same_instance_within_the_follow_continues() {
 		.expect("the relay observes the returning publication")
 		.unwrap()
 		.unwrap();
-	assert_eq!(back.info().instance.as_ref(), Some(&instance));
+	assert_eq!(back.info().identity.as_ref(), Some(&identity));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
 		import.decode(chunk).unwrap();
 	}
 	assert_eq!(
-		catalog.snapshot().media.clock,
+		catalog.snapshot().sync.clock,
 		clock,
 		"the capture keeps its catalog clock"
 	);
@@ -611,7 +612,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let versions: Vec<u8> = packets(&output).filter_map(|p| pat_version(p)).collect();
 	assert!(
 		versions.iter().all(|&version| version == 0),
-		"the same instance keeps the PSI version: {versions:?}"
+		"the same identity keeps the PSI version: {versions:?}"
 	);
 }
 
@@ -690,7 +691,7 @@ async fn a_standby_before_its_pmt_leaves_the_exports_running() {
 	a_standby_before_its_tracks(&[], TS).await;
 }
 
-/// lite-07 carries the instance, so this is the version on which the relay queries the standby.
+/// lite-07 carries the identity, so this is the version on which the relay queries the standby.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
@@ -1059,16 +1060,17 @@ async fn redundant_failover(bufferbloat: bool) {
 	}
 }
 
-/// The instance of the next route announced for the path.
-async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Instance {
+/// The identity of the next route announced for the path.
+async fn next_identity(announced: &mut moq_net::origin::Routes) -> moq_net::Identity {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
 					announce,
+					..
 				} => {
-					return announce.route.instance().clone();
+					return announce.route.identity().clone();
 				}
 				_ => continue,
 			}
@@ -1079,24 +1081,24 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 }
 
 /// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
-/// resolved while a backup on its own instance starts, and ends once that importer goes.
+/// resolved while a backup on its own identity starts, and ends once that importer goes.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let demo = moq_net::Patterns::from(moq_net::Pattern::literal("demo").unwrap());
-	let mut announced = relay.origin.scope("", &demo).unwrap().routes();
+	let demo = moq_net::Pattern::literal("demo").unwrap();
+	let mut announced = relay.origin.filter(&demo).unwrap().routes();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
-	let incumbent = next_instance(&mut announced).await;
+	let incumbent = next_identity(&mut announced).await;
 	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
 	export.output_past(0).await;
 
 	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
 	assert_ne!(
-		next_instance(&mut announced).await,
+		next_identity(&mut announced).await,
 		incumbent,
-		"the backup mints its own instance"
+		"the backup mints its own identity"
 	);
 	let mark = export.output.lock().unwrap().len();
 	export.output_past(mark).await;
@@ -1115,6 +1117,49 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
+/// `repair mp4` refuses a file something else holds the lock on, as a recorder does while it
+/// writes, and leaves it untouched.
+#[tokio::test]
+async fn repair_refuses_a_locked_recording() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	std::fs::write(&path, b"not scanned: the lock refuses first").unwrap();
+	let recorder = std::fs::File::open(&path).unwrap();
+	recorder.try_lock().unwrap();
+
+	let output = moq_repair(&path).await;
+	assert!(!output.status.success(), "repaired a file a recorder holds");
+	assert!(
+		String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+	assert_eq!(std::fs::read(&path).unwrap(), b"not scanned: the lock refuses first");
+
+	// Once the recorder lets go, the file is scanned instead.
+	drop(recorder);
+	let output = moq_repair(&path).await;
+	assert!(
+		!String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
+/// Run `moq repair mp4` on the file.
+async fn moq_repair(path: &std::path::Path) -> std::process::Output {
+	let output =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"))
+			.env_remove("KIO_DENY_HOST_TIMERS")
+			.args(["repair", "mp4"])
+			.arg(path)
+			.output();
+	kio::clock::timeout(TIMEOUT, output)
+		.await
+		.expect("repair never exited")
+		.unwrap()
+}
+
 /// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
 /// it alone once finished.
 #[tokio::test]
@@ -1130,13 +1175,24 @@ async fn a_killed_mp4_recording_is_repaired() {
 		.expect("spawn export");
 	let (mut publisher, feeding) = import(&relay);
 
+	// Audio fragments as its groups end, video only at the next keyframe, two seconds in.
 	kio::clock::timeout(TIMEOUT, async {
-		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+		while fragmented(&std::fs::read(&path).unwrap_or_default()).len() < 2 {
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
-	.expect("the recording never grew");
+	.expect("the recording never held a fragment of each track");
+	// The recorder holds its lock while it writes, so repairing now would corrupt the file.
+	let mid = std::fs::read(&path).unwrap();
+	let refused = moq_repair(&path).await;
+	assert!(!refused.status.success(), "repaired a recording still being written");
+	assert!(String::from_utf8_lossy(&refused.stderr).contains("may still be open by a recorder"));
+	assert!(
+		std::fs::read(&path).unwrap().starts_with(&mid),
+		"a refused repair rewrote the file"
+	);
+
 	recording.kill().await.unwrap();
 	let killed = std::fs::read(&path).unwrap();
 	assert_eq!(
@@ -1146,15 +1202,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 	);
 
 	let repair = || async {
-		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
-			.env_remove("KIO_DENY_HOST_TIMERS")
-			.args(["repair", "mp4"])
-			.arg(&path)
-			.output();
-		let output = kio::clock::timeout(TIMEOUT, output)
-			.await
-			.expect("repair never exited")
-			.unwrap();
+		let output = moq_repair(&path).await;
 		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 		std::fs::read(&path).unwrap()
 	};
@@ -1191,6 +1239,18 @@ fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
 	boxes
 }
 
+/// The track ids with a complete moof+mdat fragment in a recording, possibly mid-write.
+fn fragmented(file: &[u8]) -> std::collections::HashSet<u32> {
+	boxes(file)
+		.windows(2)
+		.filter_map(|pair| match pair {
+			[mp4_atom::Any::Moof(moof), mp4_atom::Any::Mdat(_)] => Some(moof),
+			_ => None,
+		})
+		.flat_map(|moof| moof.traf.iter().map(|traf| traf.tfhd.track_id))
+		.collect()
+}
+
 /// Count the frames the relay delivers on `demo`'s video track as they arrive. A GOP lasts two
 /// seconds, so subscribing during the first one counts them all.
 fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
@@ -1201,7 +1261,7 @@ fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
 		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap().unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let name = loop {
-			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");
+			let catalog = catalogs.next().await.unwrap().expect("the catalog ended").value;
 			if let Some(name) = catalog.video.renditions.keys().next() {
 				break name.clone();
 			}

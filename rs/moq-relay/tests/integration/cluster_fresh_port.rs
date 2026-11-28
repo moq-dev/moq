@@ -5,7 +5,6 @@
 //! redialing from its one port. Here a proxy drops everything from the first
 //! source port it sees, so the link only comes up once a redial leaves from
 //! another.
-#![cfg(feature = "quic")]
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -120,19 +119,19 @@ async fn spawn_proxy(upstream: SocketAddr) -> (SocketAddr, Arc<Mutex<HashSet<Soc
 #[test]
 fn a_dropped_flow_recovers_on_a_fresh_port() {
 	let budget = Duration::from_secs(1);
-	run_cluster_test(dropped_flow_recovers(budget, budget));
+	run_cluster_test(dropped_flow_recovers(Some(budget), budget));
 }
 
-/// A zero budget would retry the dropped flow forever, so a mesh dial takes
+/// An unbounded budget would retry the dropped flow forever, so a mesh dial takes
 /// moq-tokio's 10s default instead.
 #[test]
 fn an_unbounded_budget_still_leaves_the_dropped_port() {
-	run_cluster_test(dropped_flow_recovers(Duration::ZERO, Duration::from_secs(10)));
+	run_cluster_test(dropped_flow_recovers(None, Duration::from_secs(10)));
 }
 
 /// Dial through a proxy that drops the first flow, with `budget` as the
 /// configured backoff timeout and `effective` as the one a mesh dial runs.
-async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
+async fn dropped_flow_recovers(budget: Option<Duration>, effective: Duration) {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let peer = spawn_peer().await;
@@ -145,10 +144,7 @@ async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
 	connect.timeout = Some(Duration::from_millis(500).into());
 	connect.backoff.initial = Some(Duration::from_millis(100).into());
 	connect.backoff.timeout = Some(budget.into());
-	#[cfg(feature = "websocket")]
-	{
-		connect.websocket.enabled = Some(false);
-	}
+	connect.websocket.enabled = Some(false);
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://{proxy}/"))];
@@ -162,6 +158,7 @@ async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
 			if let moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 				announce: update,
+				..
 			} = event && update.prefix.as_str() == "peer"
 			{
 				break;

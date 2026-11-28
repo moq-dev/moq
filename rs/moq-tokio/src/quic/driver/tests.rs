@@ -1,5 +1,3 @@
-#![cfg(feature = "_certs")]
-
 use rind_rustls::default_provider;
 
 use std::{
@@ -225,10 +223,8 @@ async fn ip_blocking() {
 			let accepting = server.accept().await.unwrap();
 			if accepting.remote_address() == client_1_addr {
 				accepting.refuse();
-			} else if accepting.remote_address_validated() {
+			} else if let Some(accepting) = accepting.validate_address() {
 				accepting.accept().expect("accept").await.expect("connection");
-			} else {
-				accepting.retry().unwrap();
 			}
 		}
 	});
@@ -973,11 +969,12 @@ async fn retry_after_rebind() {
 	timeout(Duration::from_secs(5), async {
 		let connecting = client.dial(server.local_addr(), "localhost").unwrap();
 		let incoming = server.accept().await.unwrap();
-		assert!(!incoming.remote_address_validated());
-		incoming.retry().unwrap();
+		assert!(incoming.validate_address().is_none(), "a first dial is unvalidated");
 
 		let incoming = server.accept().await.unwrap();
-		assert!(incoming.remote_address_validated());
+		let incoming = incoming
+			.validate_address()
+			.expect("the Retry token validates the redial");
 		let (accepted, connected) = join!(incoming.accept().unwrap(), connecting);
 		let _server_connection = accepted.unwrap();
 		let _client_connection = connected.unwrap();
@@ -2148,8 +2145,9 @@ async fn dropped_connection_cleans_up() {
 	endpoint.wait_idle().await;
 }
 
-/// Leases keep the connection window spent until consumed, while a stream window far smaller
-/// than it keeps replenishing; a lease outlives its stream.
+/// Leases keep the connection window spent until consumed, while a reader waiting for more than
+/// a stream window far smaller than it gets room for what it waits on; a lease outlives its
+/// stream.
 #[tokio::test]
 async fn leases_spend_the_connection_window() {
 	const WINDOW: usize = 32 * 1024;
@@ -2336,6 +2334,31 @@ async fn reads_after_a_received_reset_fail_with_it() {
 		matches!(read, Err(recv::Error::Reset(code)) if code == VarInt::from_u32(7)),
 		"{read:?}"
 	);
+}
+
+/// A lease wanting more than a reset stream has left fails with the reset, but leaves its
+/// reliable bytes for a smaller lease.
+#[tokio::test]
+async fn a_failed_lease_keeps_a_reset_streams_reliable_bytes() {
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut send = client.open_uni(Default::default()).await.unwrap();
+	send.write_all(&b"reliable"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	let offset = send.offset();
+	send.reset_at(offset, VarInt::from_u32(7));
+
+	let lease = timeout(Duration::from_secs(10), recv.lease(16)).await.unwrap().err();
+	assert!(
+		matches!(lease, Some(recv::Error::Reset(code)) if code == VarInt::from_u32(7)),
+		"{lease:?}"
+	);
+	let mut lease = recv.lease(8).await.unwrap();
+	assert_eq!(lease.copy_to_bytes(8), &b"reliable"[..]);
+	lease.release();
+	let reset = recv.received_reset().await;
+	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
 }
 
 /// A tiny datagram, and a tiny stream frame taken from a lease, each reach the application in
@@ -2624,14 +2647,14 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 }
 
 /// A socket whose output can be held independently of QUIC's flow control.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[derive(Debug)]
 struct ControlledSocket {
 	inner: super::sim::Socket,
 	output: Arc<Mutex<ControlledOutput>>,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[derive(Debug, Default)]
 struct ControlledOutput {
 	blocked: bool,
@@ -2642,7 +2665,7 @@ struct ControlledOutput {
 	parked: kio::WaiterList,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl ControlledOutput {
 	/// Wait until a send parks on the blocked socket, past `attempts` earlier ones
 	async fn parked(output: &Mutex<Self>, attempts: usize) {
@@ -2673,7 +2696,7 @@ impl ControlledOutput {
 }
 
 /// A client connected to a server whose output the test holds, with the handshake settled
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 struct Controlled {
 	output: Arc<Mutex<ControlledOutput>>,
 	_client: Endpoint,
@@ -2684,7 +2707,7 @@ struct Controlled {
 	peer: Connection,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl Controlled {
 	async fn connect() -> Self {
 		let network = super::sim::Network::new(1);
@@ -2729,7 +2752,7 @@ impl Controlled {
 	}
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl AsyncUdpSocket for ControlledSocket {
 	fn poll_recv(
 		&self,
@@ -2775,7 +2798,7 @@ impl AsyncUdpSocket for ControlledSocket {
 }
 
 /// Output resumes on release, and closing never depends on that release.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[test]
 fn a_close_behind_a_blocked_socket_is_bounded() {
 	for release in [false, true] {
@@ -2826,7 +2849,7 @@ fn a_close_behind_a_blocked_socket_is_bounded() {
 
 /// A datagram the socket held from before a local close is not the CONNECTION_CLOSE, so
 /// sending it leaves `closed` waiting for the close itself.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[test]
 fn closed_waits_past_a_datagram_held_from_before_the_close() {
 	use futures::FutureExt;

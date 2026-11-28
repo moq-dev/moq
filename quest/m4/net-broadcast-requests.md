@@ -1,4 +1,4 @@
-# [S] @moq/net broadcasts expose their requests
+# [M] @moq/net broadcasts expose their requests
 
 ## Goal
 
@@ -11,7 +11,7 @@ front from one broadcast, on demand, the way Rust does.
 
 Split 2026-11-03 (maintainer) from
 [JS undeclared track names](/quest/m5/e2ee/js-undeclared-names.md), which
-keeps the `@moq/crypto` half and now requires this. Kixel's T3 host needs
+keeps the `@moq/e2ee` half and now requires this. Kixel's T3 host needs
 only the plaintext half: without it, one environment broadcast would need a
 track per thread created up front, so T3 claims a broadcast per entity
 instead and can collapse to one once this lands. Today the request pull
@@ -19,4 +19,15 @@ instead and can collapse to one once this lands. Today the request pull
 layers, and only the origin has a public `requests()`; keep the internal
 wire path on the new handler.
 
+`Track.Request`, which a handler hands out, is `@internal` until then
+([moq-dev/moq#8929](https://github.com/moq-dev/moq/pull/8929)): drop the tag
+when `requests()` publishes it.
+
 Moved to m4 2026-11-12 (maintainer, /quest-audit): the downstream host it was ranked for is parked.
+
+Ending an on-demand track comes with it: in Rust, dropping the last producer
+of a track nobody wants ends it cleanly, and one a reader joined in the race
+goes back to the broadcast's handler as a fresh request
+([moq-dev/moq#9550](https://github.com/moq-dev/moq/pull/9550)). JS
+`Producer.close()` still aborts an unfinished track with `Cancel`; give it the
+Rust drop's behavior once a JS handler can serve the re-request.

@@ -6,13 +6,12 @@
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
 //! moq-cli's repeated `--` stage grammar. [`Duration`] parses the human-readable
-//! values used by those flags and TOML keys, and [`check_env`] refuses `MOQ_*`
-//! variables a binary does not read.
+//! values used by those flags and TOML keys, and [`Bound`] a limit `none` turns off.
 
+pub(crate) mod bound;
 #[path = "deprecated.rs"]
 mod deprecated;
 pub(crate) mod duration;
-mod env;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -25,9 +24,9 @@ use usage_rs::config::{
 	SourceKind, Value, resolve,
 };
 
+pub use bound::Bound;
 pub use deprecated::Deprecated;
 pub use duration::Duration;
-pub use env::{UnknownEnv, check_env};
 
 /// What a Usage parse result asks the process to do.
 #[non_exhaustive]

@@ -143,12 +143,13 @@ impl Cubic {
             // w_cubic(t + rtt)
             let w_cubic = self.state.w_cubic(t + rtt, self.current_mtu);
 
-            // w_est(t)
-            let w_est = self.state.w_est(t, rtt, self.current_mtu);
+            // w_est(t), which a zero RTT would make infinite: with no Reno rate to be friendly
+            // to, only the cubic curve applies.
+            let w_est = (!rtt.is_zero()).then(|| self.state.w_est(t, rtt, self.current_mtu));
 
             let mut cubic_cwnd = self.state.window;
 
-            if w_cubic < w_est {
+            if let Some(w_est) = w_est.filter(|&w_est| w_cubic < w_est) {
                 // TCP friendly region.
                 cubic_cwnd = cmp::max(cubic_cwnd, w_est as u64);
             } else if cubic_cwnd < w_cubic as u64 {
@@ -344,6 +345,31 @@ mod tests {
                 seed: 0,
             },
         )
+    }
+
+    /// A zero smoothed RTT, as a simulated clock reports, gives no Reno rate to be friendly to,
+    /// so it banks no unbounded window credit.
+    #[test]
+    fn zero_rtt_banks_no_window_credit() {
+        let now = Instant::now();
+        let mut cubic = cubic(now);
+        let window = 20 * BASE_DATAGRAM_SIZE;
+        cubic.state.window = window;
+        cubic.state.ssthresh = window;
+        cubic.state.w_max = window as f64;
+        cubic.state.recovery_start_time = Some(now);
+        cubic.rtt = Duration::ZERO;
+
+        for ms in [0, 10] {
+            let at = now.saturating_add(Duration::from_millis(ms));
+            cubic.on_acked(at, at, BASE_DATAGRAM_SIZE, false);
+        }
+        assert!(
+            cubic.state.cwnd_inc < BASE_DATAGRAM_SIZE,
+            "banked {} bytes of window credit",
+            cubic.state.cwnd_inc
+        );
+        assert_eq!(cubic.state.window, window);
     }
 
     #[test]

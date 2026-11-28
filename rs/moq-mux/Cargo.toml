@@ -25,7 +25,6 @@ async = ["kio/async", "moq-net/async"]
 fuzz = []
 
 [dependencies]
-anyhow = { workspace = true }
 base64 = { workspace = true }
 bitstream-io = { workspace = true }
 bytes = { workspace = true }
@@ -51,10 +50,10 @@ serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
-url = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
+anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # The tests await hang's catalog subscription.
@@ -62,7 +61,7 @@ hang = { path = "../hang", features = ["async"] }
 kio = { workspace = true, features = ["sim"] }
 # Compile the async API used by the tests, benches, and examples.
 moq-mux = { path = ".", features = ["async"] }
-# Mints an instance for a test, as a session of an older wire does.
+# Mints an identity for a test, as a session of an older wire does.
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
@@ -72,6 +71,12 @@ workspace-hack = { path = "../workspace-hack" }
 # The ts_schedule bench pins glibc's heap.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
 libc = { workspace = true }
+
+# Reads a finished file's chapters the way Apple's players do.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+block2 = { workspace = true }
+objc2-av-foundation = { workspace = true, features = ["objc2-core-media"] }
+objc2-foundation = { workspace = true }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.

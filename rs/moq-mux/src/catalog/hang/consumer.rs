@@ -9,8 +9,8 @@ use crate::Result;
 /// group's snapshot and checks its renditions, reporting failures as this crate's
 /// [`Error`](crate::Error).
 ///
-/// Generic over the application extension `E` (defaulting to `()`); yields a
-/// [`Catalog<E>`](super::Catalog).
+/// Generic over the application extension `E` (defaulting to `()`); yields each
+/// [`Catalog<E>`](super::Catalog) with the timestamp it takes effect at.
 ///
 /// A rendition's `broadcast` field is relative to the path of the broadcast serving the
 /// catalog, taken from the track's [`broadcast::Info::path`](moq_net::broadcast::Info::path).
@@ -25,23 +25,27 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Subscribes to the track itself; see [`hang::catalog::Consumer::new`].
 	pub fn new(track: moq_net::track::Consumer) -> Self {
 		Self {
-			inner: hang::catalog::Consumer::new(track),
+			inner: hang::catalog::Consumer::new(track, std::time::Duration::ZERO),
 		}
 	}
 
-	/// Get the next catalog update, or `None` once the track ends.
+	/// Get the next catalog update and the timestamp it takes effect at, or `None` once the track ends.
+	///
+	/// The timestamp is on the broadcast's media timeline: a derivative republishing that media
+	/// stamps its own catalog change there too.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		self.inner.poll_next(waiter).map_err(|err| match err {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_json::Timed<Catalog<E>>>>> {
+		self.inner.poll_next(waiter).map(|next| match next {
+			Ok(next) => Ok(next),
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
-			hang::Error::Moq(err) => crate::Error::Moq(err),
-			hang::Error::EscapingBroadcast(rel) => crate::Error::EscapingBroadcast(rel),
-			err => crate::Error::Hang(err),
+			Err(hang::Error::Moq(err)) => Err(crate::Error::Moq(err)),
+			Err(hang::Error::EscapingBroadcast(rel)) => Err(crate::Error::EscapingBroadcast(rel)),
+			Err(err) => Err(crate::Error::Hang(err)),
 		})
 	}
 }
@@ -81,9 +85,9 @@ mod test {
 		(catalog, payload)
 	}
 
-	fn expect_catalog(result: Poll<Result<Option<Catalog>>>) -> Catalog {
+	fn expect_catalog(result: Poll<Result<Option<moq_json::Timed<Catalog>>>>) -> Catalog {
 		match result {
-			Poll::Ready(Ok(Some(decoded))) => decoded,
+			Poll::Ready(Ok(Some(decoded))) => decoded.value,
 			other => panic!("expected catalog payload, got {other:?}"),
 		}
 	}
@@ -113,7 +117,9 @@ mod test {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track.append_group().expect("catalog group should append");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("catalog group should append");
 
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
 		group
@@ -122,7 +128,7 @@ mod test {
 		group.finish().expect("catalog group should finish");
 
 		match consumer.poll_next(&kio::Waiter::noop()) {
-			Poll::Ready(result) => result,
+			Poll::Ready(result) => result.map(|next| next.map(|timed| timed.value)),
 			Poll::Pending => panic!("a finished catalog group should be ready"),
 		}
 	}
@@ -168,14 +174,16 @@ mod test {
 			.expect("catalog track should resolve");
 		let mut consumer = Consumer::new(catalog_track);
 
-		let mut group = track.append_group().expect("catalog group should append");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("catalog group should append");
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
-		consumer.next().await
+		consumer.next().await.map(|next| next.map(|timed| timed.value))
 	}
 
 	/// [`publish_catalog_served`] over one audio rendition carrying `reference`.
@@ -347,7 +355,9 @@ mod test {
 	fn waits_for_pending_catalog_group_payload() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track.append_group().expect("catalog group should append");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("catalog group should append");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
@@ -365,7 +375,9 @@ mod test {
 	fn a_newer_version_is_a_typed_refusal() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer: Consumer = Consumer::new(track.consume());
-		let mut group = track.append_group().expect("catalog group should append");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("catalog group should append");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
 			.expect("catalog frame should write");
@@ -381,7 +393,9 @@ mod test {
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track.append_group().expect("catalog group should append");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("catalog group should append");
 
 		let _track = track.finish().expect("catalog track should finish");
 
@@ -406,15 +420,19 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track.append_group().expect("old catalog group should append");
+		let mut old_group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("old catalog group should append");
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
-		let mut latest_group = track.append_group().expect("latest catalog group should append");
+		let mut latest_group = track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.expect("latest catalog group should append");
 		latest_group
-			.write_frame(moq_net::Timestamp::ZERO, latest_payload)
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		let _track = track.finish().expect("catalog track should finish");
@@ -432,18 +450,22 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track.append_group().expect("old catalog group should append");
+		let mut old_group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("old catalog group should append");
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
-		let mut latest_group = track.append_group().expect("latest catalog group should append");
+		let mut latest_group = track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.expect("latest catalog group should append");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		latest_group
-			.write_frame(moq_net::Timestamp::ZERO, latest_payload)
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 
@@ -459,13 +481,17 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track.append_group().expect("old catalog group should append");
+		let mut old_group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("old catalog group should append");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		let mut latest_group = track.append_group().expect("latest catalog group should append");
+		let mut latest_group = track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.expect("latest catalog group should append");
 		latest_group
-			.write_frame(moq_net::Timestamp::ZERO, latest_payload)
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		let _track = track.finish().expect("catalog track should finish");

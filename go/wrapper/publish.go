@@ -3,7 +3,6 @@ package moq
 import (
 	"context"
 	"iter"
-	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
@@ -122,6 +121,8 @@ func (r *TrackRequest) Requests() (*TrackRequests, error) {
 }
 
 // Accept accepts the request as a raw track. For media, pass the request as media.Requested to an importer constructor.
+// A track asked for again, because its producer was closed while read, must be accepted with
+// the info it was published with: another ends the track, and the producer's writes fail.
 func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	ffiInfo, err := trackInfoFFI(info)
 	if err != nil {
@@ -139,7 +140,8 @@ func (r *TrackRequest) Reject(errorCode uint16) error {
 	return r.inner.Reject(errorCode)
 }
 
-// TrackDemand watches the group a published track's subscribers want next.
+// TrackDemand watches whether a published track has subscribers, and when they
+// ask for a new group.
 //
 // It is weak: holding it neither keeps the track open nor locks the producer, so
 // a wait can park here while the producer keeps publishing. Waits return
@@ -153,15 +155,26 @@ func (d *TrackDemand) Name() string {
 	return d.inner.Name()
 }
 
-// Wanted is the group subscribers want next, or nil while nobody subscribes. A
-// value past the newest group asks for a new group now, typically a keyframe.
-func (d *TrackDemand) Wanted() *uint64 {
+// Wanted reports whether anyone consumes the track: a subscription, fetch, or a
+// group one of them is still reading.
+func (d *TrackDemand) Wanted() bool {
 	return d.inner.Wanted()
 }
 
 // WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
-func (d *TrackDemand) WantedChanged(ctx context.Context) (*uint64, error) {
+// End a track nobody wants by closing its producer once this returns false: a
+// reader that joined since is served by the next request for the track while a request handler is live.
+func (d *TrackDemand) WantedChanged(ctx context.Context) (bool, error) {
 	return d.inner.WantedChanged(ctx)
+}
+
+// Refresh blocks until a subscriber asks for a new group: the first group of a
+// track with none, or a join judged by the track's TrackRefresh once its interval
+// passed. It returns at once while the request is pending, and the next group
+// written answers it, so loop: wait here, then write a group that starts with a
+// keyframe or a snapshot.
+func (d *TrackDemand) Refresh(ctx context.Context) error {
+	return d.inner.Refresh(ctx)
 }
 
 // TrackProducer writes arbitrary byte payloads with no codec required.
@@ -187,18 +200,20 @@ func (t *TrackProducer) Requests() (*TrackRequests, error) {
 	return &TrackRequests{inner: inner}, nil
 }
 
-// AppendGroup starts a new group; write frames into it, then Finish.
-func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
-	inner, err := t.inner.AppendGroup()
+// AppendGroup starts the next group at start, converted to the track's timescale
+// (on a scale-less track, Unscaled at the group's key); write frames into it, then
+// Finish. A start at or before a group the track holds is refused.
+func (t *TrackProducer) AppendGroup(start Timestamp) (*GroupProducer, error) {
+	inner, err := t.inner.AppendGroup(start)
 	if err != nil {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
 }
 
-// CreateGroup creates a group with an explicit sequence number.
-func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
-	inner, err := t.inner.CreateGroup(sequence)
+// CreateGroup creates a group with an explicit start.
+func (t *TrackProducer) CreateGroup(start uint64) (*GroupProducer, error) {
+	inner, err := t.inner.CreateGroup(start)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +226,8 @@ func (t *TrackProducer) SkipGroups(start, end uint64) error {
 	return t.inner.SkipGroups(start, end)
 }
 
-// WriteFrame writes frame as a single-frame group.
+// WriteFrame writes frame as a single-frame group, which starts at its timestamp: on a
+// scale-less track, moq.Unscaled at the new group's key.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)
 }
@@ -226,6 +242,11 @@ func (t *TrackProducer) Largest() (*Position, error) {
 func (t *TrackProducer) Abort(errorCode uint16) error {
 	return t.inner.Abort(errorCode)
 }
+
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. The producer is unusable afterwards.
+func (t *TrackProducer) Close() { t.inner.Destroy() }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
 // (delivery priority, group range); pass nil for defaults.
@@ -246,10 +267,10 @@ func (t *TrackProducer) Finish() error {
 	return t.inner.Finish()
 }
 
-// FinishAt declares the exclusive final group sequence ahead of the live edge.
+// FinishAt declares the exclusive final group start ahead of the live edge.
 // The producer remains open for groups below the boundary.
-func (t *TrackProducer) FinishAt(finalSequence uint64) error {
-	return t.inner.FinishAt(finalSequence)
+func (t *TrackProducer) FinishAt(finalStart uint64) error {
+	return t.inner.FinishAt(finalStart)
 }
 
 // GroupProducer writes frames into a single group on a track.
@@ -257,9 +278,9 @@ type GroupProducer struct {
 	inner *ffi.MoqGroupProducer
 }
 
-// Sequence is this group's sequence number within the track.
-func (g *GroupProducer) Sequence() uint64 {
-	return g.inner.Sequence()
+// Start is this group's start within the track.
+func (g *GroupProducer) Start() uint64 {
+	return g.inner.Start()
 }
 
 // Consume reads frames from this group.
@@ -282,7 +303,8 @@ func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
 }
 
 // WriteFrame appends frame to the group. It never blocks: without Ready, a writer
-// that outpaces its readers sheds the front of the group instead.
+// that outpaces its readers sheds the front of the group instead. On a scale-less track
+// the frame's timestamp is Unscaled at this group's Start.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }
@@ -290,6 +312,12 @@ func (g *GroupProducer) WriteFrame(frame Frame) error {
 // Finish marks the group complete. The handle remains so Abort can still run.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
+}
+
+// FinishAt marks the group complete with its exclusive end in the track's timescale.
+// No other group may start before end. The handle remains so Abort can still run.
+func (g *GroupProducer) FinishAt(end uint64) error {
+	return g.inner.FinishAt(end)
 }
 
 // Abort terminates the group with an application error code.
@@ -349,12 +377,6 @@ func (f *Fill) Priority() int8 {
 	return f.inner.Priority()
 }
 
-// MaxDelay is the most tolerant age budget among its readers, or nil for the
-// publisher's max age alone.
-func (f *Fill) MaxDelay() *time.Duration {
-	return f.inner.MaxDelay()
-}
-
 // Order is which end to fill first.
 func (f *Fill) Order() Order {
 	return f.inner.Order()
@@ -375,10 +397,10 @@ func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 	return f.inner.WantedChanged(ctx)
 }
 
-// Accept inserts group sequence and returns a producer for it. The first group
+// Accept inserts group start and returns a producer for it. The first group
 // starts at Start's frame, so its frames keep their indices.
-func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
-	inner, err := f.inner.Accept(sequence)
+func (f *Fill) Accept(start uint64) (*GroupProducer, error) {
+	inner, err := f.inner.Accept(start)
 	if err != nil {
 		return nil, err
 	}
@@ -390,14 +412,14 @@ func (f *Fill) DropGroups(start, end uint64) {
 	f.inner.DropGroups(start, end)
 }
 
-// IsWanted reports whether a reader still waits for group sequence from this fill:
+// IsWanted reports whether a reader still waits for group start from this fill:
 // false once every reader took it or narrowed past it, or nobody waits on the fill.
-func (f *Fill) IsWanted(sequence uint64) bool {
-	return f.inner.IsWanted(sequence)
+func (f *Fill) IsWanted(start uint64) bool {
+	return f.inner.IsWanted(start)
 }
 
-// Unwanted blocks until no reader waits for group sequence from this fill, so stop
+// Unwanted blocks until no reader waits for group start from this fill, so stop
 // serving it.
-func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
-	return f.inner.Unwanted(ctx, sequence)
+func (f *Fill) Unwanted(ctx context.Context, start uint64) error {
+	return f.inner.Unwanted(ctx, start)
 }

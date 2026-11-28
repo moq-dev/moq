@@ -23,10 +23,13 @@ fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }
 /** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
 fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
 
-/** Stream of groups in sequence order, skipping forward if the reader falls behind. */
+/** Stream of groups in start order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 
-/** Stream of groups in arrival order, including out-of-sequence deliveries. */
+/**
+ * Stream of groups in arrival order, including out-of-order deliveries. Groups already held come in
+ * the subscription's order, newest first unless it asks ascending, as `recvGroup` returns them.
+ */
 fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = pull({ cancel() }) { recvGroup() }
 
 /**
@@ -55,6 +58,12 @@ fun Claim.requestedBroadcasts(): Flow<BroadcastRequest> = pull { requested() }
 
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
+
+/** Stream of a metadata subscription's groups in arrival order, as `recvGroup` returns them. */
+fun MetaConsumer.groupsAsArrived(): Flow<MetaGroup> = pull({ cancel() }) { recvGroup() }
+
+/** Stream of frame headers within a metadata group. */
+fun MetaGroup.headers(): Flow<FrameHeader> = pull({ cancel() }) { nextHeader() }
 
 /**
  * Stream of announce events, as `announced(config).updates()`.

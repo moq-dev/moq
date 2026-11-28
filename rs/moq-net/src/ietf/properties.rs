@@ -1,7 +1,7 @@
 /// Track Properties: relay-visible metadata attached to tracks.
 ///
 /// SUBSCRIBE_OK, PUBLISH, and FETCH_OK carry Track Properties.
-/// They appear after the message parameters as a sequence of Key-Value-Pairs
+/// They appear after the message parameters as a key of Key-Value-Pairs
 /// (same delta-encoded format) until the end of the message.
 ///
 /// Unlike Message Parameters which have a count prefix, Track Properties
@@ -95,7 +95,7 @@ impl Properties {
 			priority: Some(super::priority::to_wire(info.priority)),
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
-			dynamic_groups: info.refresh.is_some(),
+			dynamic_groups: info.refresh.enabled(),
 			compress: info.compressed(),
 			unknown: Vec::new(),
 		}
@@ -494,7 +494,7 @@ mod tests {
 
 	#[test]
 	fn publisher_priority_is_bounded_to_a_byte() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
 			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();
@@ -751,7 +751,7 @@ mod tests {
 			.with_max_age(Duration::from_secs(7))
 			.with_timescale(Timescale::MILLI)
 			.with_priority(9)
-			.with_refresh(0);
+			.with_refresh(crate::track::Refresh::default().with_ratio(0));
 		unknown.refused(&info)
 	}
 

@@ -7,9 +7,13 @@
 
 /** Re-export of {@link https://www.npmjs.com/package/@moq/loc | @moq/loc}, the LOC container. */
 export * as Loc from "@moq/loc";
-export { Consumer, type ConsumerProps, DELAY_MAX, type Read } from "./consumer";
-export type { Format } from "./format";
+export { Consumer, type ConsumerProps, DELAY_MAX, type Delay, type Read, subscription, update } from "./consumer.ts";
+/** The CTS varint container (PTS = transport timestamp + CTS). */
+export * as Cts from "./cts.ts";
+export type { Format } from "./format.ts";
 /** The legacy varint container. */
-export * as Legacy from "./legacy";
-export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track";
-export * from "./types";
+export * as Legacy from "./legacy.ts";
+/** The raw zero-header container (PTS = transport timestamp). */
+export * as Raw from "./raw.ts";
+export { JOIN, MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
+export * from "./types.ts";

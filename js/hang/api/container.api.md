@@ -18,22 +18,37 @@ export class Consumer {
 	constructor(track: Net.Track.Subscriber, props: ConsumerProps);
 	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
+	readonly finished: Signals.Getter<boolean>;
 	next(): Promise<Read | undefined>;
 	readonly spread: Signals.Getter<Net.Clock.Duration>;
 }
 
 export interface ConsumerProps {
-	delay?: Signals.GetterInit<Net.Track.Delay>;
+	delay?: Signals.GetterInit<Delay>;
 	format: Format;
+	ordered?: Net.Track.Ordered;
 	predecessor?: Consumer;
-	wait?: Signals.GetterInit<Net.Clock.Duration | undefined>;
 	warmup?: Net.Clock.Duration;
+}
+
+export namespace Cts {
+	export class Format implements Format_1 {
+		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
+		decode(frame: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
+		end(frame: Frame): Net.Clock.Duration | undefined;
+		readonly kind: "audio" | "video" | "data";
+	}
 }
 
 export const DELAY_MAX: Net.Clock.Duration;
 
+export interface Delay {
+	max?: Net.Clock.Duration | null;
+	min?: Net.Clock.Duration | null;
+}
+
 export interface Format {
-	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
 	end?(frame: Frame): Net.Clock.Duration | undefined;
 	readonly kind?: "audio" | "video" | "data";
 }
@@ -44,6 +59,8 @@ export interface Frame {
 	payload: Uint8Array;
 	timestamp: Net.Clock.Duration;
 }
+
+export const JOIN: Net.Clock.Duration;
 
 export namespace Legacy {
 	export { BufferedRange };
@@ -62,6 +79,7 @@ export namespace Legacy {
 	export class Producer {
 		constructor(track: Net.Track.Producer, format: Legacy.Format);
 		abort(err: Error): void;
+		cut(end?: Net.Clock.Duration): void;
 		discontinuity(endpoint?: Net.Clock.Duration): void;
 		encode(data: Uint8Array | Legacy.Source, pts: Net.Clock.Duration, keyframe: boolean): void;
 		finish(): Legacy.Finished;
@@ -71,11 +89,21 @@ export namespace Legacy {
 		copyTo(buffer: Uint8Array): void;
 	}
 	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Net.Clock.Duration): Uint8Array;
+	export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => Net.Clock.Duration | undefined) | undefined;
 }
 
 export * as Loc from "@moq/loc";
 
 export const MAX_AGE: Net.Clock.Duration;
+
+export namespace Raw {
+	export class Format implements Format_1 {
+		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
+		decode(frame: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
+		end(frame: Frame): Net.Clock.Duration | undefined;
+		readonly kind: "audio" | "video" | "data";
+	}
+}
 
 export type Read = {
 	frame: ReceivedFrame;
@@ -102,5 +130,9 @@ export type TrackInfoOptions = {
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
+export function subscription(delay: Delay, subscription?: Net.Track.Subscription): Net.Track.Subscription;
+
 export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
+
+export function update(delay: Delay, current: Net.Track.Subscription, asked?: Net.Track.Subscription): Net.Track.Subscription;
 ```

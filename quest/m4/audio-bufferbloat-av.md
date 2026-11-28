@@ -26,7 +26,7 @@ Decided in planning (2026-10-20):
   follows audio, so congested video lags it by design, and steady-state lip
   sync belongs to the audio ring's time stretch. Since 2026-11-13 audio
   trails the clock by at most its 200 ms `stretch` threshold and snaps onto
-  it past that ([audio playout](/quest/m2/audio-playout/README.md)), so these
+  it past that (`doc/concept/audio-jitter.md`), so these
   rows gate how soon audio is back on the clock and its underruns, and budget
   the audio it skips rather than forbid it.
 - Folded in: the native `pulse` rows become enforced. They report only
@@ -59,4 +59,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [ViSQOL grading](/quest/m5/audio-visqol.md) - adds a quality score to the same harness
-- [Audio playout](/quest/m2/audio-playout/README.md) - the playout rule and estimator whose budgets these rows extend

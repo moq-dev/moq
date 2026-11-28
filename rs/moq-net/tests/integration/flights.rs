@@ -5,6 +5,7 @@
 //! shed, and the origin's handler serves it. The joiner hands over to the live copy once it
 //! catches up, and every flight in the chain then stops.
 
+use crate::WithMax as _;
 use std::sync::{
 	Arc,
 	atomic::{AtomicU64, Ordering},
@@ -15,6 +16,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Version, cache, frame, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -33,19 +35,21 @@ fn number(frame: &frame::Frame) -> u32 {
 	u32::from_le_bytes(frame.payload[..4].try_into().unwrap())
 }
 
+/// The header admission weighs: only its size.
 fn info(payload: &Bytes) -> frame::Info {
 	frame::Info {
 		size: payload.len() as u64,
-		timestamp: None,
+		timestamp: moq_net::Timestamp::unscaled(0),
 	}
 }
 
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no
@@ -53,14 +57,14 @@ fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 /// archive has nothing newer yet, so only wait for that.
 async fn write_paced(
 	group: &mut group::Producer,
-	fill: &track::Fill,
+	fill: &track::FillGroups,
 	demand: &mut group::Demand,
 	payload: Option<Bytes>,
 ) -> bool {
-	let sequence = group.sequence;
+	let key = group.start;
 	let room = kio::wait(|waiter| {
 		while let Poll::Ready(Ok(_)) = demand.poll_wanted_changed(waiter) {}
-		if fill.poll_unwanted(sequence, waiter).is_ready() && !demand.wanted() {
+		if fill.poll_unwanted(key, waiter).is_ready() && !demand.wanted() {
 			return Poll::Ready(false);
 		}
 		match &payload {
@@ -69,7 +73,11 @@ async fn write_paced(
 		}
 	})
 	.await;
-	room && payload.is_some_and(|payload| group.write_frame(None, payload).is_ok())
+	room && payload.is_some_and(|payload| {
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.is_ok()
+	})
 }
 
 /// The origin's handler: serves each fill from the frame it starts at, paced by its riders,
@@ -79,7 +87,7 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 	drop(kio::clock::sim::spawn(async move {
 		while let Ok(fill) = requests.requested_fill().await {
 			let start = fill.start();
-			let mut group = fill.accept(start.group, None).expect("accept");
+			let mut group = fill.accept(start.group, None).expect("accept").expect("a fresh group");
 			let mut demand = group.demand();
 			let (written, ended) = (written.clone(), ended.clone());
 			drop(kio::clock::sim::spawn(async move {
@@ -158,9 +166,11 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	for index in 0..FRAMES {
-		group.write_frame(None, numbered(index)).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
+			.unwrap();
 	}
 	group.finish().unwrap();
 
@@ -177,7 +187,7 @@ async fn moq_transport_relays_a_cold_finished_group() {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
-		.expect("an instance");
+		.expect("an identity");
 	let mut fetched = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().fetch_group(0, None))
 		.await
 		.expect("fetch timeout")
@@ -234,11 +244,11 @@ async fn chain(version: &str, replay: Replay) {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
-		.expect("an instance");
+		.expect("an identity");
 	let subscription = || {
 		track::Subscription::default()
-			.with_range(0..)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+			.with_ranges([crate::support::keys(0..)])
+			.with_max(Duration::from_secs(3600))
 	};
 	let mut live_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
 		.await
@@ -246,8 +256,9 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("subscribe");
 
 	// The live reader at the bottom of the chain keeps up with the publisher.
-	let mut live = track.append_group().unwrap();
-	live.write_frame(None, numbered(0)).unwrap();
+	let mut live = track.append_next().unwrap();
+	live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(0))
+		.unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, live_sub.recv_group())
 		.await
 		.expect("group timeout")
@@ -256,7 +267,8 @@ async fn chain(version: &str, replay: Replay) {
 	assert_eq!(next(&mut reader, version, 0).await, 0);
 	for index in 1..FRAMES {
 		kio::wait(|waiter| live.poll_ready(waiter, &info(&numbered(index)))).await;
-		live.write_frame(None, numbered(index)).unwrap();
+		live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(index))
+			.unwrap();
 		assert_eq!(next(&mut reader, version, index).await, index, "{version}: live");
 	}
 

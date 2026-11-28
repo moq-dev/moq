@@ -5,16 +5,21 @@
  * preventing issues like "foo" matching "foobar".
  *
  * A path is a run of non-empty segments separated by `/`, so it has exactly one spelling:
- * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it.
+ * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it, and on
+ * a lone surrogate, which has no UTF-8 bytes of its own.
  * A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
- * either one is spelled, and any other `\` is refused. Segments still split at every `/`.
+ * either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
+ * `a\/b` is one segment, a prefix never ends inside it, and a pattern's `*` matches all of it.
+ * {@link parts} is the one walk every segment reading goes through. Until the previous release
+ * is gone, an escaped `/` still counts against {@link MAX_PARTS}, and one beside a bare `/` or at
+ * the end is refused, since that release splits at every `/`.
  * The empty path is the root, which prefixes every path; a prefix needs no trailing slash.
  * A path names a point in the origin's tree from its root. The same type names an exact
  * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
  * the prefix it announces. See {@link Relative} for `..`-style references.
  *
- * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
- * the v1 grammar and algebra.
+ * {@link Prefix} and {@link Prefixes} (grants) and {@link Pattern} and {@link Patterns}
+ * (discovery filters) are re-exported from `@moq/pattern`, the owner of their grammar and algebra.
  *
  * @example
  * ```typescript
@@ -36,6 +41,8 @@
  * @module
  */
 
+import { parts as split } from "@moq/pattern";
+
 /** A broadcast path: non-empty segments separated by `/`, or the empty root. */
 export type Valid = string & { __brand: "Name" };
 
@@ -49,10 +56,12 @@ export type Valid = string & { __brand: "Name" };
 export type Relative = string & { __brand: "Relative" };
 
 /**
- * Maximum number of slash-separated parts in a path.
+ * Maximum number of segments in a path.
  *
  * Matches the IETF moq-transport limit of 32 fields in a namespace tuple.
  * moq-lite enforces the same bound when decoding paths off the wire.
+ *
+ * @internal
  */
 export const MAX_PARTS = 32;
 
@@ -71,8 +80,8 @@ const utf8 = new TextEncoder();
 /**
  * Build a path by joining components with "/", where an empty component is the root.
  *
- * Throws when a component has a leading, trailing, or doubled `/`, or a `\` before anything
- * but `\` or `/`.
+ * Throws when a component has a leading, trailing, or doubled `/`, a `\` before anything
+ * but `\` or `/`, or a lone surrogate.
  */
 export function from(...paths: string[]): Valid {
 	for (const path of paths) {
@@ -84,35 +93,59 @@ export function from(...paths: string[]): Valid {
 
 // Why `path` is not the one spelling of a path, or undefined when it is.
 function spelling(path: string): string | undefined {
-	if (path.startsWith("/") || path.endsWith("/") || path.includes("//")) {
-		return "path contains an empty segment";
+	// UTF-8 cannot carry a lone surrogate: the encoder writes U+FFFD, another path's bytes.
+	if (!path.isWellFormed()) return "path contains a lone surrogate";
+	if (!path.includes("\\")) {
+		// Without a `\`, every `/` separates.
+		return path.startsWith("/") || path.endsWith("/") || path.includes("//")
+			? "path contains an empty segment"
+			: undefined;
 	}
 	// Pairs of `\` are escaped backslashes, so any `\` left must escape a `/`.
-	if (path.includes("\\") && /\\(?!\/)/.test(path.replaceAll("\\\\", ""))) {
+	if (/\\(?!\/)/.test(path.replaceAll("\\\\", ""))) {
 		return "path contains a `\\` that escapes neither `\\` nor `/`";
 	}
+	// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at every
+	// `/`, escaped or not, and trims and collapses the empty segments that leaves, so it would
+	// re-spell `a\//b` as `a\/b`, another broadcast's path. Refuse what it would re-spell.
+	if (path.endsWith("/") || path.includes("//")) return "path contains an empty segment";
+	// An escaped `/` is content, so only a bare one can leave a segment empty.
+	if (split(path).includes("")) return "path contains an empty segment";
 	return undefined;
 }
 
-/** Split a path into its slash-separated parts. The empty path has no parts. */
+/**
+ * Split a path into its segments, only at a `/` no `\` escapes, each still escaped as written.
+ * The empty path has no parts. See {@link unescape} for a segment's content.
+ */
 export function parts(path: Valid): string[] {
-	return path === "" ? [] : path.split("/");
+	return split(path);
+}
+
+/** The first `n` segments of `path`, or `undefined` if it has fewer. */
+export function head(path: Valid, n: number): Valid | undefined {
+	const segments = parts(path);
+	return n <= segments.length ? (segments.slice(0, n).join("/") as Valid) : undefined;
 }
 
 /**
  * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *
  * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
+ *
+ * @internal
  */
 export function decode(raw: string): Valid {
-	return encode(from(raw));
+	// The limits first, so a hostile path is refused before its spelling is split.
+	encode(raw as Valid);
+	return from(raw);
 }
 
 /** Like {@link decode}, but `undefined` for an invalid path rather than a throw. @internal */
 export function tryDecode(raw: string): Valid | undefined {
-	if (spelling(raw) !== undefined) return undefined;
 	const path = raw as Valid;
-	return check(path) === undefined ? path : undefined;
+	if (check(path) !== undefined) return undefined;
+	return spelling(raw) === undefined ? path : undefined;
 }
 
 /**
@@ -120,6 +153,8 @@ export function tryDecode(raw: string): Valid | undefined {
  *
  * Throws when the path is too deep or too long; use at wire encode sites so we never
  * emit a path the remote side is required to reject.
+ *
+ * @internal
  */
 export function encode(path: Valid): Valid {
 	const error = check(path);
@@ -129,6 +164,9 @@ export function encode(path: Valid): Valid {
 
 /** Why `path` breaks the wire limits, or undefined when it fits. @internal */
 export function check(path: Valid): string | undefined {
+	// TEMPORARY MIGRATION, delete at the next version cut and count `parts` instead: the previous
+	// release splits at every `/`, escaped or not, and ends the whole announce stream on a path
+	// past 32 parts by that count, so until it is gone the limit counts every `/`.
 	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
 	let count = path === "" ? 0 : 1;
 	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
@@ -241,7 +279,7 @@ export function empty(): Valid {
 /**
  * Parse a relative path reference and drop its redundant `.` segments. It is spelled like
  * a path, so this throws on a leading, trailing, or doubled `/` or a lone `\` rather than
- * collapsing it. A reference made only of `.` segments normalizes to `.` because it names
+ * collapsing it, and an escaped `/` never splits a segment. A reference made only of `.` segments normalizes to `.` because it names
  * the base's parent, while empty names the base. `..` is preserved and only interpreted
  * by {@link resolve}.
  *
@@ -250,13 +288,12 @@ export function empty(): Valid {
  * preserving the distinction between `""` and `"."`.
  */
 export function normalizeRelative(rel: string): Relative {
-	from(rel);
-	const raw = rel.split("/");
+	const raw = parts(from(rel));
 	if (!raw.includes(".")) return rel as Relative;
 
+	// Dropping whole segments leaves a valid path.
 	const normalized = raw.filter((s) => s !== ".").join("/");
-	// Dropping a `.` after an escaped `/` strands its `\`, so the result is checked again.
-	return from(normalized === "" ? "." : normalized) as string as Relative;
+	return (normalized === "" ? "." : normalized) as Relative;
 }
 
 /**
@@ -266,9 +303,6 @@ export function normalizeRelative(rel: string): Relative {
  * resolution. `..` segments then pop another segment; other segments are appended.
  * `.` segments are no-ops. Excess `..` once the base is empty is also a no-op
  * (subsequent named segments still append). An empty `rel` returns the base unchanged.
- *
- * Throws when the result ends a segment in a lone `\` because resolution dropped the
- * escaped `/` after it.
  *
  * Mirrors the Rust `Path::resolve`, used by hang catalogs to express
  * cross-broadcast track references (a rendition's `broadcast` field).
@@ -283,10 +317,10 @@ export function normalizeRelative(rel: string): Relative {
 export function resolve(base: Valid, rel: Relative): Valid {
 	if (rel === "") return base;
 
-	const segments = base === "" ? [] : base.split("/");
+	const segments = parts(base);
 	segments.pop();
 
-	for (const seg of rel.split("/")) {
+	for (const seg of parts(rel as string as Valid)) {
 		if (seg === ".") {
 			continue;
 		}
@@ -297,7 +331,8 @@ export function resolve(base: Valid, rel: Relative): Valid {
 		}
 	}
 
-	return from(segments.join("/"));
+	// Whole segments of valid paths rejoin into a valid path.
+	return segments.join("/") as Valid;
 }
 
 /**
@@ -311,10 +346,10 @@ export function resolve(base: Valid, rel: Relative): Valid {
 export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 	if (rel === "") return base;
 
-	const segments = base === "" ? [] : base.split("/");
+	const segments = parts(base);
 	segments.pop();
 
-	for (const seg of rel.split("/")) {
+	for (const seg of parts(rel as string as Valid)) {
 		if (seg === ".") {
 			continue;
 		}
@@ -325,8 +360,7 @@ export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 		}
 	}
 
-	const resolved = segments.join("/");
-	return spelling(resolved) === undefined ? (resolved as Valid) : undefined;
+	return segments.join("/") as Valid;
 }
 
 /**
@@ -363,17 +397,17 @@ export function relative(target: Valid, base: Valid): Relative | undefined {
 	if (target === base) return "" as Relative;
 
 	// Resolution replaces the base's last segment, so walk from its parent.
-	const dir = base === "" ? [] : base.split("/");
+	const dir = parts(base);
 	dir.pop();
 
-	const parts = target === "" ? [] : target.split("/");
+	const segments = parts(target);
 
 	let common = 0;
-	while (common < dir.length && common < parts.length && dir[common] === parts[common]) {
+	while (common < dir.length && common < segments.length && dir[common] === segments[common]) {
 		common += 1;
 	}
 
-	const down = parts.slice(common);
+	const down = segments.slice(common);
 	// Resolution would walk on these instead of naming them.
 	if (down.some((part) => part === "." || part === "..")) return undefined;
 
@@ -385,12 +419,17 @@ export function relative(target: Valid, base: Valid): Relative | undefined {
 	return (rel.length === 0 ? "." : rel.join("/")) as Relative;
 }
 
-/** Path patterns: grammar and algebra owned by `@moq/pattern`. */
+/** Grant prefixes, path patterns, and a segment's escaping, owned by `@moq/pattern`. */
 export {
 	compareSpecificity,
+	escape,
 	InvalidPattern,
+	InvalidPrefix,
 	Pattern,
 	Patterns,
+	Prefix,
+	Prefixes,
 	type Segment,
 	type Specificity,
+	unescape,
 } from "@moq/pattern";

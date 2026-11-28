@@ -7,12 +7,12 @@
 //! is dropped. Lite-06 and later encode a floor of group 0 as 0, which is the only
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -26,29 +26,31 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
-/// From `start`, or the oldest group still around when there is none.
+/// From `start`, or with an unstated Min Age the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
-	Range {
-		start: start.map_or(Range::oldest().start, Anchor::Absolute),
-		end: None,
-	}
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
+	Range { start, end: None }
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
-/// Four frames starting at `sequence` seconds, so a group created late still starts
+/// Four frames starting at `key` seconds, so a group created late still starts
 /// below the one after it.
-fn write_group(track: &moq_net::track::Producer, sequence: u64) {
-	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+fn write_group(track: &moq_net::track::Producer, key: u64) {
+	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	for frame in 0..4 {
-		let timestamp = Timestamp::from_millis(sequence * 1000 + frame).unwrap();
+		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
 		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
 	group.finish().unwrap();
@@ -74,7 +76,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 				None => break,
 			}
 		}
-		got.push((group.sequence, frames));
+		got.push((group.start, frames));
 	}
 	got
 }
@@ -124,9 +126,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 		.expect("broadcast resolves")
 		.unwrap();
 
-	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([floored(start)]);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -171,9 +171,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([floored(start)]);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let mut sub = track.subscribe(subscription);
 	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
 	kio::clock::sleep(Duration::from_millis(10)).await;
@@ -248,19 +246,27 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("broadcast resolves")
 		.unwrap();
 
-	let subscribe = |range: Range| {
+	let subscribe = |range: Range, min: Option<Duration>| {
 		let track = remote.track("late").unwrap();
 		async move {
-			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_max(BUDGET))
-				.with_ranges([range]);
+			let range = match (range.start, min) {
+				(moq_net::track::Start::Oldest, Some(min)) => Range {
+					start: moq_net::track::Start::Live {
+						min: Some(min),
+						max: Some(BUDGET),
+					},
+					..range
+				},
+				_ => range,
+			};
+			let subscription = Subscription::default().with_ranges([range]).with_max(BUDGET);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")
 				.expect("subscribe")
 		}
 	};
-	let mut live = subscribe(Range::live()).await;
+	let mut live = subscribe(Range::ALL, Some(Duration::ZERO)).await;
 	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
@@ -274,8 +280,8 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("recv_group timed out")
 		.expect("recv_group")
 		.expect("group 1");
-	assert_eq!(first.sequence, 1, "{version}: the live reader starts at group 1");
-	let mut oldest = subscribe(floored(Some(0))).await;
+	assert_eq!(first.start, 1, "{version}: the live reader starts at group 1");
+	let mut oldest = subscribe(floored(Some(0)), None).await;
 
 	// Idle time lets the merged demand reach the publisher before the lower group exists.
 	kio::clock::sleep(Duration::from_millis(10)).await;

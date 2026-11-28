@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `decode::Consumer` conceals lost SILK and hybrid Opus packets (speech, the
+  `Voice` encoder kind, low bitrates) as it already did CELT ones, instead of
+  reading the loss as a `Read::Gap`. Opus now encodes and decodes through
+  `moq-opus`, our fork of `unsafe-libopus` 0.2.0, whose SILK concealment
+  saturated to full scale. The same fix stops every SILK or hybrid DTX packet,
+  such as one forwarded from WebRTC with DTX on, from decoding to full-scale
+  noise.
+- `encode::publish_capture` keeps captured audio on the host clock its video is
+  stamped on: it resamples by up to 2000 ppm to follow each buffer's capture
+  time, where the PTS used to advance by the device's sample count and drift by
+  its clock error (0.36 s an hour at 100 ppm). A capture at the codec's rate
+  slips a crossfaded frame now and then rather than filtering every sample.
+  Stamps that stay over 100 ms behind for a second, such as a suspended host,
+  re-anchor so the gap lands in the PTS; over 100 ms ahead, input is dropped
+  until they catch up.
+- A microphone stream error capture survives, such as an overrun, marks a gap
+  on the next buffer, so an encode re-anchors rather than closing over the audio
+  it lost and shifting everything after it earlier.
 - **Breaking:** `Bus::channel` and `bus::Channel` are renamed `Bus::live` and
   `bus::Live`, pairing with `Bus::positioned` and `bus::Positioned`. See
   `MIGRATE.md`.

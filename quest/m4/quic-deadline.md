@@ -24,7 +24,7 @@ Implement in `moq-quic`.
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay.
   Measure whether receive-time differences (`moq_congestion::Acked::received`,
-  from the [realtime epic](/quest/m4/quic-realtime.md)) improve that
+  from the [realtime epic](/quest/m5/quic-realtime.md)) improve that
   estimate, accounting for clock offset, drift, and uncertainty. They do not
   alone measure absolute one-way delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
@@ -36,7 +36,7 @@ Implement in `moq-quic`.
   the congestion window; the probe is a scheduling choice, not extra credit.
 - moq-net cannot call `moq-quic` directly, so the deadline crosses its own
   `transport::poll::SendStream` trait, the way
-  [the ACK hook](/quest/m3/quic-ack-hook.md) does: a method whose default
+  [the ACK hook](/quest/m4/quic-ack-hook.md) does: a method whose default
   reports unsupported, implemented by the moq-tokio and moq-uring adapters
   over `moq-quic`. A backend without it sends as today.
 - moq-net: the per-group `GroupServe` machine in the lite and IETF
@@ -92,7 +92,7 @@ m5 for want of a consumer. The consumer: MPEG-TS trunks under a fixed
 `moq export ts --delay`, which compete with SRT on delivering whatever can
 still arrive within the delay. The outage loss that issue measured belongs to
 [Buffered exports pick their group order by measurement](/quest/m3/export-order.md)
-and [A path that's back is used within an RTT](/quest/m3/quic-path-return.md),
+and [A path that's back is used within an RTT](/quest/m1/quic-path-return.md),
 not this quest: the early probe never exceeds the congestion window, which is
 full of unacknowledged packets during an outage. This quest is the
 "below the deadline, recovery gets faster" half and the datagram expiry.
@@ -101,4 +101,4 @@ measured.
 
 ## Related
 
-- [ACK hook](/quest/m3/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
+- [ACK hook](/quest/m4/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`

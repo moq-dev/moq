@@ -28,14 +28,15 @@ def test_a_pending_timer_waits_for_advance() -> None:
             origin = moq.OriginProducer()
             route = origin.route("clock", hidden=True)
             track = route.broadcast.publish_track("track", moq.TrackInfo(max_age=None))
-            from_group_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0))]
-            consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=from_group_0))
+            # A range with no start and no delay.min reaches back over every group
+            # delay.max keeps; a timed start would be history, which never goes stale.
+            consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1))))
 
             # Group 0 stalls with no frame, so the in-order read waits on it until
             # group 1 has been out for delay.max: a native timer is pending.
-            _stalled = track.append_group()
-            later = track.append_group()
-            later.write_frame(b"later")
+            _stalled = track.append_group(moq.Timestamp.unscaled(0))
+            later = track.append_group(moq.Timestamp.unscaled(1))
+            later.write_frame(b"later", moq.Timestamp.unscaled(later.start))
             later.finish()
             pending = asyncio.ensure_future(consumer.read_frame())
 

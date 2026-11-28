@@ -12,10 +12,15 @@
 //!
 //! Loop on [`Server::accept`], inspect [`Request::resource`] /
 //! [`Request::stream_id`] (treat the stream id as a token if you like), then match
-//! on the [`Request`]: accept a [`Publish`] into an origin, or accept a
-//! [`Subscribe`] out of one, at a path of your choosing (or reject it). This is
+//! on the [`Request`]: accept a [`Publish`] into an origin with an [`Import`], or accept a
+//! [`Play`] out of one with an [`Export`], at a path of your choosing (or reject it). This is
 //! how an embedder (e.g. a relay verifying a JWT and scoping the origin per token)
 //! plugs its policy in. It mirrors `moq-tokio`'s `Server` / `Request`.
+//!
+//! Each connection's wire bytes, the SRT packets without IP and UDP headers, accumulate in the
+//! [`Import::wire`] or [`Export::wire`] it was accepted with. Register a clone of it with
+//! `moq_net::stats::Session::wire` before accepting to count them in the relay's stats, and keep
+//! the guard it returns until the accepting future resolves: dropping it ends the registration.
 //!
 //! Beyond the listener, [`Client`] is the *dial-out* role: name a remote SRT
 //! listener and either [`Client::publish`] a MoQ broadcast to it (restream MoQ
@@ -31,12 +36,12 @@
 
 #![warn(missing_docs)]
 
-pub mod dial;
+mod dial;
 mod error;
 mod server;
 mod ts;
 
 pub use dial::Client;
 pub use error::{Error, Result};
-pub use server::{Publish, Reject, Request, Server, Subscribe};
+pub use server::{Export, Import, Play, Publish, Reject, Request, Server};
 pub use ts::Program;

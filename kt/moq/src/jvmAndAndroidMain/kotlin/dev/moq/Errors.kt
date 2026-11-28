@@ -2,7 +2,8 @@ package dev.moq
 
 import uniffi.moq.MoqException
 import uniffi.moq.MoqProtocolError
-import uniffi.moq.MoqProtocolKind
+import uniffi.moq.moqErrorIsAuth
+import uniffi.moq.moqErrorIsShutdown
 
 /**
  * True for [MoqException.Cancelled] and [MoqException.Closed], which arise from graceful shutdown
@@ -10,25 +11,15 @@ import uniffi.moq.MoqProtocolKind
  * when its consumer cancels.
  */
 val MoqException.isShutdown: Boolean
-    get() = this is MoqException.Cancelled || this is MoqException.Closed
+    get() = moqErrorIsShutdown(this)
 
 /**
- * True for HTTP 401/403, an expired token, a protocol Unauthorized or Expired session close, and a
- * track revocation. Unlike a transport failure, retrying without new credentials won't help, so
- * callers should surface these rather than reconnect.
+ * True for HTTP 401/403, an expired or malformed token, a protocol Unauthorized or Expired session
+ * close, and a track revocation. Unlike a transport failure, retrying without new credentials won't
+ * help, so callers should surface these rather than reconnect.
  */
 val MoqException.isAuth: Boolean
-    get() {
-        if (
-            this is MoqException.Unauthorized ||
-                this is MoqException.Forbidden ||
-                this is MoqException.Expired
-        )
-            return true
-        val protocol = protocolError ?: return false
-        return protocol.kind == MoqProtocolKind.UNAUTHORIZED ||
-            protocol.kind == MoqProtocolKind.EXPIRED
-    }
+    get() = moqErrorIsAuth(this)
 
 /**
  * The structured protocol failure, or null if this is not one.

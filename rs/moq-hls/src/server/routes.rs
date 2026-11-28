@@ -47,23 +47,21 @@ impl Server {
 		match &route.resource {
 			Resource::Master => master(self, broadcast, query).await,
 			Resource::Manifest => manifest(self, broadcast, query).await,
-			Resource::Media {
-				instance,
-				kind,
-				rendition,
-			} => media(self, At::new(route, instance, *kind, rendition), query).await,
+			Resource::Media { token, kind, rendition } => {
+				media(self, At::new(route, token, *kind, rendition), query).await
+			}
 			Resource::Init {
-				instance,
+				token,
 				kind,
 				rendition,
 				hash,
-			} => init(self, At::new(route, instance, *kind, rendition), hash).await,
+			} => init(self, At::new(route, token, *kind, rendition), hash).await,
 			Resource::Segment {
-				instance,
+				token,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, At::new(route, instance, *kind, rendition), id).await,
+			} => segment(self, At::new(route, token, *kind, rendition), id).await,
 		}
 	}
 }
@@ -188,20 +186,20 @@ impl http_body::Body for Demanded {
 	}
 }
 
-/// A rendition of one publisher instance, as an instance-scoped URL names it.
+/// A rendition of one publisher identity, as an identity-scoped URL names it.
 #[derive(Clone, Copy)]
 struct At<'a> {
 	route: &'a Route,
-	instance: &'a str,
+	identity: &'a str,
 	kind: Kind,
 	rendition: &'a str,
 }
 
 impl<'a> At<'a> {
-	fn new(route: &'a Route, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+	fn new(route: &'a Route, identity: &'a str, kind: Kind, rendition: &'a str) -> Self {
 		Self {
 			route,
-			instance,
+			identity,
 			kind,
 			rendition,
 		}
@@ -210,7 +208,7 @@ impl<'a> At<'a> {
 
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, at: At<'_>) -> crate::Result<Option<Arc<Rendition>>> {
-	let Some(broadcaster) = server.instance(&at.route.broadcast, at.instance).await else {
+	let Some(broadcaster) = server.identity(&at.route.broadcast, at.identity).await else {
 		return Ok(None);
 	};
 	if let Some(include) = &at.route.include {
@@ -248,7 +246,7 @@ fn media_result(result: crate::Result<Option<Bytes>>, server: &Server) -> Respon
 
 fn media_bytes(body: Bytes, server: &Server) -> Response {
 	// Init/segment bytes never change while their URL is listed, but a run spliced into one
-	// instance without a generation (see `Broadcaster::set_generation`) can repeat the old run's
+	// identity without a generation (see `Broadcaster::set_generation`) can repeat the old run's
 	// segment numbers and pts with different media. Cap shared caching at the playlist window -
 	// every concurrent viewer of the live window still hits the cache, while a stale run's bytes
 	// age out as fast as the window that stopped listing them.
@@ -293,11 +291,13 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	/// The instance each test's catalog broadcast announces, and so the instance its URLs name.
+	/// The identity each test's catalog broadcast announces.
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
+	/// The URL token of the named [`RUN`]: the first 64 bits of SHA-256 over `0x00 || RUN`.
+	const AT: &str = "82dbe9b7c7e4dd2d";
 
 	fn run() -> moq_net::origin::RouteOptions {
-		moq_net::origin::RouteOptions::default().with_instance(RUN.parse().unwrap(), 0)
+		moq_net::origin::RouteOptions::default().with_identity(RUN.parse().unwrap(), 0)
 	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
@@ -317,7 +317,7 @@ mod tests {
 	/// A catalog config declaring a two-second join interval up front, so its renditions are listed.
 	fn hls_config() -> moq_mux::catalog::Config {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		catalog.sync.interval = Some(Duration::from_secs(2));
 		moq_mux::catalog::Config::default().with_catalog(catalog)
 	}
 
@@ -477,7 +477,7 @@ mod tests {
 			.consume()
 			.scope(
 				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
 			)
 			.unwrap();
 		let app = Server::new(restricted, Default::default()).unwrap().router();
@@ -492,8 +492,8 @@ mod tests {
 	}
 
 	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists
-	/// the replacement, while a player already on the old instance keeps its playlist until that
-	/// instance's broadcast closes.
+	/// the replacement, while a player already on the old identity keeps its playlist until that
+	/// identity's broadcast closes.
 	#[tokio::test(start_paused = true)]
 	async fn a_restart_lists_the_replacement_under_its_own_urls() {
 		let origin = moq_tokio::origin::spawn();
@@ -505,43 +505,43 @@ mod tests {
 		let app = Server::new(origin.consume(), crate::export::Config::default())
 			.unwrap()
 			.router();
-		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
-		let old_segment = format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s");
-		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
-		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
+		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
+		let old_segment = format!("/live/@{AT}/video/video0/seg/c913b6a2.0.m4s");
+		wait_listed(&app, "/live/master.m3u8", &format!("@{AT}/video/video0/media.m3u8")).await;
+		wait_listed(&app, &old_playlist, "seg/c913b6a2.0.m4s").await;
 
-		let next = moq_net::Instance::random();
+		let next = moq_net::Identity::random();
 		let new = origin
 			.route(
 				"live",
-				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_identity(next.clone(), 0),
 			)
 			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
-		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", next.as_str());
+		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", crate::export::token(&next));
 		wait_listed(
 			&app,
 			"/live/master.m3u8",
-			&format!("@{}/video/video0/media.m3u8", next.as_str()),
+			&format!("@{}/video/video0/media.m3u8", crate::export::token(&next)),
 		)
 		.await;
-		wait_listed(&app, &new_playlist, "seg/8343e7cd.0.m4s").await;
+		wait_listed(&app, &new_playlist, "seg/c913b6a2.0.m4s").await;
 		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
 		drop((old_catalog, old_track, old_media, old));
 		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
-			assert!(kio::clock::now() < deadline, "the closed instance kept serving");
+			assert!(kio::clock::now() < deadline, "the closed identity kept serving");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
 		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
 	}
 
-	/// A replaced instance's recording ends at the segments it listed before the takeover, even
+	/// A replaced identity's recording ends at the segments it listed before the takeover, even
 	/// while its publisher keeps sending, and the replacement records at once without waiting
 	/// on that drain.
 	#[tokio::test(start_paused = true)]
@@ -555,19 +555,19 @@ mod tests {
 
 		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
-		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
-		wait_listed(&app, &old_playlist, "seg/8343e7cd.1.m4s").await;
+		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
+		wait_listed(&app, &old_playlist, "seg/c913b6a2.1.m4s").await;
 		let replaced = server.broadcaster("live").await.expect("announced");
 		let mut old_renditions = replaced.renditions();
 		let old_rendition = replaced.rendition(Kind::Video, "video0").expect("listed");
 		// Held, not read, until the replacement has recorded.
 		let mut old_segments = old_rendition.segments();
 
-		let next = moq_net::Instance::random();
+		let next = moq_net::Identity::random();
 		let new = origin
 			.route(
 				"live",
-				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_identity(next.clone(), 0),
 			)
 			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
@@ -577,7 +577,7 @@ mod tests {
 		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		let successor = loop {
 			let current = server.broadcaster("live").await.expect("announced");
-			if current.instance().as_ref() == next.as_str() {
+			if *current.token() == crate::export::token(&next) {
 				break current;
 			}
 			assert!(kio::clock::now() < deadline, "the replacement was never served");
@@ -617,7 +617,7 @@ mod tests {
 		assert_eq!(recorded, [0, 1], "exactly what was listed before the takeover");
 		let playlist = old_rendition.media_playlist(None).unwrap().expect("listed");
 		assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
-		assert!(!playlist.contains("seg/8343e7cd.2.m4s"), "{playlist}");
+		assert!(!playlist.contains("seg/c913b6a2.2.m4s"), "{playlist}");
 
 		let mut added = 0;
 		while let Some(event) = kio::clock::timeout(TIMEOUT, old_renditions.next())
@@ -645,14 +645,14 @@ mod tests {
 		let app = Server::new(origin.consume(), crate::export::Config::default())
 			.unwrap()
 			.router();
-		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
+		wait_listed(&app, &format!("/live/@{AT}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		// The track fails while its rendition stays in the catalog.
 		track
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
-		for uri in [&format!("/live/@{RUN}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
+		for uri in [&format!("/live/@{AT}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
 			let deadline = kio::clock::now().saturating_add(TIMEOUT);
 			let response = loop {
 				let response = oneshot(app.clone(), uri).await;
@@ -682,17 +682,17 @@ mod tests {
 		let app = server.router();
 		wait_listed(
 			&app,
-			&format!("/live/@{RUN}/video/video0/media.m3u8"),
-			"seg/8343e7cd.0.m4s",
+			&format!("/live/@{AT}/video/video0/media.m3u8"),
+			"seg/c913b6a2.0.m4s",
 		)
 		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 
-		let response = oneshot(app.clone(), &format!("/live/@{RUN}/video/video0/media.m3u8")).await;
+		let response = oneshot(app.clone(), &format!("/live/@{AT}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
-		assert!(playlist.contains("\nseg/run-1.8343e7cd.0.m4s\n"), "{playlist}");
+		assert!(playlist.contains("\nseg/run-1.c913b6a2.0.m4s\n"), "{playlist}");
 		let map = playlist.lines().find(|line| line.starts_with("#EXT-X-MAP:")).unwrap();
 		let init = map
 			.strip_prefix("#EXT-X-MAP:URI=\"")
@@ -701,39 +701,39 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/{init}")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/{init}")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/init.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/init.0000000000000000.mp4")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/init.0000000000000000.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.t0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-0.c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}
@@ -772,23 +772,23 @@ mod tests {
 		write_three_gops(&mut allowed);
 		write_three_gops(&mut denied);
 
-		let patterns = ["room/live", "room/source"]
+		let prefixes = ["room/live", "room/source"]
 			.into_iter()
-			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
+			.map(|path| path.parse::<moq_net::Prefix>().unwrap())
 			.collect();
-		let restricted = origin.consume().scope("", &patterns).unwrap();
+		let restricted = origin.consume().scope("", &prefixes).unwrap();
 		let server = Server::new(restricted, Default::default()).unwrap();
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
 		let tag = |name| broadcaster.rendition(Kind::Video, name).unwrap().tag().to_string();
-		let allowed_uri = &format!("/room/live/@{RUN}/video/video0/seg/{}.0.m4s", tag("video0"));
-		let denied_uri = &format!("/room/live/@{RUN}/video/video1/seg/{}.0.m4s", tag("video1"));
+		let allowed_uri = &format!("/room/live/@{AT}/video/video0/seg/{}.0.m4s", tag("video0"));
+		let denied_uri = &format!("/room/live/@{AT}/video/video1/seg/{}.0.m4s", tag("video1"));
 		let app = server.router();
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		for uri in [
 			denied_uri,
-			&format!("/room/live/@{RUN}/video/video1/media.m3u8"),
-			&format!("/room/live/@{RUN}/video/video1/init.unknown.mp4"),
+			&format!("/room/live/@{AT}/video/video1/media.m3u8"),
+			&format!("/room/live/@{AT}/video/video1/init.unknown.mp4"),
 		] {
 			let response = oneshot(app.clone(), uri).await;
 			assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
@@ -820,7 +820,7 @@ mod tests {
 		// restricted server's export into using them.
 		let broad = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let referenced = broad
-			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()), None)
+			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()))
 			.await
 			.unwrap();
 		let mut group = referenced.track("video1").unwrap().fetch_group(0, None).await.unwrap();
@@ -830,7 +830,7 @@ mod tests {
 		assert_eq!(
 			oneshot(
 				app,
-				&format!("/room/live/@{RUN}/video/video0/seg/{}.9999.m4s", tag("video0"))
+				&format!("/room/live/@{AT}/video/video0/seg/{}.9999.m4s", tag("video0"))
 			)
 			.await
 			.status(),
@@ -842,7 +842,7 @@ mod tests {
 			.consume()
 			.scope(
 				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
 			)
 			.unwrap();
 		let all_denied = Server::new(only_catalog, Default::default()).unwrap();

@@ -7,7 +7,7 @@ use std::task::Poll;
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
 /// `!Send` session cannot meet, so wrap the session in this
-/// before `Server::accept_request` or `Client::connect`. The session, its
+/// before `Server::handshake` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
 /// proving it at compile time.
@@ -114,18 +114,39 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.receive_window()
 	}
 
+	fn reliable_reset(&self) -> bool {
+		self.0.reliable_reset()
+	}
+
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
 	}
 
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.export_keying_material(label, context)
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), moq::KeepAliveError> {
+		self.0.set_keep_alive(keep_alive)
+	}
+
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		self.0.poll_liveness(waiter, last)
 	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	type Error = T::Error;
 	type Group = Local<T::Group>;
+	type Offset = T::Offset;
+
+	fn offset(&self) -> Self::Offset {
+		self.0.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
+		self.0.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.0.poll_write(waiter, buf)
@@ -151,20 +172,12 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.reset(code)
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		self.0.reset_at(offset, code)
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.0.acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.0.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_delivered(waiter)
 	}
 }
 
@@ -181,6 +194,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 
 	fn set_priority(&mut self, priority: i64) {
 		self.0.set_priority(priority)
+	}
+
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		self.0.set_window(window)
 	}
 
 	fn stop(&mut self, code: u32) {

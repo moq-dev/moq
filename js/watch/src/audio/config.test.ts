@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
-import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
+import { decoderConfig, decoderDescription, frameDuration, packetDuration, playbackIdentity } from "./config";
 
 const flush = () => yieldNow();
 
@@ -71,6 +71,25 @@ test("AAC and MP3 frame durations follow their codec frame sizes", () => {
 	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toEqual(Duration.millis(24));
 });
 
+test("an AAC frame with an AudioSpecificConfig runs 1024 samples at its core's rate", () => {
+	// A 48 kHz core with SBR at 96 kHz, SBR at the core's own 48 kHz, and plain AAC-LC.
+	for (const [description, sampleRate] of [
+		["119056e580", 96000],
+		["119056e598", 48000],
+		["1190", 48000],
+	] as const) {
+		const aac = config({ codec: "mp4a.40.2", sampleRate, description });
+		expect(frameDuration(aac)?.asMillis()).toBeCloseTo(21.333, 3);
+	}
+	// frameLengthFlag set: 960 samples, plain at 48 kHz and under explicit SBR over a 24 kHz core.
+	expect(frameDuration(config({ codec: "mp4a.40.2", sampleRate: 48000, description: "1194" }))).toEqual(
+		Duration.millis(20),
+	);
+	expect(frameDuration(config({ codec: "mp4a.40.5", sampleRate: 48000, description: "2b118a00" }))).toEqual(
+		Duration.millis(40),
+	);
+});
+
 test("Opus and unknown codecs have no constant frame duration", () => {
 	// Opus states its duration per packet, in the TOC byte.
 	expect(frameDuration(config())).toBeUndefined();
@@ -89,4 +108,43 @@ test("an implicit CMAF duration falls through to the Opus TOC", () => {
 	};
 	expect(packetDuration("opus", frame)).toEqual(Duration.millis(20));
 	expect(packetDuration("mp4a.40.2", frame)).toBeUndefined();
+});
+
+test("an Opus description reaches WebCodecs with its mapping and no pre-skip", () => {
+	// OpusHead, version 1, 4 channels, pre-skip 312, 48 kHz, gain 0, family 2 with 4 streams.
+	const head = new Uint8Array([
+		...new TextEncoder().encode("OpusHead"),
+		1,
+		4,
+		0x38,
+		0x01,
+		0x80,
+		0xbb,
+		0,
+		0,
+		0,
+		0,
+		2,
+		4,
+		0,
+		0,
+		1,
+		2,
+		3,
+	]);
+	const description = decoderDescription("opus", head);
+	expect(description?.slice(10, 12)).toEqual(new Uint8Array([0, 0]));
+	expect([...(description ?? [])].filter((_, index) => index < 10 || index > 11)).toEqual(
+		[...head].filter((_, index) => index < 10 || index > 11),
+	);
+	// The catalog's bytes are left alone.
+	expect(head[10]).toBe(0x38);
+
+	// WebCodecs reads only a signed OpusHead, so a dOps stays dropped, as a truncated header fails.
+	const dops = new Uint8Array([0, 2, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0, 0, 0]);
+	expect(decoderDescription("opus", dops)).toBeUndefined();
+	expect(() => decoderDescription("opus", head.slice(0, 12))).toThrow();
+	expect(decoderDescription("opus", undefined)).toBeUndefined();
+	const asc = new Uint8Array([0x12, 0x10]);
+	expect(decoderDescription("mp4a.40.2", asc)).toBe(asc);
 });

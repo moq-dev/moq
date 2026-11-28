@@ -1,5 +1,6 @@
-// Verifies that every workspace package declares the `@moq/*` packages it imports, and
-// that every workspace whose tests can reach `@moq/clock` loads its test preload.
+// Verifies that every workspace package declares the `@moq/*` packages it imports, that no
+// published package depends on a private one, and that every workspace whose tests can reach
+// `@moq/clock` loads its test preload.
 //
 // A bundler resolves an undeclared import through hoisting, so the tree builds and
 // the tests pass while a published consumer with a stricter resolver gets `undefined`.
@@ -13,6 +14,7 @@ import { parse } from "@babel/parser";
 /** A package.json, narrowed to the fields this script reads. */
 type Manifest = {
 	name?: string;
+	private?: boolean;
 	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
 	optionalDependencies?: Record<string, string>;
@@ -100,7 +102,7 @@ function visit(value: unknown, found: string[]) {
 	for (const child of Object.values(value)) visit(child, found);
 }
 
-/** The module specifiers referenced by JavaScript or TypeScript source. */
+/** The module specifiers referenced by JavaScript or TypeScript source, declarations included. */
 export function specifiers(source: string): string[] {
 	const ast = parse(source, {
 		createImportExpressions: true,
@@ -164,6 +166,19 @@ function main() {
 		}
 
 		const runtime = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.peerDependencies ?? {})]);
+		// A private package is never published, so a published one bundles it (common/package.ts)
+		// from its devDependencies instead of depending on it.
+		const bundled = new Set(Object.keys(pkg.devDependencies ?? {}).filter((name) => manifests.get(name)?.private));
+		if (pkg.scripts?.release) {
+			for (const name of [...runtime, ...Object.keys(pkg.optionalDependencies ?? {})]) {
+				if (manifests.get(name)?.private) {
+					problems.add(
+						`${workspace}/package.json: depends on the private ${name}, which only devDependencies may bundle`,
+					);
+				}
+			}
+		}
+		const shipping = new Set([...runtime, ...bundled]);
 		const dev = new Set([
 			...runtime,
 			...Object.keys(pkg.optionalDependencies ?? {}),
@@ -174,13 +189,15 @@ function main() {
 			// Only files that ship need a runtime dependency; configs, examples, and
 			// tests may lean on a devDependency instead.
 			const shipped = relative(dir, file).startsWith(`src${sep}`) && !TEST.test(file);
-			const declared = shipped ? runtime : dev;
+			const declared = shipped ? shipping : dev;
 
 			for (const specifier of specifiers(readFileSync(file, "utf8"))) {
 				const name = packageName(specifier);
 				if (!name || name === pkg.name || declared.has(name)) continue;
 
-				const where = shipped ? "dependencies or peerDependencies" : "any dependency list";
+				const where = shipped
+					? "dependencies, peerDependencies, or bundled devDependencies"
+					: "any dependency list";
 				problems.add(`${relative(root, file)}: imports ${name}, missing from ${pkg.name} ${where}`);
 			}
 		}

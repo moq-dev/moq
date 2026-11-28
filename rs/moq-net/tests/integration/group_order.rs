@@ -7,8 +7,8 @@
 //! the hop into the subscriber and releases them by send order, the way a congested
 //! sender would transmit them.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -25,10 +25,11 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const BACKLOG: [u64; 4] = [0, 1, 2, 3];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Connect a session serving `publish` to a fresh subscribing origin.
@@ -57,8 +58,8 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 			.expect("broadcast resolves")
 			.unwrap();
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(FOREVER))
-			.with_range(0..)
+			.with_ranges([support::keys(0..)])
+			.with_max(FOREVER)
 			.with_order(order);
 		let mut sub = remote
 			.track("ordered")
@@ -74,7 +75,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 				.expect("group timeout")
 				.expect("recv_group")
 				.expect("track open");
-			arrivals.push(group.sequence);
+			arrivals.push(group.start);
 		}
 		arrivals
 	})
@@ -88,10 +89,10 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 fn write_backlog(track: &moq_net::track::Producer) -> Vec<moq_net::group::Producer> {
 	BACKLOG
 		.iter()
-		.map(|&sequence| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		.map(|&key| {
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 10).unwrap(), &b"frame"[..])
+				.write_frame(Timestamp::from_millis(key * 10).unwrap(), &b"frame"[..])
 				.unwrap();
 			group
 		})
@@ -103,11 +104,6 @@ fn expected(order: Order) -> Vec<u64> {
 		Order::Ascending => BACKLOG.to_vec(),
 		Order::Descending => BACKLOG.iter().rev().copied().collect(),
 	}
-}
-
-/// Whether `version` can carry an ascending order at all.
-fn carries_order(version: &str) -> bool {
-	version == "moq-lite-07-wip" || version.starts_with("moq-transport")
 }
 
 /// Serve one subscriber in `order`, optionally through a relay, and return the order its
@@ -170,12 +166,9 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 		for relay in [false, true] {
 			for order in [Order::Ascending, Order::Descending] {
 				let got = round(version, relay, order).await;
-				// An older lite wire cannot ask for ascending, so it is served newest first.
-				let served = match carries_order(version) {
-					true => order,
-					false => Order::Descending,
-				};
-				if got != expected(served) {
+				// An older lite wire cannot ask for ascending, so it is served newest first, but
+				// the reader holds the whole backlog by then and reads it in its own order.
+				if got != expected(order) {
 					failures.push(format!("{version} relay={relay} {order:?}: {got:?}"));
 				}
 			}

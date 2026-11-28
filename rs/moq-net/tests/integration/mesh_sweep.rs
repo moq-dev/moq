@@ -7,8 +7,7 @@
 //! broadcasts, then applies one external change at a time: a link flap, a relay
 //! restart, a publisher restarting under a fresh identity, a client joining or
 //! leaving, or a broadcast published or withdrawn. Once the mesh goes quiet, every
-//! relay and client must have followed the rules the `verify-route` skill states on
-//! what it showed, and must now show exactly what it can reach. The announce
+//! relay and client must have followed the route rules on what it showed, and must now show exactly what it can reach. The announce
 //! messages each change cost are counted against [`budget`].
 //!
 //! `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick the cases; a failure prints the seed
@@ -22,12 +21,12 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Instance, Timescale, Timestamp, Version, cache, origin, stats, track};
+use moq_net::{Identity, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::{self, Rng};
-
-const VERSION: &str = "moq-lite-07-wip";
 
 /// The only track each broadcast carries, holding one frame.
 const TRACK: &str = "t";
@@ -35,6 +34,8 @@ const TRACK: &str = "t";
 /// What one case runs.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
+	/// The version every session negotiates.
+	version: &'static str,
 	/// Relays in the mesh.
 	relays: usize,
 	/// External changes applied, one per quiet point.
@@ -51,7 +52,7 @@ enum Change {
 	/// A relay restarts under a fresh identity, and its links and clients reconnect.
 	RelayRestart,
 	/// A publishing client restarts under a fresh identity, attaches to a random relay,
-	/// and publishes its broadcasts again as new instances.
+	/// and publishes its broadcasts again as new identities.
 	OriginRestart,
 	/// A client joins at a random relay.
 	Join,
@@ -94,7 +95,7 @@ impl Change {
 struct Seen {
 	path: String,
 	kind: origin::RouteKind,
-	instance: Instance,
+	identity: Identity,
 	available: bool,
 }
 
@@ -106,7 +107,7 @@ fn observe(mut routes: origin::Routes) -> mpsc::UnboundedReceiver<Seen> {
 			let seen = Seen {
 				path: event.announce.prefix.to_string(),
 				kind: event.kind,
-				instance: event.announce.route.instance().clone(),
+				identity: event.announce.route.identity().clone(),
 				available: event.announce.route.available(),
 			};
 			if tx.unbounded_send(seen).is_err() {
@@ -120,7 +121,7 @@ fn observe(mut routes: origin::Routes) -> mpsc::UnboundedReceiver<Seen> {
 /// A broadcast as one node currently shows it.
 #[derive(Clone, Debug)]
 struct Shown {
-	instance: Instance,
+	identity: Identity,
 	available: bool,
 }
 
@@ -130,8 +131,8 @@ struct Reader {
 	shown: BTreeMap<String, Shown>,
 	/// The newest generation shown per path, which must never go back.
 	newest: BTreeMap<String, u64>,
-	/// The instances this reader saw END for.
-	ended: BTreeSet<Instance>,
+	/// The identities this reader saw END for.
+	ended: BTreeSet<Identity>,
 }
 
 impl Reader {
@@ -145,10 +146,10 @@ impl Reader {
 	}
 }
 
-/// One publication of a broadcast: a path served by one instance.
+/// One publication of a broadcast: a path served by one identity.
 struct Publication {
 	path: String,
-	/// Counts the path's publications, so a newer instance compares higher.
+	/// Counts the path's publications, so a newer identity compares higher.
 	generation: u64,
 	/// Whether it still serves; once over it never serves again.
 	live: bool,
@@ -193,7 +194,7 @@ struct Mesh {
 	relays: Vec<Relay>,
 	links: Vec<Link>,
 	clients: Vec<Option<Client>>,
-	publications: BTreeMap<Instance, Publication>,
+	publications: BTreeMap<Identity, Publication>,
 	/// Publications per path so far.
 	generations: BTreeMap<String, u64>,
 	/// Broadcasts published so far, so each gets a fresh path.
@@ -203,10 +204,11 @@ struct Mesh {
 }
 
 impl Mesh {
-	async fn new(rng: Rng, relays: usize) -> Self {
+	async fn new(rng: Rng, shape: Shape) -> Self {
+		let relays = shape.relays;
 		let mut mesh = Self {
 			rng,
-			version: VERSION.parse().unwrap(),
+			version: shape.version.parse().unwrap(),
 			registry: stats::Registry::new(Default::default()),
 			next_hop: 0,
 			relays: Vec::new(),
@@ -257,9 +259,10 @@ impl Mesh {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(self.next_hop).unwrap());
 		// Nothing expires, so no expiry sweep keeps a timer armed and the mesh can go idle.
 		config.pool = cache::Pool::unbounded();
+		config.proxy = proxy;
 		let (origin, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		origin.with_proxy(proxy)
+		origin
 	}
 
 	fn stats(&self) -> moq_net::stats::Session {
@@ -349,7 +352,7 @@ impl Mesh {
 		self.announce(client, path);
 	}
 
-	/// Announce `path` from `client` as a new instance, with one frame on its track.
+	/// Announce `path` from `client` as a new identity, with one frame on its track.
 	fn announce(&mut self, client: usize, path: String) {
 		let held = {
 			let client = self.clients[client].as_ref().unwrap();
@@ -361,9 +364,9 @@ impl Mesh {
 				.broadcast()
 				.create_track(TRACK, track::Info::default().with_timescale(Timescale::MILLI))
 				.unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
-				.write_frame(Timestamp::ZERO, bytes::Bytes::from(path.clone()))
+				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
 			group.finish().unwrap();
 			route.announce().unwrap();
@@ -372,7 +375,7 @@ impl Mesh {
 		let generation = self.generations.entry(path.clone()).or_default();
 		*generation += 1;
 		self.publications.insert(
-			held.route.instance(),
+			held.route.identity(),
 			Publication {
 				path: path.clone(),
 				generation: *generation,
@@ -386,7 +389,7 @@ impl Mesh {
 	/// Mark every publication `held` serves as over.
 	fn over(&mut self, held: &BTreeMap<String, Held>) {
 		for held in held.values() {
-			self.publications.get_mut(&held.route.instance()).unwrap().live = false;
+			self.publications.get_mut(&held.route.identity()).unwrap().live = false;
 		}
 	}
 
@@ -555,18 +558,22 @@ impl Mesh {
 				}
 			}
 			// Settled: exactly the live broadcasts whose publisher this node reaches.
-			let expected: BTreeMap<&str, &Instance> = (publications.iter())
+			let expected: BTreeMap<&str, &Identity> = (publications.iter())
 				.filter(|(_, publication)| publication.live)
 				.filter(|(_, publication)| {
 					let relay = attached[&publication.client];
 					component == components[relay]
 				})
-				.map(|(instance, publication)| (publication.path.as_str(), instance))
+				.map(|(identity, publication)| (publication.path.as_str(), identity))
 				.collect();
-			let shown: BTreeMap<&str, &Instance> = (reader.shown.iter())
-				.map(|(path, shown)| (path.as_str(), &shown.instance))
+			let shown: BTreeMap<&str, &Identity> = (reader.shown.iter())
+				.map(|(path, shown)| (path.as_str(), &shown.identity))
 				.collect();
-			if shown != expected {
+			// A minted identity names only the session that showed it, so only its path counts.
+			let matches = shown.len() == expected.len()
+				&& (shown.iter().zip(&expected))
+					.all(|((path, shown), (want, identity))| path == want && (shown.is_minted() || shown == identity));
+			if !matches {
 				failures.push(format!("{name}: not settled: shows {shown:?}, reaches {expected:?}"));
 			}
 			for (path, shown) in &reader.shown {
@@ -594,7 +601,7 @@ impl Mesh {
 			};
 			let read = async {
 				let broadcast = (client.origin.consume())
-					.request(path.as_str(), shown.instance.clone())
+					.request(path.as_str(), shown.identity.clone())
 					.await
 					.map_err(|err| format!("request: {err}"))?;
 				let mut track = (broadcast.track(TRACK).map_err(|err| format!("track: {err}"))?)
@@ -632,30 +639,59 @@ fn close(pair: MockPair) {
 }
 
 /// Apply one event to what `reader` shows, checking the per-event rules.
-fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, seen: &Seen) -> Result<(), String> {
+fn apply(reader: &mut Reader, publications: &BTreeMap<Identity, Publication>, seen: &Seen) -> Result<(), String> {
 	use origin::RouteKind::*;
 
-	// Truthful: every instance shown is one some client published at that path.
-	let publication = publications.get(&seen.instance).ok_or("an instance nobody published")?;
-	if publication.path != seen.path {
-		return Err(format!("the instance of {}", publication.path));
-	}
+	// An UPDATE names the identity shown and a RESTART another. A session keeps the identity
+	// it minted for a path while it holds the path, so this holds on a moq-lite-06 wire too.
+	// A retraction names the last route advertised, which may be a minted RESTART the update
+	// hold kept back and the retraction overtook (see `RouteEvent::announce`).
 	let current = reader.shown.get(&seen.path);
 	match (seen.kind, current) {
 		(Start, Some(_)) => return Err("START for a shown broadcast".into()),
 		(Update | Restart | End | Offline, None) => return Err("an event for a broadcast not shown".into()),
-		(Update | End | Offline, Some(shown)) if shown.instance != seen.instance => {
-			return Err(format!("the event names another instance than {:?}", shown.instance));
+		(End | Offline, Some(_)) if seen.identity.is_minted() => {}
+		(Update | End | Offline, Some(shown)) if shown.identity != seen.identity => {
+			return Err(format!("the event names another identity than {:?}", shown.identity));
 		}
-		(Restart, Some(shown)) if shown.instance == seen.instance => {
-			return Err("RESTART to the same instance".into());
+		(Restart, Some(shown)) if shown.identity == seen.identity => {
+			return Err("RESTART to the same identity".into());
 		}
 		_ => {}
 	}
+
+	// A moq-lite-06 wire carries no identity, so each session mints one per path, and a
+	// reader can hold only the path to what was published: the settled check below still
+	// requires exactly the paths it reaches.
+	if seen.identity.is_minted() {
+		if !publications.values().any(|publication| publication.path == seen.path) {
+			return Err("a path nobody published".into());
+		}
+		match seen.kind {
+			Start | Update | Restart => {
+				let shown = Shown {
+					identity: seen.identity.clone(),
+					available: seen.available,
+				};
+				reader.shown.insert(seen.path.clone(), shown);
+			}
+			End | Offline => {
+				reader.shown.remove(&seen.path);
+			}
+			kind => return Err(format!("unknown route kind {kind:?}")),
+		}
+		return Ok(());
+	}
+
+	// Truthful: every identity shown is one some client published at that path.
+	let publication = publications.get(&seen.identity).ok_or("an identity nobody published")?;
+	if publication.path != seen.path {
+		return Err(format!("the identity of {}", publication.path));
+	}
 	match seen.kind {
 		Start | Update | Restart => {
-			// NoRevival: an instance this reader saw end never starts again.
-			if reader.ended.contains(&seen.instance) {
+			// NoRevival: an identity this reader saw end never starts again.
+			if reader.ended.contains(&seen.identity) {
 				return Err("revived after END".into());
 			}
 			// NoRegression: a reader never goes back to an older publication.
@@ -667,7 +703,7 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			reader.shown.insert(
 				seen.path.clone(),
 				Shown {
-					instance: seen.instance.clone(),
+					identity: seen.identity.clone(),
 					available: seen.available,
 				},
 			);
@@ -677,12 +713,13 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			if publication.live {
 				return Err("END while its publisher still serves it".into());
 			}
-			reader.ended.insert(seen.instance.clone());
+			reader.ended.insert(seen.identity.clone());
 			reader.shown.remove(&seen.path);
 		}
 		Offline => {
 			reader.shown.remove(&seen.path);
 		}
+		kind => return Err(format!("unknown route kind {kind:?}")),
 	}
 	Ok(())
 }
@@ -710,7 +747,7 @@ fn budget(before: Size, after: Size) -> u64 {
 
 /// What one case found: each change's announce-message count, or the failure.
 async fn run_case(rng: Rng, shape: Shape) -> Result<Counts, String> {
-	let mut mesh = Mesh::new(rng, shape.relays).await;
+	let mut mesh = Mesh::new(rng, shape).await;
 	kio::clock::sim::idle().await;
 	mesh.check().map_err(|err| format!("after building the mesh:\n{err}"))?;
 	let mut counts = Counts::new();
@@ -740,11 +777,17 @@ async fn run_case(rng: Rng, shape: Shape) -> Result<Counts, String> {
 	Ok(counts)
 }
 
-/// The case `index` of a sweep from `seed`: its own rng and simulator seed, and a shape.
-fn case(seed: u64, index: u64) -> (u64, Shape) {
+/// The versions every case runs under: lite-07's route layer, and moq-lite-06's hop chains,
+/// which relays speak to a peer that offers nothing newer.
+const VERSIONS: [&str; 2] = ["moq-lite-07-wip", "moq-lite-06"];
+
+/// The case `index` of a sweep from `seed` under `version`: its own rng and simulator seed,
+/// and a shape.
+fn case(seed: u64, index: u64, version: &'static str) -> (u64, Shape) {
 	let case_seed = Rng(seed ^ index.wrapping_mul(0xA24B_AED4_963E_E407)).next();
 	let mut rng = Rng(case_seed);
 	let shape = Shape {
+		version,
 		relays: rng.range(2, 10) as usize,
 		changes: rng.range(5, 30) as usize,
 	};
@@ -755,7 +798,7 @@ fn setting(name: &str, fallback: u64) -> u64 {
 	std::env::var(name).map_or(fallback, |value| value.parse().expect(name))
 }
 
-/// Runs the cases `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick.
+/// Runs the cases `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick, each under every version.
 #[test]
 fn seeded_meshes_hold_the_route_rules() {
 	let seed = setting("MOQ_ROUTE_SEED", 0x6d6f71);
@@ -763,14 +806,16 @@ fn seeded_meshes_hold_the_route_rules() {
 	let first = setting("MOQ_ROUTE_CASE", 0);
 	eprintln!("MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASES={cases}");
 	for index in first..first + cases {
-		let (case_seed, shape) = case(seed, index);
-		// A mesh that never goes quiet hangs rather than fails; the last of these names it.
-		eprintln!("MOQ_ROUTE_CASE={index} {shape:?}");
-		let result = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape));
-		if let Err(err) = result {
-			panic!(
-				"{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}"
-			);
+		for version in VERSIONS {
+			let (case_seed, shape) = case(seed, index, version);
+			// A mesh that never goes quiet hangs rather than fails; the last of these names it.
+			eprintln!("MOQ_ROUTE_CASE={index} {shape:?}");
+			let result = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape));
+			if let Err(err) = result {
+				panic!(
+					"{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}"
+				);
+			}
 		}
 	}
 }
@@ -779,12 +824,16 @@ fn seeded_meshes_hold_the_route_rules() {
 #[test]
 #[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_mesh() {
-	println!("relays,change,mean_messages,max_messages");
-	for relays in [3, 6, 12, 24] {
+	println!("version,relays,change,mean_messages,max_messages");
+	for (version, relays) in VERSIONS.into_iter().flat_map(|v| [3, 6, 12, 24].map(|r| (v, r))) {
 		let mut all = Counts::new();
 		for index in 0..16 {
-			let (case_seed, _) = case(0x6d6f71, index);
-			let shape = Shape { relays, changes: 24 };
+			let (case_seed, _) = case(0x6d6f71, index, version);
+			let shape = Shape {
+				version,
+				relays,
+				changes: 24,
+			};
 			let counts = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape))
 				.unwrap_or_else(|err| panic!("{shape:?} case {index}: {err}"));
 			for (change, sent) in counts {
@@ -794,7 +843,7 @@ fn benchmark_route_mesh() {
 		for (change, sent) in all {
 			let mean = sent.iter().sum::<u64>() as f64 / sent.len() as f64;
 			let max = sent.iter().max().unwrap();
-			println!("{relays},{},{mean:.1},{max}", change.as_str());
+			println!("{version},{relays},{},{mean:.1},{max}", change.as_str());
 		}
 	}
 }

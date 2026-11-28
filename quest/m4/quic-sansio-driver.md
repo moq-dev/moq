@@ -9,9 +9,9 @@ on each wake and at the deadline the poll returns. Its connections implement moq
 `transport::poll::Session`, so moq-net's `Client::connect` and `Server::accept` take them.
 No tokio or io_uring is in its dependency tree.
 
-The first consumer is [moq-dev/rust2](https://github.com/moq-dev/rust2)'s exporter,
+The first consumer is [kixel-ai/rust2](https://github.com/kixel-ai/rust2)'s exporter,
 whose C, C++, and Kotlin bindings drive it from their own loops
-([sessions on sans-IO QUIC](https://github.com/moq-dev/rust2/blob/main/quest/m3/session-quic.md),
+([sessions on sans-IO QUIC](https://github.com/kixel-ai/rust2/blob/main/quest/m3/session-quic.md),
 which rust2 keeps in its deferred milestone).
 
 ## Plan
@@ -19,7 +19,7 @@ which rust2 keeps in its deferred milestone).
 Moved to m4 2026-11-12 (maintainer, /quest-audit): its only consumer is deferred in rust2.
 
 Decided with the maintainer on 2026-10-28, from
-[moq-dev/rust2#215](https://github.com/moq-dev/rust2/pull/215):
+[kixel-ai/rust2#215](https://github.com/kixel-ai/rust2/pull/215):
 
 - **The waits and driver poll forms have landed.**
   Once moq-quic owns its waits, a driver is I/O, timers, and a lock. This one is the
@@ -38,7 +38,8 @@ Open, for whoever starts it:
 - Where it lives: a module in moq-quic, which doesn't depend on moq-net today, or a crate
   of its own.
 - Whether it ships with WebTransport over HTTP/3, sharing
-  the drivers' supported `quic::web` API, or with raw
+  the drivers' `quic::web` API (moq-tokio's is public only under
+  `test-support` since [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957)), or with raw
   QUIC's moq ALPN first.
 - How it builds its TLS configs (identity, roots, fingerprint pinning) without
   moq-tokio's `tls` module.

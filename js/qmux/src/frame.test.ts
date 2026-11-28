@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TransportCode, transportCode } from "./error.ts";
 import * as Frame from "./frame.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
@@ -73,6 +74,18 @@ describe("QMux01 record framing", () => {
 			0x00,
 		);
 		expect(() => Frame.decode(record, "qmux-00")).toThrow();
+	});
+
+	test("qmux-00 decode rejects a message carrying more than one frame", () => {
+		const ping = Frame.encode({ type: "ping_request", sequence: 1n }, "qmux-00");
+		const stream = Frame.encode(
+			{ type: "stream", id: new Stream.Id(VarInt.from(0n)), data: new Uint8Array([1]), fin: false },
+			"qmux-00",
+		);
+		expect(() => Frame.decode(new Uint8Array([...ping, ...stream]), "qmux-00")).toThrow();
+		// A PADDING byte is a frame of its own, so a STREAM frame behind it is a second frame.
+		expect(() => Frame.decode(new Uint8Array([0x00, ...stream]), "qmux-00")).toThrow();
+		expect(Frame.decode(new Uint8Array([0x00]), "qmux-00")).toBeNull();
 	});
 
 	test("ping_request and ping_response round-trip preserves the sequence number", () => {
@@ -179,19 +192,32 @@ describe("QMux02 (draft-02)", () => {
 		}
 	});
 
-	test("RESET_STREAM_AT (0x24) decodes as a reset carrying reliableSize", () => {
+	test("RESET_STREAM_AT (0x24) round-trips as a reset carrying reliableSize", () => {
+		const frame: Frame.ResetStream = {
+			type: "reset_stream",
+			id: new Stream.Id(VarInt.from(4n)),
+			code: VarInt.from(42n),
+			finalSize: 128n,
+			reliableSize: 64n,
+		};
+		const wire = Frame.encode(frame, "qmux-02");
 		// 0x24, id=4, code=42, final_size=128 (0x40 0x80), reliable_size=64 (0x40 0x40).
-		const wire = new Uint8Array([0x24, 0x04, 0x2a, 0x40, 0x80, 0x40, 0x40]);
-		const decoded = Frame.decode(wire, "qmux-02");
-		expect(decoded?.type).toBe("reset_stream");
-		if (decoded?.type === "reset_stream") {
-			expect(decoded.id.value.value).toBe(4n);
-			expect(decoded.code.value).toBe(42n);
-			expect(decoded.finalSize).toBe(128n);
-			// reliableSize present marks it as RESET_STREAM_AT (vs a plain 0x04 reset,
-			// which leaves it undefined); the session uses this to gate on negotiation.
-			expect(decoded.reliableSize).toBe(64n);
-		}
+		expect(Array.from(wire)).toEqual([0x24, 0x04, 0x2a, 0x40, 0x80, 0x40, 0x40]);
+		// reliableSize present marks it as RESET_STREAM_AT (vs a plain 0x04 reset,
+		// which leaves it undefined); the session uses this to gate on negotiation.
+		expect(Frame.decode(wire, "qmux-02")).toEqual(frame);
+		expect(Frame.encode({ ...frame, reliableSize: undefined }, "qmux-02")[0]).toBe(0x04);
+	});
+
+	test("a RESET_STREAM_AT reliable_size past final_size does not encode", () => {
+		const frame: Frame.ResetStream = {
+			type: "reset_stream",
+			id: new Stream.Id(VarInt.from(4n)),
+			code: VarInt.from(0n),
+			finalSize: 2n,
+			reliableSize: 3n,
+		};
+		expect(() => Frame.encode(frame, "qmux-02")).toThrow("reliable_size exceeds final_size");
 	});
 
 	test("a duplicate transport parameter is rejected", () => {
@@ -215,6 +241,18 @@ describe("QMux02 (draft-02)", () => {
 			0x01, // duplicate
 		]);
 		expect(() => Frame.decode(bytes, "qmux-02")).toThrow();
+	});
+
+	test("a malformed transport parameter value is a TRANSPORT_PARAMETER_ERROR", () => {
+		// QX_TRANSPORT_PARAMETERS carrying initial_max_data (0x04) with an empty value.
+		const bytes = new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x02, 0x04, 0x00]);
+		let caught: unknown;
+		try {
+			Frame.decode(bytes, "qmux-02");
+		} catch (err) {
+			caught = err;
+		}
+		expect(transportCode(caught)).toBe(TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
 	test("forbidden QUIC v1 transport parameters are rejected", () => {

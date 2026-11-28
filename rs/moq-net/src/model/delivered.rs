@@ -1,34 +1,42 @@
-//! The group sequences a reader handed out, so it never hands one out twice.
+//! The group keys a reader handed out, so it never hands one out twice.
 
 use std::collections::BTreeMap;
 
-/// The group sequences a reader handed out, as runs of consecutive sequences.
+use rangemap::RangeSet;
+
+use super::subscription::{Cover, minus};
+
+/// The group keys a reader handed out, as runs of consecutive keys.
 ///
 /// A reader stops expecting a group once it is past its budget, and counts everything
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
 /// floor, so only the gaps above it cost memory. It never holds the reserved group
-/// sequence `u64::MAX`, so one past any run fits.
+/// key `u64::MAX`, so one past any run fits.
 #[derive(Default)]
 pub(super) struct Delivered {
-	/// First to last sequence, inclusive, never adjacent to each other.
+	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
+	/// The keys a fold counted as handed out that no range held then, so no budget judged
+	/// them: a range added later owes each it holds (see [`Self::reopen`]). Always within `runs`,
+	/// and never more runs than [`Self::fold_below`] leaves.
+	unjudged: RangeSet<u64>,
 }
 
 impl Delivered {
-	/// Whether `sequence` was handed out, or is below the floor.
-	pub fn contains(&self, sequence: u64) -> bool {
+	/// Whether `key` was handed out, or is below the floor.
+	pub fn contains(&self, key: u64) -> bool {
 		self.runs
-			.range(..=sequence)
+			.range(..=key)
 			.next_back()
-			.is_some_and(|(_, last)| sequence <= *last)
+			.is_some_and(|(_, last)| key <= *last)
 	}
 
-	/// The first sequence above the handed-out prefix.
+	/// The first key above the handed-out prefix.
 	pub fn floor(&self) -> u64 {
 		self.runs.get(&0).map_or(0, |last| last + 1)
 	}
 
-	/// Whether every sequence in `groups` was handed out, or is below the floor.
+	/// Whether every key in `groups` was handed out, or is below the floor.
 	pub fn covers(&self, groups: std::ops::Range<u64>) -> bool {
 		groups.is_empty()
 			|| self
@@ -38,28 +46,29 @@ impl Delivered {
 				.is_some_and(|(_, last)| groups.end - 1 <= *last)
 	}
 
-	/// Record `sequence` as handed out; `false` when it already was.
-	pub fn insert(&mut self, sequence: u64) -> bool {
-		if self.contains(sequence) {
+	/// Record `key` as handed out; `false` when it already was.
+	pub fn insert(&mut self, key: u64) -> bool {
+		if self.contains(key) {
 			return false;
 		}
-		let first = sequence
+		let first = key
 			.checked_sub(1)
 			.and_then(|below| self.runs.range(..=below).next_back())
-			.filter(|(_, last)| **last + 1 == sequence)
-			.map_or(sequence, |(first, _)| *first);
-		let last = self.runs.remove(&(sequence + 1)).unwrap_or(sequence);
+			.filter(|(_, last)| **last + 1 == key)
+			.map_or(key, |(first, _)| *first);
+		let last = self.runs.remove(&(key + 1)).unwrap_or(key);
 		self.runs.insert(first, last);
 		true
 	}
 
-	/// Record every sequence in `groups` as handed out, joining the runs it touches.
+	/// Record every key in `groups` as handed out, joining the runs it touches.
 	pub fn insert_run(&mut self, groups: std::ops::Range<u64>) {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
+		self.unjudged.remove(groups.clone());
 		let mut first = groups.start;
-		// A run ending at or just below the first sequence joins it.
+		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
 			&& end + 1 >= first
 		{
@@ -76,28 +85,53 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
-	/// The parts of `groups` not handed out, in order.
-	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
-		let mut gaps = Vec::new();
+	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.
+	pub fn remove(&mut self, groups: std::ops::Range<u64>) {
+		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
+			return;
+		};
+		self.unjudged.remove(groups.clone());
+		// Runs are disjoint and sorted, so the ones reaching into `groups` are the last few
+		// starting at or below its last key.
+		let cut: Vec<(u64, u64)> = (self.runs.range(..=last).rev())
+			.take_while(|(_, end)| **end >= groups.start)
+			.map(|(start, end)| (*start, *end))
+			.collect();
+		for (start, end) in cut {
+			self.runs.remove(&start);
+			if start < groups.start {
+				self.runs.insert(start, groups.start - 1);
+			}
+			if end > last {
+				self.runs.insert(last + 1, end);
+			}
+		}
+	}
+
+	/// The parts of `groups` not handed out, in order, found as they are read.
+	pub fn gaps(&self, groups: std::ops::Range<u64>) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
 		let mut next = groups.start;
 		let from = self
 			.runs
 			.range(..=groups.start)
 			.next_back()
 			.map_or(next, |(start, _)| *start);
-		for (first, last) in self.runs.range(from..) {
-			if next >= groups.end {
-				return gaps;
+		let mut runs = self.runs.range(from..);
+		std::iter::from_fn(move || {
+			while next < groups.end {
+				let Some((first, last)) = runs.next() else {
+					let gap = next..groups.end;
+					next = groups.end;
+					return Some(gap);
+				};
+				let gap = next..(*first).min(groups.end);
+				next = next.max(last + 1);
+				if !gap.is_empty() {
+					return Some(gap);
+				}
 			}
-			if *first > next {
-				gaps.push(next..(*first).min(groups.end));
-			}
-			next = next.max(last + 1);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
+			None
+		})
 	}
 
 	/// The parts of `groups` none of `taken` handed out, in order.
@@ -109,7 +143,74 @@ impl Delivered {
 		gaps
 	}
 
-	/// Count every sequence below `floor` as handed out.
+	/// Count every key below `floor` as handed out, as a fold past the reader's budget does:
+	/// each gap it closes that `judged` doesn't hold, or every one while the ranges are still
+	/// being placed, a range added later that holds it owes again.
+	///
+	/// So that ranges moving to disjoint groups leave no more runs than they hold, what lies
+	/// between two runs it remembers that `judged` doesn't hold joins them: what ranges added
+	/// over it later hand out may then include a group handed out before, which the same
+	/// identity makes harmless, as [`Record::retire`](super::record::Record) trades, rather than
+	/// miss one never handed out.
+	pub fn fold_below(&mut self, floor: u64, judged: Option<&Cover>) {
+		let gaps: Vec<std::ops::Range<u64>> = self.gaps(self.floor()..floor).collect();
+		let added = !gaps.is_empty();
+		for gap in gaps {
+			match judged {
+				Some(judged) => {
+					for run in minus(gap.start..=gap.end - 1, judged) {
+						self.unjudged.insert(*run.start()..*run.end() + 1);
+					}
+				}
+				None => self.unjudged.insert(gap),
+			}
+		}
+		self.forget_below(floor);
+		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
+		let (Some(judged), true, Some(first), Some(last)) = (
+			judged,
+			added,
+			self.unjudged.iter().next().map(|run| run.start),
+			self.unjudged.iter().next_back().map(|run| run.end - 1),
+		) else {
+			return;
+		};
+		for run in minus(first..=last, judged) {
+			let run = *run.start()..*run.end() + 1;
+			self.unjudged.insert(run.clone());
+			// Not what a reopen gave back since, which is owed rather than counted handed out.
+			let owed: Vec<std::ops::Range<u64>> = self.gaps(run).collect();
+			for gap in owed {
+				self.unjudged.remove(gap);
+			}
+		}
+	}
+
+	/// Whether a fold counted `key` as handed out while no range held it.
+	pub fn is_unjudged(&self, key: u64) -> bool {
+		self.unjudged.contains(&key)
+	}
+
+	/// Take back each key a fold counted as handed out unjudged that `judged` now holds, so it
+	/// is owed again.
+	pub fn reopen(&mut self, judged: &Cover) {
+		let held: Vec<std::ops::Range<u64>> = (self.unjudged.iter())
+			.flat_map(|run| judged.within(run.start, run.end - 1))
+			.map(|run| *run.start()..*run.end() + 1)
+			.collect();
+		for run in held {
+			self.remove(run);
+		}
+	}
+
+	/// Count every key below `floor` as handed out for good: none is owed again, whatever
+	/// range is added later.
+	pub fn settle_below(&mut self, floor: u64) {
+		self.forget_below(floor);
+		self.unjudged.remove(0..floor);
+	}
+
+	/// Count every key below `floor` as handed out.
 	pub fn forget_below(&mut self, floor: u64) {
 		let Some(below) = floor.checked_sub(1) else {
 			return;
@@ -122,7 +223,7 @@ impl Delivered {
 		self.runs.insert(0, last);
 	}
 
-	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
+	/// The lowest key handed out above a gap: once it is past the reader's budget,
 	/// so is the gap, since a timed track refuses a group whose start rewinds.
 	pub fn above_gap(&self) -> Option<u64> {
 		let mut runs = self.runs.keys();
@@ -132,23 +233,36 @@ impl Delivered {
 		}
 	}
 
-	/// The last run starting below `sequence`.
-	pub fn last_before(&self, sequence: u64) -> Option<u64> {
-		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
+	/// The last run starting below `key`.
+	pub fn last_before(&self, key: u64) -> Option<u64> {
+		self.runs.range(..key).next_back().map(|(start, _)| *start)
 	}
 
-	/// One past the last sequence of the run holding `sequence`, if it was handed out.
-	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+	/// One past the last key of the run holding `key`, if it was handed out.
+	pub fn run_end(&self, key: u64) -> Option<u64> {
 		self.runs
-			.range(..=sequence)
+			.range(..=key)
 			.next_back()
-			.filter(|(_, last)| sequence <= **last)
+			.filter(|(_, last)| key <= **last)
 			.map(|(_, last)| last + 1)
 	}
 
-	/// How many runs it holds: one per gap, plus the floor.
+	/// The lowest key from `key` on that was handed out.
+	pub fn next_from(&self, key: u64) -> Option<u64> {
+		match self.contains(key) {
+			true => Some(key),
+			false => self.runs.range(key..).next().map(|(first, _)| *first),
+		}
+	}
+
+	/// One past the highest key handed out.
+	pub fn end(&self) -> Option<u64> {
+		self.runs.last_key_value().map(|(_, last)| last + 1)
+	}
+
+	/// How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged.
 	pub fn runs(&self) -> usize {
-		self.runs.len()
+		self.runs.len() + self.unjudged.len()
 	}
 }
 
@@ -163,14 +277,14 @@ mod test {
 	#[test]
 	fn gaps_are_what_no_run_covers() {
 		let mut delivered = Delivered::default();
-		for sequence in [2, 4, 5, 9] {
-			delivered.insert(sequence);
+		for key in [2, 4, 5, 9] {
+			delivered.insert(key);
 		}
-		assert_eq!(delivered.gaps(0..12), [0..2, 3..4, 6..9, 10..12]);
-		assert_eq!(delivered.gaps(4..6), []);
-		assert_eq!(delivered.gaps(5..11), [6..9, 10..11]);
+		assert_eq!(delivered.gaps(0..12).collect::<Vec<_>>(), [0..2, 3..4, 6..9, 10..12]);
+		assert_eq!(delivered.gaps(4..6).next(), None);
+		assert_eq!(delivered.gaps(5..11).collect::<Vec<_>>(), [6..9, 10..11]);
 		delivered.insert(u64::MAX - 1);
-		let gaps = delivered.gaps(u64::MAX - 2..u64::MAX);
+		let gaps: Vec<_> = delivered.gaps(u64::MAX - 2..u64::MAX).collect();
 		assert_eq!((gaps.len(), gaps.first()), (1, Some(&(u64::MAX - 2..u64::MAX - 1))));
 	}
 
@@ -196,8 +310,8 @@ mod test {
 	#[test]
 	fn insert_run_joins_every_run_it_touches() {
 		let mut delivered = Delivered::default();
-		for sequence in [2, 5, 6, 9, 14] {
-			delivered.insert(sequence);
+		for key in [2, 5, 6, 9, 14] {
+			delivered.insert(key);
 		}
 		delivered.insert_run(3..5);
 		assert_eq!(runs(&delivered), [(2, 6), (9, 9), (14, 14)], "adjacent on both sides");
@@ -212,7 +326,31 @@ mod test {
 	}
 
 	#[test]
-	fn the_extremes_are_sequences_too() {
+	fn remove_splits_the_runs_it_cuts() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(2..7);
+		for key in [9, 12] {
+			delivered.insert(key);
+		}
+		delivered.remove(4..10);
+		assert_eq!(runs(&delivered), [(2, 3), (12, 12)], "the tail of one, all of another");
+		delivered.insert_run(2..12);
+		delivered.remove(5..6);
+		assert_eq!(runs(&delivered), [(2, 4), (6, 12)], "the middle of one");
+		delivered.remove(13..20);
+		delivered.remove(8..8);
+		assert_eq!(
+			runs(&delivered),
+			[(2, 4), (6, 12)],
+			"nothing handed out, or nothing at all"
+		);
+		delivered.insert(u64::MAX - 1);
+		delivered.remove(0..u64::MAX);
+		assert_eq!(runs(&delivered), []);
+	}
+
+	#[test]
+	fn the_extremes_are_keys_too() {
 		let mut delivered = Delivered::default();
 		assert!(delivered.insert(0));
 		assert!(delivered.insert(u64::MAX - 1));
@@ -226,8 +364,8 @@ mod test {
 	#[test]
 	fn forget_below_closes_the_gaps_under_the_floor() {
 		let mut delivered = Delivered::default();
-		for sequence in [3, 5, 6, 9, 12] {
-			delivered.insert(sequence);
+		for key in [3, 5, 6, 9, 12] {
+			delivered.insert(key);
 		}
 		assert_eq!(delivered.above_gap(), Some(3));
 		assert_eq!(delivered.last_before(0), None);
@@ -251,5 +389,59 @@ mod test {
 		delivered.forget_below(13);
 		assert_eq!(runs(&delivered), [(0, 12)]);
 		assert_eq!(delivered.above_gap(), None);
+	}
+
+	#[test]
+	fn a_fold_reopens_only_the_gaps_no_range_judged() {
+		let mut delivered = Delivered::default();
+		for key in [4, 9] {
+			delivered.insert(key);
+		}
+		// Ranges hold 2..=4 and 6..=7 as the fold closes every gap below 9.
+		delivered.fold_below(9, Some(&Cover::new([2..=4, 6..=7])));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 4, "the floor plus three gaps no range held");
+
+		// A range added over 0..=8 owes the gaps folded unjudged, never a hand-out nor what the
+		// budget judged.
+		delivered.reopen(&Cover::new(std::iter::once(0..=8)));
+		assert_eq!(runs(&delivered), [(2, 4), (6, 7), (9, 9)]);
+		assert_eq!(delivered.runs(), 3, "nothing left to reopen");
+
+		// Folded while the ranges are still being placed, every gap is unjudged; one handed out or
+		// settled since is not reopened.
+		delivered.fold_below(10, None);
+		delivered.insert_run(0..1);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 0), (2, 4), (6, 7), (9, 9)]);
+
+		// Settled for good, nothing below is owed again.
+		delivered.fold_below(10, None);
+		delivered.settle_below(10);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 1);
+	}
+
+	#[test]
+	fn a_fold_keeps_no_more_unjudged_runs_than_the_ranges_hold() {
+		let mut delivered = Delivered::default();
+		// Ranges moving to a fresh group each time, each handed out and folded past by ranges
+		// then holding only the live edge, would leave a run no range held between each pair.
+		for key in (10..100).step_by(10) {
+			delivered.insert(key);
+			delivered.fold_below(key + 5, Some(&Cover::new(std::iter::once(key + 5..=1000))));
+		}
+		assert_eq!(delivered.runs(), 2, "the floor and one run between");
+		// A range added over a group handed out before owes it again, and while it holds it,
+		// splits the runs around it; one no longer held, as 97 next, joins them.
+		delivered.reopen(&Cover::new([40..=40, 95..=1000]));
+		assert!(!delivered.contains(40));
+		delivered.insert(40);
+		delivered.insert(97);
+		delivered.fold_below(99, Some(&Cover::new([40..=40, 99..=1000])));
+		assert_eq!(delivered.runs(), 3, "the floor and a run each side of 40");
+		delivered.reopen(&Cover::new(std::iter::once(0..=98)));
+		assert_eq!(runs(&delivered), [(40, 40)]);
 	}
 }

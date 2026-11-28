@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use moq_net::{Timestamp, Version, cache, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -13,9 +14,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Every viewer that joins reads the group the relay holds. Each join subscribes upstream
@@ -24,7 +26,13 @@ fn origin(hop: u64) -> origin::Producer {
 /// That drop must not hide the group the relay holds whole.
 #[kio::test]
 async fn each_joining_viewer_reads_the_held_group() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);
@@ -38,7 +46,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
 		let source = broadcast.broadcast().create_track("video", info).unwrap();
-		let mut group = source.append_group().unwrap();
+		let mut group = source.append_next().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..])
 			.unwrap();
@@ -55,7 +63,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 				let remote = remote.unwrap().expect("the broadcast resolves");
 				let mut subscriber = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				let mut group = subscriber.recv_group().await.unwrap().expect("a group");
-				assert_eq!(group.sequence, 0, "{version}: viewer {join}");
+				assert_eq!(group.start, 0, "{version}: viewer {join}");
 				let frame = group.read_frame().await.unwrap().expect("a frame");
 				assert_eq!(&frame.payload[..], b"x", "{version}: viewer {join}");
 			})

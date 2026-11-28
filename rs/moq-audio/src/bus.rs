@@ -47,7 +47,7 @@
 //! # }
 //! ```
 //!
-//! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
+//! `Bus::capture` needs the `capture` feature.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -663,6 +663,9 @@ impl Driver {
 			minus.output.publish(*position, channels, self.retention);
 		}
 
+		// A source whose last channel closed stays until its delay line plays out.
+		sources.retain(|_, source| !source.closed());
+
 		*position += frames as u64;
 	}
 
@@ -686,6 +689,11 @@ impl Drop for Driver {
 }
 
 impl Source {
+	/// Every channel has closed and the sync delay holds nothing more of them.
+	fn closed(&self) -> bool {
+		self.channels.is_empty() && self.lanes.iter().all(|lane| lane.delay.is_empty())
+	}
+
 	/// Compute this source's share of the next `samples`, interleaved.
 	///
 	/// Only a `stereo` bus pans; any other holds every strip on it at center.
@@ -1243,7 +1251,9 @@ impl Drop for Port {
 		let key = key(&self.strip);
 		if let Some(source) = mixer.sources.get_mut(&key) {
 			source.channels.retain(|feed| feed.id != self.id);
-			if source.channels.is_empty() {
+			// Otherwise the driver drops it once the sync delay plays out what it
+			// holds of the closed channels.
+			if source.closed() {
 				mixer.sources.remove(&key);
 			}
 		}
@@ -2093,6 +2103,38 @@ mod tests {
 		assert_eq!(held_mono(&bus), 0, "the drained delay line is freed");
 		stereo.write(&pcm).unwrap();
 		assert_frames(&step(&mut driver, &mut reader), balanced);
+	}
+
+	/// Closing a strip's last channel still plays out what its sync delay holds,
+	/// then frees the source; with no delay it leaves at once.
+	#[test]
+	fn closing_the_last_channel_plays_out_the_delay() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let (mut channel, strip) = source(&bus);
+		strip.set_delay(Duration::from_millis(20));
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+
+		let last = feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 20);
+		assert!(all_near(&last[0], 0.5));
+
+		drop(channel);
+		let held = |bus: &Bus| bus.inner.mixer.lock().unwrap().sources.contains_key(&key(&strip));
+		assert!(held(&bus), "the delay line outlives the channel");
+		for _ in 0..2 {
+			assert!(all_near(&step(&mut driver, &mut reader), 0.5), "held audio was dropped");
+		}
+		assert!(!held(&bus), "the drained source is freed");
+		assert!(all_near(&step(&mut driver, &mut reader), 0.0));
+
+		// Without a delay there is nothing to play out.
+		strip.set_delay(Duration::ZERO);
+		let mut channel = bus.live(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		channel.write(&constant(0.5, BLOCK, 2)).unwrap();
+		step(&mut driver, &mut reader);
+		drop(channel);
+		assert!(!held(&bus), "an undelayed source leaves with its last channel");
 	}
 
 	/// A pan change reaches audio the sync delay already holds back, as gain

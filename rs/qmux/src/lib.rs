@@ -18,13 +18,13 @@
 //!
 //! Everything tied to a specific transport lives in that transport's module:
 //!
-//! | Module | Entry point | Feature |
-//! | --- | --- | --- |
-//! | `tcp` | `tcp::connect`, `tcp::accept` | `tcp` |
-//! | `uds` | `uds::connect`, `uds::accept` | `uds` (Unix only) |
-//! | `tls` | `tls::Client`, `tls::Server` | `tls` |
-//! | `ws` | `ws::Client`, `ws::Server`, `ws::Upgraded` | `ws` |
-//! | [`transport`] | [`transport::Transport`] | |
+//! | Module | Entry point |
+//! | --- | --- |
+//! | [`tcp`] | [`tcp::connect`], [`tcp::accept`] |
+//! | `uds` (Unix only) | `uds::connect`, `uds::accept` |
+//! | [`tls`] | [`tls::Client`], [`tls::Server`] |
+//! | [`ws`] | [`ws::Client`], [`ws::Server`], [`ws::Upgraded`] |
+//! | [`transport`] | [`transport::Transport`] |
 //!
 //! For anything the built-in modules don't cover, wrap an
 //! [`AsyncRead`](tokio::io::AsyncRead) + [`AsyncWrite`](tokio::io::AsyncWrite) byte stream
@@ -32,7 +32,6 @@
 //! [`Session::connect`] / [`Session::accept`].
 
 // ALPN/subprotocol negotiation is only used by the TLS and WebSocket transports.
-#[cfg(any(feature = "tls", feature = "ws"))]
 mod alpn;
 mod config;
 mod driver;
@@ -41,37 +40,36 @@ mod protocol;
 mod session;
 mod socket;
 
+/// Test support for the `fuzz/` harness: the target body and its seeds.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
+
 /// The transport abstraction, and the byte-stream implementation.
 pub mod transport;
 
 /// Plain TCP transport.
-#[cfg(feature = "tcp")]
 pub mod tcp;
 
 /// Unix domain socket transport.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 pub mod uds;
 
 /// TLS over TCP transport.
-#[cfg(feature = "tls")]
 pub mod tls;
 
 /// WebSocket transport.
-#[cfg(feature = "ws")]
 pub mod ws;
 
 pub use config::{Config, Protocol};
 pub use driver::Driver;
 pub use error::Error;
-#[cfg(feature = "ws")]
 pub use error::WebSocketError;
 pub use moq_quic::connection::mux::Version;
 pub use moq_quic::{Limits, LimitsError};
 pub use session::{RecvStream, SendGroup, SendStream, Session};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use socket::TcpStats;
-pub use socket::{SharedSocketStats, SocketStats};
+pub use socket::{SharedSocketStats, SocketBytes, SocketStats};
 
 /// The largest frame draft-00 accepts, header included
-#[cfg(any(feature = "tcp", all(unix, feature = "uds"), feature = "ws"))]
 const MAX_FRAME_SIZE: usize = 16384;

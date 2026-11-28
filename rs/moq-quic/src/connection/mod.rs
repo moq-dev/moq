@@ -56,8 +56,11 @@ mod datagrams;
 use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
+mod keep_alive;
+use keep_alive::Liveness;
+pub use keep_alive::{KeepAlive, KeepAliveError};
+
 mod mtud;
-#[cfg(feature = "mux")]
 pub mod mux;
 
 mod packet_builder;
@@ -100,7 +103,7 @@ impl ConnectionTag {
 		Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 	}
 }
-pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
+pub use stats::{CreditStats, FrameStats, HeldStats, PathStats, SendCreditStats, Stats, UdpStats};
 
 pub(crate) mod streams;
 pub use streams::Streams;
@@ -125,8 +128,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
-///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read),
+///   but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -214,6 +217,13 @@ pub struct Connection {
 	idle_timeout: Option<Duration>,
 	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
 	keep_alive: Option<Duration>,
+	/// The keep-alive [`Self::set_keep_alive`] started, which replaces [`Self::keep_alive`]
+	liveness: Option<Liveness>,
+	/// When the peer was last heard: the latest authenticated packet
+	heard: Instant,
+	/// When the keep-alive's first probe past the congestion window since the peer last
+	/// acknowledged progress went out, and how many have since
+	exempt_probes: Option<(Instant, u32)>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -253,6 +263,8 @@ pub struct Connection {
 	/// A probe timed out with the peer unheard since the packet it probed for went out, so the
 	/// path may have been down: the next packet heard brings the next probe forward.
 	probe_when_heard: bool,
+	/// When handshake CRYPTO was last recovered ahead of the PTO ([`Self::recover_crypto_early`])
+	early_crypto_sent: Option<Instant>,
 
 	//
 	// Congestion Control
@@ -272,6 +284,8 @@ pub struct Connection {
 	bandwidth_probe: BandwidthProbe,
 	/// Holds sending to a cap below whatever the congestion controller allows
 	send_rate: Option<rate::Bucket>,
+	/// Since when the congestion controller has held back data ready to send, and how
+	congestion_wait: Option<(Instant, CongestionLimit)>,
 
 	streams: StreamsState,
 	/// Surplus remote CIDs for future use on new paths
@@ -365,6 +379,9 @@ impl Connection {
 			},
 			// Armed only once established, after the peer's parameters set it.
 			keep_alive: None,
+			liveness: None,
+			heard: now,
+			exempt_probes: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -384,9 +401,11 @@ impl Connection {
 			pto_count: 0,
 			heard_since_sent: false,
 			probe_when_heard: false,
+			early_crypto_sent: None,
 
 			app_limited: false,
 			send_rate: None,
+			congestion_wait: None,
 			acked: Vec::new(),
 			receive_timestamps: None,
 			arrival: None,
@@ -502,6 +521,77 @@ impl Connection {
 		}
 	}
 
+	/// End every stream either side may still send on, except `keep`, and wait until both ends are
+	/// through
+	///
+	/// Each stream the application opened or accepted first stops taking writes, and once the peer
+	/// acknowledged everything written to them, each is reset with `code` and gets one
+	/// STOP_SENDING with it, so the peer reads what was written ahead of any end. A stream is done
+	/// once the peer acknowledged the reset, or every byte of a finish, and its final size arrived
+	/// with a reset or FIN. A stream waiting to be accepted is left alone but keeps this waiting:
+	/// accept it, and keep it by passing it in `keep` or let the next poll end it. The readers and
+	/// writers keep their streams, and learn of the ends by using them: a writer sees its stream
+	/// stopped with `code`, as if the peer had stopped it, and its own reset is held with the
+	/// others. Ready once none is left open, or with the reason the connection was lost first. A
+	/// peer that keeps opening streams keeps this waiting, so bound the wait, and call
+	/// [`Self::abandon_quiesce`] when it runs out.
+	pub fn poll_quiesce(&mut self, waiter: &kio::Waiter, code: VarInt, keep: &[StreamId]) -> Poll<Result<(), Error>> {
+		if let Some(err) = self.streams.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// The peer's stalled streams can fill `keep`, so look it up in constant time.
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		let sending = self.streams.sending(&keep);
+		// The writers stop, and what they wrote reaches the peer before any stream ends, so it
+		// reads that, such as a refusal, ahead of the resets and stops, whatever the packets do.
+		let mut unacked = false;
+		for &id in &sending {
+			unacked |= self.streams.stop_for_writer(id, code);
+		}
+		if unacked {
+			self.streams.waits.register_ended(waiter);
+			return Poll::Pending;
+		}
+		self.reset_quiesced(sending.iter().map(|&id| (id, code)).collect());
+		let pending = &mut self.spaces[SpaceId::Data].pending;
+		if !self.streams.quiesce(pending, code, &keep) && sending.is_empty() {
+			return Poll::Ready(Ok(()));
+		}
+		// A stream the peer opens, or either half of one ending, may change the answer.
+		self.streams.waits.register_ended(waiter);
+		self.streams.waits.register_accept(Dir::Uni, waiter);
+		self.streams.waits.register_accept(Dir::Bi, waiter);
+		Poll::Pending
+	}
+
+	/// Give up a [`Self::poll_quiesce`] that is not ready, with the same `code` and `keep`: reset
+	/// now the streams it stopped, send the writers' resets it held, and ask the peer to end the
+	/// streams it sends on, without waiting for the peer to acknowledge what was written. Until
+	/// this or a ready poll, those resets and stops stay held.
+	pub fn abandon_quiesce(&mut self, code: VarInt, keep: &[StreamId]) {
+		let quiesced = self.streams.quiesced();
+		self.reset_quiesced(quiesced);
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		self.streams
+			.quiesce(&mut self.spaces[SpaceId::Data].pending, code, &keep);
+	}
+
+	/// Reset each of `streams` still open with its code, keeping what was written, which a peer
+	/// with RESET_STREAM_AT still hands its reader unless it stopped the stream, and send those
+	/// resets together with the ones writers of quiesced streams asked for meanwhile.
+	fn reset_quiesced(&mut self, streams: Vec<(StreamId, VarInt)>) {
+		for (id, code) in streams {
+			if !self.streams.resettable(id) {
+				continue;
+			}
+			let mut send = self.send_stream(id);
+			let written = send.offset();
+			send.reset_at(written, code).expect("a stream still sending resets");
+		}
+		self.streams
+			.release_quiesced_resets(&mut self.spaces[SpaceId::Data].pending);
+	}
+
 	/// Provide control over streams
 	#[must_use]
 	pub fn recv_stream(&mut self, id: StreamId) -> recv::Stream<'_> {
@@ -556,6 +646,9 @@ impl Connection {
 	#[must_use]
 	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
+		// A write that blocked on the peer's credit, or the congestion controller, woke this call:
+		// date its wait from here.
+		self.observe_waits(now);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
 			true => max_datagrams,
@@ -580,6 +673,12 @@ impl Connection {
 		// packets, this can be earlier than the start of the current QUIC packet.
 		let mut datagram_start = 0;
 		let mut segment_size = usize::from(self.path.current_mtu());
+		// No datagram may outgrow what the anti-amplification limit has left (RFC 9000 §8.1). A
+		// smaller one still goes out, so a path MTU past the whole budget cannot stall the
+		// handshake.
+		if let Some(budget) = self.path.anti_amplification_budget() {
+			segment_size = segment_size.min(usize::try_from(budget).unwrap_or(usize::MAX));
+		}
 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
 
@@ -637,8 +736,9 @@ impl Connection {
 			&& self.spaces[SpaceId::Handshake].unacked_crypto().next().is_some();
 
 		// Check whether we need to send an ACK_FREQUENCY frame
+		// A lost frame already queued its retransmission, which this must not clear
 		if let Some(config) = &self.config.ack_frequency {
-			self.spaces[SpaceId::Data].pending.ack_frequency =
+			self.spaces[SpaceId::Data].pending.ack_frequency |=
 				self.ack_frequency
 					.should_send_ack_frequency(self.path.rtt.get(), config, &self.peer_params)
 					&& self.highest_space == SpaceId::Data
@@ -654,6 +754,11 @@ impl Connection {
 		let mut builder_storage: Option<PacketBuilder> = None;
 		let mut sent_frames = None;
 		let mut pad_datagram = false;
+		// Whether the datagram carries the current path's PATH_CHALLENGE
+		let mut challenge_datagram = false;
+		// Whether the datagram's room was cleared to go in flight: the window held it, or it
+		// carries a loss probe or a close. A datagram opened by a bare ACK was not.
+		let mut datagram_cleared = false;
 		let mut pad_datagram_to_mtu = false;
 		// Set when either the congestion window or the pacer held a send back; drives
 		// `app_limited`, since neither case means the application ran dry.
@@ -667,6 +772,13 @@ impl Connection {
 		// Set when the send rate cap held a send back: a local policy, not the path, so the
 		// controller hears it as application-limited.
 		let mut rate_blocked = false;
+		// When the pacer releases data ready to send it held back; a held bandwidth probe
+		// resends data already in flight, so it is not one.
+		let mut pacing_until = None;
+
+		// Whatever still holds a send back sets the pacing timer again, so one that has since
+		// cleared, as when the data it held was reset, wakes nobody
+		self.timers.stop(Timer::Pacing);
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -725,6 +837,13 @@ impl Connection {
 			if space_id == SpaceId::Data {
 				ack_eliciting |= self.can_send_1rtt(frame_space_1rtt) || bandwidth_probe;
 			}
+			// ACKs due now go out alone when a limit holds back the data they would ride with:
+			// an ACK-only packet is not congestion controlled (RFC 9002 §7), and holding it stalls
+			// the peer's own sending.
+			let acks_alone = space_id == SpaceId::Data && can_send.acks;
+			// Set once a limit held this space's data back and its ACKs went out alone, after
+			// which nothing ack-eliciting may follow in this call
+			let mut held = false;
 
 			pad_datagram_to_mtu |= space_id == SpaceId::Data && self.config.pad_to_mtu;
 
@@ -747,18 +866,26 @@ impl Connection {
 					break;
 				}
 
-				// Anti-amplification is only based on `total_sent`, which gets
-				// updated at the end of this method. Therefore we pass the amount
-				// of bytes for datagrams that are already created, as well as 1 byte
-				// for starting another datagram. If there is any anti-amplification
-				// budget left, we always allow a full MTU to be sent
-				// (see https://github.com/quinn-rs/quinn/issues/1082)
-				if self
-					.path
-					.anti_amplification_blocked(segment_size as u64 * (num_datagrams as u64) + 1)
-				{
+				// Anti-amplification counts `total_sent`, which this method updates only at its
+				// end, so the datagrams it already built count too: each is one segment. A
+				// client's Initial, and a server's ack-eliciting one, is padded to `min_mtu`
+				// (RFC 9000 §14.1); when the budget cannot carry that, a later space may still
+				// fit.
+				let padded = space_id == SpaceId::Initial && (self.side.is_client() || ack_eliciting);
+				let datagram = segment_size.max(min_packet_space(space_id) + tag_len);
+				let built = (segment_size * num_datagrams) as u64;
+				if self.path.anti_amplification_blocked(built + datagram as u64) {
 					trace!("blocked by anti-amplification");
 					break;
+				}
+				if padded
+					&& self
+						.path
+						.anti_amplification_blocked(built + datagram.max(usize::from(min_mtu)) as u64)
+				{
+					trace!("Initial blocked by anti-amplification");
+					space_idx += 1;
+					continue;
 				}
 
 				// Congestion control and pacing checks
@@ -768,28 +895,41 @@ impl Connection {
 				// pending frames that will never be sent once closing, and a closed connection no
 				// longer processes ACKs, so the window could never drain
 				// (see https://github.com/quinn-rs/quinn/issues/2785)
-				if ack_eliciting && self.spaces[space_id].loss_probes == 0 && !close {
+				// A padded Initial counts in flight even when it carries only an ACK (RFC 9002
+				// §2), so the window holds it too, though the pacer lets an ACK out at once.
+				if (ack_eliciting || padded) && self.spaces[space_id].loss_probes == 0 && !close {
 					debug_assert!(untracked_bytes <= segment_size as u64);
 
+					// A bandwidth probe held back leaves the sender limited by the probe, as
+					// `Ready::Blocked` does, not by the window or the pacer: only data it has to
+					// send counts for those.
 					let bytes_to_send = segment_size as u64 + untracked_bytes;
 					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
-						space_idx += 1;
 						send_blocked = true;
-						cwnd_blocked = true;
-						// We continue instead of breaking here in order to avoid
-						// blocking loss probes queued for higher spaces.
+						cwnd_blocked |= !bandwidth_probe;
 						trace!("blocked by congestion control");
-						continue;
+						if !acks_alone {
+							// We continue instead of breaking here in order to avoid
+							// blocking loss probes queued for higher spaces.
+							space_idx += 1;
+							continue;
+						}
+						held = true;
 					}
-
 					// Check whether the next datagram is blocked by pacing
-					if let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
+					else if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
+						if !bandwidth_probe {
+							pacing_until = Some(delay);
+						}
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
-						break;
+						if !acks_alone {
+							break;
+						}
+						held = true;
 					}
 				}
 
@@ -797,21 +937,29 @@ impl Connection {
 				// congestion window, so a probe only waits, and a peer faking loss cannot draw
 				// probes past the cap.
 				if ack_eliciting
-					&& !close && let Some(delay) = self
-					.send_rate
-					.as_mut()
-					.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
+					&& !held && !close
+					&& let Some(delay) = self
+						.send_rate
+						.as_mut()
+						.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
 				{
 					self.timers.set(Timer::Pacing, delay);
 					rate_blocked = true;
 					trace!("blocked by the send rate cap");
-					break;
+					if !acks_alone {
+						break;
+					}
+					held = true;
+				}
+				if held {
+					trace!("sending ACKs alone");
+					ack_eliciting = false;
 				}
 
 				// Finish current packet
 				if let Some(mut builder) = builder_storage.take() {
 					if pad_datagram {
-						builder.pad_to(min_mtu);
+						self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 					}
 
 					if num_datagrams > 1 || pad_datagram_to_mtu {
@@ -883,10 +1031,14 @@ impl Connection {
 					}
 				}
 
+				// ACKs going alone are no probe, so they leave the probe to a later datagram
+				let probe = !held && self.spaces[space_id].loss_probes > 0;
+				datagram_cleared = ack_eliciting || padded || close || probe;
+
 				// Allocate space for another datagram
-				let next_datagram_size_limit = match self.spaces[space_id].loss_probes {
-					0 => segment_size,
-					_ => {
+				let next_datagram_size_limit = match probe {
+					false => segment_size,
+					true => {
 						self.spaces[space_id].loss_probes -= 1;
 						// Clamp the datagram to at most the minimum MTU to ensure that loss probes
 						// can get through and enable recovery even if the path MTU has shrank
@@ -909,6 +1061,7 @@ impl Connection {
 				num_datagrams += 1;
 				coalesce = true;
 				pad_datagram = false;
+				challenge_datagram = false;
 				datagram_start = buf.len();
 
 				debug_assert_eq!(
@@ -918,14 +1071,30 @@ impl Connection {
 				);
 			} else {
 				// We can append/coalesce the next packet into the current
-				// datagram.
+				// datagram, if the window holds it: one behind a bare ACK was never checked.
+				if ack_eliciting
+					&& !close && !datagram_cleared
+					&& self.spaces[space_id].loss_probes == 0
+					&& self.path.in_flight.bytes + untracked_bytes > self.path.congestion.window()
+				{
+					send_blocked = true;
+					cwnd_blocked |= !bandwidth_probe;
+					trace!("blocked by congestion control");
+					if !acks_alone {
+						space_idx += 1;
+						continue;
+					}
+					trace!("sending ACKs alone");
+					held = true;
+					ack_eliciting = false;
+				}
 				// Finish current packet without adding extra padding
 				if let Some(builder) = builder_storage.take() {
 					builder.finish_and_track(now, self, sent_frames.take(), buf);
 				}
 			}
 
-			debug_assert!(buf_capacity - buf.len() >= MIN_PACKET_SPACE);
+			debug_assert!(buf_capacity - buf.len() >= min_packet_space(space_id));
 
 			//
 			// From here on, we've determined that a packet will definitely be sent.
@@ -979,6 +1148,7 @@ impl Connection {
 						buf,
 						&mut self.stats,
 						builder.max_size - frame::ConnectionClose::SIZE_BOUND,
+						0,
 					);
 				}
 
@@ -1042,9 +1212,10 @@ impl Connection {
 			}
 
 			// Send an off-path PATH_RESPONSE. Prioritized over on-path data to ensure that path
-			// validation can occur while the link is saturated.
+			// validation can occur while the link is saturated. Not in place of ACKs going alone,
+			// as the response counts in flight.
 			if space_id == SpaceId::Data
-				&& num_datagrams == 1
+				&& !held && num_datagrams == 1
 				&& let Some((token, remote)) = self.path_responses.pop_off_path(self.path.remote)
 			{
 				// `unwrap` guaranteed to succeed because `builder_storage` was populated just
@@ -1060,6 +1231,7 @@ impl Connection {
 					self,
 					Some(SentFrames {
 						non_retransmits: true,
+						off_path: true,
 						..SentFrames::default()
 					}),
 					buf,
@@ -1074,14 +1246,7 @@ impl Connection {
 				});
 			}
 
-			let sent = self.populate_packet(
-				now,
-				space_id,
-				buf,
-				builder.max_size,
-				builder.exact_number,
-				bandwidth_probe,
-			);
+			let sent = self.populate_packet(now, space_id, buf, builder, bandwidth_probe);
 			debug_assert!(buf.len() <= builder.max_size, "frames overflowed the packet");
 
 			// ACK-only packets should only be sent when explicitly allowed. If we write them due to
@@ -1099,15 +1264,24 @@ impl Connection {
 				"SendableFrames was {can_send:?}, but only ACKs have been written"
 			);
 			pad_datagram |= sent.requires_padding;
+			challenge_datagram |= sent.path_challenge;
 
 			if sent.largest_acked.is_some() {
 				self.spaces[space_id].pending_acks.acks_sent();
-				self.timers.stop(Timer::MaxAckDelay);
-				self.next_bundled_ack_time = Some(now.saturating_add(self.next_bundled_ack_delay()));
+				// The timer and the bundling delay belong to 1-RTT ACKs alone
+				if space_id == SpaceId::Data {
+					self.timers.stop(Timer::MaxAckDelay);
+					self.next_bundled_ack_time = Some(now.saturating_add(self.next_bundled_ack_delay()));
+				}
 			}
 
 			// Keep information about the packet around until it gets finalized
 			sent_frames = Some(sent);
+
+			// The data a limit held back waits for it to clear, behind the ACKs that went alone
+			if held {
+				break;
+			}
 
 			// Don't increment space_idx.
 			// We stay in the current space and check if there is more data to send.
@@ -1116,7 +1290,7 @@ impl Connection {
 		// Finish the last packet
 		if let Some(mut builder) = builder_storage {
 			if pad_datagram {
-				builder.pad_to(min_mtu);
+				self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 			}
 
 			// If this datagram is a loss probe and `segment_size` is larger than `min_mtu`,
@@ -1148,22 +1322,37 @@ impl Connection {
 		if cwnd_blocked {
 			self.path.congestion.on_cwnd_limited();
 		}
+		// A full window outranks the pacer: the pacer only matters once the window opens. The
+		// check charged a packet still being built a whole segment, so the window is full only if
+		// the finished packets left no room for another.
+		let limit = match (cwnd_blocked && self.window_full(), pacing_until) {
+			(true, _) => Some(CongestionLimit::Window),
+			(false, Some(until)) => Some(CongestionLimit::Pacing { until }),
+			(false, None) => None,
+		};
+		self.congestion_wait = limit.map(|limit| (now, limit));
 
 		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
 		// anti-amplification check above, and until a migrated path is validated, its budget is
-		// needed for PATH_CHALLENGE.
-		if buf.is_empty() && self.state.is_established() && self.path.validated {
+		// needed for PATH_CHALLENGE. One still challenged again after a short challenge has not
+		// shown it carries `min_mtu`, let alone more. Whatever held this call's data back holds
+		// the probe too.
+		if buf.is_empty()
+			&& self.state.is_established()
+			&& self.path.validated
+			&& self.path.challenge.is_none()
+			&& !send_blocked
+			&& !rate_blocked
+			&& let Some(probe_size) = self.path.mtud.poll_transmit(now)
+			&& self.mtu_probe_cleared(now, probe_size)
+		{
 			let space_id = SpaceId::Data;
-			let probe_size = self
-				.path
-				.mtud
-				.poll_transmit(now, self.packet_number_filter.peek(&self.spaces[space_id]))?;
-
 			let buf_capacity = probe_size as usize;
 			buf.reserve(buf_capacity);
 
 			let mut builder =
 				PacketBuilder::new(now, space_id, self.rem_cids.active(), buf, buf_capacity, 0, true, self)?;
+			let pn = builder.exact_number;
 
 			// We implement MTU probes as ping packets padded up to the probe size
 			buf.write(frame::FrameType::PING);
@@ -1181,6 +1370,7 @@ impl Connection {
 				..Default::default()
 			};
 			builder.finish_and_track(now, self, Some(sent_frames), buf);
+			self.path.mtud.on_probe_sent(pn, probe_size);
 
 			self.stats.path.sent_plpmtud_probes += 1;
 			num_datagrams = 1;
@@ -1211,6 +1401,39 @@ impl Connection {
 			},
 			local_ip: self.local_ip,
 		})
+	}
+
+	/// Whether an MTU probe of `size` bytes may go now: it is ack-eliciting data like any other,
+	/// so the congestion window, the pacer, and the send rate cap hold it back too
+	fn mtu_probe_cleared(&mut self, now: Instant, size: u16) -> bool {
+		let size = u64::from(size);
+		if self.path.in_flight.bytes + size > self.path.congestion.window() {
+			return false;
+		}
+		let delay = self
+			.path
+			.congestion
+			.pace(now, size)
+			.or_else(|| self.send_rate.as_mut().and_then(|cap| cap.delay(now, size)));
+		if let Some(delay) = delay {
+			self.timers.set(Timer::Pacing, delay);
+			return false;
+		}
+		true
+	}
+
+	/// Pad a datagram to `min_mtu`, or to its `room` when the anti-amplification limit shrank it
+	/// below that. RFC 9000 §8.2.1 exempts such a datagram from padding, and padding past its end
+	/// would run into frames written to fill it; a challenge sent in one is marked short.
+	fn pad_datagram(&mut self, builder: &mut PacketBuilder, min_mtu: u16, room: usize, challenge: bool) {
+		let room = u16::try_from(room).unwrap_or(u16::MAX);
+		if room < min_mtu
+			&& challenge
+			&& let Some(challenge) = &mut self.path.challenge
+		{
+			challenge.short = true;
+		}
+		builder.pad_to(min_mtu.min(room));
 	}
 
 	/// Send PATH_CHALLENGE for a previous path if necessary
@@ -1309,7 +1532,7 @@ impl Connection {
 				// A datagram read after the idle deadline, as one buffered while this process was
 				// stopped, finds the connection already timed out: handling it first would restart
 				// the idle timer, and its ACKs would fold the stop into the RTT and so into 3 * PTO.
-				if self.timers.is_expired(Timer::Idle, now) {
+				if self.timers.is_expired(Timer::Idle, now) || self.timers.is_expired(Timer::Silent, now) {
 					self.handle_timeout(now);
 					return;
 				}
@@ -1351,6 +1574,7 @@ impl Connection {
 					// the server's first flight is lost.
 					self.set_loss_detection_timer(now);
 				}
+				self.observe_waits(now);
 			}
 			NewIdentifiers(ids, now) => {
 				self.local_cid_state.new_cids(&ids, now);
@@ -1401,9 +1625,20 @@ impl Connection {
 						false => Error::TimedOut,
 					});
 				}
+				Timer::KeepAlive if self.liveness.is_some() => self.probe(now),
 				Timer::KeepAlive => {
 					trace!("sending keep-alive");
 					self.ping();
+				}
+				Timer::Stale => {
+					if self.liveness.as_mut().is_some_and(|liveness| liveness.expire(now)) {
+						debug!("peer is stale");
+						self.streams.waits.wake_stale();
+					}
+				}
+				Timer::Silent => {
+					debug!("keep-alive closing on a silent peer");
+					self.kill(Error::TimedOut);
 				}
 				Timer::LossDetection => {
 					self.on_loss_detection_timeout(now);
@@ -1416,11 +1651,10 @@ impl Connection {
 				}
 				Timer::PathValidation => {
 					debug!("path validation failed");
-					if let Some((_, prev)) = self.prev_path.take() {
-						self.path = prev;
-						self.set_loss_detection_timer(now);
+					match self.prev_path.take() {
+						Some((_, prev)) => self.fall_back(now, prev),
+						None => self.path.challenge = None,
 					}
-					self.path.challenge = None;
 				}
 				Timer::Pacing => trace!("pacing timer expired"),
 				Timer::PushNewCid => {
@@ -1442,6 +1676,41 @@ impl Connection {
 				}
 			}
 		}
+		self.observe_waits(now);
+	}
+
+	/// Accrue a writer's wait on the peer's credit or the congestion controller, and a hold on the
+	/// spent receive window, up to `now`
+	fn observe_waits(&mut self, now: Instant) {
+		let closed = self.state.is_closed();
+		self.streams.observe_credit(now, closed);
+		// A closed connection sends nothing more, so its wait ends here.
+		self.observe_congestion(now, closed);
+	}
+
+	/// Accrue the congestion wait up to `now`, ending it once its limit clears or at `end`, as
+	/// when the path that imposed it is replaced
+	fn observe_congestion(&mut self, now: Instant, end: bool) {
+		if let Some((since, limit)) = self.congestion_wait {
+			// A wait ends once its limit clears, whether or not a transmit follows at once, as
+			// one may not while a driver's send buffers are full.
+			let (until, cleared) = match limit {
+				CongestionLimit::Window => (now, end || !self.window_full()),
+				CongestionLimit::Pacing { until } => (now.min(until), end || now >= until),
+			};
+			let total = match limit {
+				CongestionLimit::Window => &mut self.stats.path.cwnd_blocked,
+				CongestionLimit::Pacing { .. } => &mut self.stats.path.pacing_blocked,
+			};
+			*total += until.saturating_duration_since(since);
+			self.congestion_wait = (!cleared).then_some((until, limit));
+		}
+	}
+
+	/// Whether the congestion window has no room for another datagram
+	fn window_full(&self) -> bool {
+		let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
+		room < u64::from(self.path.current_mtu())
 	}
 
 	/// Close a connection immediately
@@ -1449,7 +1718,7 @@ impl Connection {
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
 	/// [`send::Stream::finish`] on outstanding streams and waiting for
-	/// [`send::Stream::poll_end`].
+	/// [`send::Stream::poll_stopped`].
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
 	/// delivered. There may still be data from the peer that has not been received.
@@ -1463,7 +1732,8 @@ impl Connection {
 				reason: reason.clone(),
 			});
 		}
-		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }))
+		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }));
+		self.observe_waits(now);
 	}
 
 	/// Report that a send to the peer found no route, such as `ENETUNREACH`
@@ -1511,6 +1781,7 @@ impl Connection {
 		stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
 		stats.path.current_mtu = self.path.mtud.current_mtu();
 		stats.credit = self.streams.credit_stats();
+		stats.send_credit = self.streams.send_credit_stats();
 
 		stats
 	}
@@ -1564,12 +1835,16 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// 32 bytes of keying material exported from the TLS session (RFC 8446 section 7.5) under
-	/// `label` and `context`, or `None` before the handshake completes.
-	pub fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		let mut output = [0; 32];
-		self.crypto.export_keying_material(&mut output, label, context).ok()?;
-		Some(output)
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -1590,6 +1865,16 @@ impl Connection {
 	/// [`Error::LocallyClosed`] when the local application closed it via [`close()`](Self::close).
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
+	}
+
+	/// Whether a CONNECTION_CLOSE is due that [`poll_transmit`](Self::poll_transmit) has yet to hand
+	/// over
+	///
+	/// Closing owes the peer one, as does each packet the peer sends on the current path during
+	/// the closing period; a loss with nothing to answer, such as an idle timeout or a stateless
+	/// reset, owes none. Once a closed connection owes none, everything it had to send is out.
+	pub fn owes_close(&self) -> bool {
+		self.state.owes_close()
 	}
 
 	/// Whether there is no longer any need to keep the connection around
@@ -1622,9 +1907,9 @@ impl Connection {
 	/// fills the inflight it allows
 	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. A controller that paces its own probe cluster
-	/// ([`Controller::paces_probe`]) gets it filled at its pace instead, and may aim its probes at
-	/// the target ([`Controller::on_probe_target`]). Duplicates count against congestion control,
+	/// measures the path. A controller that paces its own probe cluster, which only the `lab`
+	/// feature's GoogCC does, gets it filled at its pace instead, and may aim its probes at the
+	/// target. Duplicates count against congestion control,
 	/// as [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])
@@ -1634,9 +1919,9 @@ impl Connection {
 			return;
 		}
 		self.bandwidth_probe.set_target(bytes_per_second);
-		self.path.congestion.on_probe_target(bytes_per_second);
+		bandwidth_probe::report_target(&mut *self.path.congestion, bytes_per_second);
 		if let Some((_, prev)) = &mut self.prev_path {
-			prev.congestion.on_probe_target(bytes_per_second);
+			bandwidth_probe::report_target(&mut *prev.congestion, bytes_per_second);
 		}
 	}
 
@@ -1653,7 +1938,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, self.rng.random(), &self.config);
-		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *self.path.congestion, self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
 			for info in self.spaces[space].sent_packets.values_mut() {
@@ -1697,6 +1982,13 @@ impl Connection {
 		}
 	}
 
+	/// Whether [`send::Stream::reset_at`] still delivers its prefix to the peer's reader: the peer
+	/// accepts RESET_STREAM_AT. Otherwise it sends a RESET_STREAM once the prefix is acknowledged,
+	/// which lets the peer discard any of it not yet read. False until the peer's parameters arrive.
+	pub fn reset_stream_at(&self) -> bool {
+		self.streams.peer_reset_stream_at()
+	}
+
 	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
 	pub fn receive_window(&self) -> std::num::NonZeroU64 {
 		std::num::NonZeroU64::new(self.streams.receive_window()).expect("receive windows are non-zero limits")
@@ -1706,6 +1998,39 @@ impl Connection {
 	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
 	pub fn stream_receive_window(&self) -> u64 {
 		self.streams.peak_stream_receive_window()
+	}
+
+	/// Start `keep_alive`, replacing any running, measured from when the peer was last heard
+	///
+	/// It replaces the keep-alive [`transport::Config::keep_alive`] derives: a PING goes out each
+	/// half of `soft` the peer stays unheard and nothing else ack-eliciting went out, the peer turns stale
+	/// once all of `soft` passes (see [`Self::poll_stale`]), and the connection closes as
+	/// [`Error::TimedOut`] once `hard` does. Errors, changing nothing, on a `hard` longer than the
+	/// negotiated idle timeout, which stays in force as a backstop.
+	pub fn set_keep_alive(&mut self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		let liveness = Liveness::new(keep_alive, self.idle_timeout, self.heard)?;
+		if self.liveness.replace(liveness).is_some_and(|old| old.is_stale()) {
+			self.streams.waits.wake_stale();
+		}
+		self.arm_liveness();
+		// The driver reads the new deadlines when it next polls.
+		self.streams.waits.wake_transmit();
+		Ok(())
+	}
+
+	/// Whether a [`KeepAlive`] found the peer unheard for its `soft` limit
+	pub fn is_stale(&self) -> bool {
+		self.liveness.as_ref().is_some_and(Liveness::is_stale)
+	}
+
+	/// Wait until [`Self::is_stale`] differs from `stale`, returning the new value
+	pub fn poll_stale(&mut self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		let now = self.is_stale();
+		if now != stale {
+			return Poll::Ready(now);
+		}
+		self.streams.waits.register_stale(waiter);
+		Poll::Pending
 	}
 
 	/// Change every limit `limits` sets, leaving the others as they are
@@ -1797,6 +2122,8 @@ impl Connection {
 		}
 
 		let mut ack_eliciting_acked = false;
+		// Newly acknowledged packets sent marked on this path, which the peer's ECN counts cover
+		let mut ecn_acked = 0;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
 		for packet in newly_acked.elts() {
@@ -1810,15 +2137,22 @@ impl Connection {
 					self.spaces[space].pending_acks.subtract_below(acked);
 				}
 				ack_eliciting_acked |= info.ack_eliciting;
+				let this_path = info.path_generation == self.path.generation();
+				ecn_acked += u64::from(info.ecn && this_path);
+				self.spaces[space].ecn_prior_path |= info.ecn && !this_path;
 
-				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
-				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
-				if mtu_updated {
-					self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+				// Notify MTU discovery that a packet was acked, because it might be an MTU probe. One
+				// the peer's previous path sent stays that path's, which it may return to.
+				let path = self.sent_path(info.path_generation);
+				if path.mtud.on_acked(space, packet, info.size) {
+					path.congestion.on_mtu_update(path.mtud.current_mtu());
 				}
 
-				// Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
-				self.ack_frequency.on_acked(packet);
+				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY. A
+				// probe may have taken the packet's retransmits, so its own frames go unrecorded.
+				if space == SpaceId::Data {
+					self.ack_frequency.on_acked(packet);
+				}
 
 				let received = received
 					.binary_search_by_key(&packet, |&(packet, _)| packet)
@@ -1834,7 +2168,7 @@ impl Connection {
 			} else {
 				cmp::min(
 					self.ack_frequency.peer_max_ack_delay,
-					Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
+					Duration::from_micros(ack.delay_micros(self.peer_params.ack_delay_exponent.0)),
 				)
 			};
 			let rtt = now.saturating_duration_since(self.spaces[space].largest_acked_packet_sent);
@@ -1844,7 +2178,11 @@ impl Connection {
 			}
 		}
 
-		// After the RTT update, as RFC 9002's OnAckReceived orders it.
+		// Must be called before crypto/pto_count are clobbered. The losses this ACK reveals reach
+		// the controller before the ACK itself, as RFC 9002's OnAckReceived orders them.
+		self.detect_lost_packets(now, space, true);
+
+		// After the RTT update and loss detection, as RFC 9002's OnAckReceived orders it.
 		self.path.congestion.on_ack(congestion::Ack {
 			now,
 			packets: &acked,
@@ -1853,9 +2191,6 @@ impl Connection {
 			rtt: self.path.rtt.get(),
 		});
 		self.acked = acked;
-
-		// Must be called before crypto/pto_count are clobbered
-		self.detect_lost_packets(now, space, true);
 
 		if self.peer_completed_address_validation() {
 			self.pto_count = 0;
@@ -1869,11 +2204,11 @@ impl Connection {
 				// of newly acked packets that remains well-defined in the presence of arbitrary packet
 				// reordering.
 				if new_largest {
-					let sent = self.spaces[space].largest_acked_packet_sent;
-					self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+					self.process_ecn(now, space, ecn_acked, ecn);
 				}
-			} else {
-				// We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
+			} else if ecn_acked > 0 {
+				// A marked packet acknowledged without counts means the marks went unseen
+				// (RFC 9000 §13.4.2.1).
 				debug!("ECN not acknowledged by peer");
 				self.path.sending_ecn = false;
 			}
@@ -1884,25 +2219,33 @@ impl Connection {
 	}
 
 	fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {
-		let lost_packets = &mut self.spaces[space].lost_packets;
+		let generation = self.path.generation();
+		let space = &mut self.spaces[space];
 
-		if lost_packets.is_empty() {
+		if space.lost_packets.is_empty() {
 			return false;
 		}
 
+		let mut answered = false;
 		for range in ack.iter() {
-			let spurious_losses: Vec<u64> = lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
+			let spurious_losses: Vec<u64> = space.lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
 
 			for pn in spurious_losses {
-				lost_packets.remove(pn);
+				// A late packet still carried its mark into the peer's counts
+				let lost = space.lost_packets.remove(pn).expect("listed above");
+				space.ecn_prior_path |= lost.ecn_path.is_some_and(|path| path != generation);
+				answered |= lost.congestion_path == Some(generation);
 			}
 		}
 
-		// If this ACK frame acknowledged all deemed lost packets,
-		// then we have raised a spurious congestion event in the past.
-		// We cannot conclude when there are remaining packets,
-		// but future ACK frames might indicate a spurious loss detection.
-		lost_packets.is_empty()
+		// Once this ACK covers every loss this path's controller answered, its response was
+		// spurious. Losses it never heard, such as an ACK-only packet's, prove nothing: a late ACK
+		// of one would undo an unrelated cut.
+		answered
+			&& !space
+				.lost_packets
+				.range(..)
+				.any(|(_, lost)| lost.congestion_path == Some(generation))
 	}
 
 	/// Drain lost packets that we reasonably think will never arrive
@@ -1922,14 +2265,8 @@ impl Connection {
 	}
 
 	/// Process a new ECN block from an in-order ACK
-	fn process_ecn(
-		&mut self,
-		now: Instant,
-		space: SpaceId,
-		newly_acked: u64,
-		ecn: frame::EcnCounts,
-		largest_sent_time: Instant,
-	) {
+	fn process_ecn(&mut self, now: Instant, space: SpaceId, newly_acked: u64, ecn: frame::EcnCounts) {
+		let prior_path = mem::take(&mut self.spaces[space].ecn_prior_path);
 		match self.spaces[space].detect_ecn(newly_acked, ecn) {
 			Err(e) => {
 				debug!("halting ECN due to verification failure: {}", e);
@@ -1939,11 +2276,17 @@ impl Connection {
 				self.spaces[space].ecn_feedback = frame::EcnCounts::ZERO;
 			}
 			Ok(false) => {}
+			// The marks may be the earlier path's, whose controller this path's never answers for
+			Ok(true) if prior_path => debug!("CE marks may belong to an earlier path"),
+			// While the path validates, its controller hears no congestion signal, as it hears no
+			// ACK (see `on_packet_acked`): BBR3 would leave Startup with no bandwidth sample and
+			// pace at zero.
+			Ok(true) if self.path.challenge.is_some() => {}
 			Ok(true) => {
 				self.stats.path.congestion_events += 1;
 				self.path.congestion.on_ce(congestion::Ce {
 					now,
-					sent: largest_sent_time,
+					sent: self.spaces[space].largest_acked_packet_sent,
 				});
 			}
 		}
@@ -2032,11 +2375,80 @@ impl Connection {
 			_ => 2,
 		};
 		self.spaces[space].loss_probes = self.spaces[space].loss_probes.saturating_add(count);
+		if space != SpaceId::Data {
+			// The whole unacknowledged handshake flight goes in the probe, both spaces coalesced
+			// (RFC 9002 §6.2.4), rather than the fired space's oldest packet padded out: a server
+			// held to three times what it heard otherwise spends that budget on a padded
+			// ServerHello and a Handshake flight apart, and has none left when one is lost again.
+			self.requeue_crypto(SpaceId::Initial);
+			self.requeue_crypto(SpaceId::Handshake);
+		}
 		self.probe_when_heard = space == SpaceId::Data
 			&& self.spaces[space].time_of_last_ack_eliciting_packet.is_some()
 			&& !self.heard_since_sent;
 		self.pto_count = self.pto_count.saturating_add(1);
 		self.set_loss_detection_timer(now);
+	}
+
+	/// Act on a peer's packet showing handshake CRYPTO went missing, now rather than at a PTO
+	/// (RFC 9002 §6.2.3): re-send ours that it has not acknowledged, or PING in our newest
+	/// handshake space for a packet it answers by re-sending its own
+	///
+	/// A PTO backed off under heavy loss can be seconds out, past a peer's handshake timeout.
+	/// At most once a round trip, so the peer's packets that prompted it, such as each datagram
+	/// of a lost flight, cannot multiply into a flood; each still crosses the path at most once.
+	fn recover_crypto_early(&mut self, now: Instant, missing: Missing) {
+		if self
+			.early_crypto_sent
+			.is_some_and(|sent| now.saturating_duration_since(sent) < self.path.rtt.get())
+		{
+			return;
+		}
+		let sent = match missing {
+			Missing::Ours => {
+				let initial = self.requeue_crypto(SpaceId::Initial);
+				self.requeue_crypto(SpaceId::Handshake) || initial
+			}
+			// A client without the ServerHello repeats its ClientHello if unacknowledged: the
+			// RFC's server heuristic keys on duplicate Initial CRYPTO, and a server following
+			// only that text just ACKs a PING. A server lacking the Finished only PINGs, since
+			// the client already holds its whole flight.
+			Missing::Theirs => {
+				let space = match self.spaces[SpaceId::Handshake].crypto {
+					Some(_) => SpaceId::Handshake,
+					None => SpaceId::Initial,
+				};
+				if space == SpaceId::Initial && self.requeue_crypto(space) {
+					true
+				} else if self.spaces[space].crypto.is_some() {
+					self.spaces[space].ping_pending = true;
+					true
+				} else {
+					false
+				}
+			}
+		};
+		if sent {
+			trace!(?missing, "recovering handshake CRYPTO ahead of the PTO");
+			self.early_crypto_sent = Some(now);
+		}
+	}
+
+	/// Move a handshake space's unacknowledged CRYPTO back to pending, reporting whether there was any
+	fn requeue_crypto(&mut self, space_id: SpaceId) -> bool {
+		let space = &mut self.spaces[space_id];
+		if space.crypto.is_none() {
+			return false;
+		}
+		let mut recovered = VecDeque::new();
+		for packet in space.sent_packets.values_mut() {
+			if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
+				recovered.extend(mem::take(&mut packet.retransmits.get_or_create().crypto));
+			}
+		}
+		let any = !recovered.is_empty();
+		spaces::queue_crypto(&mut space.pending.crypto, recovered);
+		any
 	}
 
 	/// Send the next probe now if the peer, silent through the last probe timeout, is heard
@@ -2057,8 +2469,14 @@ impl Connection {
 
 	fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
 		let mut lost_packets = Vec::<u64>::new();
-		let mut lost_mtu_probe = None;
-		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe();
+		let mut lost_mtu_probes = [None; 2];
+		// The previous path's probe too, which stays that path's
+		let in_flight_mtu_probes = [
+			self.path.mtud.in_flight_mtu_probe(pn_space),
+			self.prev_path
+				.as_ref()
+				.and_then(|(_, prev)| prev.mtud.in_flight_mtu_probe(pn_space)),
+		];
 		let rtt = self.path.rtt.conservative();
 		let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
 
@@ -2090,10 +2508,10 @@ impl Connection {
 			// saturating equivalent of this substraction operation with a Duration.
 			let packet_too_old = now.saturating_duration_since(info.time_sent) >= loss_delay;
 			if packet_too_old || largest_acked_packet >= packet + packet_threshold {
-				if Some(packet) == in_flight_mtu_probe {
+				if let Some(i) = in_flight_mtu_probes.iter().position(|&probe| probe == Some(packet)) {
 					// Lost MTU probes are not included in `lost_packets`, because they should not
 					// trigger a congestion control response
-					lost_mtu_probe = in_flight_mtu_probe;
+					lost_mtu_probes[i] = Some(packet);
 				} else {
 					lost_packets.push(packet);
 					size_of_lost_packets += info.size as u64;
@@ -2101,7 +2519,7 @@ impl Connection {
 						match persistent_congestion_start {
 							// Two ACK-eliciting packets lost more than congestion_period apart, with no
 							// ACKed packets in between
-							Some(start) if info.time_sent - start > congestion_period => {
+							Some(start) if info.time_sent.saturating_duration_since(start) > congestion_period => {
 								in_persistent_congestion = true;
 							}
 							// Persistent congestion must start after the first RTT sample
@@ -2136,19 +2554,18 @@ impl Connection {
 
 			for &packet in &lost_packets {
 				let info = self.spaces[pn_space].sent_packets.remove(packet).unwrap(); // safe: lost_packets is populated just above
-				// A packet from another path carries another controller's state.
-				if let Some(state) = info
+				// A packet from another path carries another controller's state. While the path
+				// validates, its controller hears no loss, as it hears no ACK (see
+				// `on_packet_acked`): losses alone read as a path that delivers nothing.
+				let generation = self.path.generation();
+				let state = info
 					.congestion
-					.filter(|_| info.path_generation == self.path.generation())
-				{
-					let new_burst = packet
-						.checked_sub(1)
-						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
+					.filter(|_| self.path.challenge.is_none() && info.path_generation == generation);
+				if let Some(state) = state {
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
-						new_burst,
 					});
 				}
 				self.qlog
@@ -2161,13 +2578,21 @@ impl Connection {
 						self.streams.retransmit(frame);
 					}
 				}
+				if pn_space == SpaceId::Data {
+					self.ack_frequency.on_lost(packet);
+				}
 				self.spaces[pn_space].pending |= info.retransmits;
-				self.path.mtud.on_non_probe_lost(packet, info.size);
+				// Judged against the ACKs of the path that sent it, which `on_ack` feeds the same way
+				self.sent_path(info.path_generation)
+					.mtud
+					.on_non_probe_lost(pn_space, packet, info.size);
 
 				self.spaces[pn_space].lost_packets.insert(
 					packet,
 					LostPacket {
 						time_sent: info.time_sent,
+						ecn_path: info.ecn.then_some(info.path_generation),
+						congestion_path: state.is_some().then_some(generation),
 					},
 				);
 			}
@@ -2176,6 +2601,13 @@ impl Connection {
 				self.stats.path.black_holes_detected += 1;
 				self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
 				self.datagrams().drop_oversized();
+			}
+			// The previous path's losses close their burst there, and judge only its own MTU
+			if let Some((_, prev)) = &mut self.prev_path
+				&& prev.mtud.black_hole_detected(now)
+			{
+				self.stats.path.black_holes_detected += 1;
+				prev.congestion.on_mtu_update(prev.mtud.current_mtu());
 			}
 
 			// Don't apply congestion penalty for lost ack-only packets
@@ -2191,10 +2623,10 @@ impl Connection {
 		}
 
 		// Handle a lost MTU probe
-		if let Some(packet) = lost_mtu_probe {
-			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
+		for packet in lost_mtu_probes.into_iter().flatten() {
+			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probes is omitted from lost_packets, and therefore must not have been removed yet
 			self.remove_in_flight(&info);
-			self.path.mtud.on_probe_lost();
+			self.sent_path(info.path_generation).mtud.on_probe_lost();
 			self.stats.path.lost_plpmtud_probes += 1;
 		}
 	}
@@ -2224,8 +2656,10 @@ impl Connection {
 				continue;
 			}
 			if space == SpaceId::Data {
-				// Skip ApplicationData until handshake completes.
-				if self.is_handshaking() {
+				// Skip ApplicationData until the handshake is confirmed (RFC 9002 §6.2.1), which
+				// discards the Handshake keys: a client's 1-RTT probe before then would back off
+				// the PTO that re-sends its Finished.
+				if self.is_handshaking() || self.spaces[SpaceId::Handshake].crypto.is_some() {
 					return result;
 				}
 				// Include max_ack_delay and backoff for ApplicationData.
@@ -2306,6 +2740,18 @@ impl Connection {
 		packet: Option<u64>,
 		spin: bool,
 	) {
+		// Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+		// Version Negotiation packet.
+		if packet.is_some() {
+			self.heard = self.heard.max(now);
+			if let Some(liveness) = &mut self.liveness
+				&& liveness.heard(now)
+			{
+				debug!("peer is live again");
+				self.streams.waits.wake_stale();
+			}
+			self.arm_liveness();
+		}
 		self.reset_keep_alive(now);
 		self.reset_idle_timeout(now, space_id);
 		self.permit_idle_reset = true;
@@ -2357,6 +2803,10 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
+		// A keep-alive counts only what the peer sends; see [`Self::arm_liveness`].
+		if self.liveness.is_some() {
+			return;
+		}
 		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
@@ -2367,6 +2817,61 @@ impl Connection {
 			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
 			None => self.timers.stop(Timer::KeepAlive),
 		}
+	}
+
+	/// Probe an unheard peer under a keep-alive, unless something ack-eliciting went out within half
+	/// of its `soft`, then check again half a `soft` after the latest
+	///
+	/// Ack-eliciting packets on a dead path stay in flight, and PTO probes back off exponentially,
+	/// so this bounds the gap between probes: a path that heals is heard within half a `soft`, even
+	/// with the congestion window full.
+	fn probe(&mut self, now: Instant) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		let after = liveness.probe_after();
+		let limit = liveness.probes_before_close();
+		let sent = self.spaces[SpaceId::Data].time_of_last_ack_eliciting_packet;
+		match sent.map(|sent| sent.saturating_add(after)).filter(|&at| at > now) {
+			Some(at) => self.timers.set(Timer::KeepAlive, at),
+			None => {
+				trace!("sending keep-alive probe");
+				self.ping();
+				// Exempt from congestion control, as a PTO's probe is: a dead path leaves the window
+				// full of packets nothing acknowledges, and the backed-off PTO can fall past `hard`.
+				// Only as many as a dead path draws before `hard` closes it, until the peer
+				// acknowledges one: a peer that keeps talking without acknowledging could otherwise
+				// grow the sent history by one probe per half `soft`.
+				let space = self.highest_space;
+				let acked = self.spaces[space].largest_acked_packet_sent;
+				let (since, count) = self
+					.exempt_probes
+					.filter(|&(since, _)| acked < since)
+					.unwrap_or((now, 0));
+				// A reservation still waiting to leave, as behind a stalled socket, already covers this.
+				if count < limit && self.spaces[space].loss_probes == 0 {
+					self.exempt_probes = Some((since, count + 1));
+					self.spaces[space].loss_probes = 1;
+				}
+				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
+			}
+		}
+	}
+
+	/// Arm the keep-alive's probe, stale, and silent timers from when the peer was last heard
+	fn arm_liveness(&mut self) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		if self.state.is_closed() {
+			return;
+		}
+		self.timers.set(Timer::KeepAlive, liveness.probe_at());
+		match liveness.stale_at() {
+			Some(at) => self.timers.set(Timer::Stale, at),
+			None => self.timers.stop(Timer::Stale),
+		}
+		self.timers.set(Timer::Silent, liveness.silent_at());
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -2533,6 +3038,8 @@ impl Connection {
 		space.crypto = None;
 		space.time_of_last_ack_eliciting_packet = None;
 		space.loss_time = None;
+		// Its probes can never be sent, and one left owed would read as a probe in flight
+		space.loss_probes = 0;
 		let sent_packets = mem::take(&mut space.sent_packets);
 		for packet in sent_packets.into_values() {
 			self.remove_in_flight(&packet);
@@ -2572,6 +3079,16 @@ impl Connection {
 		ecn: Option<EcnCodepoint>,
 		partial_decode: PartialDecode,
 	) {
+		// A server's Handshake or 1-RTT packet before its ServerHello means an Initial of its was
+		// lost
+		if self.side.is_client()
+			&& self.state.is_handshake()
+			&& remote == self.path.remote
+			&& matches!(partial_decode.space(), Some(SpaceId::Handshake | SpaceId::Data))
+			&& self.spaces[SpaceId::Handshake].crypto.is_none()
+		{
+			self.recover_crypto_early(now, Missing::Theirs);
+		}
 		if let Some(decoded) =
 			packet_crypto::unprotect_header(partial_decode, &self.spaces, self.peer_params.stateless_reset_token)
 		{
@@ -2658,6 +3175,11 @@ impl Connection {
 						&& self.early_1rtt.len() < MAX_EARLY_1RTT_PACKETS
 					{
 						trace!("buffering short packet during handshake");
+						// The client sent this after its Finished, which we lack, so it already
+						// holds our whole flight
+						if self.side.is_server() {
+							self.recover_crypto_early(now, Missing::Theirs);
+						}
 						self.early_1rtt.push(EarlyPacket {
 							remote,
 							ecn,
@@ -3028,6 +3550,8 @@ impl Connection {
 	/// Process an Initial or Handshake packet payload
 	fn process_early_payload(&mut self, now: Instant, packet: Packet) -> Result<(), TransportError> {
 		debug_assert_ne!(packet.header.space(), SpaceId::Data);
+		let space = packet.header.space();
+		let read = self.spaces[space].crypto_stream.bytes_read();
 		let payload_len = packet.payload.len();
 		let mut ack_eliciting = false;
 		for result in frame::Iter::new(packet.payload.freeze())? {
@@ -3069,9 +3593,12 @@ impl Connection {
 
 		if ack_eliciting {
 			// In the initial and handshake spaces, ACKs must be sent immediately
-			self.spaces[packet.header.space()]
-				.pending_acks
-				.set_immediate_ack_required();
+			self.spaces[space].pending_acks.set_immediate_ack_required();
+			// A peer probing without moving its handshake forward, by repeating its CRYPTO or
+			// with a PING, is missing some of ours (RFC 9002 §6.2.3)
+			if self.spaces[space].crypto_stream.bytes_read() == read {
+				self.recover_crypto_early(now, Missing::Ours);
+			}
 		}
 
 		self.write_crypto();
@@ -3153,7 +3680,7 @@ impl Connection {
 					close = Some(reason);
 				}
 				Frame::PathChallenge(token) => {
-					self.path_responses.push(number, token, remote);
+					self.path_responses.push(number, token, remote, self.path.remote);
 					if remote == self.path.remote {
 						// PATH_CHALLENGE on active path, possible off-path packet forwarding
 						// attack. Send a non-probing packet to recover the active path.
@@ -3164,16 +3691,34 @@ impl Connection {
 					}
 				}
 				Frame::PathResponse(token) => {
-					if self.path.challenge.is_some_and(|challenge| challenge.token == token)
+					if let Some(challenge) = self.path.challenge.filter(|challenge| challenge.token == token)
 						&& remote == self.path.remote
 					{
-						trace!("new path validated");
-						self.timers.stop(Timer::PathValidation);
-						self.path.challenge = None;
 						self.path.validated = true;
 						if let Some((_, prev_path)) = &mut self.prev_path {
 							prev_path.challenge = None;
 						}
+						if challenge.short {
+							// RFC 9000 §8.2.1: the address is validated, but the path is not yet shown
+							// to carry `min_mtu`, so validate it again at full size.
+							trace!("path validated through a short datagram, challenging again");
+							self.path.challenge = Some(Challenge::new(self.rng.random()));
+							self.timers
+								.set(Timer::PathValidation, now.saturating_add(3 * self.pto(SpaceId::Data)));
+						} else {
+							trace!("new path validated");
+							self.timers.stop(Timer::PathValidation);
+							self.path.challenge = None;
+							// Kept only to fall back to while this path validates
+							self.prev_path = None;
+						}
+					} else if let Some((_, prev_path)) = &mut self.prev_path
+						&& remote == prev_path.remote
+						&& prev_path.challenge.is_some_and(|challenge| challenge.token == token)
+					{
+						// The previous path still works, so a migration back to it skips validation
+						trace!("previous path validated");
+						prev_path.challenge = None;
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
 					}
@@ -3236,6 +3781,12 @@ impl Connection {
 						sequence,
 						allow_more_cids,
 					));
+					// The peer catching up on a Retire Prior To lets the next expiry proceed, and a
+					// retirement may drop the batch the timer was armed for
+					match self.local_cid_state.next_timeout() {
+						Some(at) => self.timers.set(Timer::PushNewCid, at),
+						None => self.timers.stop(Timer::PushNewCid),
+					}
 				}
 				Frame::NewConnectionId(frame) => {
 					trace!(
@@ -3254,17 +3805,18 @@ impl Connection {
 						));
 					}
 
-					use crate::cid_queue::InsertError;
-					match self.rem_cids.insert(frame) {
-						Ok(None) => {}
-						Ok(Some((retired, reset_token))) => {
+					use crate::cid_queue::Inserted;
+					let inserted = self
+						.rem_cids
+						.insert(frame)
+						.map_err(|_| TransportError::CONNECTION_ID_LIMIT_ERROR(""))?;
+					match inserted {
+						Inserted::Queued => {}
+						Inserted::Advanced { retired, reset_token } => {
 							self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
 							self.set_reset_token(reset_token);
 						}
-						Err(InsertError::ExceedsLimit) => {
-							return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
-						}
-						Err(InsertError::Retired) => {
+						Inserted::Stale => {
 							trace!("discarding already-retired");
 							// RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
 							// range of connection IDs larger than the active connection ID limit
@@ -3276,10 +3828,15 @@ impl Connection {
 						}
 					};
 
-					if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-						// We're a server still using the initial remote CID for the client, so
-						// let's switch immediately to enable clientside stateless resets.
-						self.update_rem_cid();
+					// A server still on the client's initial CID switches at once, to enable
+					// client-side stateless resets, but only to sequence 1: jumping to a later
+					// one would retire the CIDs before it, still in flight, without using them.
+					if self.side.is_server()
+						&& self.rem_cids.active_seq() == 0
+						&& let Some((reset_token, retired)) = self.rem_cids.next_in_order()
+					{
+						self.spaces[SpaceId::Data].pending.retire_cids.extend(retired);
+						self.set_reset_token(reset_token);
 					}
 				}
 				Frame::NewToken(NewToken { token }) => {
@@ -3398,11 +3955,21 @@ impl Connection {
 
 	fn migrate(&mut self, now: Instant, remote: SocketAddr) {
 		trace!(%remote, "migration initiated");
+		// The peer is back on the address validated before an apparent migration, which was
+		// spurious, as when an attacker forwards a copy of its packet (RFC 9000 §9.3.3). Return to
+		// that path, skipping validation and keeping its loss detection and congestion state (§9.3).
+		if let Some((_, prev)) = self.prev_path.take_if(|(_, prev)| prev.remote == remote) {
+			trace!("returning to the previous path");
+			self.fall_back(now, prev);
+			return;
+		}
 		self.path_counter = self.path_counter.wrapping_add(1);
-		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding.
+		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding: only the
+		// port changed (RFC 9000 §9.4). A dual-stack socket reports an IPv4 peer as IPv4-mapped
+		// IPv6, so compare canonical addresses.
 		// Note that the congestion window will not grow until validation terminates. Helps mitigate
 		// amplification attacks performed by spoofing source addresses.
-		let mut new_path = if remote.is_ipv4() && remote.ip() == self.path.remote.ip() {
+		let mut new_path = if remote.ip().to_canonical() == self.path.remote.ip().to_canonical() {
 			PathData::from_previous(remote, &self.path, self.path_counter)
 		} else {
 			let peer_max_udp_payload_size =
@@ -3417,11 +3984,11 @@ impl Connection {
 				&self.config,
 			)
 		};
-		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *new_path.congestion, self.bandwidth_probe.target());
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
-		let mut prev = mem::replace(&mut self.path, new_path);
+		let mut prev = self.replace_path(now, new_path);
 		self.datagrams().drop_oversized();
 
 		// Don't clobber the original path if the previous one hasn't been validated yet
@@ -3436,6 +4003,58 @@ impl Connection {
 			Timer::PathValidation,
 			now.saturating_add(3 * cmp::max(self.pto(SpaceId::Data), prev_pto)),
 		);
+	}
+
+	/// Return to the path the peer left, abandoning the unvalidated ones it moved to
+	fn fall_back(&mut self, now: Instant, prev: PathData) {
+		self.replace_path(now, prev);
+		self.path.challenge = None;
+		self.timers.stop(Timer::PathValidation);
+
+		// No path counts what went out on the abandoned ones in flight, so loss detection would
+		// never find it lost: requeue it, as those addresses may never have reached the peer. A
+		// late ACK of it then goes unmatched, as one of a packet already declared lost may.
+		let generation = self.path.generation();
+		let space = &mut self.spaces[SpaceId::Data];
+		let sent: Vec<u64> = space
+			.sent_packets
+			.range(..)
+			.filter(|(_, info)| info.path_generation != generation)
+			.map(|(pn, _)| pn)
+			.collect();
+		for packet in sent {
+			let info = self.spaces[SpaceId::Data]
+				.sent_packets
+				.remove(packet)
+				.expect("listed above");
+			// A probe's duplicates leave the loss of their data to the originals
+			if !info.bandwidth_probe {
+				for frame in info.stream_frames {
+					self.streams.retransmit(frame);
+				}
+			}
+			self.ack_frequency.on_lost(packet);
+			self.spaces[SpaceId::Data].pending |= info.retransmits;
+		}
+
+		self.datagrams().drop_oversized();
+		self.set_loss_detection_timer(now);
+	}
+
+	/// The path a packet sent on path `generation` counts against: the previous one if it went
+	/// there, otherwise the current one
+	fn sent_path(&mut self, generation: u64) -> &mut PathData {
+		match &mut self.prev_path {
+			Some((_, prev)) if prev.generation() == generation => prev,
+			_ => &mut self.path,
+		}
+	}
+
+	/// Make `path` the current path, returning the one it replaces
+	fn replace_path(&mut self, now: Instant, path: PathData) -> PathData {
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
+		mem::replace(&mut self.path, path)
 	}
 
 	/// Handle a change in the local address, i.e. an active migration
@@ -3486,18 +4105,21 @@ impl Connection {
 		now: Instant,
 		space_id: SpaceId,
 		buf: &mut Vec<u8>,
-		max_size: usize,
-		pn: u64,
+		builder: &PacketBuilder,
 		bandwidth_probe: bool,
 	) -> SentFrames {
+		let (max_size, pn) = (builder.max_size, builder.exact_number);
 		let mut sent = SentFrames::default();
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.maybe_ack_non_eliciting();
 
 		let pre_payload_len = buf.len();
+		// A packet planned as ACK-only skipped the limits on ack-eliciting packets, so it must
+		// stay that way (RFC 9002 §7): every other frame waits for a packet the limits let through.
+		let ack_eliciting = builder.ack_eliciting;
 
 		// HANDSHAKE_DONE
-		if mem::replace(&mut space.pending.handshake_done, false) {
+		if ack_eliciting && mem::replace(&mut space.pending.handshake_done, false) {
 			buf.write(frame::FrameType::HANDSHAKE_DONE);
 			sent.retransmits.get_or_create().handshake_done = true;
 			// This is just a u8 counter and the frame is typically just sent once
@@ -3505,7 +4127,7 @@ impl Connection {
 		}
 
 		// PING
-		if mem::replace(&mut space.ping_pending, false) {
+		if ack_eliciting && mem::replace(&mut space.ping_pending, false) {
 			trace!("PING");
 			buf.write(frame::FrameType::PING);
 			sent.non_retransmits = true;
@@ -3513,7 +4135,7 @@ impl Connection {
 		}
 
 		// IMMEDIATE_ACK
-		if mem::replace(&mut space.immediate_ack_pending, false) {
+		if ack_eliciting && mem::replace(&mut space.immediate_ack_pending, false) {
 			trace!("IMMEDIATE_ACK");
 			buf.write(frame::FrameType::IMMEDIATE_ACK);
 			sent.non_retransmits = true;
@@ -3521,7 +4143,7 @@ impl Connection {
 		}
 
 		// ACK_FREQUENCY, ahead of the ACK, whose receive timestamps fill the space left
-		if mem::replace(&mut space.pending.ack_frequency, false) {
+		if ack_eliciting && mem::replace(&mut space.pending.ack_frequency, false) {
 			let sequence_number = self.ack_frequency.next_sequence_number();
 
 			// Safe to unwrap because this is always provided when ACK frequency is enabled
@@ -3554,8 +4176,9 @@ impl Connection {
 		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
 		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
 
-		// ACK
+		// ACK, its receive timestamps leaving half the room to the frames that follow
 		if space.pending_acks.can_send() {
+			let reserve = if ack_eliciting { (max_size - buf.len()) / 2 } else { 0 };
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
@@ -3565,7 +4188,13 @@ impl Connection {
 				buf,
 				&mut self.stats,
 				max_size,
+				reserve,
 			);
+		}
+
+		// A frame that rides along, such as the challenge an unvalidated path repeats, waits too
+		if !ack_eliciting {
+			return sent;
 		}
 
 		// PATH_CHALLENGE
@@ -3577,6 +4206,7 @@ impl Connection {
 				let token = challenge.token;
 				sent.non_retransmits = true;
 				sent.requires_padding = true;
+				sent.path_challenge = true;
 				trace!("PATH_CHALLENGE {:08x}", token);
 				buf.write(frame::FrameType::PATH_CHALLENGE);
 				buf.write(token);
@@ -3584,8 +4214,8 @@ impl Connection {
 			}
 		}
 
-		// PATH_RESPONSE
-		if buf.len() + 9 < max_size
+		// PATH_RESPONSE, one for each challenge received on this path
+		while buf.len() + 9 < max_size
 			&& space_id == SpaceId::Data
 			&& let Some(token) = self.path_responses.pop_on_path(self.path.remote)
 		{
@@ -3736,11 +4366,12 @@ impl Connection {
 		// Bundle ACK with other frames when there is room for them.
 		// We want to reuse encryption and underlying protocol overhead,
 		// but sending multiple ACKs for a single incoming packet is a waste of peer's resources,
-		// so we have next_bundled_ack_time to control when to send ACKs.
+		// so we have next_bundled_ack_time to control when to send ACKs. It spaces out 1-RTT ACKs
+		// alone: the handshake spaces acknowledge every packet at once anyway.
 		let any_frames_sent = buf.len() > pre_payload_len;
 		if any_frames_sent
 			&& sent.largest_acked.is_none()
-			&& self.next_bundled_ack_time.is_some_and(|time| time <= now)
+			&& (space_id != SpaceId::Data || self.next_bundled_ack_time.is_some_and(|time| time <= now))
 			&& space.pending_acks.can_send_with_other_frames()
 		{
 			Self::try_populate_acks(
@@ -3752,6 +4383,7 @@ impl Connection {
 				buf,
 				&mut self.stats,
 				max_size,
+				0,
 			);
 		}
 
@@ -3765,6 +4397,8 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
+	///
+	/// Receive timestamps leave `reserve` bytes free for the frames that follow.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "an associated function, so a caller can lend it disjoint fields of the connection"
@@ -3778,6 +4412,7 @@ impl Connection {
 		buf: &mut Vec<u8>,
 		stats: &mut Stats,
 		max_size: usize,
+		reserve: usize,
 	) {
 		debug_assert!(!space.pending_acks.ranges().is_empty());
 
@@ -3794,17 +4429,26 @@ impl Connection {
 		let no_acks_len = buf.len();
 		let ranges = space.pending_acks.ranges();
 		// Timestamps fill the space left after the ranges, rather than a packet of their own
-		let timestamps = timestamps.filter(|log| log.any(ranges));
-		frame::Ack::encode(delay as _, ranges, ecn, timestamps.is_some(), buf);
-		if let Some(log) = timestamps
-			&& let Some(space) = max_size.checked_sub(buf.len())
-		{
-			log.encode(ranges, space, buf);
+		let mut report = timestamps.as_deref().is_some_and(|log| log.any(ranges));
+		frame::Ack::encode(delay as _, ranges, ecn, report, buf);
+		// The Receive Timestamps field takes a byte for its count at least; with no room for it,
+		// the ACK goes without the field
+		let room = max_size.saturating_sub(reserve).saturating_sub(buf.len());
+		if report && room == 0 {
+			report = false;
+			buf.truncate(no_acks_len);
+			frame::Ack::encode(delay as _, ranges, ecn, false, buf);
 		}
 		if buf.len() > max_size {
 			// The ACK frame is too large. Remove it.
 			buf.truncate(no_acks_len);
 			return;
+		}
+		if let Some(log) = timestamps {
+			if report {
+				log.encode(ranges, room, buf);
+			}
+			log.clear();
 		}
 		sent.largest_acked = space.pending_acks.ranges().max();
 		stats.frame_tx.acks += 1;
@@ -4002,6 +4646,32 @@ impl Connection {
 		buf
 	}
 
+	/// Whether the path the peer moved away from is still kept to fall back to
+	#[cfg(test)]
+	pub(crate) fn has_prev_path(&self) -> bool {
+		self.prev_path.is_some()
+	}
+
+	/// How many keep-alive probes past the congestion window count against the current budget
+	#[cfg(test)]
+	pub(crate) fn exempt_probes_spent(&self) -> u32 {
+		self.exempt_probes.map_or(0, |(_, count)| count)
+	}
+
+	/// Bytes in flight on the current path, and its congestion window
+	#[cfg(test)]
+	pub(crate) fn in_flight_and_window(&self) -> (u64, u64) {
+		(self.path.in_flight.bytes, self.path.congestion.window())
+	}
+
+	/// When the pacer's bucket is full again, or `None` if it is now
+	#[cfg(test)]
+	pub(crate) fn pacing_release(&mut self, now: Instant) -> Option<Instant> {
+		// The pacer caps what it waits for at its bucket, so asking for the most it could send
+		// waits for a full one
+		self.path.congestion.pace(now, u64::MAX)
+	}
+
 	/// The number of bytes of packets containing retransmittable frames that have not been
 	/// acknowledged or declared lost.
 	#[cfg(test)]
@@ -4017,6 +4687,18 @@ impl Connection {
 		self.path.remove_in_flight(&packet);
 	}
 
+	/// What a test's observer reads to check that bytes in flight stay within the congestion
+	/// window
+	#[cfg(test)]
+	pub(crate) fn window_state(&self) -> WindowState {
+		WindowState {
+			window: self.path.congestion.window(),
+			in_flight: self.path.in_flight.bytes,
+			probing: SpaceId::iter().any(|space| self.spaces[space].loss_probes > 0),
+			probes: self.stats.path.sent_plpmtud_probes + self.stats.path.sent_bandwidth_probes,
+		}
+	}
+
 	/// Number of bytes worth of non-ack-only packets that may be sent
 	#[cfg(test)]
 	pub(crate) fn congestion_window(&self) -> u64 {
@@ -4029,7 +4711,7 @@ impl Connection {
 		self.streams.receive_rate_deadline()
 	}
 
-	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running
+	/// Whether no timers but keepalive, idle, rtt, pushnewcid, key discard, stale, and silent are running
 	#[cfg(test)]
 	pub(crate) fn is_idle(&self) -> bool {
 		if self.streams.receive_rate_deadline().is_some() {
@@ -4037,7 +4719,12 @@ impl Connection {
 		}
 		Timer::VALUES
 			.iter()
-			.filter(|&&t| !matches!(t, Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard))
+			.filter(|&&t| {
+				!matches!(
+					t,
+					Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard | Timer::Stale | Timer::Silent
+				)
+			})
 			.filter_map(|&t| Some((t, self.timers.get(t)?)))
 			.min_by_key(|&(_, time)| time)
 			.is_none_or(|(timer, _)| timer == Timer::Idle)
@@ -4086,6 +4773,7 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
+			|| self.streams.owes_streams_blocked()
 			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
 			|| self
 				.prev_path
@@ -4182,6 +4870,15 @@ impl fmt::Debug for Connection {
 			.field("handshake_cid", &self.handshake_cid)
 			.finish()
 	}
+}
+
+/// What the congestion controller held data back on
+#[derive(Debug, Clone, Copy)]
+enum CongestionLimit {
+	/// The congestion window had no room for another datagram
+	Window,
+	/// The pacer holds the next send until then
+	Pacing { until: Instant },
 }
 
 /// Fields of `Connection` specific to it being client-side or server-side
@@ -4409,6 +5106,13 @@ impl State {
 	fn is_drained(&self) -> bool {
 		matches!(*self, Self::Drained)
 	}
+
+	fn owes_close(&self) -> bool {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close,
+			Self::Handshake(_) | Self::Established | Self::Drained => false,
+		}
+	}
 }
 
 mod state {
@@ -4439,6 +5143,15 @@ mod state {
 	}
 }
 
+/// Whose handshake CRYPTO a peer's packet showed is missing
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+	/// Ours: the peer probed without moving its handshake forward
+	Ours,
+	/// The peer's: it sent what follows CRYPTO we never got
+	Theirs,
+}
+
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {
 	Duration::from_micros(params.max_ack_delay.0 * 1000)
 }
@@ -4457,6 +5170,18 @@ struct EarlyPacket {
 	packet: Packet,
 }
 
+/// A connection's congestion window as a test's observer sees it
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WindowState {
+	pub(crate) window: u64,
+	pub(crate) in_flight: u64,
+	/// Whether a loss probe is owed, which may cross the window
+	pub(crate) probing: bool,
+	/// The MTU and bandwidth probes sent so far, which the window does not bound
+	pub(crate) probes: u64,
+}
+
 /// Minimal remaining size to allow packet coalescing, excluding cryptographic tag
 ///
 /// This must be at least as large as the header for a well-formed empty packet to be coalesced,
@@ -4465,6 +5190,20 @@ struct EarlyPacket {
 /// datagram (because we coalesce in ascending packet space order and the only reason to split a
 /// packet is when packet space changes).
 const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_HEADER_SIZE + 32;
+
+/// [`MIN_PACKET_SPACE`] for a 1-RTT packet starting its own datagram, whose short header leaves
+/// the same room for frames
+///
+/// An unvalidated path's datagram may be this small, as one answering a migrated peer's PING.
+const MIN_SHORT_PACKET_SPACE: usize = 1 + MAX_CID_SIZE + 4 + 32;
+
+/// The least room a packet in `space` needs, excluding its tag
+fn min_packet_space(space: SpaceId) -> usize {
+	match space {
+		SpaceId::Data => MIN_SHORT_PACKET_SPACE,
+		SpaceId::Initial | SpaceId::Handshake => MIN_PACKET_SPACE,
+	}
+}
 
 /// Largest amount of space that could be occupied by a Handshake packet's header
 ///
@@ -4489,6 +5228,10 @@ struct SentFrames {
 	/// Whether the packet contains non-retransmittable frames (like datagrams)
 	non_retransmits: bool,
 	requires_padding: bool,
+	/// Whether the packet carries the current path's PATH_CHALLENGE
+	path_challenge: bool,
+	/// Whether the packet goes to an address off the path, unmarked for ECN
+	off_path: bool,
 }
 
 impl SentFrames {
@@ -4621,6 +5364,64 @@ mod tests {
 		for (left, right, result) in test_params {
 			assert_eq!(negotiate_max_idle_timeout(left, right), result);
 			assert_eq!(negotiate_max_idle_timeout(right, left), result);
+		}
+	}
+
+	/// An ACK whose ranges leave no room for the Receive Timestamps field, or only room reserved for
+	/// other frames, goes out plain rather than not at all, one with room reports what fits, and
+	/// either way the log forgets every arrival the ACK covered
+	#[test]
+	fn ack_fits_receive_timestamps_to_its_room() {
+		let now = Instant::now();
+		let mut space = PacketSpace::new(now);
+		for pn in [0, 2, 4] {
+			space.pending_acks.insert_one(pn, now);
+		}
+		let ranges = space.pending_acks.ranges().clone();
+		let header = |timestamps| {
+			let mut buf = Vec::new();
+			frame::Ack::encode(0, &ranges, None, timestamps, &mut buf);
+			buf.len()
+		};
+		for (room, reserve, ty, reported) in [
+			(header(true), 0, frame::FrameType::ACK, 0),
+			(header(true) + 1, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 0),
+			(1200, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 3),
+			(1200, 1200 - header(true), frame::FrameType::ACK, 0),
+		] {
+			let mut log = receive_timestamps::Log::new(32, 0);
+			for pn in [0, 2, 4] {
+				log.received(pn, now, usize::MAX);
+			}
+			let mut sent = SentFrames::default();
+			let mut buf = Vec::new();
+			Connection::try_populate_acks(
+				now,
+				false,
+				Some(&mut log),
+				&mut sent,
+				&mut space,
+				&mut buf,
+				&mut Stats::default(),
+				room,
+				reserve,
+			);
+			assert_eq!(sent.largest_acked, Some(4), "room {room}, reserve {reserve}");
+			assert!(buf.len() <= room, "room {room}, reserve {reserve}");
+			let frames = frame::Iter::new(buf.into())
+				.unwrap()
+				.collect::<Result<Vec<_>, _>>()
+				.unwrap();
+			let [Frame::Ack(ack)] = &frames[..] else {
+				panic!("incorrect frames {frames:?}");
+			};
+			assert_eq!(frames[0].ty(), ty, "room {room}, reserve {reserve}");
+			assert_eq!(
+				ack.receive_timestamps().map_or(0, Iterator::count),
+				reported,
+				"room {room}, reserve {reserve}"
+			);
+			assert!(!log.any(&ranges), "room {room}, reserve {reserve}");
 		}
 	}
 }

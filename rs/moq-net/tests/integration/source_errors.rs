@@ -7,10 +7,12 @@
 //! moq-transport's PUBLISH_DONE registry has no code for either error.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Error, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const VERSIONS: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
@@ -22,16 +24,19 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A publisher announcing `bcast`, a relay subscribed to it, and a far origin subscribed
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
+	/// Held as a relay holds its origin: one whose sessions all end tears down.
+	_relay: moq_net::origin::Producer,
 	broadcast: moq_net::origin::Route,
 	upstream: MockPair,
 	_downstream: MockPair,
@@ -74,6 +79,7 @@ async fn relayed(version: &str) -> Relayed {
 		_downstream: downstream,
 		relayed: resolve(&relay).await,
 		remote: resolve(&far).await,
+		_relay: relay,
 	}
 }
 
@@ -135,8 +141,8 @@ async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 		let setup = relayed(version).await;
 		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
 		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -163,8 +169,8 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 		let setup = relayed(version).await;
 		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
 		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

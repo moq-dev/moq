@@ -1,24 +1,23 @@
 /**
  * Serving the groups a track's readers miss: the on-demand request surface. Mirrors the Rust
- * `track::Requests` and `track::Fill` (`rs/moq-net/src/model/track/fill.rs`).
+ * `track::Requests` and `track::FillGroups` (`rs/moq-net/src/model/track/fill.rs`).
  *
  * A reader misses a group its ranges name that the track no longer caches, or never did, below
  * the newest group the producer wrote: nothing above it is a miss, since it arrives live. While a
- * {@link Requests} handle is open, each run of misses queues a {@link Fill} for it to serve, and
+ * {@link Requests} handle is open, each run of misses queues a {@link FillGroups} for it to serve, and
  * readers missing the same groups join the one fill rather than asking twice. With none open, a
  * miss is given up as it always was.
  *
  * @module
  */
-import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
-import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
+import { cutRun, insertRun, runGaps, runsFrom } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
-import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
+import { checkEnd, checkKey, max, min } from "./util/key.ts";
 
-// A half-open run of group sequences, as `internal.ts` has it, kept local so the published
+// A half-open run of group keys, as `internal.ts` has it, kept local so the published
 // declarations never reach the package internals.
 type Run = { start: bigint; end: bigint };
 
@@ -30,15 +29,20 @@ type Run = { start: bigint; end: bigint };
 export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
-	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
-	accept(sequence: bigint, info: Info | undefined): GroupProducer;
+	/** Insert group `key` into the cache, committing `info` first if the track has none. */
+	accept(key: bigint, info: Info | undefined): GroupProducer;
 	/**
 	 * Record `[start, end)` as never to be delivered, with `error`. With `stale`, judged too old
 	 * under that budget in milliseconds: a verdict only on readers no more tolerant.
 	 */
 	drop(start: bigint, end: bigint, hole: { error: Error; stale?: number }): void;
-	/** Whether the track still caches group `sequence`, not failed. */
-	holds(sequence: bigint): boolean;
+	/**
+	 * Whether the track still caches group `key`, not failed: `"headless"` for a copy missing
+	 * its first frames, which a fill from frame 0 replaces.
+	 */
+	holds(key: bigint): boolean | "headless";
+	/** The group the track caches at `key`, if any. */
+	cached(key: bigint): GroupProducer | undefined;
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -55,23 +59,18 @@ export interface Asker {
 	wants(start: bigint, end: bigint): Run[];
 	/** Its delivery priority. */
 	priority(): number;
-	/** Its age budget in milliseconds: `Infinity` for none, so the publisher's alone bounds it. */
-	maxDelay(): number;
 	/** Which end it reads first. */
 	order(): Order;
-	/**
-	 * Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again.
-	 * With `stale`, the source judged them too old under that budget in milliseconds: a verdict
-	 * on this reader only while its own budget is no wider, so a widening asks again.
-	 */
-	refuse(start: bigint, end: bigint, error: Error, stale?: number): void;
+	/** Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again. */
+	refuse(start: bigint, end: bigint, error: Error): void;
 }
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
+	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer | undefined;
+	answerCached(state: FillState, pending: Pending, key: bigint): boolean;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
-	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
+	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
 };
@@ -83,6 +82,12 @@ type Live = Run & { pending: Pending };
 class Pending {
 	readonly start: bigint;
 	readonly end: bigint;
+	// The oldest key the first group may start at: below `start` for a time start, whose group is
+	// the newest one starting at or before it.
+	readonly floor: bigint;
+	// A time start's, which no other reader joins: it owes its key while its reader waits on it,
+	// whatever the reader's window reads, as the Rust `Join` holds its key.
+	readonly exclusive: boolean;
 	readonly askers = new Set<Asker>();
 	// The groups answered: accepted, delivered live, dropped, or refused.
 	readonly resolved: Run[] = [];
@@ -95,10 +100,14 @@ class Pending {
 	done = false;
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
+	// What a time start's handler answered.
+	answer?: TimeStart;
 
-	constructor(start: bigint, end: bigint) {
+	constructor(start: bigint, end: bigint, floor = start, exclusive = false) {
 		this.start = start;
 		this.end = end;
+		this.floor = floor;
+		this.exclusive = exclusive;
 	}
 
 	bump(): void {
@@ -115,6 +124,7 @@ class Pending {
 
 	// The parts of `[start, end)` still unanswered that a reader still reads.
 	owed(start = this.start, end = this.end): Run[] {
+		if (this.exclusive) return this.askers.size > 0 ? this.unresolved(start, end) : [];
 		const owed: Run[] = [];
 		for (const gap of this.unresolved(start, end)) {
 			for (const asker of this.askers) {
@@ -137,9 +147,12 @@ export class FillState {
 	#queue: Pending[] = [];
 	readonly #queued = new Signal(0);
 	readonly #pending = new Set<Pending>();
-	// What each fill still owes, by sequence: its unanswered, unwithdrawn parts, which no two fills
+	// What each fill still owes, by key: its unanswered, unwithdrawn parts, which no two fills
 	// share, so a reader's ask or an arrival costs the fills it touches, never every fill out.
 	#live: Live[] = [];
+	// The time starts' fills out, by their key, which no live part holds: a group landing there
+	// answers each, as the Rust `FillGroups::wanted` finds it cached.
+	readonly #starts = new Map<bigint, Set<Pending>>();
 	// Bumped as each handler opens, so readers parked on a miss nobody could take ask again.
 	readonly #opened = new Signal(0);
 
@@ -188,6 +201,29 @@ export class FillState {
 	}
 
 	/**
+	 * Queue a fill of the group containing `time` for `asker`: the group starting at it, or else the
+	 * newest one before it, starting at or after `floor`, as the Rust `FillState::time_start` does.
+	 * No other reader joins it. Undefined while no handler is open to answer it.
+	 */
+	timeStart(time: bigint, floor: bigint, asker: Asker): Lookup | undefined {
+		if (this.#handlers === 0 || this.#track.closed()) return undefined;
+		const pending = new Pending(time, time + 1n, min(floor, time), true);
+		pending.askers.add(asker);
+		this.#pending.add(pending);
+		const starts = this.#starts.get(time) ?? new Set();
+		starts.add(pending);
+		this.#starts.set(time, starts);
+		this.#queue.push(pending);
+		this.#queued.update((revision) => revision + 1);
+		return {
+			answer: () => pending.answer,
+			done: () => pending.done,
+			changed: pending.revision,
+			leave: () => this.leave(asker, pending),
+		};
+	}
+
+	/**
 	 * The parts of `[start, end)` a fill `asker` joined still owes it, merged and in order: only what it still
 	 * reads, as the Rust `Join::held` holds, so a wider fill shared with other readers owes it
 	 * nothing outside its own ranges.
@@ -209,9 +245,9 @@ export class FillState {
 		if (run) yield run;
 	}
 
-	/** `asker` left: the fills it alone waited on are withdrawn. */
-	leave(asker: Asker): void {
-		for (const pending of this.#pending) {
+	/** `asker` left `only`, or every fill: the fills it alone waited on are withdrawn. */
+	leave(asker: Asker, only?: Pending): void {
+		for (const pending of only ? [only] : this.#pending) {
 			if (!pending.askers.delete(asker)) continue;
 			this.#judge(pending);
 		}
@@ -231,15 +267,29 @@ export class FillState {
 		for (const pending of judged) this.#judge(pending);
 	}
 
-	/** Group `sequence` landed in the cache, through a fill or live: it is answered. */
-	arrived(sequence: bigint): void {
-		const [live] = this.#overlapping(sequence, sequence + 1n);
-		if (live) this.#resolve(live.pending, sequence, sequence + 1n);
+	/** Group `key` landed in the cache, through a fill or live: it is answered. */
+	arrived(key: bigint): void {
+		const [live] = this.#overlapping(key, key + 1n);
+		if (live) this.#resolve(live.pending, key, key + 1n);
+		for (const pending of this.#starts.get(key) ?? []) {
+			pending.answer = { kind: "group", group: key };
+			this.#resolve(pending, key, key + 1n);
+		}
 	}
 
-	/** `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. */
+	/**
+	 * `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. A head
+	 * of a group the cache holds is left to its own fill, as the Rust `drop_groups` touches no
+	 * fill: a drop of that group, such as an earlier SUBSCRIBE_DROP arriving late, says nothing of
+	 * whether its source can still bring frame 0.
+	 */
 	dropped(start: bigint, end: bigint): void {
-		const owing = new Set(this.#overlapping(start, end).map((live) => live.pending));
+		const owing = new Set<Pending>();
+		for (const live of this.#overlapping(start, end)) {
+			// A held group is no miss, so the only fill owing it is its head's, one group wide.
+			if (live.end - live.start === 1n && this.#track.holds(live.start) === "headless") continue;
+			owing.add(live.pending);
+		}
 		for (const pending of owing) this.#resolve(pending, start, end);
 	}
 
@@ -251,8 +301,10 @@ export class FillState {
 		return found;
 	}
 
-	// Take `runs` of one fill out of the live parts, once it no longer owes them.
-	#settled(runs: readonly Run[]): void {
+	// Take `runs` of `pending` out of the live parts, once it no longer owes them. A time start's
+	// fill was never among them.
+	#settled(pending: Pending, runs: readonly Run[]): void {
+		if (pending.exclusive) return;
 		for (const run of runs) cutRun(this.#live, run.start, run.end);
 	}
 
@@ -271,7 +323,11 @@ export class FillState {
 	removeHandler(): void {
 		this.#handlers--;
 		if (this.#handlers > 0) return;
-		for (const pending of this.#queue.splice(0)) this.#settle(pending);
+		// A time start nobody took is left unanswered, as the Rust `release_queued` ends it.
+		for (const pending of this.#queue.splice(0)) {
+			if (pending.exclusive) this.#finish(pending);
+			else this.#settle(pending);
+		}
 	}
 
 	/**
@@ -302,7 +358,7 @@ export class FillState {
 				withdrawn.push(run);
 			}
 		}
-		this.#settled(withdrawn);
+		this.#settled(pending, withdrawn);
 		if (owed.length > 0) {
 			pending.bump();
 			return;
@@ -315,24 +371,27 @@ export class FillState {
 		const unresolved = pending.unresolved(start, end);
 		if (unresolved.length === 0) return;
 		for (const run of unresolved) insertRun(pending.resolved, run.start, run.end);
-		this.#settled(unresolved);
+		this.#settled(pending, unresolved);
 		if (pending.unresolved().length === 0) this.#finish(pending);
 		else pending.bump();
 	}
 
 	// Answer what `pending` still owes as dropped, then forget it.
 	#settle(pending: Pending): void {
-		for (const run of pending.owed())
-			this.#track.drop(run.start, run.end, { error: new NotFound(`group ${run.start}`) });
+		const owed = pending.owed();
+		if (pending.exclusive && owed.length > 0) pending.answer ??= { kind: "dropped" };
+		for (const run of owed) this.#track.drop(run.start, run.end, { error: new NotFound(`group ${run.start}`) });
 		this.#finish(pending);
 	}
 
 	// Forget `pending`: it owes nothing more.
 	#finish(pending: Pending): void {
 		if (pending.done) return;
-		this.#settled(pending.unresolved());
+		this.#settled(pending, pending.unresolved());
 		pending.done = true;
 		this.#pending.delete(pending);
+		const starts = pending.exclusive ? this.#starts.get(pending.start) : undefined;
+		if (starts?.delete(pending) && starts.size === 0) this.#starts.delete(pending.start);
 		if (pending.queued) this.#queue.splice(this.#queue.indexOf(pending), 1);
 		pending.bump();
 	}
@@ -346,32 +405,60 @@ export class FillState {
 
 	static {
 		fillOps = {
-			accept: (state, pending, sequence, info) => {
-				if (sequence < pending.start || sequence >= pending.end) {
-					throw new RangeError(`group ${sequence} is outside the fill ${pending.start}..${pending.end}`);
+			accept: (state, pending, key, info) => {
+				if (key < pending.floor || key >= pending.end) {
+					throw new RangeError(`group ${key} is outside the fill ${pending.floor}..${pending.end}`);
 				}
-				if (pending.resolved.some((run) => run.start <= sequence && sequence < run.end)) {
-					throw new Error(`group ${sequence} was already answered`);
+				// A key below the start answers the start, so no other group starts from it through the
+				// start.
+				let answers = key;
+				if (answers < pending.start) answers = pending.start;
+				if (pending.resolved.some((run) => run.start <= answers && answers < run.end)) return undefined;
+				// A copy missing its head is replaced from frame 0, as a bounded reader asked. Landing in
+				// the cache answers it, as `arrived` records.
+				const group = state.#track.holds(key) === true ? undefined : state.#track.accept(key, info);
+				// A time start's fill is no live part, and a group below its key lands nowhere it owes.
+				if (pending.exclusive && !pending.done) {
+					// Below the time, it holds the group it names, created or cached, so its End stays known
+					// once the cache lets it go.
+					const answer = key < pending.start ? (group ?? state.#track.cached(key)) : undefined;
+					pending.answer = { kind: "group", group: key, answer };
+					state.#resolve(pending, pending.start, pending.end);
 				}
-				if (state.#track.holds(sequence)) throw new Error(`duplicate group: sequence=${sequence}`);
-				// Landing in the cache answers it, as `arrived` records.
-				return state.#track.accept(sequence, info);
+				return group;
+			},
+			// Answer owed `key` from the cache if the track holds it whole, as an arrival would. Returns
+			// whether it did.
+			answerCached: (state, pending, key) => {
+				if (state.#track.holds(key) !== true) return false;
+				if (pending.exclusive) {
+					pending.answer = { kind: "group", group: key };
+					state.#resolve(pending, pending.start, pending.end);
+				} else state.#resolve(pending, key, key + 1n);
+				return true;
 			},
 			drop: (state, pending, start, end, hole) => {
-				for (const run of pending.owed(start, end)) {
+				const owed = pending.owed(start, end);
+				if (pending.exclusive && owed.length > 0) pending.answer ??= { kind: "dropped" };
+				for (const run of owed) {
 					state.#track.drop(run.start, run.end, hole ?? { error: new NotFound(`group ${run.start}`) });
 				}
 				// A stale verdict settles only readers that read every group above it, so the readers
-				// waiting now are refused as well, as the Rust `Inner::drop_groups` does. It binds every
-				// reader, so the refusal carries no budget a wider one could see past.
+				// waiting now are refused as well, as the Rust `Inner::drop_groups` does.
 				if (hole?.stale !== undefined) fillOps.refuse(state, pending, start, end, hole.error);
 				else state.#resolve(pending, start, end);
 			},
-			refuse: (state, pending, start, end, error, stale) => {
+			refuse: (state, pending, start, end, error) => {
+				// A time start's refusal reaches its reader through the lookup, as the error its
+				// reads fail with, not as a group given up.
+				if (pending.exclusive) {
+					if (pending.unresolved(start, end).length > 0) pending.answer ??= { kind: "refused", error };
+					state.#resolve(pending, start, end);
+					return;
+				}
 				for (const gap of pending.unresolved(start, end)) {
 					for (const asker of pending.askers) {
-						for (const run of asker.wants(gap.start, gap.end))
-							asker.refuse(run.start, run.end, error, stale);
+						for (const run of asker.wants(gap.start, gap.end)) asker.refuse(run.start, run.end, error);
 					}
 				}
 				state.#resolve(pending, start, end);
@@ -383,38 +470,68 @@ export class FillState {
 }
 
 /** The still-wanted runs of a fill, in ascending order. @internal */
-export let wantedRuns: (fill: Fill) => Run[];
+export let wantedRuns: (fill: FillGroups) => Run[];
 /**
  * Wait for a change to the groups or readers of a fill, which a lost {@link race} releases.
  * @internal
  */
-export let fillChanged: (fill: Fill) => GetPromise<unknown>;
+export let fillChanged: (fill: FillGroups) => GetPromise<unknown>;
 /**
- * The budget in milliseconds an OLD answer was judged under, and whether that is the publisher's
- * max age, which binds every reader, rather than the request's own budget.
+ * What a time start's handler answered: the group containing the time, no group from the floor
+ * through it, or a refusal saying nothing of where it falls. Mirrors the Rust `fill::TimeStart`.
  *
  * @internal
  */
-export interface Judged {
-	budget: number;
-	everyone: boolean;
+export type TimeStart =
+	/**
+	 * The group containing the time, and the group that answered it below the time, held so where it
+	 * ends is known once the cache lets it go.
+	 */
+	{ kind: "group"; group: bigint; answer?: GroupProducer } | { kind: "dropped" } | { kind: "refused"; error: Error };
+
+/**
+ * A reader's time start, from {@link FillState.timeStart}.
+ *
+ * @internal
+ */
+export interface Lookup {
+	/** What its handler answered, undefined until it does, or when it closed unanswered. */
+	answer(): TimeStart | undefined;
+	/** Whether it is over: answered, or closed unanswered. */
+	done(): boolean;
+	/** Bumped as it changes. */
+	readonly changed: Getter<number>;
+	/** Stop waiting on it, withdrawing it once nobody does. */
+	leave(): void;
 }
 
 /**
- * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one
- * says every older group of the fill is stale too, since a timed track's starts never rewind:
- * judged under the request's own budget, or a max age not known here (`judged` undefined), it is
- * refused to the readers waiting now, a verdict only on those no more tolerant, so a wider reader
- * asks again; under the publisher's max age it binds every reader, so the track records it as a
- * stale verdict under that age, which new terms or the drop set's expiry window forget. Any other
- * refusal answers only `[start, end)`, for now. Mirrors the Rust `Fill::reject_groups`.
+ * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one,
+ * past the publisher's max age `bound` in milliseconds, says every older group of the fill is
+ * stale too, since a timed track's starts never rewind: it binds every reader, so the track
+ * records it as a stale verdict under that age, which a new upstream subscription or the drop
+ * set's expiry window forgets. Any other refusal, or an OLD one with no max age known here,
+ * answers only `[start, end)`, for now. Mirrors the Rust `Inner::reject`.
  * @internal
  */
-export let rejectGroups: (fill: Fill, start: bigint, end: bigint, error: Error, judged: Judged | undefined) => void;
+export let rejectGroups: (
+	fill: FillGroups,
+	start: bigint,
+	end: bigint,
+	error: Error,
+	bound: number | undefined,
+) => void;
 
 // Constructs the public handles from within this module; assigned in their static blocks.
-let makeFill: (state: FillState, pending: Pending) => Fill;
+let makeGroups: (state: FillState, pending: Pending) => FillGroups;
 let makeRequests: (state: FillState) => Requests;
+
+// The most urgent delivery priority among the readers waiting on `pending` now.
+function priorityOf(pending: Pending): number {
+	let priority: number | undefined;
+	for (const asker of pending.askers) priority = Math.max(priority ?? asker.priority(), asker.priority());
+	return priority ?? 0;
+}
 
 /**
  * A {@link Requests} handle on `state`, for a producer's `requests()`.
@@ -431,8 +548,10 @@ export function requestsOf(state: FillState): Requests {
  *
  * Most tracks never serve old content, so this lives on its own handle rather than the producer:
  * a publisher backed by storage opens one to serve groups its live cache no longer holds, or
- * never held. While at least one is open, a reader missing a run of groups queues a {@link Fill}
- * here; with none open, the miss is given up. {@link close} it once done.
+ * never held. While at least one is open, a reader missing a run of groups queues a
+ * {@link FillGroups} here; with none open, the miss is given up. {@link close} it once done, and keep
+ * taking fills until then: a reader waits on its fill until it is answered or closed, so a handle
+ * left open but unread stalls that reader.
  *
  * @public
  */
@@ -450,19 +569,21 @@ export class Requests {
 	}
 
 	/** The track's name, unique within its broadcast. */
+	// fallow-ignore-next-line unused-class-member
 	get name(): string {
 		return fillOps.name(this.#state);
 	}
 
 	/**
-	 * Wait until readers miss a run of groups, returning the {@link Fill} to serve. Resolves
-	 * `undefined` once the track closes with nothing queued, or this handle closes, even while
-	 * it waits.
+	 * Wait until readers miss a run of groups, returning the {@link FillGroups} to serve, including
+	 * the group containing a reader's time start that no cached group places (see
+	 * {@link FillGroups.floor}). Resolves `undefined` once the track closes with nothing queued, or
+	 * this handle closes, even while it waits.
 	 */
-	async requestedFill(): Promise<Fill | undefined> {
+	async requestedFill(): Promise<FillGroups | undefined> {
 		const pending = await this.#state.next(this.#closed);
 		if (!pending) return undefined;
-		return makeFill(this.#state, pending);
+		return makeGroups(this.#state, pending);
 	}
 
 	/**
@@ -482,25 +603,41 @@ export class Requests {
 
 /**
  * A run of groups readers miss, from {@link Requests.requestedFill}: `start` up to the exclusive
- * `end`. Mirrors the Rust `track::Fill`.
+ * `end`. Mirrors the Rust `track::FillGroups`. A reader's time start that no cached group places
+ * asks for the group containing that time as a fill one key wide, from the time, whose first group
+ * may start below it: see {@link floor}.
  *
- * Its {@link priority}, {@link maxDelay}, and {@link order} follow its readers as they change, so
+ * Its {@link priority} and {@link order} follow its readers as they change, so
  * read them as each group is served. Call {@link accept} for each group the source has, writing
  * its frames into the returned producer, and {@link dropGroups} for those it does not. Readers
  * that leave, or narrow their ranges past a group, stop wanting it: serve {@link wanted} until it
  * is `undefined`, which {@link wantedChanged} waits on. {@link close} the fill once done; closing
  * names whatever is still wanted dropped rather than leaving its readers waiting.
  *
- * Groups keep their sequence, so an accepted group should hold the frames, payloads, and
+ * Groups keep their key, so an accepted group should hold the frames, payloads, and
  * boundaries it had when it was first published: a fill replays the track, never a new version.
  *
  * @public
  */
-export class Fill {
+export class FillGroups {
 	/** The first group to fill. */
 	readonly start: bigint;
 	/** The exclusive end group. */
 	readonly end: bigint;
+	/**
+	 * The oldest group the first group may start at: {@link start}, unless that is a reader's time
+	 * start no cached group places. Then the first group is the one containing that time: the group
+	 * starting at it, or else the newest one starting before it, at or after the floor; once that
+	 * group ends whole at or before the time, the reader starts past it, at its End. A handler
+	 * knowing its groups only by key serves that key as any other; one that can tell which group
+	 * holds the time, as from an index, may {@link accept} that group instead, or
+	 * {@link dropGroups} the key when none does. The reader starts where the answer says, never
+	 * where the cached groups happen to say: a drop, or the fill closed unanswered, says no group
+	 * starts from the floor through the time, so it starts at the group just below the floor (at its
+	 * End once the time is past that group's span), or past the time when the floor is 0. A
+	 * {@link refuseGroups refusal} fails the reader with its error until its ranges change.
+	 */
+	readonly floor: bigint;
 
 	#state: FillState;
 	#pending: Pending;
@@ -512,38 +649,22 @@ export class Fill {
 		this.#pending = pending;
 		this.start = pending.start;
 		this.end = pending.end;
+		this.floor = pending.floor;
 	}
 
 	static {
-		makeFill = (state, pending) => new Fill(state, pending);
+		makeGroups = (state, pending) => new FillGroups(state, pending);
 		wantedRuns = (fill) => fill.#pending.owed();
 		fillChanged = (fill) => Signal.race(fill.#pending.revision);
-		rejectGroups = (fill, start, end, error, judged) => {
-			if (toStreamCode(error) !== StreamCode.Old) {
-				fill.refuseGroups(start, end, error);
-			} else if (judged?.everyone) {
-				fillOps.drop(fill.#state, fill.#pending, fill.start, end, { error, stale: judged.budget });
-			} else {
-				fillOps.refuse(fill.#state, fill.#pending, fill.start, end, error, judged?.budget);
-			}
+		rejectGroups = (fill, start, end, error, bound) => {
+			if (toStreamCode(error) !== StreamCode.Old || bound === undefined) fill.refuseGroups(start, end, error);
+			else fillOps.drop(fill.#state, fill.#pending, fill.start, end, { error, stale: bound });
 		};
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */
 	get priority(): number {
-		let priority: number | undefined;
-		for (const asker of this.#pending.askers) priority = Math.max(priority ?? asker.priority(), asker.priority());
-		return priority ?? 0;
-	}
-
-	/**
-	 * The most tolerant age budget among the readers waiting on it now, or `null` for none: the
-	 * publisher's {@link Info.maxAge} alone bounds it. Each reader still enforces its own.
-	 */
-	get maxDelay(): Duration | null {
-		let max = 0;
-		for (const asker of this.#pending.askers) max = Math.max(max, asker.maxDelay());
-		return max < NO_MAX_DELAY ? Duration.millis(max) : null;
+		return priorityOf(this.#pending);
 	}
 
 	/** Which end to fill first now: `"descending"`, newest first, if any reader asks it. */
@@ -552,21 +673,26 @@ export class Fill {
 		return this.#pending.askers.size > 0 ? "ascending" : "descending";
 	}
 
-	/** Whether a reader still waits for group `sequence` from this fill. Once false, it stays false. */
-	isWanted(sequence: bigint): boolean {
-		checkSequence(sequence);
-		return this.#pending.owed(sequence, sequence + 1n).length > 0;
+	/** Whether a reader still waits for group `key` from this fill. Once false, it stays false. */
+	isWanted(key: bigint): boolean {
+		checkKey(key);
+		return this.#pending.owed(key, key + 1n).length > 0;
 	}
 
 	/**
-	 * The next group still owed in the fill's {@link order}: a reader still reads it, and it was
-	 * neither answered nor delivered live since it was asked. `undefined` once none is, so stop
-	 * serving the fill.
+	 * The next group still owed in the fill's {@link order}: a reader still reads it, it was
+	 * neither answered nor delivered live since it was asked, and the track does not hold it whole.
+	 * `undefined` once none is, so stop serving the fill.
 	 */
 	wanted(): bigint | undefined {
-		const owed = this.#pending.owed();
-		if (owed.length === 0) return undefined;
-		return this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1n;
+		for (;;) {
+			const owed = this.#pending.owed();
+			if (owed.length === 0) return undefined;
+			const key = this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1n;
+			// A time start asked once its group already landed, which no arrival answers, is answered by
+			// the cache, not the source, as the Rust `FillGroups::wanted` does.
+			if (!fillOps.answerCached(this.#state, this.#pending, key)) return key;
+		}
 	}
 
 	/**
@@ -586,21 +712,24 @@ export class Fill {
 		}
 	}
 
-	/** Resolves once no reader waits for group `sequence` from this fill, so stop serving it. */
-	async unwanted(sequence: bigint): Promise<void> {
-		checkSequence(sequence);
-		while (this.isWanted(sequence)) await this.#pending.revision.changed();
+	/** Resolves once no reader waits for group `key` from this fill, so stop serving it. */
+	async unwanted(key: bigint): Promise<void> {
+		checkKey(key);
+		while (this.isWanted(key)) await this.#pending.revision.changed();
 	}
 
 	/**
-	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
-	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
-	 * already answered or cached, or the track is closed.
+	 * Insert group `key` into the track's cache, handing it to the readers waiting on it,
+	 * and return the producer to write its frames into. A live subscription covering it receives
+	 * it too. `info` commits the track's {@link Info} if it has none yet. A key from the
+	 * {@link floor} up to the start answers the start with that group. A cached copy missing its
+	 * first frames, which a reader asked whole, is replaced. Returns `undefined` if the group was
+	 * already answered or cached whole. Throws a `RangeError` outside the fill, and an error if the
+	 * track is closed.
 	 */
-	accept(sequence: bigint, info?: Info): GroupProducer {
-		checkSequence(sequence);
-		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	accept(start: bigint, info?: Info): GroupProducer | undefined {
+		checkKey(start);
+		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
 
 	/**
@@ -609,7 +738,7 @@ export class Fill {
 	 * still reads count; the rest of the fill was never owed.
 	 */
 	dropGroups(start: bigint, end: bigint): void {
-		checkSequence(start);
+		checkKey(start);
 		checkEnd(end);
 		fillOps.drop(this.#state, this.#pending, start, end);
 	}
@@ -620,7 +749,7 @@ export class Fill {
 	 * again.
 	 */
 	refuseGroups(start: bigint, end: bigint, error: Error): void {
-		checkSequence(start);
+		checkKey(start);
 		checkEnd(end);
 		fillOps.refuse(this.#state, this.#pending, start, end, error);
 	}
@@ -630,6 +759,7 @@ export class Fill {
 		fillOps.settle(this.#state, this.#pending);
 	}
 
+	/** Closes the fill; see {@link close}. */
 	[Symbol.dispose](): void {
 		this.close();
 	}

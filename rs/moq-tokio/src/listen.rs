@@ -14,8 +14,8 @@ pub enum Bind {
 }
 
 impl Bind {
-	#[cfg(feature = "quic")]
-	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
+	/// The socket address this names, resolving a host now.
+	pub fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
 			Self::Host(host, port) => crate::util::resolve(Some(&format!("{host}:{port}")), ""),
@@ -100,16 +100,14 @@ pub struct Config {
 	#[usage(skip)]
 	pub(crate) listen: Option<String>,
 
-	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS). Requires the
-	/// `tcp` feature.
-	#[cfg(feature = "tcp")]
+	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub tcp: crate::tcp::Config,
 
 	/// Plaintext qmux Unix-socket listener (`--listen-unix-bind`) with an optional
-	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
-	#[cfg(all(feature = "uds", unix))]
+	/// peer-credential allowlist. Unix-only.
+	#[cfg(unix)]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub unix: crate::unix::Config,
@@ -122,6 +120,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "listen-version",
+		delimiter = ',',
 		long = "listen-version",
 		env = "MOQ_LISTEN_VERSION",
 		setting = "listen.version",
@@ -135,15 +134,25 @@ pub struct Config {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// Offer the `ietf` extension on moq-lite-07. Behind the `relay` feature: moq-relay's
+	/// door for its own links, not a setting.
+	#[cfg(feature = "relay")]
 	#[usage(skip)]
-	pub extensions: moq_net::setup::Extensions,
+	#[serde(skip)]
+	pub ietf: bool,
+
+	/// Decline MoQ Solicit, acting as a moq-transport peer without it. Behind the
+	/// `test-support` feature: a test's door, not a setting.
+	#[cfg(feature = "test-support")]
+	#[usage(skip)]
+	#[serde(skip)]
+	pub decline_solicit: bool,
 
 	/// The implementation to advertise in SETUP, as space-separated `name/version`
 	/// product tokens. `None` advertises [`moq_net::IMPLEMENTATION`]; empty advertises
@@ -155,7 +164,7 @@ pub struct Config {
 	/// Maximum time for one accepted connection to finish its handshake: the
 	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
 	/// server runs under (admission, say), until the session is accepted. Defaults to
-	/// 10 seconds; set to 0 to wait forever.
+	/// 30 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
 	/// connection open indefinitely, since keep-alives count as activity. The
@@ -178,8 +187,8 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, this crate) migrate to this address
-	/// shortly after the handshake completes. Typical use: handshake on an
+	/// Supporting clients (Chrome M131+) migrate to this address shortly after
+	/// the handshake completes; moq-quic's own client stays on the first. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
 	/// Honored by the QUIC backend. Accept-only, which is why it lives
@@ -213,9 +222,9 @@ pub struct Config {
 	#[serde(default)]
 	pub reset: Reset,
 
-	/// The released `--server-*` spellings and their env vars, kept parsing but
-	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
-	/// each one so a process can say so and stop.
+	/// The released `--server-*` and `--listen-quic-lb-*` spellings and their env
+	/// vars, kept parsing but hidden. Never read as settings: [`Config::deprecated`]
+	/// names what replaced each one so a process can say so and stop.
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
@@ -232,7 +241,7 @@ pub struct Config {
 }
 
 /// QUIC stateless reset settings (`[listen.reset]`, `--listen-reset-*`).
-#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -243,7 +252,8 @@ pub struct Reset {
 	/// A server restarted with the same secret resets its predecessor's connections,
 	/// so peers reconnect at once instead of waiting out their idle timeout. Every
 	/// holder can reset every other holder's connections, so share it between live
-	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// servers only behind one address that routes by connection ID, as QUIC-LB or a
+	/// handoff's reuseport group does.
 	/// Unset draws a random key per process.
 	#[usage(
 		name = "listen-reset-secret",
@@ -254,6 +264,15 @@ pub struct Reset {
 	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub secret: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for Reset {
+	/// Redact an inline key: the relay traces its whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reset")
+			.field("secret", &self.secret.as_deref().map(crate::secret::Redacted))
+			.finish()
+	}
 }
 
 /// The QUIC listener settings with defaults applied, produced by [`Config::resolve`].
@@ -267,8 +286,6 @@ pub struct Resolved {
 	pub bind: Option<Bind>,
 	/// The versions to accept, every one when none was configured.
 	pub versions: moq_net::Versions,
-	/// The extensions to offer in SETUP.
-	pub extensions: moq_net::setup::Extensions,
 	/// The implementation to advertise in SETUP, or the runtime's own when unset.
 	pub implementation: Option<String>,
 	/// The handshake deadline, from [`Config::resolved_timeout`].
@@ -289,10 +306,10 @@ pub struct Resolved {
 ///
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
 /// forms a group here, and callers do not need its raw serving handles.
-#[cfg(feature = "_transport")]
 pub(crate) use moq_sock::shard::Socket;
 
-/// The `--server-*` flags from before the accept side was named `listen`.
+/// The released `--server-*` flags from before the accept side was named `listen`, and
+/// the `--listen-quic-lb-*` ones from before they joined their `[listen.lb]` table.
 ///
 /// They carry their original env vars, which is why these are separate args rather
 /// than Usage aliases: an alias renames the flag but not the variable, and a relay
@@ -317,7 +334,8 @@ pub(crate) struct Legacy {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		),
 		hide = true
 	)]
@@ -354,6 +372,22 @@ pub(crate) struct Legacy {
 		hide = true
 	)]
 	lb_nonce: Option<usize>,
+
+	#[usage(
+		name = "listen-quic-lb-id",
+		long = "listen-quic-lb-id",
+		env = "MOQ_LISTEN_QUIC_LB_ID",
+		hide = true
+	)]
+	quic_lb_id: Option<crate::quic::ServerId>,
+
+	#[usage(
+		name = "listen-quic-lb-nonce",
+		long = "listen-quic-lb-nonce",
+		env = "MOQ_LISTEN_QUIC_LB_NONCE",
+		hide = true
+	)]
+	quic_lb_nonce: Option<usize>,
 }
 
 impl Legacy {
@@ -388,14 +422,28 @@ impl Legacy {
 			found.flag(
 				"--server-quic-lb-id",
 				Some("MOQ_SERVER_QUIC_LB_ID"),
-				"--listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID",
+				"--listen-lb-id / MOQ_LISTEN_LB_ID",
 			);
 		}
 		if self.lb_nonce.is_some() {
 			found.flag(
 				"--server-quic-lb-nonce",
 				Some("MOQ_SERVER_QUIC_LB_NONCE"),
-				"--listen-quic-lb-nonce / MOQ_LISTEN_QUIC_LB_NONCE",
+				"--listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
+			);
+		}
+		if self.quic_lb_id.is_some() {
+			found.flag(
+				"--listen-quic-lb-id",
+				Some("MOQ_LISTEN_QUIC_LB_ID"),
+				"--listen-lb-id / MOQ_LISTEN_LB_ID",
+			);
+		}
+		if self.quic_lb_nonce.is_some() {
+			found.flag(
+				"--listen-quic-lb-nonce",
+				Some("MOQ_LISTEN_QUIC_LB_NONCE"),
+				"--listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
 			);
 		}
 		found
@@ -419,52 +467,44 @@ impl Config {
 			found.toml("[server.quic]", "[quic]", Some("now applies to both directions"));
 		}
 		found.extend(self.tls.deprecated());
-		#[cfg(feature = "tcp")]
 		found.extend(self.tcp.deprecated());
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		found.extend(self.unix.deprecated());
 		found
 	}
 
-	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		#[cfg(feature = "tcp")]
 		if self.tcp.tls == Some(true) && self.tcp.bind.is_none() {
 			return Err(crate::Error::NoBackend("--listen-tcp-tls requires --listen-tcp-bind"));
 		}
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		if !self.unix.allow.is_empty() && self.unix.bind.is_none() {
 			return Err(crate::Error::NoBackend(
 				"--listen-unix-allow-* requires --listen-unix-bind",
 			));
 		}
 		if self.lb.nonce.is_some() && self.lb.id.is_none() {
-			return Err(crate::Error::NoBackend(
-				"--listen-quic-lb-nonce requires --listen-quic-lb-id",
-			));
+			return Err(crate::Error::NoBackend("--listen-lb-nonce requires --listen-lb-id"));
 		}
 		let forward = &self.lb.forward;
 		if forward.configured() {
 			let refused = [
-				(
-					self.lb.id.is_none(),
-					"--listen-quic-lb-forward-* requires --listen-quic-lb-id",
-				),
+				(self.lb.id.is_none(), "--listen-lb-forward-* requires --listen-lb-id"),
 				(
 					forward.bind.is_none(),
-					"--listen-quic-lb-forward-* requires --listen-quic-lb-forward-bind",
+					"--listen-lb-forward-* requires --listen-lb-forward-bind",
 				),
 				(
 					forward.key.is_none(),
-					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-key",
+					"--listen-lb-forward-bind requires --listen-lb-forward-key",
 				),
 				(
 					forward.peers.is_none(),
-					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-peers",
+					"--listen-lb-forward-bind requires --listen-lb-forward-peers",
 				),
 				(
 					forward.bind.is_some_and(|bind| bind.ip().is_unspecified()),
-					"--listen-quic-lb-forward-bind needs a specific IP, which its peers list",
+					"--listen-lb-forward-bind needs a specific IP, which its peers list",
 				),
 			];
 			if let Some((_, reason)) = refused.into_iter().find(|(set, _)| *set) {
@@ -475,16 +515,9 @@ impl Config {
 	}
 
 	/// Refuse what only the QUIC listener reads, for a server that has none.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn validate_stream_only(&self) -> crate::Result<()> {
-		#[cfg(feature = "tcp")]
 		let tcp_tls = self.tcp.tls == Some(true);
-		#[cfg(not(feature = "tcp"))]
-		let tcp_tls = false;
-		#[cfg(feature = "_certs")]
 		let identity = self.tls.identity.is_some();
-		#[cfg(not(feature = "_certs"))]
-		let identity = false;
 
 		let refused = [
 			(
@@ -511,10 +544,7 @@ impl Config {
 				self.preferred_v6.is_some(),
 				"--listen-preferred-v6 needs a QUIC listener (--listen)",
 			),
-			(
-				self.lb.id.is_some(),
-				"--listen-quic-lb-id needs a QUIC listener (--listen)",
-			),
+			(self.lb.id.is_some(), "--listen-lb-id needs a QUIC listener (--listen)"),
 			(
 				self.reset.secret.is_some(),
 				"--listen-reset-secret needs a QUIC listener (--listen)",
@@ -539,7 +569,6 @@ impl Config {
 	/// does. Destructures every field, so a new one fails to compile here until it is
 	/// either carried into [`Resolved`] or named as something a QUIC listener never
 	/// reads.
-	#[cfg(feature = "_transport")]
 	pub fn resolve(&self) -> crate::Result<Resolved> {
 		let deprecated = self.deprecated();
 		if !deprecated.is_empty() {
@@ -550,7 +579,12 @@ impl Config {
 		let Self {
 			bind,
 			version: _,
-			extensions,
+			// Offered by the moq-net server every listener accepts with, which no QUIC
+			// listener reads.
+			#[cfg(feature = "relay")]
+				ietf: _,
+			#[cfg(feature = "test-support")]
+				decline_solicit: _,
 			implementation,
 			timeout: _,
 			tls,
@@ -559,9 +593,8 @@ impl Config {
 			lb,
 			reset: Reset { secret: reset_secret },
 			// Served by `Server` on the caller's runtime, never by a QUIC listener.
-			#[cfg(feature = "tcp")]
-				tcp: _,
-			#[cfg(all(feature = "uds", unix))]
+			tcp: _,
+			#[cfg(unix)]
 				unix: _,
 			// Refused above as deprecated.
 			listen: _,
@@ -572,7 +605,6 @@ impl Config {
 		Ok(Resolved {
 			bind: bind.clone(),
 			versions: self.versions(),
-			extensions: *extensions,
 			implementation: implementation.clone(),
 			timeout: self.resolved_timeout(),
 			tls: tls.clone(),
@@ -583,7 +615,6 @@ impl Config {
 		})
 	}
 
-	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
 	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		let forward = &self.lb.forward;
@@ -604,21 +635,26 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+	/// The relay traces its whole config, so an inline key never reaches a `Debug`.
+	#[test]
+	fn debug_redacts_an_inline_secret() {
+		let key = "00".repeat(32);
+		let reset = Reset {
+			secret: Some(key.clone().into()),
+		};
+		let forward = Forward {
+			key: Some(key.clone().into()),
+			..Default::default()
+		};
+		assert!(!format!("{reset:?} {forward:?}").contains(&key));
+	}
+
 	use super::*;
 
-	/// The listen config offers every extension unless told otherwise, and leaves the
-	/// default out when serialized.
+	/// The SETUP extensions are no setting: a file naming them is refused.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
-		assert!(!config.extensions.solicit);
-		assert!(!config.extensions.ietf);
-		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
-		assert!(
-			!toml::to_string(&Config::default())
-				.expect("serialize")
-				.contains("extensions")
-		);
+	fn extensions_are_not_a_setting() {
+		assert!(toml::from_str::<Config>("[extensions]\nsolicit = false\n").is_err());
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
@@ -644,9 +680,9 @@ mod tests {
 		Cli::parse_from(&args).unwrap().config
 	}
 
-	/// Every released `--server-*` spelling keeps parsing, so the process can name
-	/// its replacement rather than leave Usage reporting an unexpected argument.
-	/// None of them configure anything.
+	/// Every released `--server-*` and `--listen-quic-lb-*` spelling keeps parsing,
+	/// so the process can name its replacement rather than leave Usage reporting an
+	/// unexpected argument. None of them configure anything.
 	#[test]
 	fn released_server_spellings_are_reported_not_applied() {
 		let config = config_from([
@@ -659,6 +695,12 @@ mod tests {
 			"192.0.2.1:443",
 			"--server-quic-lb-id",
 			"ab",
+			"--server-quic-lb-nonce",
+			"8",
+			"--listen-quic-lb-id",
+			"cd",
+			"--listen-quic-lb-nonce",
+			"9",
 			"--server-tls-cert",
 			"/tmp/cert.pem",
 			"--server-tls-root",
@@ -668,6 +710,7 @@ mod tests {
 		assert!(config.version.is_empty());
 		assert_eq!(config.preferred_v4, None);
 		assert!(config.lb.id.is_none());
+		assert!(config.lb.nonce.is_none());
 		assert!(config.tls.cert.is_empty());
 		assert!(config.tls.root.is_empty());
 
@@ -676,7 +719,10 @@ mod tests {
 			"--server-bind / MOQ_SERVER_BIND -> --listen / MOQ_LISTEN",
 			"--server-version / MOQ_SERVER_VERSION -> --listen-version / MOQ_LISTEN_VERSION",
 			"--server-preferred-v4 / MOQ_SERVER_PREFERRED_V4 -> --listen-preferred-v4 / MOQ_LISTEN_PREFERRED_V4",
-			"--server-quic-lb-id / MOQ_SERVER_QUIC_LB_ID -> --listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID",
+			"--server-quic-lb-id / MOQ_SERVER_QUIC_LB_ID -> --listen-lb-id / MOQ_LISTEN_LB_ID",
+			"--server-quic-lb-nonce / MOQ_SERVER_QUIC_LB_NONCE -> --listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
+			"--listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID -> --listen-lb-id / MOQ_LISTEN_LB_ID",
+			"--listen-quic-lb-nonce / MOQ_LISTEN_QUIC_LB_NONCE -> --listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
 			"--tls-cert / MOQ_SERVER_TLS_CERT -> --listen-tls-cert / MOQ_LISTEN_TLS_CERT",
 			"--server-tls-root / MOQ_SERVER_TLS_ROOT -> --listen-tls-root / MOQ_LISTEN_TLS_ROOT",
 		] {
@@ -728,10 +774,9 @@ mod tests {
 		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn cli_load_balancer_survives_the_merge_round_trip() {
-		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
+		let config = config_from(["test", "--listen-lb-id", "ab", "--listen-lb-nonce", "9"]);
 		let encoded = toml::Value::try_from(config).expect("serialize");
 		let decoded: Config = encoded.try_into().expect("deserialize");
 		assert_eq!(
@@ -748,7 +793,7 @@ mod tests {
 	fn quic_lb_nonce_without_id_refuses_to_start() {
 		let config: Config = toml::from_str("[lb]\nnonce = 8").unwrap();
 		assert!(
-			matches!(config.validate(), Err(crate::Error::NoBackend(reason)) if reason.contains("requires --listen-quic-lb-id"))
+			matches!(config.validate(), Err(crate::Error::NoBackend(reason)) if reason.contains("requires --listen-lb-id"))
 		);
 	}
 
@@ -765,7 +810,6 @@ mod tests {
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
-	#[cfg(feature = "quic")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
 		assert_eq!(Config::default().load_balancer(), None);
@@ -805,18 +849,18 @@ peers = "peers.toml"
 		config.validate().expect("complete");
 
 		for (body, needle) in [
-			(complete.replace("id = \"ab\"\n", ""), "requires --listen-quic-lb-id"),
+			(complete.replace("id = \"ab\"\n", ""), "requires --listen-lb-id"),
 			(
 				complete.replace("bind = \"10.0.0.1:4443\"\n", ""),
-				"requires --listen-quic-lb-forward-bind",
+				"requires --listen-lb-forward-bind",
 			),
 			(
 				complete.replace("key = \"k\"\n", ""),
-				"requires --listen-quic-lb-forward-key",
+				"requires --listen-lb-forward-key",
 			),
 			(
 				complete.replace("peers = \"p\"\n", ""),
-				"requires --listen-quic-lb-forward-peers",
+				"requires --listen-lb-forward-peers",
 			),
 			(complete.replace("10.0.0.1", "0.0.0.0"), "needs a specific IP"),
 		] {
@@ -838,12 +882,11 @@ peers = "peers.toml"
 		};
 
 		let server = config.init_streams().unwrap();
-		assert!(matches!(server.local_addr(), Err(crate::Error::NoBackend(_))));
+		assert!(server.local_addr().is_none());
 	}
 
 	/// A stream-only server refuses each setting only QUIC reads rather than
 	/// ignoring it, and accepts them once QUIC lives elsewhere.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn stream_only_refuses_quic_settings() {
 		let stream_only = || Config {
@@ -864,7 +907,7 @@ peers = "peers.toml"
 			("--listen-preferred-v6", |c| {
 				c.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap())
 			}),
-			("--listen-quic-lb-id", |c| c.lb.id = Some("ab".parse().unwrap())),
+			("--listen-lb-id", |c| c.lb.id = Some("ab".parse().unwrap())),
 			("--listen-reset-secret", |c| c.reset.secret = Some("reset.key".into())),
 		];
 		for (name, set) in cases {
@@ -886,7 +929,7 @@ peers = "peers.toml"
 	}
 
 	/// A Unix allowlist without the Unix listener it gates is refused.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[test]
 	fn unix_allow_requires_unix_bind() {
 		let mut config = Config::default();
@@ -910,7 +953,7 @@ peers = "peers.toml"
 		config.tls.generate = vec!["localhost".to_string()];
 
 		let server = config.init(Default::default()).unwrap();
-		assert!(server.local_addr().is_ok());
+		assert!(server.local_addr().is_some());
 	}
 
 	/// The handshake deadline defaults on, from the parser and in code alike, and
@@ -958,9 +1001,9 @@ pub struct LoadBalancer {
 	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
 	/// If set, connection IDs will be derived semi-deterministically.
 	#[usage(
-		name = "listen-quic-lb-id",
-		long = "listen-quic-lb-id",
-		env = "MOQ_LISTEN_QUIC_LB_ID",
+		name = "listen-lb-id",
+		long = "listen-lb-id",
+		env = "MOQ_LISTEN_LB_ID",
 		setting = "listen.lb.id"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -969,11 +1012,11 @@ pub struct LoadBalancer {
 	/// Number of random nonce bytes in QUIC-LB connection IDs.
 	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
 	#[usage(
-		name = "listen-quic-lb-nonce",
-		long = "listen-quic-lb-nonce",
-		env = "MOQ_LISTEN_QUIC_LB_NONCE",
+		name = "listen-lb-nonce",
+		long = "listen-lb-nonce",
+		env = "MOQ_LISTEN_LB_NONCE",
 		setting = "listen.lb.nonce",
-		requires = "--listen-quic-lb-id"
+		requires = "--listen-lb-id"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub nonce: Option<usize>,
@@ -984,23 +1027,23 @@ pub struct LoadBalancer {
 	pub forward: Forward,
 }
 
-/// QUIC-LB forwarding (`[listen.lb.forward]`, `--listen-quic-lb-forward-*`).
+/// QUIC-LB forwarding (`[listen.lb.forward]`, `--listen-lb-forward-*`).
 ///
 /// Behind an anycast address or a load-balanced VIP, a route change or a rebalance can land an
 /// established connection's packets on another server. With forwarding, that server hands each
 /// packet whose connection ID names another server to the owner, which processes it as if the
 /// client had sent it there and keeps replying from the shared address. Only packets after the
 /// handshake are forwarded, so the front end must still keep a handshake on one server.
-#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Forward {
 	/// The UDP address this server receives forwards on, and the one its peers name it by.
 	/// Needs a specific IP, since a forward is accepted only from a peer's listed address.
 	#[usage(
-		name = "listen-quic-lb-forward-bind",
-		long = "listen-quic-lb-forward-bind",
-		env = "MOQ_LISTEN_QUIC_LB_FORWARD_BIND",
+		name = "listen-lb-forward-bind",
+		long = "listen-lb-forward-bind",
+		env = "MOQ_LISTEN_LB_FORWARD_BIND",
 		setting = "listen.lb.forward.bind"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1010,9 +1053,9 @@ pub struct Forward {
 	/// characters (`openssl rand -hex 32`). It authenticates each forward, which carries a
 	/// client address the receiver would otherwise take on trust.
 	#[usage(
-		name = "listen-quic-lb-forward-key",
-		long = "listen-quic-lb-forward-key",
-		env = "MOQ_LISTEN_QUIC_LB_FORWARD_KEY",
+		name = "listen-lb-forward-key",
+		long = "listen-lb-forward-key",
+		env = "MOQ_LISTEN_LB_FORWARD_KEY",
 		setting = "listen.lb.forward.key"
 	)]
 	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
@@ -1024,9 +1067,9 @@ pub struct Forward {
 	/// This server's own entry is skipped, so every server can share one file. A packet for
 	/// a server missing from it is dropped.
 	#[usage(
-		name = "listen-quic-lb-forward-peers",
-		long = "listen-quic-lb-forward-peers",
-		env = "MOQ_LISTEN_QUIC_LB_FORWARD_PEERS",
+		name = "listen-lb-forward-peers",
+		long = "listen-lb-forward-peers",
+		env = "MOQ_LISTEN_LB_FORWARD_PEERS",
 		setting = "listen.lb.forward.peers"
 	)]
 	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
@@ -1034,9 +1077,19 @@ pub struct Forward {
 	pub peers: Option<std::path::PathBuf>,
 }
 
+impl std::fmt::Debug for Forward {
+	/// Redact an inline key: the relay traces its whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Forward")
+			.field("bind", &self.bind)
+			.field("key", &self.key.as_deref().map(crate::secret::Redacted))
+			.field("peers", &self.peers)
+			.finish()
+	}
+}
+
 impl Forward {
 	/// Whether any forwarding setting is present.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn configured(&self) -> bool {
 		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
 	}

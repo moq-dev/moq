@@ -1,3 +1,5 @@
+import { TransportCode, TransportError } from "./error.ts";
+import { MAX_STREAMS } from "./frame.ts";
 import { VarInt } from "./varint.ts";
 
 /** Decide the new receive-window limit to advertise (MAX_DATA / MAX_STREAM_DATA).
@@ -172,7 +174,7 @@ export class Window {
 
 	/** Spend the window up to `end`, which the caller has checked with {@link allows}. */
 	receiveTo(end: bigint): void {
-		if (end > this.#advertised) throw new Error("flow control error");
+		if (end > this.#advertised) throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		if (end > this.#received) this.#received = end;
 	}
 
@@ -230,9 +232,14 @@ export class StreamLimit {
 		return this.#max;
 	}
 
+	/** Whether the advertised limit lets the peer open stream `index`. */
+	allows(index: bigint): boolean {
+		return index < this.#advertised;
+	}
+
 	/** Open stream `index` and every lower one, or return false if that passes the limit. */
 	open(index: bigint): boolean {
-		if (index >= this.#advertised) return false;
+		if (!this.allows(index)) return false;
 		if (index >= this.#opened) {
 			this.#opened = index + 1n;
 			// The peer moved closer to the limit, so slots held back may be due now.
@@ -250,7 +257,10 @@ export class StreamLimit {
 	/** Advertise the returned slots once they would let the peer open past the limit. */
 	#raise(): void {
 		if (this.#closed === 0n || this.#opened + 2n * this.#closed <= this.#max) return;
-		this.#max += this.#closed;
+		// MAX_STREAMS cannot carry more than 2^60, so the slots past it are never returned.
+		const max = this.#max + this.#closed;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
+		this.#max = max > MAX_STREAMS ? MAX_STREAMS : max;
 		this.#closed = 0n;
 		if (this.#pending) return;
 		this.#pending = true;

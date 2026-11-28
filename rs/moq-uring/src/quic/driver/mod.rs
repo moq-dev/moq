@@ -21,7 +21,6 @@ pub(crate) use connection::Shared;
 
 use std::{num::NonZeroU64, sync::Arc};
 
-#[cfg(feature = "qlog")]
 use super::qlog;
 use super::{Error, client, server, transport};
 use crate::udp;
@@ -30,7 +29,7 @@ use crate::udp;
 const MAX_STREAMS: u64 = 1024;
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
 /// The same default as moq-tokio's `[quic] stream_receive_window`.
-const STREAM_WINDOW: u32 = 1024 * 1024;
+const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
 /// the largest unit, `MIN_RECEIVE_WINDOW`: one 1 MiB segment. The same default as moq-tokio's
 /// `[quic] receive_window`.
@@ -105,7 +104,8 @@ pub(crate) fn endpoint_config(
 	config.cid_generator = Some(Arc::new(move || {
 		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
 		if let Some(shard) = shard {
-			cids.set_shard(shard.index(), shard.count());
+			cids.set_shard(shard.index(), shard.count())
+				.set_generations(shard.generations());
 		}
 		Box::new(cids)
 	}));
@@ -116,7 +116,6 @@ pub(crate) fn endpoint_config(
 pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client::Config, Error> {
 	let mut client = moq_quic::client::Config::new(config.tls.clone());
 	client.transport = transport_config(&config.transport)?;
-	#[cfg(feature = "qlog")]
 	with_qlog(&mut client.transport, &config.transport, qlog::Side::Client);
 	Ok(client)
 }
@@ -126,7 +125,6 @@ pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server:
 	moq_crypto::cpu::check()?;
 	let mut server = moq_quic::server::Config::new(config.tls.clone());
 	server.transport = transport_config(&config.transport)?;
-	#[cfg(feature = "qlog")]
 	with_qlog(&mut server.transport, &config.transport, qlog::Side::Server);
 	Ok(server)
 }
@@ -136,7 +134,6 @@ pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server:
 /// moq-quic holds one sink per transport config, which is per endpoint on the
 /// accept side and per dial on the connect side; its events carry the
 /// connection's qlog `group_id` either way.
-#[cfg(feature = "qlog")]
 fn with_qlog(transport: &mut moq_quic::transport::Config, config: &transport::Config, side: qlog::Side) {
 	let Some(sink) = config.qlog.clone() else {
 		return;
@@ -151,6 +148,7 @@ fn with_qlog(transport: &mut moq_quic::transport::Config, config: &transport::Co
 fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::Config, Error> {
 	let mut transport = moq_quic::transport::Config::default();
 	transport.idle_timeout = Some(config.idle_timeout);
+	transport.handshake_timeout = config.handshake_timeout;
 	transport.keep_alive = config.keep_alive;
 	// Our defaults where the caller set none, rather than moq-quic's; the rate caps pass through.
 	transport.limits = config.limits;

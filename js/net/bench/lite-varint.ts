@@ -15,7 +15,6 @@ let checksum = 0;
 /** A lite object: how the publisher writes it and how the subscriber reads it back. */
 interface Sample {
 	name: string;
-	versions?: Version[];
 	encode(w: Writer, version: Version): Promise<void>;
 	decode(r: Reader, version: Version): Promise<unknown>;
 }
@@ -60,7 +59,7 @@ const audio = frames(
 
 const group: Sample = {
 	name: "Group",
-	encode: (w, version) => new Group({ subscribe: 3n, sequence: 1_234n }).encode(w, version),
+	encode: (w, version) => new Group({ subscribe: 3n, key: 1_234n }).encode(w, version),
 	decode: (r, version) => Group.decode(r, version),
 };
 
@@ -79,18 +78,8 @@ const subscribe: Sample = {
 
 const datagram: Sample = {
 	name: "Datagram",
-	encode: (w, version) => w.write(new Datagram(3n, 1_234n, 1_234_567_890, new Uint8Array()).encode(version)),
-	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version, () => ({ timed: true }))),
-};
-
-const padding: Sample = {
-	name: "Padding Datagram",
-	versions: [Version.DRAFT_07],
-	async encode(w) {
-		await w.u53(1);
-		await w.write(new Uint8Array(1199));
-	},
-	decode: datagram.decode,
+	encode: (w, version) => w.write(new Datagram(3n, 1_234n, 1_234_567_890n, new Uint8Array()).encode(version)),
+	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version)),
 };
 
 const hop = randomHop();
@@ -139,8 +128,8 @@ const sink = () =>
 	});
 
 console.log("sample,version,bytes,encode_ns,decode_ns");
-for (const sample of [video, audio, group, subscribe, datagram, padding, setup]) {
-	for (const version of sample.versions ?? versions) {
+for (const sample of [video, audio, group, subscribe, datagram, setup]) {
+	for (const version of versions) {
 		const bytes = await wire(sample, version);
 		const encode = await time(async () => {
 			const w = new Writer(sink(), version);

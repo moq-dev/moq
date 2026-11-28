@@ -8,18 +8,15 @@
 //! Certificates, keys, and custom root CAs loaded from disk are hot reloaded for
 //! new handshakes. [`Certificates`] reads the current served set back out.
 
-#[cfg(all(feature = "watch", feature = "_certs"))]
 use crate::abort::AbortOnDrop;
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-#[cfg(feature = "_certs")]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::{fs, io};
 
-#[cfg(feature = "_certs")]
 use rustls::pki_types::PrivatePkcs8KeyDer;
 
 /// Errors loading or generating TLS certificates and keys.
@@ -68,6 +65,10 @@ pub enum Error {
 	#[error("no roots found in {}", .0.display())]
 	EmptyRoots(PathBuf),
 
+	/// A listener requires client certificates but names no root to verify them.
+	#[error("a required client certificate needs a root to verify it against")]
+	RequireRoots,
+
 	/// Nothing is configured that could ever verify a server certificate.
 	#[error(
 		"no trusted roots: provide --connect-tls-root, enable --connect-tls-system-roots, or use --connect-tls-fingerprint / --connect-tls-insecure"
@@ -94,11 +95,6 @@ pub enum Error {
 		"a client Identity cannot be combined with --connect-tls-cert or --connect-tls-key: only one client certificate can be presented"
 	)]
 	ConflictingClientAuth,
-
-	/// Client pinning was combined with client CA roots. Pinning bypasses the chain,
-	/// so one of the two would be silently ignored.
-	#[error("a client fingerprint allowlist cannot be combined with client CA roots: pinning bypasses CA verification")]
-	PeersWithRoots,
 
 	/// Trust material was configured alongside the flag that ignores all of it.
 	#[error(
@@ -157,7 +153,6 @@ pub enum Error {
 	Rustls(#[from] rustls::Error),
 
 	/// The mTLS client-certificate verifier couldn't be built from the configured roots.
-	#[cfg(feature = "_certs")]
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
@@ -166,13 +161,11 @@ pub enum Error {
 	ServerVerifier(#[source] rustls::client::VerifierBuilderError),
 
 	/// Generating a self-signed certificate failed.
-	#[cfg(feature = "_certs")]
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
 	/// A client certificate chain held more candidate paths than certificate path
 	/// building allows, so its lineage could not be traced in full.
-	#[cfg(feature = "_certs")]
 	#[error("the client certificate chain is too complex to trace: {0}")]
 	Lineage(String),
 
@@ -186,7 +179,6 @@ pub enum Error {
 	Deprecated(crate::cli::Deprecated),
 }
 
-#[cfg(feature = "_certs")]
 crate::error::from_message! {
 	rcgen::Error => Rcgen,
 }
@@ -254,13 +246,11 @@ fn load_key_pair(
 // ── Certified ───────────────────────────────────────────────────────
 
 /// A certificate chain and its rustls signing key.
-#[cfg(feature = "_certs")]
 pub(crate) struct Certified {
 	/// The chain and its rustls signer, in leaf-first order.
 	pub rustls: Arc<rustls::sign::CertifiedKey>,
 }
 
-#[cfg(feature = "_certs")]
 impl Certified {
 	/// Load `chain` and `key`, building the rustls signer and keeping the DER.
 	pub(crate) fn new(
@@ -282,7 +272,6 @@ impl Certified {
 	}
 }
 
-#[cfg(feature = "_certs")]
 impl fmt::Debug for Certified {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		// Never derive: the DER private key would print in full.
@@ -307,14 +296,12 @@ impl fmt::Debug for Certified {
 /// Set it on [`Listen::identity`] to serve it and [`Connect::identity`] to
 /// present it. Generated in memory and never written to disk, so it lasts as
 /// long as the process and a restart is a new principal.
-#[cfg(feature = "_certs")]
 #[derive(Clone)]
 pub struct Identity {
 	key: Arc<Certified>,
 	fingerprint: String,
 }
 
-#[cfg(feature = "_certs")]
 impl Identity {
 	/// Generate a fresh identity, valid for `hostnames`.
 	///
@@ -331,9 +318,8 @@ impl Identity {
 
 	/// The certificate's SHA-256 fingerprint, hex encoded.
 	///
-	/// This is what peers pin, in [`Connect::fingerprint`] to reach this process
-	/// and in [`Peers`] to let it in. The same value [`Certificates::fingerprints`]
-	/// reports for the served certificate.
+	/// This is what peers pin in [`Connect::fingerprint`] to reach this process.
+	/// The same value [`Certificates::fingerprints`] reports for the served certificate.
 	pub fn fingerprint(&self) -> &str {
 		&self.fingerprint
 	}
@@ -344,7 +330,6 @@ impl Identity {
 	}
 }
 
-#[cfg(feature = "_certs")]
 impl fmt::Debug for Identity {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		formatter
@@ -355,11 +340,9 @@ impl fmt::Debug for Identity {
 }
 
 /// Presents one fixed client certificate whenever a server asks for one.
-#[cfg(any(feature = "_certs", not(feature = "watch")))]
 #[derive(Debug)]
 struct IdentityResolver(Arc<rustls::sign::CertifiedKey>);
 
-#[cfg(any(feature = "_certs", not(feature = "watch")))]
 impl rustls::client::ResolvesClientCert for IdentityResolver {
 	fn resolve(
 		&self,
@@ -380,13 +363,11 @@ impl rustls::client::ResolvesClientCert for IdentityResolver {
 ///
 /// A rewrite that is briefly missing, malformed, or mismatched (the certificate
 /// replaced before its key) keeps the previous pair until the files agree again.
-#[cfg(feature = "watch")]
 #[derive(Debug)]
 struct ReloadingClientCert {
 	inner: Reloading<rustls::sign::CertifiedKey>,
 }
 
-#[cfg(feature = "watch")]
 impl ReloadingClientCert {
 	fn new(
 		provider: crypto::Provider,
@@ -402,7 +383,6 @@ impl ReloadingClientCert {
 	}
 }
 
-#[cfg(feature = "watch")]
 impl rustls::client::ResolvesClientCert for ReloadingClientCert {
 	fn resolve(
 		&self,
@@ -414,69 +394,6 @@ impl rustls::client::ResolvesClientCert for ReloadingClientCert {
 
 	fn has_certs(&self) -> bool {
 		true
-	}
-}
-
-/// The client certificates a listener accepts, pinned by SHA-256 fingerprint.
-///
-/// The CA-rooted alternative ([`Listen::root`]) needs an authority to issue the
-/// certificates; this needs only the fingerprints, which suits a peer mesh where
-/// membership changes as peers appear and go away. Cheap to clone, and every
-/// handshake reads the current set, so a caller holds one handle and edits it as
-/// its peer list changes.
-///
-/// A peer whose fingerprint is absent fails the TLS handshake, so a session that
-/// reaches the application is always one of these. Which one is
-/// `server::Request::peer_identity` on a MoQ transport, plus [`PeerIdentity::fingerprint`].
-#[derive(Clone, Debug, Default)]
-pub struct Peers {
-	allowed: Arc<RwLock<std::collections::HashSet<[u8; 32]>>>,
-}
-
-impl Peers {
-	/// An empty set, which rejects every client certificate until something is added.
-	pub fn new() -> Self {
-		Self::default()
-	}
-
-	/// Allow the peer serving the certificate with this hex SHA-256 fingerprint.
-	pub fn insert(&self, fingerprint: &str) -> Result<()> {
-		let fingerprint = parse_fingerprint(fingerprint)?;
-		self.write().insert(fingerprint);
-		Ok(())
-	}
-
-	/// Stop allowing a fingerprint. Established sessions are unaffected; this only
-	/// applies to handshakes that have yet to happen.
-	pub fn remove(&self, fingerprint: &str) -> Result<()> {
-		let fingerprint = parse_fingerprint(fingerprint)?;
-		self.write().remove(&fingerprint);
-		Ok(())
-	}
-
-	/// Whether a hex fingerprint is currently allowed.
-	pub fn contains(&self, fingerprint: &str) -> bool {
-		match parse_fingerprint(fingerprint) {
-			Ok(fingerprint) => self.read().contains(&fingerprint),
-			Err(_) => false,
-		}
-	}
-
-	/// Whether a raw digest is allowed, for the verifier's hot path.
-	#[cfg(feature = "_certs")]
-	fn contains_raw(&self, fingerprint: &[u8]) -> bool {
-		match <[u8; 32]>::try_from(fingerprint) {
-			Ok(fingerprint) => self.read().contains(&fingerprint),
-			Err(_) => false,
-		}
-	}
-
-	fn read(&self) -> std::sync::RwLockReadGuard<'_, std::collections::HashSet<[u8; 32]>> {
-		self.allowed.read().expect("peer allowlist read lock poisoned")
-	}
-
-	fn write(&self) -> std::sync::RwLockWriteGuard<'_, std::collections::HashSet<[u8; 32]>> {
-		self.allowed.write().expect("peer allowlist write lock poisoned")
 	}
 }
 
@@ -503,6 +420,7 @@ pub struct Connect {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-tls-root",
+		delimiter = ',',
 		long = "connect-tls-root",
 		env = "MOQ_CONNECT_TLS_ROOT",
 		setting = "connect.tls.root"
@@ -542,6 +460,7 @@ pub struct Connect {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-tls-fingerprint",
+		delimiter = ',',
 		long = "connect-tls-fingerprint",
 		env = "MOQ_CONNECT_TLS_FINGERPRINT",
 		setting = "connect.tls.fingerprint"
@@ -555,7 +474,6 @@ pub struct Connect {
 	/// generates its identity at startup rather than loading one from disk.
 	/// Setting both is an error. Not settable from the CLI or a config file,
 	/// since it never exists on disk.
-	#[cfg(feature = "_certs")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
@@ -563,7 +481,7 @@ pub struct Connect {
 	/// PEM file containing the client certificate chain for mTLS.
 	///
 	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--connect-tls-key`. With the `watch` feature, both files
+	/// Must be paired with `--connect-tls-key`. Both files
 	/// are hot reloaded for new connections, retaining the last valid pair while a
 	/// rotation is missing, malformed, or mismatched. Dialing `http://`, `ws://`,
 	/// `tcp://`, or `unix://` with a client certificate fails, since none can present it.
@@ -761,13 +679,11 @@ impl CustomRoots {
 		})
 	}
 
-	#[cfg(feature = "watch")]
 	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
 		read_roots(&self.paths)
 	}
 
 	/// Only a build that reloads has a second set of roots to install.
-	#[cfg(feature = "watch")]
 	fn replace(&self, roots: Vec<CertificateDer<'static>>) {
 		*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
 	}
@@ -780,7 +696,6 @@ impl CustomRoots {
 	}
 }
 
-#[cfg(feature = "watch")]
 struct ReloadState<T: ?Sized + Send + Sync + 'static> {
 	current: RwLock<Arc<T>>,
 	build: Box<dyn Fn() -> Result<Arc<T>> + Send + Sync>,
@@ -791,7 +706,6 @@ struct ReloadState<T: ?Sized + Send + Sync + 'static> {
 	serial: std::sync::Mutex<()>,
 }
 
-#[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 	fn reload(&self) {
 		let _serial = self.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -828,14 +742,12 @@ impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 }
 
 /// A verifier or client certificate replaced after its files change.
-#[cfg(feature = "watch")]
 struct Reloading<T: ?Sized + Send + Sync + 'static> {
 	state: Arc<ReloadState<T>>,
 	// Holds the OS watcher alive for exactly as long as the TLS config.
 	_watcher: notify::RecommendedWatcher,
 }
 
-#[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
 	fn new(
 		paths: &[PathBuf],
@@ -866,7 +778,6 @@ impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
 	}
 }
 
-#[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> std::fmt::Debug for Reloading<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Reloading")
@@ -1052,13 +963,11 @@ impl Connect {
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
-	#[cfg(feature = "quic")]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
 	}
 
 	/// Whether a dial presents an mTLS client certificate.
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) fn has_client_cert(&self) -> bool {
 		self.identity.is_some() || self.cert.is_some()
 	}
@@ -1089,9 +998,8 @@ impl Connect {
 		if let Some(name) = &self.host_name {
 			server_name(name)?;
 		}
-		let reloadable = cfg!(feature = "watch")
-			&& (self.cert.is_some()
-				|| matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty()));
+		let reloadable = self.cert.is_some()
+			|| matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
@@ -1140,7 +1048,6 @@ impl Connect {
 	) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> {
 		let initial = Self::build_root_server_verifier(&custom.current(), system, &provider)?;
 
-		#[cfg(feature = "watch")]
 		if !custom.paths.is_empty() {
 			let paths = custom.paths.clone();
 			let reload = custom.clone();
@@ -1210,7 +1117,6 @@ impl Connect {
 		&self,
 		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
 	) -> Result<rustls::ClientConfig> {
-		#[cfg(feature = "_certs")]
 		if let Some(identity) = &self.identity {
 			if self.cert.is_some() || self.key.is_some() {
 				return Err(Error::ConflictingClientAuth);
@@ -1228,10 +1134,7 @@ impl Connect {
 		let provider = builder.crypto_provider().clone();
 		let initial = load_key_pair(&provider, &cert, &key)?;
 
-		#[cfg(feature = "watch")]
 		let resolver = Arc::new(ReloadingClientCert::new(provider, cert, key, initial)?);
-		#[cfg(not(feature = "watch"))]
-		let resolver = Arc::new(IdentityResolver(initial));
 
 		Ok(builder.with_client_cert_resolver(resolver))
 	}
@@ -1242,7 +1145,6 @@ impl Connect {
 /// Valid for two weeks starting yesterday: WebTransport refuses anything longer,
 /// and the backdating absorbs clock drift between two hosts that have never
 /// agreed on a time source.
-#[cfg(feature = "_certs")]
 fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certified> {
 	let key_pair = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 
@@ -1310,6 +1212,7 @@ pub struct Listen {
 	#[usage(
 		long = "listen-tls-cert",
 		name = "listen-tls-cert",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_CERT",
 		setting = "listen.tls.cert"
 	)]
@@ -1322,6 +1225,7 @@ pub struct Listen {
 	#[usage(
 		long = "listen-tls-key",
 		name = "listen-tls-key",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_KEY",
 		setting = "listen.tls.key"
 	)]
@@ -1348,25 +1252,18 @@ pub struct Listen {
 	/// The programmatic alternative to `generate`, for a peer that hands the same
 	/// identity to [`Connect::identity`] so both roles share one fingerprint. Not
 	/// settable from the CLI or a config file, since it never exists on disk.
-	#[cfg(feature = "_certs")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
 
-	/// Require a client certificate, pinned to these fingerprints (mTLS without a CA).
+	/// Refuse a client that presents no certificate chaining to [`root`](Self::root),
+	/// instead of admitting it unauthenticated. Needs `root`.
 	///
-	/// The peer-mesh counterpart to `root`: membership is a set of fingerprints
-	/// that changes as peers are discovered, rather than an authority that issues
-	/// certificates. A client whose certificate isn't in the set fails the
-	/// handshake, and one that is arrives with a MoQ `server::Request::peer_identity`
-	/// naming which peer it is.
-	///
-	/// Combining this with `root` is an error: pinning bypasses the chain, so one
-	/// of the two would be silently ignored. Not settable from the CLI or a config
-	/// file, since the set is maintained at runtime.
+	/// Set by an embedder for a listener only its own peers dial; a public listener
+	/// leaves it off, since some browsers abort a connection whose server asks.
 	#[usage(skip)]
 	#[serde(skip)]
-	pub peers: Option<Peers>,
+	pub require: bool,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
@@ -1448,42 +1345,29 @@ impl Listen {
 	///
 	/// File-backed certificates reload on the caller's Tokio runtime, else the fallback,
 	/// which must outlive every listener using the result.
-	#[cfg(feature = "_certs")]
 	pub fn load(&self) -> Result<Serve> {
 		self.refuse_deprecated()?;
 		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		certs.load_certs(self)?;
 		let ClientAuth { verifier, roots } = self.client_auth(provider)?;
-		#[cfg(feature = "watch")]
 		let reload = Reload::spawn(certs.clone(), self.clone())?;
 		Ok(Serve(Arc::new(Serving {
 			certs,
 			resolver: None,
 			verifier,
 			roots,
-			#[cfg(feature = "watch")]
 			_reload: reload,
 		})))
 	}
 
-	#[cfg(all(feature = "_certs", feature = "_transport"))]
 	pub(crate) fn configured(&self) -> bool {
 		!self.cert.is_empty()
 			|| !self.key.is_empty()
 			|| !self.generate.is_empty()
 			|| !self.root.is_empty()
-			|| self.peers.is_some()
-			|| {
-				#[cfg(feature = "_certs")]
-				{
-					self.identity.is_some()
-				}
-				#[cfg(not(feature = "_certs"))]
-				{
-					false
-				}
-			}
+			|| self.require
+			|| self.identity.is_some()
 	}
 
 	/// The released spellings in use, each paired with what replaced it.
@@ -1529,14 +1413,10 @@ impl Listen {
 		found
 	}
 
-	/// Disable cached client authentication when client authorization can change.
-	///
-	/// Gated with the rest of the serving side rather than with `watch`: a pinned
-	/// [`peers`](Self::peers) set changes while the process runs whether or not
-	/// anything is reloading from disk.
-	#[cfg(feature = "_certs")]
+	/// Disable cached client authentication when client authorization can change,
+	/// as reloaded client roots do.
 	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
-		if !self.root.is_empty() || self.peers.is_some() {
+		if !self.root.is_empty() {
 			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
 			tls.send_tls13_tickets = 0;
 		}
@@ -1561,48 +1441,33 @@ impl Listen {
 	/// certificate at all, with the roots it verifies against.
 	///
 	/// The one place the TLS listeners agree on what mTLS means here, so a new
-	/// mode lands once rather than in each of them: pinned [`peers`](Self::peers),
-	/// else optional CA-rooted [`root`](Self::root), else nothing.
-	#[cfg(feature = "_certs")]
+	/// mode lands once rather than in each of them: CA-rooted
+	/// [`root`](Self::root), optional unless [`require`](Self::require), else nothing.
 	pub(crate) fn client_auth(&self, provider: crypto::Provider) -> Result<ClientAuth> {
-		if let Some(peers) = &self.peers {
-			// Pinning replaces the chain rather than adding to it, so a caller that
-			// configured both would silently lose whichever we didn't install.
-			if !self.root.is_empty() {
-				return Err(Error::PeersWithRoots);
-			}
-			return Ok(ClientAuth {
-				verifier: Some(Arc::new(PeerVerifier::new(provider, peers.clone()))),
-				roots: ClientRoots::default(),
-			});
-		}
-
-		match self.root.is_empty() {
-			true => Ok(ClientAuth::default()),
-			false => self.client_verifier(provider),
+		match (self.root.is_empty(), self.require) {
+			(true, false) => Ok(ClientAuth::default()),
+			(true, true) => Err(Error::RequireRoots),
+			(false, _) => self.client_verifier(provider),
 		}
 	}
 
-	/// Build the optional-client-auth verifier, reloading configured roots in place.
-	#[cfg(feature = "_certs")]
+	/// Build the client-auth verifier, reloading configured roots in place.
 	fn client_verifier(&self, provider: crypto::Provider) -> Result<ClientAuth> {
 		self.refuse_deprecated()?;
 		let roots = ClientRoots::default();
-		let initial = Self::build_client_verifier(&self.root, &provider, &roots)?;
+		let require = self.require;
+		let initial = Self::build_client_verifier(&self.root, require, &provider, &roots)?;
 
-		#[cfg(feature = "watch")]
 		let verifier = {
 			let paths = self.root.clone();
 			let reload_paths = paths.clone();
 			let reload_provider = provider.clone();
 			let reload_roots = roots.clone();
 			let verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-				Self::build_client_verifier(&reload_paths, &reload_provider, &reload_roots)
+				Self::build_client_verifier(&reload_paths, require, &reload_provider, &reload_roots)
 			})?;
 			Arc::new(verifier)
 		};
-		#[cfg(not(feature = "watch"))]
-		let verifier = initial;
 
 		Ok(ClientAuth {
 			verifier: Some(verifier),
@@ -1611,20 +1476,23 @@ impl Listen {
 	}
 
 	/// Build a verifier from the root files, adding them to `roots` once it builds.
-	#[cfg(feature = "_certs")]
+	/// A client without a certificate is refused when `require` is set.
 	fn build_client_verifier(
 		paths: &[PathBuf],
+		require: bool,
 		provider: &crypto::Provider,
 		roots: &ClientRoots,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
 		let certs = read_roots(paths)?;
-		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+		let builder = rustls::server::WebPkiClientVerifier::builder_with_provider(
 			Arc::new(root_store(&certs)?),
 			provider.clone(),
-		)
-		.allow_unauthenticated()
-		.build()
-		.map_err(Error::ClientVerifier)?;
+		);
+		let builder = match require {
+			true => builder,
+			false => builder.allow_unauthenticated(),
+		};
+		let verifier = builder.build().map_err(Error::ClientVerifier)?;
 		roots.extend(certs);
 		Ok(verifier)
 	}
@@ -1634,13 +1502,9 @@ impl Listen {
 	/// certificate handling the QUIC listeners use: on-disk `cert`/`key` pairs,
 	/// `generate` self-signed certs, and optional mTLS `root` client CAs.
 	///
-	/// Available whenever a crypto provider is compiled in, so a build with no
-	/// QUIC backend at all can still terminate TLS.
-	///
 	/// `alpn` sets the advertised ALPN protocols (e.g.
 	/// `vec![b"h2".to_vec(), b"http/1.1".to_vec()]`); pass an empty list for a
 	/// protocol like RTMPS that doesn't use ALPN.
-	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
 		let provider = crypto::provider()?;
@@ -1669,23 +1533,19 @@ impl Listen {
 /// A rotation swaps one complete snapshot: handshakes that already resolved the
 /// old certificate finish with it, and a partial or invalid replacement keeps the
 /// last valid snapshot serving.
-#[cfg(feature = "_certs")]
 #[derive(Clone, Debug)]
 pub struct Serve(Arc<Serving>);
 
-#[cfg(feature = "_certs")]
 #[derive(Debug)]
 struct Serving {
 	certs: Arc<ServeCerts>,
 	resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
 	verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
 	roots: ClientRoots,
-	#[cfg(feature = "watch")]
 	_reload: Reload,
 }
 
 /// A listener's client-certificate verifier and the roots behind it.
-#[cfg(feature = "_certs")]
 #[derive(Default)]
 pub(crate) struct ClientAuth {
 	pub(crate) verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
@@ -1700,11 +1560,9 @@ pub(crate) struct ClientAuth {
 /// verified against. Listing an old root is never wrong: lineage names a root only
 /// when the leaf provably descends from it. The set grows only with the
 /// operator's own root files.
-#[cfg(feature = "_certs")]
 #[derive(Clone, Debug, Default)]
 struct ClientRoots(Arc<RwLock<Arc<[CertificateDer<'static>]>>>);
 
-#[cfg(feature = "_certs")]
 impl ClientRoots {
 	fn current(&self) -> Arc<[CertificateDer<'static>]> {
 		self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
@@ -1719,7 +1577,6 @@ impl ClientRoots {
 	}
 }
 
-#[cfg(feature = "_certs")]
 impl rustls::server::ResolvesServerCert for Serving {
 	fn resolve(&self, hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		// Keeping this owner in the TLS config also keeps its reload watcher alive.
@@ -1730,32 +1587,26 @@ impl rustls::server::ResolvesServerCert for Serving {
 	}
 }
 
-#[cfg(feature = "_certs")]
 impl Serve {
 	/// Serve this resolver's current certificate with the listen policy's client authentication.
 	///
-	/// Certificate sources in `policy` are refused. Roots and pinned peers retain their
+	/// Certificate sources in `policy` are refused. Client roots retain their
 	/// usual verification and reload behavior. External certificates have no reported fingerprints.
 	pub fn resolver(resolver: Arc<dyn rustls::server::ResolvesServerCert>, policy: &Listen) -> Result<Self> {
 		policy.refuse_deprecated()?;
-		#[cfg(feature = "_certs")]
 		let in_memory = policy.identity.is_some();
-		#[cfg(not(feature = "_certs"))]
-		let in_memory = false;
 		if !policy.cert.is_empty() || !policy.key.is_empty() || !policy.generate.is_empty() || in_memory {
 			return Err(Error::ConflictingResolver);
 		}
 		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		let ClientAuth { verifier, roots } = policy.client_auth(provider)?;
-		#[cfg(feature = "watch")]
 		let reload = Reload::spawn(certs.clone(), policy.clone())?;
 		Ok(Self(Arc::new(Serving {
 			certs,
 			resolver: Some(resolver),
 			verifier,
 			roots,
-			#[cfg(feature = "watch")]
 			_reload: reload,
 		})))
 	}
@@ -1798,7 +1649,6 @@ impl Serve {
 		}
 	}
 
-	#[cfg(feature = "_transport")]
 	pub(crate) fn client_auth(&self) -> bool {
 		self.0.verifier.is_some()
 	}
@@ -1814,13 +1664,12 @@ impl Serve {
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 	/// Every root the accepting listener had trusted when it built this.
-	#[cfg(feature = "_certs")]
 	roots: Arc<[CertificateDer<'static>]>,
 }
 
 impl PeerIdentity {
 	/// A chain with no listener roots behind it.
-	#[cfg(all(test, feature = "_transport"))]
+	#[cfg(test)]
 	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
 		Self {
 			chain,
@@ -1837,11 +1686,8 @@ impl PeerIdentity {
 		&self.chain
 	}
 
-	/// The leaf certificate's SHA-256 fingerprint, hex encoded.
-	///
-	/// Names the peer when the listener pinned [`Peers`] rather than a CA: it is
-	/// the same value that peer published as its [`Identity::fingerprint`], so a
-	/// caller matches it against whatever it discovered them by.
+	/// The leaf certificate's SHA-256 fingerprint, hex encoded: the same value a
+	/// peer serving that certificate reports as its [`Identity::fingerprint`].
 	pub fn fingerprint(&self) -> Option<String> {
 		let leaf = self.chain.first()?;
 		Some(hex::encode(crypto::sha256(leaf.as_ref())))
@@ -1880,7 +1726,6 @@ impl PeerIdentity {
 	///
 	/// Fails when the chain is empty or exhausts path building's fixed budget of
 	/// signature checks, which a chain a CA issued never comes near.
-	#[cfg(feature = "_certs")]
 	pub fn lineage(&self) -> Result<Vec<String>> {
 		use std::cell::RefCell;
 
@@ -1967,14 +1812,9 @@ impl PeerIdentity {
 	}
 }
 
-/// The certificates a server is currently serving.
-///
-/// The chains themselves are kept only where a resolver picks between them per
-/// SNI, so a build without server-side certificate handling carries fingerprints
-/// alone.
+/// The certificates a server is currently serving, and their fingerprints.
 #[derive(Debug, Default)]
 pub(crate) struct Info {
-	#[cfg(feature = "_certs")]
 	pub(crate) certs: Vec<Arc<Certified>>,
 	pub(crate) fingerprints: Vec<String>,
 }
@@ -1995,7 +1835,6 @@ impl Certificates {
 	}
 
 	/// An empty set, used when no TLS-bearing backend is configured.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn empty() -> Self {
 		Self {
 			info: Arc::new(RwLock::new(Info::default())),
@@ -2025,7 +1864,6 @@ impl Certificates {
 			.map(|cert| hex::encode(crypto::sha256(cert.as_ref())))
 			.collect();
 		Ok(Self::new(Arc::new(RwLock::new(Info {
-			#[cfg(feature = "_certs")]
 			certs: Vec::new(),
 			fingerprints,
 		}))))
@@ -2045,13 +1883,11 @@ impl Certificates {
 }
 
 /// Delegates each server-certificate check to the latest valid root verifier.
-#[cfg(feature = "watch")]
 #[derive(Debug)]
 struct ReloadingServerVerifier {
 	inner: Reloading<dyn rustls::client::danger::ServerCertVerifier>,
 }
 
-#[cfg(feature = "watch")]
 impl ReloadingServerVerifier {
 	fn new(
 		paths: &[PathBuf],
@@ -2064,7 +1900,6 @@ impl ReloadingServerVerifier {
 	}
 }
 
-#[cfg(feature = "watch")]
 impl rustls::client::danger::ServerCertVerifier for ReloadingServerVerifier {
 	fn verify_server_cert(
 		&self,
@@ -2107,13 +1942,11 @@ impl rustls::client::danger::ServerCertVerifier for ReloadingServerVerifier {
 }
 
 /// Delegates each client-certificate check to the latest valid root verifier.
-#[cfg(all(feature = "watch", feature = "_certs"))]
 #[derive(Debug)]
 struct ReloadingClientVerifier {
 	inner: Reloading<dyn rustls::server::danger::ClientCertVerifier>,
 }
 
-#[cfg(all(feature = "watch", feature = "_certs"))]
 impl ReloadingClientVerifier {
 	fn new(
 		paths: &[PathBuf],
@@ -2126,7 +1959,6 @@ impl ReloadingClientVerifier {
 	}
 }
 
-#[cfg(all(feature = "watch", feature = "_certs"))]
 impl rustls::server::danger::ClientCertVerifier for ReloadingClientVerifier {
 	fn offer_client_auth(&self) -> bool {
 		self.inner.current().offer_client_auth()
@@ -2219,80 +2051,6 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 	}
 }
 
-// ── PeerVerifier ────────────────────────────────────────────────────
-
-/// Accepts a client certificate whose fingerprint is in a live [`Peers`] set.
-///
-/// The mirror of [`FingerprintVerifier`] on the accept side, with one difference
-/// that matters: the allowed set is read per handshake rather than fixed when the
-/// listener was built, because a mesh learns its members while it runs.
-#[cfg(feature = "_certs")]
-#[derive(Debug)]
-pub(crate) struct PeerVerifier {
-	provider: crypto::Provider,
-	peers: Peers,
-}
-
-#[cfg(feature = "_certs")]
-impl PeerVerifier {
-	pub fn new(provider: crypto::Provider, peers: Peers) -> Self {
-		Self { provider, peers }
-	}
-}
-
-#[cfg(feature = "_certs")]
-impl rustls::server::danger::ClientCertVerifier for PeerVerifier {
-	fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
-		// Self-signed identities chain to nothing, so there is no issuer to hint at.
-		&[]
-	}
-
-	fn offer_client_auth(&self) -> bool {
-		true
-	}
-
-	fn client_auth_mandatory(&self) -> bool {
-		// Unlike the CA-rooted verifier, an anonymous client is refused outright:
-		// the whole point of this mode is that the listener knows who connected.
-		true
-	}
-
-	fn verify_client_cert(
-		&self,
-		end_entity: &CertificateDer<'_>,
-		_intermediates: &[CertificateDer<'_>],
-		_now: UnixTime,
-	) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
-		let fingerprint = crypto::sha256(end_entity);
-		match self.peers.contains_raw(fingerprint.as_ref()) {
-			true => Ok(rustls::server::danger::ClientCertVerified::assertion()),
-			false => Err(rustls::Error::General("unknown peer fingerprint".into())),
-		}
-	}
-
-	fn verify_tls12_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-	}
-
-	fn verify_tls13_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-	}
-
-	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		self.provider.signature_verification_algorithms.supported_schemes()
-	}
-}
-
 // ── FingerprintVerifier ─────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -2348,7 +2106,6 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 }
 
 #[cfg(test)]
-#[cfg(feature = "quic")]
 mod tests {
 	#[tokio::test]
 	async fn resolved_config_keeps_reload_owner_alive() {
@@ -2430,7 +2187,6 @@ mod tests {
 	}
 
 	/// Outside a runtime, file-backed certificates still reload, on the fallback runtime.
-	#[cfg(feature = "watch")]
 	#[test]
 	fn loading_outside_a_runtime_watches_on_the_fallback() {
 		let dir = tempfile::tempdir().unwrap();
@@ -2460,7 +2216,6 @@ mod tests {
 		.expect("file-backed certificates reload on the fallback runtime");
 	}
 
-	#[cfg(feature = "watch")]
 	#[tokio::test]
 	async fn an_unwatchable_identity_refuses_startup() {
 		let dir = tempfile::tempdir().unwrap();
@@ -2529,7 +2284,6 @@ mod tests {
 	use super::*;
 	use rustls::client::danger::ServerCertVerifier;
 	use rustls::pki_types::ServerName;
-	#[cfg(feature = "watch")]
 	use rustls::server::danger::ClientCertVerifier;
 
 	fn self_signed() -> CertificateDer<'static> {
@@ -2565,7 +2319,6 @@ mod tests {
 		);
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_expiry_saturates_to_the_wall_range() {
 		let last = kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
@@ -2690,7 +2443,6 @@ mod tests {
 	/// keeps its task, an OS directory watch, and the certificate keys alive for the
 	/// rest of the process. The `Arc` is the observable half: while the task lives it
 	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn dropping_the_reload_guard_stops_the_watcher() {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
@@ -2768,23 +2520,7 @@ mod tests {
 		assert!(matches!(config.build(), Err(Error::ConflictingClientAuth)));
 	}
 
-	/// Pinned peers replace the chain rather than extending it, so configuring
-	/// both would silently drop one.
-	#[test]
-	fn peers_reject_client_roots() {
-		let config = Listen {
-			peers: Some(Peers::new()),
-			root: vec!["/nonexistent/ca.pem".into()],
-			..Default::default()
-		};
-		assert!(matches!(
-			config.client_auth(crypto::provider().unwrap()),
-			Err(Error::PeersWithRoots)
-		));
-	}
-
-	/// No client auth at all unless something asked for it, and `peers` wins over
-	/// `root` only because the two together are already refused.
+	/// No client auth at all unless something asked for it.
 	#[test]
 	fn client_auth_is_off_until_configured() {
 		let provider = crypto::provider().unwrap();
@@ -2795,87 +2531,16 @@ mod tests {
 				.verifier
 				.is_none()
 		);
-
-		let pinned = Listen {
-			peers: Some(Peers::new()),
+		let require = Listen {
+			require: true,
 			..Default::default()
 		};
-		let verifier = pinned
-			.client_auth(provider)
-			.unwrap()
-			.verifier
-			.expect("pinning wants a certificate");
-		// Unlike the CA-rooted verifier, an anonymous client is no longer welcome:
-		// the point of this mode is knowing who connected.
-		assert!(verifier.client_auth_mandatory());
-	}
-
-	/// The allowlist is read per handshake, so a peer discovered after the
-	/// listener was built still gets in and one that went away stops getting in.
-	#[test]
-	fn peers_are_checked_live() {
-		let identity = Identity::generate(["mesh.invalid"]).unwrap();
-		let peers = Peers::new();
-		let verifier = PeerVerifier::new(crypto::provider().unwrap(), peers.clone());
-		let leaf = identity.certified().leaf().clone();
-		let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
-
-		assert!(
-			verifier.verify_client_cert(&leaf, &[], now).is_err(),
-			"empty set lets nobody in"
-		);
-
-		peers.insert(identity.fingerprint()).unwrap();
-		assert!(peers.contains(identity.fingerprint()));
-		assert!(verifier.verify_client_cert(&leaf, &[], now).is_ok());
-
-		peers.remove(identity.fingerprint()).unwrap();
-		assert!(verifier.verify_client_cert(&leaf, &[], now).is_err());
-
-		// A different peer's certificate is not interchangeable with an allowed one.
-		let other = Identity::generate(["mesh.invalid"]).unwrap();
-		peers.insert(identity.fingerprint()).unwrap();
-		let other_leaf = other.certified().leaf().clone();
-		assert!(verifier.verify_client_cert(&other_leaf, &[], now).is_err());
-	}
-
-	/// A resumed handshake skips certificate verification, so a listener with a
-	/// live peer set must disable resumption for removals to take effect.
-	#[cfg(all(feature = "watch", feature = "quic"))]
-	#[test]
-	fn removed_peers_cannot_resume() {
-		let server_identity = Identity::generate(["localhost"]).unwrap();
-		let client_identity = Identity::generate(["client.invalid"]).unwrap();
-		let peers = Peers::new();
-		peers.insert(client_identity.fingerprint()).unwrap();
-
-		let client = Arc::new(
-			Connect {
-				identity: Some(client_identity.clone()),
-				fingerprint: vec![server_identity.fingerprint().to_string()],
-				..Default::default()
-			}
-			.build()
-			.unwrap(),
-		);
-		let server = Listen {
-			identity: Some(server_identity),
-			peers: Some(peers.clone()),
-			..Default::default()
-		}
-		.server_config(Vec::new())
-		.unwrap();
-
-		assert_eq!(
-			handshake_kinds(client.clone(), server.clone()).unwrap().1,
-			rustls::HandshakeKind::Full
-		);
-		peers.remove(client_identity.fingerprint()).unwrap();
-		assert!(handshake_kinds(client, server).is_err());
+		assert!(matches!(require.client_auth(provider), Err(Error::RequireRoots)));
+		// A shared policy beside it is refused rather than serving without the requirement.
+		assert!(require.configured(), "require alone reads as unconfigured");
 	}
 
 	/// A plain-TLS embedder receives a working config from the shared identity.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn served_config_handshakes() {
 		let server = Listen {
@@ -2895,7 +2560,6 @@ mod tests {
 
 	/// Every config built from one identity asks an external resolver per handshake,
 	/// so a certificate it swaps in reaches each listener without a rebuild.
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn external_resolver_answers_every_handshake() {
 		#[derive(Debug)]
@@ -2924,50 +2588,7 @@ mod tests {
 		assert_eq!(resolver.1.load(std::sync::atomic::Ordering::Relaxed), 2);
 	}
 
-	/// The external certificate source must retain the listener's live peer allowlist.
-	#[cfg(all(feature = "watch", feature = "quic"))]
-	#[test]
-	fn external_resolver_retains_live_client_auth() {
-		#[derive(Debug)]
-		struct Fixed(Arc<rustls::sign::CertifiedKey>);
-		impl rustls::server::ResolvesServerCert for Fixed {
-			fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
-				Some(self.0.clone())
-			}
-		}
-		let server = Identity::generate(["localhost"]).unwrap();
-		let client = Identity::generate(["client.invalid"]).unwrap();
-		let peers = Peers::new();
-		let policy = Listen {
-			peers: Some(peers.clone()),
-			..Default::default()
-		};
-		let serve = Serve::resolver(Arc::new(Fixed(server.certified().rustls.clone())), &policy).unwrap();
-		let client_config = Arc::new(
-			Connect {
-				identity: Some(client.clone()),
-				fingerprint: vec![server.fingerprint().to_string()],
-				..Default::default()
-			}
-			.build()
-			.unwrap(),
-		);
-		let tls = serve.config(Vec::new()).unwrap();
-		assert!(handshake_kinds(client_config.clone(), tls.clone()).is_err());
-		peers.insert(client.fingerprint()).unwrap();
-		assert_eq!(
-			handshake_kinds(client_config.clone(), tls.clone()).unwrap().0,
-			rustls::HandshakeKind::Full
-		);
-		peers.remove(client.fingerprint()).unwrap();
-		assert!(
-			handshake_kinds(client_config, tls).is_err(),
-			"a removed peer must not resume"
-		);
-	}
-
 	/// An external resolver retains CA verification of presented client certificates.
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn external_resolver_retains_client_roots() {
 		let (ca, server_cert, server_key, client_cert, client_key) = signed_certificates();
@@ -3152,7 +2773,7 @@ mod tests {
 		let roots = ClientRoots::default();
 		let load = |root: &CertificateDer<'static>| {
 			std::fs::write(&path, pem::encode(&pem::Pem::new("CERTIFICATE", root.to_vec()))).unwrap();
-			Listen::build_client_verifier(std::slice::from_ref(&path), &provider, &roots).unwrap();
+			Listen::build_client_verifier(std::slice::from_ref(&path), false, &provider, &roots).unwrap();
 		};
 
 		load(&old);
@@ -3183,16 +2804,6 @@ mod tests {
 			PeerIdentity::from_chain(Vec::new()).lineage(),
 			Err(Error::Empty)
 		));
-	}
-
-	/// A malformed fingerprint is rejected on the way in rather than stored as
-	/// something no certificate can ever match.
-	#[test]
-	fn peers_reject_malformed_fingerprints() {
-		let peers = Peers::new();
-		assert!(matches!(peers.insert("not-hex"), Err(Error::Fingerprint(_))));
-		assert!(matches!(peers.insert("abcd"), Err(Error::FingerprintLength(2))));
-		assert!(!peers.contains("not-hex"));
 	}
 
 	#[test]
@@ -3288,7 +2899,6 @@ mod tests {
 		(file, path)
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	fn signed_certificates() -> (
 		String,
 		CertificateDer<'static>,
@@ -3340,7 +2950,6 @@ mod tests {
 		)
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	fn handshake_kinds(
 		client: Arc<rustls::ClientConfig>,
 		server: Arc<rustls::ServerConfig>,
@@ -3372,7 +2981,6 @@ mod tests {
 		panic!("TLS handshake did not settle");
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn reloadable_roots_disable_session_resumption() {
 		use std::io::Write;
@@ -3444,7 +3052,6 @@ mod tests {
 
 	/// Write a fresh self-signed client certificate and its key as `cert.pem` and
 	/// `key.pem` in `dir`, returning both paths.
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	fn write_client_pair(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 		let signing = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
@@ -3459,7 +3066,6 @@ mod tests {
 		(cert, key)
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn client_certificate_reloads_for_new_handshakes() {
 		// A dedicated directory, not `/tmp`: see `reloadable_client_roots_disable_server_resumption`.
@@ -3505,7 +3111,6 @@ mod tests {
 		assert!(matches!(error, Error::LoadKey { .. }), "{error:?}");
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn reloadable_client_roots_disable_server_resumption() {
 		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
@@ -3531,7 +3136,7 @@ mod tests {
 		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
 		let reloadable_client = Arc::new(build_client(client_cert, client_key));
 
-		let verifier = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let verifier = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()
 			.unwrap()
@@ -3539,12 +3144,12 @@ mod tests {
 			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
 			.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let initial = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let verifier = Arc::new(
 			ReloadingClientVerifier::new(&paths, initial, move || {
-				Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
+				Listen::build_client_verifier(&reload_paths, false, &reload_provider, &ClientRoots::default())
 			})
 			.unwrap(),
 		);
@@ -3584,7 +3189,6 @@ mod tests {
 		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
 	}
 
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
 		let (ca_a, server_a, _, client_a, _) = signed_certificates();
@@ -3608,11 +3212,11 @@ mod tests {
 		})
 		.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let initial = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let client_verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-			Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
+			Listen::build_client_verifier(&reload_paths, false, &reload_provider, &ClientRoots::default())
 		})
 		.unwrap();
 
@@ -3655,7 +3259,6 @@ mod tests {
 	}
 
 	/// A root file holding several CAs trusts every one of them, not only the first.
-	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn a_root_bundle_is_loaded_whole() {
 		let (unrelated, _, _, _, _) = signed_certificates();
@@ -3710,7 +3313,6 @@ mod tests {
 
 // ── ServeCerts ──────────────────────────────────────────────────────
 
-#[cfg(feature = "_certs")]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<Info>>,
@@ -3719,7 +3321,6 @@ pub(crate) struct ServeCerts {
 	generated: RwLock<Option<Arc<Certified>>>,
 }
 
-#[cfg(feature = "_certs")]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
@@ -3735,10 +3336,7 @@ impl ServeCerts {
 		}
 		// An in-memory identity is a certificate source like the other two, so a
 		// listener configured with only that one still has something to serve.
-		#[cfg(feature = "_certs")]
 		let in_memory = config.identity.is_some();
-		#[cfg(not(feature = "_certs"))]
-		let in_memory = false;
 		if config.cert.is_empty() && config.generate.is_empty() && !in_memory {
 			return Err(Error::NoCertSource);
 		}
@@ -3755,7 +3353,6 @@ impl ServeCerts {
 			certs.push(self.generated(&config.generate)?);
 		}
 
-		#[cfg(feature = "_certs")]
 		if let Some(identity) = &config.identity {
 			certs.push(identity.certified());
 		}
@@ -3833,7 +3430,6 @@ impl ServeCerts {
 	}
 }
 
-#[cfg(feature = "_certs")]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		Some(self.select(client_hello.server_name())?.rustls.clone())
@@ -3848,7 +3444,6 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// its own, so a listener that goes away without this leaves the task, the keys it
 /// holds, and an OS directory watch behind. An embedder that builds listeners
 /// repeatedly in one process would accumulate all three.
-#[cfg(all(feature = "watch", feature = "_certs"))]
 #[derive(Debug)]
 pub(crate) struct Reload {
 	/// Named for the drop alone: nothing reads it, and losing it stops the watcher.
@@ -3856,7 +3451,6 @@ pub(crate) struct Reload {
 	_task: Option<AbortOnDrop>,
 }
 
-#[cfg(all(feature = "watch", feature = "_certs"))]
 impl Reload {
 	/// Start watching the file-backed pairs in `config`, if it has any.
 	///
@@ -3899,7 +3493,6 @@ impl Reload {
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
 /// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
 /// registering the watch and is the only caller.
-#[cfg(all(feature = "watch", feature = "_certs"))]
 async fn reload_certs(mut watcher: crate::watch::Files, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;
@@ -3928,6 +3521,27 @@ mod legacy_tests {
 	fn parse(args: &[&str]) -> Cli {
 		let argv = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
 		Cli::parse_from(&argv).unwrap()
+	}
+
+	/// A list variable splits on commas, as `services.moq-relay.tls.certs` joins two or more
+	/// certificates and keys into one value.
+	#[test]
+	fn list_environment_splits_on_commas() {
+		if !test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CERT", "a.pem,b.pem")
+			.set("MOQ_LISTEN_TLS_KEY", "a.key,b.key")
+			.set("MOQ_CONNECT_TLS_ROOT", "ca.pem,ca2.pem")
+			.set("MOQ_CONNECT_TLS_FINGERPRINT", "aa,bb")
+			.isolate()
+		{
+			return;
+		}
+		let cli = parse(&[]);
+		let paths = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+		assert_eq!(cli.listen.cert, paths(&["a.pem", "b.pem"]));
+		assert_eq!(cli.listen.key, paths(&["a.key", "b.key"]));
+		assert_eq!(cli.connect.root, paths(&["ca.pem", "ca2.pem"]));
+		assert_eq!(cli.connect.fingerprint, ["aa", "bb"]);
 	}
 
 	/// The released `--client-tls-*` spellings parse so the process can name their
@@ -4003,7 +3617,6 @@ mod legacy_tests {
 	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client
 	/// CAs with it and leaves the listener accepting unauthenticated peers.
 	/// moq-cli's `export hls` flattens this type directly, so it is a live path.
-	#[cfg(feature = "quic")]
 	#[test]
 	fn the_server_builders_refuse_a_released_spelling() {
 		let tls = parse(&["--server-tls-root", "/tmp/ca.pem"]).listen;

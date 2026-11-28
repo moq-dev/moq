@@ -1,5 +1,6 @@
-import { Instant, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import { hosted } from "../assets";
+import * as MediaClock from "../media-clock";
 import type { FromWorker, ToWorker } from "./capture-worker";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorker from "./capture-worker.ts?worklet";
@@ -42,25 +43,27 @@ export async function workerSupported(): Promise<boolean> {
 	return probe.supported;
 }
 
-// Maps capture timestamps onto our wall clock so audio and video share one epoch. The first frame
-// pins the two clocks together; everything after it keeps its spacing.
+// Maps capture timestamps onto the media clock so audio and video share one epoch. The first frame
+// pins the two clocks together; everything after it keeps its spacing, plus however far the media
+// clock has slewed off the installed clock since, which the source's timestamps also run on.
 class Epoch {
-	// The source timestamp we anchored on, and our wall clock at that moment in microseconds.
+	// The source timestamp we anchored on, and the installed clock at that moment in microseconds.
 	#base?: number;
 	#zero = 0;
 
 	// Whether the source clock is stuck, decided on the second frame.
 	#stuck?: boolean;
 
-	// `at` is when the frame arrived, in milliseconds on the installed clock. For the
-	// first frame it has to be measured as close to capture as possible: whatever delay sits between
-	// capture and the anchor becomes a permanent audio/video offset.
-	stamp(frame: VideoFrame, at: number): VideoFrame {
-		const arrived = at * 1000;
+	// `at` is when the frame arrived on the installed clock. For the first frame it has to be
+	// measured as close to capture as possible: whatever delay sits between capture and the anchor
+	// becomes a permanent audio/video offset.
+	stamp(frame: VideoFrame, at: Instant): VideoFrame {
+		const instant = at.since(Instant.ZERO).asMicros();
+		const arrived = MediaClock.capture(at).asMicros();
 
 		if (this.#base === undefined) {
 			this.#base = frame.timestamp;
-			this.#zero = arrived;
+			this.#zero = instant;
 		} else if (this.#stuck === undefined) {
 			// WebKit stamps every frame off a canvas capture track with 0, which would collapse the
 			// whole stream onto one instant. One frame is enough to tell: a real capture clock always
@@ -70,7 +73,12 @@ class Epoch {
 
 		// A stuck source leaves arrival time as the only clock we have, which is what the <video>
 		// fallback uses anyway.
-		const timestamp = this.#stuck ? arrived : frame.timestamp - this.#base + this.#zero;
+		// Whole microseconds, like the integer a VideoFrame stores: the float error in the clock
+		// arithmetic would otherwise land a frame a hair under its mark, which a browser truncates a
+		// whole microsecond early.
+		const timestamp = Math.round(
+			this.#stuck ? arrived : frame.timestamp - this.#base + this.#zero + (arrived - instant),
+		);
 
 		const stamped = new VideoFrame(frame, { timestamp });
 		frame.close();
@@ -88,7 +96,7 @@ function rewrite(source: ReadableStream<VideoFrame>): ReadableStream<VideoFrame>
 			async pull(controller) {
 				const { value } = await reader.read();
 				if (cancelled) value?.close();
-				else if (value) controller.enqueue(epoch.stamp(value, now().since(Instant.ZERO).asMillis()));
+				else if (value) controller.enqueue(epoch.stamp(value, now()));
 				else controller.close();
 			},
 			async cancel(reason) {
@@ -135,14 +143,16 @@ async function workerProcessor(source: StreamTrack): Promise<ReadableStream<Vide
 					return;
 				}
 				switch (msg.type) {
-					case "frame":
+					case "frame": {
 						// Anchor on when the worker read the frame, not when we got around to handling
 						// the message, so a busy main thread can't skew video against audio. The worker's
 						// realm has its own origin, so the shared Unix-anchored time origin translates it
 						// onto the host clock.
 						// biome-ignore lint/style/noRestrictedGlobals: a cross-realm origin, not a clock read.
-						controller.enqueue(epoch.stamp(msg.frame, msg.at - performance.timeOrigin));
+						const at = Duration.millis(Math.max(msg.at - performance.timeOrigin, 0));
+						controller.enqueue(epoch.stamp(msg.frame, Instant.ZERO.saturatingAdd(at)));
 						return;
+					}
 					case "done":
 						worker.close();
 						controller.close();
@@ -271,9 +281,13 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 				await new Promise<void>((resolve) => {
 					handle = video.requestVideoFrameCallback((now, metadata) => {
 						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
-						// which the host clock shares, so audio and video stay on one epoch.
-						const millis = metadata.captureTime ?? now;
-						controller.enqueue(new VideoFrame(video, { timestamp: millis * 1000 }));
+						// which the host clock shares, so they map onto the media clock audio uses too.
+						const at = Instant.ZERO.saturatingAdd(
+							Duration.millis(Math.max(metadata.captureTime ?? now, 0)),
+						);
+						controller.enqueue(
+							new VideoFrame(video, { timestamp: Math.round(MediaClock.capture(at).asMicros()) }),
+						);
 						resolve();
 					});
 				});

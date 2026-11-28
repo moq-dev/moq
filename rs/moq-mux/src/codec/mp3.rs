@@ -92,6 +92,14 @@ impl Config {
 	}
 }
 
+/// How long the MPEG Layer III frame at the start of `data` plays, from its header: 1152 samples
+/// for MPEG-1, half that for MPEG-2 and 2.5. `None` when the header doesn't parse.
+pub(crate) fn duration(data: &[u8]) -> Option<Timestamp> {
+	let config = Config::parse(data).ok()?;
+	let samples = if (data[1] >> 3) & 0x03 == 0b11 { 1152 } else { 576 };
+	Timestamp::from_scale(samples, config.sample_rate.into()).ok()
+}
+
 /// MP3 importer.
 ///
 /// Publishes raw MP3 frames to a single moq track. Build it with [`new`](Self::new),
@@ -134,10 +142,14 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::AudioConfig>> {
+		self.track.finish()
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -157,9 +169,9 @@ impl Import {
 		self.track.discontinuity()
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -225,6 +237,20 @@ mod tests {
 		let header = [0xFF, 0xF3, 0x90, 0x44];
 		let cfg = Config::parse(&header).unwrap();
 		assert_eq!(cfg.sample_rate, 22050);
+	}
+
+	#[test]
+	fn mpeg2_frames_hold_half_the_samples() {
+		let micros = |header: [u8; 4]| {
+			std::time::Duration::try_from(duration(&header).unwrap())
+				.unwrap()
+				.as_micros()
+		};
+		// MPEG-1 at 48 kHz: 1152 samples.
+		assert_eq!(micros([0xFF, 0xFB, 0x94, 0x44]), 24_000);
+		// MPEG-2 at 24 kHz: 576 samples.
+		assert_eq!(micros([0xFF, 0xF3, 0x94, 0x44]), 24_000);
+		assert_eq!(duration(&[0xFF, 0xFD, 0x90, 0x44]), None, "a Layer II frame");
 	}
 
 	#[test]

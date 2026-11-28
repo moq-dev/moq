@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use kio::clock::Instant;
 use moq_quic::{Limits, VarInt, connection::mux};
 
 use crate::Version;
@@ -65,10 +66,10 @@ pub struct Config {
 	/// feature (QMux01+), so this is ignored on QMux00. Default: 16382 bytes.
 	pub max_datagram_frame_size: Option<u64>,
 
-	/// How long [`Session::connect`](crate::Session::connect) /
-	/// [`accept`](crate::Session::accept) waits for the peer's transport parameters, or
-	/// `None` to wait indefinitely. Bounds the handshake so a peer that completes the
-	/// transport connection but never sends its parameters can't hang establishment
+	/// How long the handshake may take, or `None` to wait indefinitely: the wait for the
+	/// peer's transport parameters, and before it the TLS handshake or WebSocket upgrade
+	/// that the `tls` and `ws` builders run, which share the one deadline. Bounds it so a
+	/// peer that stalls mid-handshake or never sends its parameters can't hang establishment
 	/// forever. Default: 10s.
 	pub handshake_timeout: Option<Duration>,
 
@@ -79,11 +80,6 @@ pub struct Config {
 	/// an application is actively sending. Only the record-framed drafts (QMux01+) carry
 	/// `QX_PING`. Default: 1s.
 	pub rtt_interval: Option<Duration>,
-
-	/// Keep `limits.receive_window` for the session's life, for a carrier that sizes its own
-	/// buffers by it, such as a WebRTC data channel: [`Session::set_limits`](crate::Session::set_limits)
-	/// then refuses to change it. Default: false.
-	pub fixed_receive_window: bool,
 }
 
 impl Default for Config {
@@ -98,7 +94,6 @@ impl Default for Config {
 			max_datagram_frame_size: Some(DEFAULT_MAX_RECORD_SIZE),
 			handshake_timeout: Some(Duration::from_secs(10)),
 			rtt_interval: Some(Duration::from_secs(1)),
-			fixed_receive_window: false,
 		}
 	}
 }
@@ -114,7 +109,6 @@ impl Config {
 	}
 
 	/// This config with the out-of-band negotiation's outcome applied.
-	#[cfg(any(feature = "tls", feature = "ws"))]
 	pub(crate) fn with_negotiated(self, version: Version, protocol: Option<String>) -> Self {
 		Self {
 			version,
@@ -132,6 +126,31 @@ impl Config {
 			Protocol::Negotiated(name) => Some(name.clone()),
 			Protocol::None | Protocol::Negotiate(_) => None,
 		}
+	}
+
+	/// When the handshake must finish, if it is bounded: the transport's own handshake, such as
+	/// TLS or a WebSocket upgrade, and the wait for the peer's parameters share it
+	pub(crate) fn handshake_deadline(&self) -> Option<Instant> {
+		self.handshake_timeout
+			.map(|timeout| kio::clock::now().saturating_add(timeout))
+	}
+
+	/// This config with only what is left of `deadline` to wait for the peer's parameters
+	pub(crate) fn until(mut self, deadline: Option<Instant>) -> Self {
+		if let Some(deadline) = deadline {
+			self.handshake_timeout = Some(deadline.saturating_duration_since(kio::clock::now()));
+		}
+		self
+	}
+
+	/// Refuse this config if any of the `offered` wire-format ALPNs would, before the peer
+	/// picks one
+	pub(crate) fn check_offered(&self, offered: &[String]) -> Result<(), crate::Error> {
+		for alpn in offered {
+			let (version, _) = crate::alpn::parse(Some(alpn))?;
+			self.clone().with_negotiated(version, None).to_mux()?;
+		}
+		Ok(())
 	}
 
 	/// The connection's settings, refusing a value the wire cannot carry, the peer would
@@ -187,6 +206,17 @@ pub(crate) fn check_limits(limits: &Limits) -> Result<(), crate::Error> {
 		));
 	}
 	Ok(())
+}
+
+/// Run one step of a handshake bounded by `deadline`, failing as
+/// [`Error::HandshakeTimeout`](crate::Error::HandshakeTimeout) once it passes
+pub(crate) async fn within<F: IntoFuture>(deadline: Option<Instant>, step: F) -> Result<F::Output, crate::Error> {
+	match deadline {
+		Some(deadline) => kio::clock::timeout_at(deadline, step)
+			.await
+			.map_err(|_| crate::Error::HandshakeTimeout),
+		None => Ok(step.await),
+	}
 }
 
 #[cfg(test)]

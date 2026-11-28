@@ -1,21 +1,25 @@
 use std::sync::{Arc, OnceLock};
 
+use super::Producer;
 use super::hang::CatalogExt;
-use super::{Producer, Reserved};
 
 /// One source's timestamp base on a catalog, shared by every importer reading it.
 ///
-/// Made via [`Producer::timebase`]. An importer publishes its source's own timestamps, shifted onto
-/// the catalog's [`Clock`](crate::Clock) by one offset fixed on its first frame: zero when that
-/// frame places the clock (the catalog was not yet published, nor its clock taken), so the
-/// timestamps stay verbatim, and the gap between the clock's reading and the frame's timestamp
-/// otherwise. Every track of every importer minted from one timebase shares that offset, so
-/// renditions on one timestamp base (an HLS import's variants, or the importer replacing one on a
-/// new init segment) stay in sync, while separate timebases each get their own.
+/// Made via [`Producer::timebase`]. A source on a timeline of its own (a container's, an RTP
+/// session's) [`shift`](Self::shift)s its timestamps onto the catalog's [`Clock`](crate::Clock) by
+/// one offset fixed on its first frame: zero when that frame places the clock (the catalog was not
+/// yet published, nor its clock taken), so the timestamps stay verbatim, and the gap between the
+/// clock's reading and the frame's timestamp otherwise. A source that knows when its timestamps
+/// happened [`place`](Self::place)s them first instead of landing at its first frame's arrival.
 ///
-/// [`Producer::reserve`] mints a fresh timebase per call, which is what a lone importer wants.
-/// Clones share the offset. Holding one never withholds the catalog: only a live [`Reserved`]
-/// does.
+/// Every track shifted through one timebase shares that offset, so renditions on one timestamp
+/// base (an HLS import's variants, or the importer replacing one on a new init segment) stay in
+/// sync, while separate timebases each get their own. A container importer shifts through a fresh
+/// one unless handed a shared one with its `with_timebase`; codec importers and
+/// [`Reserved`](super::Reserved) write timestamps verbatim, already on the catalog's clock.
+///
+/// Clones share the offset. Holding one never withholds the catalog: only a live
+/// [`Reserved`](super::Reserved) does.
 pub struct Timebase<E: CatalogExt = ()> {
 	pub(super) catalog: Producer<E>,
 	offset: Arc<OnceLock<Offset>>,
@@ -27,13 +31,6 @@ impl<E: CatalogExt> Timebase<E> {
 			catalog,
 			offset: Default::default(),
 		}
-	}
-
-	/// Begin reserving an importer's tracks, sharing this timebase's offset.
-	///
-	/// See [`Producer::reserve`] for how the reservation gates the catalog.
-	pub fn reserve(&self) -> Reserved<E> {
-		Reserved::new(self.clone())
 	}
 
 	/// Place this timebase's `pts` at the wall-clock instant `wall`, instead of at the arrival of its
@@ -65,7 +62,9 @@ impl<E: CatalogExt> Timebase<E> {
 	}
 
 	/// Shift `pts` onto the catalog clock, anchoring on it if it is this timebase's first.
-	pub(crate) fn shift(&self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+	///
+	/// Refuses a `pts` that lands before the clock's zero, and one without a timescale.
+	pub fn shift(&self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
 		self.anchor(pts)?.apply(pts)
 	}
 }
@@ -96,17 +95,17 @@ impl Offset {
 		(self.0 as i128 * units_per_second as i128).div_euclid(1_000_000)
 	}
 
-	/// Shift `pts`, keeping its scale. Refuses a result below zero rather than clamping it.
+	/// Shift `pts`, keeping its scale. Refuses a result below zero rather than clamping it, and an
+	/// [unscaled](moq_net::Timestamp::unscaled) `pts`, which has no time to shift.
 	pub(crate) fn apply(self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+		let scale = pts.scale().ok_or(moq_net::TimeOverflow)?;
 		if self.0 == 0 {
 			return Ok(pts);
 		}
-		let scale = pts.scale();
 		let value = pts.value() as i128 + self.ticks(scale.as_u64());
 		let value = u64::try_from(value).map_err(|_| {
 			crate::Error::UnmappableTimestamp(format!(
-				"{} µs shifted by {} µs lands before the broadcast clock's zero",
-				pts.as_micros(),
+				"{pts:?} shifted by {} µs lands before the broadcast clock's zero",
 				self.0
 			))
 		})?;
@@ -136,6 +135,7 @@ mod test {
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
 		assert_eq!(Offset::default().apply(us(7)).unwrap(), us(7));
+		assert!(Offset::default().apply(moq_net::Timestamp::unscaled(7)).is_err());
 	}
 
 	/// A fractional unit rounds down at every scale, so tracks at one scale shift alike.

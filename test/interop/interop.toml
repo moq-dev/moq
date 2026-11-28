@@ -8,8 +8,9 @@ level = "info"
 # QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
 bind = "127.0.0.1:4443"
 tls.generate = ["localhost", "127.0.0.1"]
-# Every default version, plus the work-in-progress moq-lite-07 that carries AUTH,
-# which the defaults leave out. Keep in sync with `ALL` in rs/moq-net/src/version.rs.
+# Every default version, plus the work-in-progress moq-lite-07 that carries AUTH and
+# the partial moq-transport-23, which the defaults leave out. Keep in sync with `ALL`
+# in rs/moq-net/src/version.rs.
 version = [
     "moq-lite-07-wip",
     "moq-lite-06",
@@ -18,6 +19,7 @@ version = [
     "moq-lite-03",
     "moq-lite-02",
     "moq-lite-01",
+    "moq-transport-23",
     "moq-transport-22",
     "moq-transport-20",
     "moq-transport-18",

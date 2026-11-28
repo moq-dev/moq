@@ -1,17 +1,18 @@
 //! A replaced broadcast restarts announce consumers across relays, end to end over
 //! real sessions, while the subscriptions already on it stay.
 //!
-//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART, carrying the new instance;
-//! older versions and moq-transport carry no instance, so it travels as an end and a
-//! fresh start, which the receiving relay mints a new instance for. Either way a downstream relay
+//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART, carrying the new identity;
+//! older versions and moq-transport carry no identity, so it travels as an end and a
+//! fresh start, which the receiving relay mints a new identity for. Either way a downstream relay
 //! retires its copy of the old source, so a new subscriber never sees the old
-//! instance's cached groups.
+//! identity's cached groups.
 
 use crate::support;
+use support::AppendNext;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Instance, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Identity, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -24,9 +25,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -51,7 +54,7 @@ async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 		.expect("announce ended")
 }
 
-/// Expect the restart of `prefix` onto another instance, as `version` carries it: one restart
+/// Expect the restart of `prefix` onto another identity, as `version` carries it: one restart
 /// on lite-07, an end then a start elsewhere.
 async fn expect_restart(version: Version, announced: &mut origin::Routes, prefix: &str) {
 	expect_replaced(
@@ -63,23 +66,26 @@ async fn expect_restart(version: Version, announced: &mut origin::Routes, prefix
 	.await
 }
 
-/// Expect the restart of `prefix` as one restart when the wire replaced the instance in
+/// Expect the restart of `prefix` as one restart when the wire replaced the identity in
 /// place, so the path was never absent, or as an end then a start.
 async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefix: &str, restarts: bool) {
 	match next_event(announced).await {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
 		origin::RouteEvent {
 			kind: origin::RouteKind::End,
 			announce,
+			..
 		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
@@ -95,10 +101,11 @@ async fn quiet(version: Version, announced: &mut origin::Routes) {
 	}
 }
 
-/// Write one group of one frame tagged `tag`.
+/// Write the next group of one frame tagged `tag`, starting at its key in milliseconds.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, tag.as_bytes().to_vec()).unwrap();
+	let mut group = track.append_next().unwrap();
+	let start = Timestamp::from_millis(group.start).unwrap();
+	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
 	group.finish().unwrap();
 }
 
@@ -119,9 +126,9 @@ async fn subscribe(origin: &origin::Producer, path: &str) -> (broadcast::Consume
 	(broadcast, subscription)
 }
 
-/// `P -> R -> V`, where a publisher at `P` under another instance restarts while the old one
-/// lingers: `V` restarts the path, its old subscription keeps the old instance, and a
-/// re-request reaches the new one without any of the old instance's cached groups.
+/// `P -> R -> V`, where a publisher at `P` under another identity restarts while the old one
+/// lingers: `V` restarts the path, its old subscription keeps the old identity, and a
+/// re-request reaches the new one without any of the old identity's cached groups.
 async fn relay_chain(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -137,6 +144,7 @@ async fn relay_chain(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -147,16 +155,16 @@ async fn relay_chain(version: &str) {
 		assert_eq!(read(&mut sticky).await, format!("old:{group}"), "{version}");
 	}
 
-	// The publisher restarts under another instance, its old session still open.
+	// The publisher restarts under another identity, its old session still open.
 	let new = publisher.route("live", origin::RouteOptions::default()).unwrap();
 	let new_track = new.broadcast().create_track("video", timed()).unwrap();
 	expect_restart(version, &mut announced, "live").await;
 
-	// The old subscription stays on the old instance.
+	// The old subscription stays on the old identity.
 	write(&old_track, "old:3");
 	assert_eq!(read(&mut sticky).await, "old:3", "{version}");
 
-	// A re-request reaches the new instance, never a group cached from the old one.
+	// A re-request reaches the new identity, never a group cached from the old one.
 	let (fresh, mut subscription) = subscribe(&viewer, "live").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the replaced broadcast");
 	write(&new_track, "new:0");
@@ -183,7 +191,7 @@ relay_chain_tests! {
 	relay_chain_ietf22: "moq-transport-22",
 }
 
-/// A worker claiming `pool` under its own instance, `worker-<hop>`, answering each request
+/// A worker claiming `pool` under its own identity, `worker-<hop>`, answering each request
 /// with an output whose `video` track carries the worker's name. The claim is a peer's, landed through
 /// the `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
@@ -222,7 +230,7 @@ impl Worker {
 	}
 }
 
-/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance, and
+/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own identity, and
 /// lite-07 routes each claim to its own origin node. Only the first hop selects the
 /// origin, by a rendezvous hash of the path and the origin's identity that every node
 /// computes alike, so `D` spreads the pool's paths over the workers exactly as `U` does
@@ -243,14 +251,15 @@ async fn prefix_pool(version: &str) {
 	// `D`'s route for `pool` names one of the workers.
 	let advertised = |announce: announce::Announce| {
 		assert_eq!(announce.prefix.as_str(), "pool");
-		let instance = announce.route.instance().clone();
-		assert!(instance.as_str().starts_with("worker-"), "{instance:?}");
+		let identity = announce.route.identity().clone();
+		assert!(identity.as_str().starts_with("worker-"), "{identity:?}");
 	};
 	let mut announced = downstream.consume().routes();
 	match next_event(&mut announced).await {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
 	}
@@ -282,6 +291,7 @@ async fn prefix_pool(version: &str) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
@@ -305,18 +315,18 @@ async fn prefix_pool_lite07() {
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
-/// claim moves to another instance or re-prices in place, so it lands through the
+/// claim moves to another identity or re-prices in place, so it lands through the
 /// `fuzz` module as a session lands it.
 struct Claim {
 	dynamic: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
-	/// The price the claim advertises, kept across an instance move.
+	/// The price the claim advertises, kept across an identity move.
 	cost: std::cell::Cell<u64>,
 }
 
 impl Claim {
-	fn new(origin: &origin::Producer, instance: Option<Instance>) -> Self {
-		let route = moq_net::fuzz::route_info([], 0, instance.map(|instance| (instance, 0)));
+	fn new(origin: &origin::Producer, identity: Option<Identity>) -> Self {
+		let route = moq_net::fuzz::route_info([], 0, identity.map(|identity| (identity, 0)));
 		let dynamic =
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -345,13 +355,13 @@ impl Claim {
 		self.outputs.borrow().len()
 	}
 
-	/// Move the claim to `instance` in place, keeping the rest of its route.
-	fn update_instance(&self, instance: Instance) {
-		let route = moq_net::fuzz::route_info([], self.cost.get(), Some((instance, 0)));
+	/// Move the claim to `identity` in place, keeping the rest of its route.
+	fn update_identity(&self, identity: Identity) {
+		let route = moq_net::fuzz::route_info([], self.cost.get(), Some((identity, 0)));
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 
-	/// Re-price the claim in place, keeping its instance.
+	/// Re-price the claim in place, keeping its identity.
 	fn update_cost(&self, cost: u64) {
 		self.cost.set(cost);
 		let route = moq_net::fuzz::route_info([], cost, None);
@@ -363,7 +373,7 @@ impl Claim {
 /// A re-price keeps every handle. Moving to `to` restarts `V`, the subscription already
 /// open stays on the old answer, and a re-request asks the handler again and reads none
 /// of the old answer's cached groups.
-async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
+async fn dynamic_identity(version: &str, from: Option<Identity>, to: Identity) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
@@ -377,6 +387,7 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}
@@ -405,10 +416,10 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
 	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
 
-	// Another instance is another stream downstream. lite-07 restarts it in place; the
+	// Another identity is another stream downstream. lite-07 restarts it in place; the
 	// other wires end it and start a fresh one.
 	let in_place = version == "moq-lite-07-wip".parse().unwrap();
-	claim.update_instance(to.clone());
+	claim.update_identity(to.clone());
 	expect_replaced(version, &mut announced, "live", in_place).await;
 
 	// The subscription already open stays on the old answer.
@@ -417,14 +428,14 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 
 	// A re-request asks the handler again and never reads the old answer.
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
-	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
+	assert!(!fresh.is_clone(&stale), "{version}: joined the old identity's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	// Only lite-07 carries the instance.
+	// Only lite-07 carries the identity.
 	if in_place {
 		assert_eq!(
-			fresh.info().instance,
+			fresh.info().identity,
 			Some(to),
-			"{version}: resolved under the old instance"
+			"{version}: resolved under the old identity"
 		);
 	}
 	claim.write(1, "new:0");
@@ -435,22 +446,22 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	quiet(version, &mut announced).await;
 }
 
-/// The instance the claim starts at, and another one it moves to.
-fn instances() -> (Instance, Instance) {
+/// The identity the claim starts at, and another one it moves to.
+fn identities() -> (Identity, Identity) {
 	(
 		"01900000-0000-7000-8000-000000000001".parse().unwrap(),
 		"01900000-0000-7000-8000-000000000002".parse().unwrap(),
 	)
 }
 
-macro_rules! dynamic_instance_tests {
+macro_rules! dynamic_identity_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
 			#[kio::test]
 			async fn $name() {
-				let (a, b) = instances();
+				let (a, b) = identities();
 				for from in [Some(a), None] {
-					kio::clock::timeout(TEST_TIMEOUT, dynamic_instance($version, from, b.clone()))
+					kio::clock::timeout(TEST_TIMEOUT, dynamic_identity($version, from, b.clone()))
 						.await
 						.expect("timed out");
 				}
@@ -459,27 +470,27 @@ macro_rules! dynamic_instance_tests {
 	};
 }
 
-dynamic_instance_tests! {
-	dynamic_instance_lite06: "moq-lite-06",
-	dynamic_instance_lite07: "moq-lite-07-wip",
-	dynamic_instance_ietf18: "moq-transport-18",
-	dynamic_instance_ietf22: "moq-transport-22",
+dynamic_identity_tests! {
+	dynamic_identity_lite06: "moq-lite-06",
+	dynamic_identity_lite07: "moq-lite-07-wip",
+	dynamic_identity_ietf18: "moq-transport-18",
+	dynamic_identity_ietf22: "moq-transport-22",
 }
 
-/// A held track must not fill an old instance's cache from its replacement.
+/// A held track must not fill an old identity's cache from its replacement.
 async fn retired_fetch(version: &str, explicit: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(2);
 	let _session = link(version, &publisher, &viewer).await;
-	let (a, b) = instances();
+	let (a, b) = identities();
 	let old_route = if explicit {
-		origin::RouteOptions::default().with_instance(a, 0)
+		origin::RouteOptions::default().with_identity(a, 0)
 	} else {
 		origin::RouteOptions::default()
 	};
 	let new_route = if explicit {
-		origin::RouteOptions::default().with_instance(b, 0)
+		origin::RouteOptions::default().with_identity(b, 0)
 	} else {
 		origin::RouteOptions::default()
 	};
@@ -522,7 +533,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	{
 		assert_ne!(info.priority, 17, "{version}: late track resolved replacement");
 	}
-	// A held query keeps reading the retired instance; a bare handle would not.
+	// A held query keeps reading the retired identity; a bare handle would not.
 	let _reading = track.info();
 	drop(subscription);
 	settle().await;
@@ -557,10 +568,10 @@ retired_fetch_tests! {
 	retired_fetch_ietf22: "moq-transport-22",
 }
 
-/// A SUBSCRIBE on a wire without instances names none, so until the publisher answers it,
-/// it may have resolved whichever instance won the path. Unanswered when its stream is
+/// A SUBSCRIBE on a wire without identities names none, so until the publisher answers it,
+/// it may have resolved whichever identity won the path. Unanswered when its stream is
 /// replaced, it is refused, even if the publisher had resolved it on the old one, rather than
-/// risk filling the old stream from the replacement. lite-07 pins the instance, so its
+/// risk filling the old stream from the replacement. lite-07 pins the identity, so its
 /// SUBSCRIBE reads the old stream it named.
 async fn unanswered_takeover(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -582,7 +593,7 @@ async fn unanswered_takeover(version: &str) {
 	settle().await;
 	assert!(
 		old_track.subscription().is_some(),
-		"{version}: the SUBSCRIBE reached the old instance"
+		"{version}: the SUBSCRIBE reached the old identity"
 	);
 
 	let replacement = publisher.route("live", origin::RouteOptions::default()).unwrap();
@@ -597,8 +608,8 @@ async fn unanswered_takeover(version: &str) {
 	match next {
 		Err(err) => assert!(matches!(err, moq_net::Error::Unroutable), "{version}: {err}"),
 		Ok(group) => panic!(
-			"{version}: the replaced instance's SUBSCRIBE went on: {:?}",
-			group.map(|group| group.sequence)
+			"{version}: the replaced identity's SUBSCRIBE went on: {:?}",
+			group.map(|group| group.start)
 		),
 	}
 }
@@ -620,7 +631,7 @@ unanswered_takeover_tests! {
 }
 
 #[kio::test]
-async fn retired_fetch_explicit_instance_control() {
+async fn retired_fetch_explicit_identity_control() {
 	kio::clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
 		.await
 		.expect("timed out");
@@ -702,7 +713,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 }
 
 /// A worker claiming `pool` through the public API: each request is answered with its own
-/// exact route, which carries the claim's instance until it ends, and `outputs[path]`
+/// exact route, which carries the claim's identity until it ends, and `outputs[path]`
 /// holds the latest.
 struct Pool {
 	_claim: Rc<origin::Claim>,
@@ -744,8 +755,8 @@ impl Pool {
 }
 
 /// Subscribe to `path` through the claim. On moq-lite-07 the answer's exact route carries
-/// the claim's instance, so the first subscription continues on it. Older wires and
-/// moq-transport mint an instance per announcement, so the answer is another broadcast that
+/// the claim's identity, so the first subscription continues on it. Older wires and
+/// moq-transport mint an identity per announcement, so the answer is another broadcast that
 /// resets the first subscription: wake the worker first and subscribe through the exact
 /// route.
 async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
@@ -819,8 +830,8 @@ claim_restart_tests! {
 }
 
 /// A mid-stream priority change on a viewer's subscription reaches the publisher's
-/// aggregate, directly or through a relay (`P -> R -> V`), and on an old instance after
-/// an instance switch left the subscription on it.
+/// aggregate, directly or through a relay (`P -> R -> V`), and on an old identity after
+/// an identity switch left the subscription on it.
 async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	let version: Version = version.parse().unwrap();
 	let case = format!("{version} relayed={relayed} switch={switch}");
@@ -835,9 +846,9 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 		links.push(link(version, &publisher, &viewer).await);
 	}
 
-	let (a, b) = instances();
+	let (a, b) = identities();
 	let old = publisher
-		.route("live", origin::RouteOptions::default().with_instance(a, 0))
+		.route("live", origin::RouteOptions::default().with_identity(a, 0))
 		.unwrap();
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
@@ -858,7 +869,7 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 
 	let _new = switch.then(|| {
 		publisher
-			.route("live", origin::RouteOptions::default().with_instance(b, 0))
+			.route("live", origin::RouteOptions::default().with_identity(b, 0))
 			.unwrap()
 	});
 	if switch {
@@ -900,4 +911,41 @@ priority_update_tests! {
 	priority_update_lite07: "moq-lite-07-wip",
 	priority_update_ietf18: "moq-transport-18",
 	priority_update_ietf22: "moq-transport-22",
+}
+
+/// An endpoint replacing its own broadcast ends the old identity for its reader: the
+/// broadcast handed out first has closed by the time its replacement is handed out, as
+/// one a publisher ended, not one held in case its route returns.
+#[kio::test]
+async fn an_endpoint_replacing_its_broadcast_ends_the_old_one() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let endpoint = || {
+		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		support::harness::spawn(driver);
+		producer
+	};
+	let publisher = endpoint();
+	let viewer = endpoint();
+	let _session = link(version, &publisher, &viewer).await;
+	let old = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
+	let mut following = viewer.consume().follow("live", None).unwrap();
+	let held = following.available().await.unwrap().expect("the first identity");
+	let mut subscription = held.track("video").unwrap().subscribe(None).await.unwrap();
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0");
+	settle().await;
+
+	let _replacement = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let next = kio::clock::timeout(Duration::from_secs(10), following.available())
+		.await
+		.expect("the takeover hung")
+		.unwrap()
+		.expect("the replacement");
+	assert!(!next.is_clone(&held));
+	assert!(held.is_closed(), "the replaced broadcast is still open");
+
+	// The subscription already on it stays.
+	write(&old_track, "old:1");
+	assert_eq!(read(&mut subscription).await, "old:1");
 }

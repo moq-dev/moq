@@ -94,15 +94,15 @@ jobs:
       - uses: ./.github/actions/just
 
       # ── client toolchains ──────────────────────────────────────────────
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "21"
@@ -187,13 +187,13 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
             | sudo tee /etc/apt/sources.list.d/moq.list
           sudo apt-get update
-          sudo apt-get install -y moq-relay moq-cli
+          sudo apt-get install -y moq-relay moq
 
       - name: Install moq Rust packages (brew)
         if: matrix.channel == 'brew'
         run: |
           brew tap moq-dev/tap
-          brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
+          brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
       # Trusts the moq flake's nixConfig, which names the nix.moq.dev cache.
       - name: Install Nix (nix channel)
@@ -248,6 +248,8 @@ jobs:
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
       - name: Freshness
+        env:
+          SMOKE_CHANNEL: ${{ matrix.channel }}
         run: just freshness
 
       # ── run the full interop matrix ────────────────────────────────────
@@ -309,6 +311,27 @@ jobs:
           fi
           just token --generators "$impls" --verifiers "$impls"
 
+  # The Kotlin cells resolve from Google's Maven Central mirror, since Central
+  # rate-limits shared runner IPs. This one job asks Central, so a lagging mirror
+  # fails loudly here, and a block on this runner leaves the matrix alone.
+  maven-mirror:
+    name: Maven mirror is current
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - name: Compare dev.moq:moq on the mirror and Central
+        run: just maven-mirror
+
   relays:
     name: External relay interop
     runs-on: ubuntu-latest
@@ -343,7 +366,7 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
             | sudo tee /etc/apt/sources.list.d/moq.list
           sudo apt-get update
-          sudo apt-get install -y moq-cli
+          sudo apt-get install -y moq
 
       - name: Playwright system deps
         run: just playwright-deps
@@ -396,9 +419,6 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt or by this run's
-      # upstream runner report.
-      actions: write
       contents: write
       pages: write
       id-token: write
@@ -423,20 +443,21 @@ jobs:
       - name: Commit report
         run: just publish "$RUNNER_TEMP/relay-report" "$RUNNER_TEMP/pages"
 
-      - name: Drop a stale Pages artifact
-        working-directory: .
-        run: just gh pages-clean
-        env:
-          GH_TOKEN: ${{ github.token }}
-
+      # Each Pages publisher names its own artifact: a run's names must be unique.
       - name: Upload site
+        id: pages
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: pages-relays
           path: ${{ runner.temp }}/pages
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        working-directory: .
+        run: just gh pages-deploy "$ARTIFACT"
+        env:
+          ARTIFACT: ${{ steps.pages.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}
 
   cloudflare:
     name: Cloudflare interoperability
@@ -462,7 +483,7 @@ jobs:
       # does). `--status` exits non-zero when there is no shim.
       - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
-          version: 1.17.0
+          version: 1.31.0
           github-cache-mode: objects
           cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-
@@ -506,7 +527,7 @@ jobs:
       # does). `--status` exits non-zero when there is no shim.
       - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
-          version: 1.17.0
+          version: 1.31.0
           github-cache-mode: objects
           cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-
@@ -584,9 +605,6 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt or by this run's
-      # relay report.
-      actions: write
       contents: write
       pages: write
       id-token: write
@@ -613,16 +631,16 @@ jobs:
       - name: Commit upstream report
         run: just gh pages-publish interop-runner "$RUNNER_TEMP/interop-runner-report" "$RUNNER_TEMP/pages"
 
-      - name: Drop a stale Pages artifact
-        run: just gh pages-clean
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Upload site
+        id: pages
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: pages-interop-runner
           path: ${{ runner.temp }}/pages
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        run: just gh pages-deploy "$ARTIFACT"
+        env:
+          ARTIFACT: ${{ steps.pages.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}

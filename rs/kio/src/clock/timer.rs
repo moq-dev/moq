@@ -20,9 +20,12 @@ pub struct Sleep {
 	parked: Option<Waker>,
 }
 
-#[allow(
-	clippy::large_enum_variant,
-	reason = "one per sleep, and the size gap varies with the clock features enabled; an allow, since some builds balance it"
+#[cfg_attr(
+	not(any(feature = "runtime", feature = "sim")),
+	expect(
+		clippy::large_enum_variant,
+		reason = "one per sleep; without `runtime` or `sim`, no other timer is as large as the queue's"
+	)
 )]
 enum Timer {
 	Queue(crate::clock::deadline::Timer),
@@ -33,45 +36,50 @@ enum Timer {
 	Installed(crate::clock::installed::Timer),
 }
 
+impl Timer {
+	fn new(at: Option<Instant>) -> Self {
+		if let Some(deadlines) = crate::clock::deadline::entered() {
+			return Self::Queue(crate::clock::deadline::Timer::new(&deadlines, at));
+		}
+		// The other backends park a never-firing timer at the end of time, unpolled.
+		let end = at.unwrap_or(Instant::MAX);
+		#[cfg(feature = "sim")]
+		if let Some(timer) = crate::clock::sim::Timer::new(end) {
+			return Self::Sim(timer);
+		}
+		#[cfg(feature = "manual")]
+		if let Some(clock) = crate::clock::installed::current() {
+			return Self::Installed(crate::clock::installed::Timer::new(clock, end));
+		}
+		Self::Host(crate::clock::runtime::Timer::new(end))
+	}
+}
+
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
-	if let Some(deadlines) = crate::clock::deadline::entered() {
-		return Sleep {
-			at: Some(at),
-			timer: Timer::Queue(crate::clock::deadline::Timer::new(&deadlines, Some(at))),
-			parked: None,
-		};
-	}
-	#[cfg(feature = "sim")]
-	if let Some(timer) = crate::clock::sim::Timer::new(at) {
-		return Sleep {
-			at: Some(at),
-			timer: Timer::Sim(timer),
-			parked: None,
-		};
-	}
-	#[cfg(feature = "manual")]
-	if let Some(clock) = crate::clock::installed::current() {
-		return Sleep::installed(clock, at);
-	}
-	Sleep {
-		at: Some(at),
-		timer: Timer::Host(crate::clock::runtime::Timer::new(at)),
-		parked: None,
-	}
+	Sleep::new(Some(at))
 }
 
 /// Complete once `duration` has passed on the ambient clock.
 ///
 /// A duration past the clock's range never completes.
 pub fn sleep(duration: Duration) -> Sleep {
-	let now = crate::clock::now();
-	let mut sleep = sleep_until(now);
-	sleep.set(now.checked_add(duration));
-	sleep
+	Sleep::new(crate::clock::now().checked_add(duration))
 }
 
 impl Sleep {
+	/// A sleep on the ambient clock's backend, never firing for `None`.
+	///
+	/// Armed for its own instant from the start: arming the reached `now` first would
+	/// fire a queue's deadline at once and wake the queue's owner for nothing.
+	fn new(at: Option<Instant>) -> Self {
+		Self {
+			at,
+			timer: Timer::new(at),
+			parked: None,
+		}
+	}
+
 	/// A sleep on an installed clock, whichever thread polls it.
 	#[cfg(feature = "manual")]
 	pub(crate) fn installed(clock: crate::clock::Installed, at: Instant) -> Self {

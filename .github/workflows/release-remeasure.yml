@@ -43,21 +43,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REMEASURE_FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
-          HARNESS_RUNS: ${{ runner.temp }}/remeasure
       - name: Upload measurements
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-remeasure
-          path: |
-            .tmp/remeasure
-            ${{ runner.temp }}/remeasure
+          # Only the report, versions, and logs: the kept runs' binaries stay out.
+          path: .tmp/remeasure
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true
       - name: Generate moq-bot token
         if: ${{ steps.measure.outputs.changed == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -69,11 +67,11 @@ jobs:
           permission-merge-queues: write
       - name: Propose measured pins
         if: ${{ steps.token.outputs.token != '' }}
-        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         id: pr
         with:
           token: ${{ steps.token.outputs.token }}
-          branch: release/planned-breaks
+          branch: release-remeasure
           base: main
           add-paths: test/interop/compat/planned-breaks.json
           commit-message: 'chore(interop): remeasure planned breaks against published packages'

@@ -12,18 +12,14 @@ let
   inherit (pkgs) lib;
 
   # The files cargo compiles from (.rs and .toml, as crane's filter keeps), plus
-  # what crates embed at compile time: moq-video's PTX and moq-webrtc's crypto
-  # validation data. A README or CHANGELOG edit rebuilds nothing.
+  # what crates embed at compile time: moq-video's PTX. A README or CHANGELOG
+  # edit rebuilds nothing.
   filterSources =
     path: type:
     type == "directory"
     || lib.hasSuffix ".rs" path
     || lib.hasSuffix ".toml" path
-    || lib.hasSuffix ".ptx" path
-    || (
-      lib.hasInfix "/rs/moq-webrtc/src/vendor/dimpl/crypto/validation/" path
-      && (lib.hasSuffix ".der" path || lib.hasSuffix ".bin" path)
-    );
+    || lib.hasSuffix ".ptx" path;
 
   buildRustCrate = pkgs.buildRustCrate.override {
     rustc = rustToolchain;
@@ -156,6 +152,11 @@ let
       # cargo -p builds no dependency's binaries. An explicit empty list also
       # stops buildRustCrate guessing them from src/main.rs.
       // lib.optionalAttrs (local && !isRoot) { crateBin = [ ]; }
+      # A dependency is only read as an rlib. Linking its cdylib or staticlib
+      # from bitcode fails on macOS, whose ld takes no LTO plugin (crc-fast).
+      // lib.optionalAttrs (!isRoot && crate ? type) {
+        type = lib.filter (t: t == "lib" || t == "rlib") crate.type;
+      }
       // lib.optionalAttrs isRoot (
         {
           # Named like the package, not buildRustCrate's rust_<crate>.

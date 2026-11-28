@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
 use moq_auth::serve::{Keys, Policy};
-use moq_auth::{Algorithm, Pattern, Permissions};
+use moq_auth::{Algorithm, Permissions, Prefix};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
 #[derive(usage_rs::Args, Clone, Debug)]
@@ -70,9 +70,9 @@ impl Args {
 
 				if let Some(dir) = public_dir {
 					let path = dir.join(format!("{id}.jwk"));
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				} else if let Some(path) = public {
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				}
 
 				if let Some(dir) = out_dir {
@@ -95,6 +95,7 @@ impl Args {
 				ttl,
 				unbounded,
 				issued,
+				id,
 			} => {
 				let key = read_key(&key)?;
 				let expires = match (unbounded, expires) {
@@ -112,7 +113,8 @@ impl Args {
 					.with_publish(publish)
 					.with_subscribe(subscribe)
 					.with_expires(expires)
-					.with_issued(issued.map(Into::into));
+					.with_issued(issued.map(Into::into))
+					.with_id(id.as_deref().map(moq_auth::TokenId::decode).transpose()?);
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -129,7 +131,6 @@ impl Args {
 				println!("{payload:#?}");
 			}
 
-			Command::Mesh(mesh) => mesh.run().await?,
 			Command::Sessions(filter) => filter.get("/sessions").await?,
 			Command::Revalidate(filter) => filter.post("/sessions/revalidate").await?,
 		}
@@ -173,13 +174,13 @@ enum Command {
 		#[usage(long, default = "")]
 		root: String,
 
-		/// Publish patterns the key may grant (repeatable); `foo/**` for a subtree.
+		/// Publish prefixes the key may grant (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		publish: Vec<Pattern>,
+		publish: Vec<Prefix>,
 
-		/// Subscribe patterns the key may grant (repeatable); `foo/**` for a subtree.
+		/// Subscribe prefixes the key may grant (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		subscribe: Vec<Pattern>,
+		subscribe: Vec<Prefix>,
 	},
 
 	/// Sign a token, writing it to stdout.
@@ -192,13 +193,13 @@ enum Command {
 		#[usage(long, default = "")]
 		root: String,
 
-		/// Patterns the user can publish (repeatable); `foo/**` for a subtree.
+		/// Prefixes the user can publish (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		publish: Vec<Pattern>,
+		publish: Vec<Prefix>,
 
-		/// Patterns the user can subscribe to (repeatable); `foo/**` for a subtree.
+		/// Prefixes the user can subscribe to (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		subscribe: Vec<Pattern>,
+		subscribe: Vec<Prefix>,
 
 		/// Expiration time as a unix timestamp, instead of `--ttl` from now.
 		#[usage(long, conflicts("--ttl", "--unbounded"))]
@@ -215,13 +216,14 @@ enum Command {
 		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
+
+		/// The token ID, written as its `jti`, such as one you record to revoke it. None unless given.
+		#[usage(long)]
+		id: Option<String>,
 	},
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
 	Serve(Serve),
-
-	/// Manage a mesh served by `moq auth serve --mesh-url`: enrollment keys and devices.
-	Mesh(Mesh),
 
 	/// List live sessions on a relay's internal listener.
 	Sessions(SessionFilter),
@@ -400,13 +402,9 @@ pub struct Serve {
 	#[usage(long, default = "127.0.0.1:4440", setting = "listen")]
 	listen: String,
 
-	/// Allow a bind on a non-loopback address. Needs `--listen-secret`.
-	#[usage(long, setting = "listen_public")]
-	#[serde(default)]
-	listen_public: bool,
-
 	/// A file holding the secret every request must carry as its HTTP Basic password;
-	/// relays send it from `--auth-url https://relay:<secret>@host/`.
+	/// relays send it from `--auth-url https://relay:<secret>@host/`. A non-loopback
+	/// `--listen` address needs it.
 	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, setting = "listen_secret")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	listen_secret: Option<PathBuf>,
@@ -440,7 +438,7 @@ pub struct Serve {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	tier: Option<String>,
 
-	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
+	/// How often the relay re-checks each grant, at least 1s. Off by default; needs `--expires`.
 	#[usage(long, setting = "revalidate")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	revalidate: Option<moq_tokio::cli::Duration>,
@@ -453,10 +451,6 @@ pub struct Serve {
 	#[usage(flatten)]
 	#[serde(default)]
 	limit: SessionLimits,
-
-	#[usage(flatten)]
-	#[serde(default)]
-	mesh: MeshServe,
 }
 
 /// What an anonymous session may do.
@@ -464,13 +458,13 @@ pub struct Serve {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 struct PublicRules {
-	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
+	/// Prefixes an anonymous session may publish, rooted at `/` (repeatable); each covers its path and everything beneath it.
 	#[usage(name = "public-publish", long = "public-publish", setting = "public.publish")]
-	publish: Vec<Pattern>,
+	publish: Vec<Prefix>,
 
-	/// Patterns an anonymous session may subscribe to, rooted at `/` (repeatable).
+	/// Prefixes an anonymous session may subscribe to, rooted at `/` (repeatable).
 	#[usage(name = "public-subscribe", long = "public-subscribe", setting = "public.subscribe")]
-	subscribe: Vec<Pattern>,
+	subscribe: Vec<Prefix>,
 }
 
 /// What a session presenting a verified certificate may do.
@@ -478,13 +472,13 @@ struct PublicRules {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 struct MtlsRules {
-	/// Patterns a session with a verified certificate may publish, rooted at `/` (repeatable). Empty refuses certificates no rule names.
+	/// Prefixes a session with a verified certificate may publish, rooted at `/` (repeatable). Empty refuses certificates no rule names.
 	#[usage(name = "mtls-publish", long = "mtls-publish", setting = "mtls.publish")]
-	publish: Vec<Pattern>,
+	publish: Vec<Prefix>,
 
-	/// Patterns a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
+	/// Prefixes a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
 	#[usage(name = "mtls-subscribe", long = "mtls-subscribe", setting = "mtls.subscribe")]
-	subscribe: Vec<Pattern>,
+	subscribe: Vec<Prefix>,
 
 	/// The role verified certificates have on cluster links: peer or upstream.
 	#[usage(
@@ -494,7 +488,7 @@ struct MtlsRules {
 		setting = "mtls.link"
 	)]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	link: Option<moq_auth::serve::Link>,
+	link: Option<moq_auth::Link>,
 
 	/// Rules for particular certificates, keyed by the SHA-256 of a leaf or of a
 	/// certificate it was issued under.
@@ -519,64 +513,6 @@ struct SessionLimits {
 	remote: Option<usize>,
 }
 
-/// The mesh coordinator served beside the auth server.
-#[derive(usage_rs::Args, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[usage(unknown_flags = "error", args_override_self = false)]
-#[serde(deny_unknown_fields)]
-struct MeshServe {
-	/// Coordinate a mesh: the public base URL devices enroll at, which every enrollment
-	/// proof is bound to. Serve it behind TLS; devices refuse plain `http://` beyond loopback.
-	#[usage(name = "mesh-url", long = "mesh-url", setting = "mesh.url")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	url: Option<url::Url>,
-
-	/// Where to answer devices at `--mesh-url`, usually behind a TLS-terminating proxy.
-	#[usage(
-		name = "mesh-listen",
-		long = "mesh-listen",
-		default = "127.0.0.1:4441",
-		setting = "mesh.listen"
-	)]
-	listen: SocketAddr,
-
-	/// The private key that signs mesh tokens; the relays verify it like any other.
-	#[usage(name = "mesh-key", long = "mesh-key", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"), setting = "mesh.key")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	key: Option<PathBuf>,
-
-	/// A relay URL enrolled devices dial (repeatable).
-	#[usage(name = "mesh-relay", long = "mesh-relay", setting = "mesh.relay")]
-	#[serde(default)]
-	relay: Vec<url::Url>,
-
-	/// The JSON file enrollment keys and devices persist to. Without one, a restart forgets them.
-	#[usage(name = "mesh-state", long = "mesh-state", value_hint = usage_rs::ValueHint::FilePath, setting = "mesh.state")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	state: Option<PathBuf>,
-
-	/// How long a mesh token lasts; devices refresh it two thirds of the way through.
-	#[usage(
-		name = "mesh-token-ttl",
-		long = "mesh-token-ttl",
-		default = "1h",
-		setting = "mesh.token_ttl"
-	)]
-	token_ttl: moq_tokio::cli::Duration,
-}
-
-impl Default for MeshServe {
-	fn default() -> Self {
-		Self {
-			url: None,
-			listen: SocketAddr::from(([127, 0, 0, 1], 4441)),
-			key: None,
-			relay: Vec::new(),
-			state: None,
-			token_ttl: std::time::Duration::from_secs(3600).into(),
-		}
-	}
-}
-
 /// Every setting `moq auth serve` merges from its file, declared for the merge's registry.
 #[allow(
 	dead_code,
@@ -586,8 +522,6 @@ impl Default for MeshServe {
 struct ServeSettings {
 	#[usage(cli("--listen"))]
 	listen: Option<String>,
-	#[usage(cli("--listen-public"))]
-	listen_public: Option<bool>,
 	#[usage(cli("--listen-secret"))]
 	listen_secret: Option<String>,
 	#[usage(cli("--key"))]
@@ -608,8 +542,6 @@ struct ServeSettings {
 	expires: Option<String>,
 	#[usage(flatten)]
 	limit: LimitSettings,
-	#[usage(flatten)]
-	mesh: MeshSettings,
 }
 
 #[allow(
@@ -653,32 +585,8 @@ struct LimitSettings {
 	remote: Option<u64>,
 }
 
-#[allow(
-	dead_code,
-	reason = "declares the settings for the usage registry; nothing reads the fields"
-)]
-#[derive(usage_rs::Config)]
-#[usage(prefix = "mesh")]
-struct MeshSettings {
-	#[usage(cli("--mesh-url"))]
-	url: Option<String>,
-	#[usage(cli("--mesh-listen"))]
-	listen: Option<String>,
-	#[usage(cli("--mesh-key"))]
-	key: Option<String>,
-	#[usage(cli("--mesh-relay"))]
-	relay: Option<Vec<String>>,
-	#[usage(cli("--mesh-state"))]
-	state: Option<String>,
-	#[usage(cli("--mesh-token-ttl"))]
-	token_ttl: Option<String>,
-}
-
 impl Serve {
 	/// These flags over the settings in [`file`](Self::file), read from disk now.
-	///
-	/// A mesh setting without a mesh URL is refused here rather than by the parser, so
-	/// the URL can come from the file and the rest from the command line.
 	fn merged(&self, cli: &usage_rs::config::CliLayer, env: &usage_rs::config::EnvLayer) -> anyhow::Result<Self> {
 		let value = self
 			.file
@@ -694,7 +602,7 @@ impl Serve {
 			.as_deref()
 			.zip(value.as_ref())
 			.map(|(path, value)| moq_tokio::cli::FileSource { path, value });
-		let (mut merged, resolved) = moq_tokio::cli::Merge {
+		let (mut merged, _) = moq_tokio::cli::Merge {
 			registry: ServeSettings::SETTINGS_REGISTRY,
 			cli,
 			env,
@@ -703,24 +611,13 @@ impl Serve {
 		.apply(self.clone())
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
 		merged.file = self.file.clone();
-
-		if merged.mesh.url.is_none() {
-			for key in ["mesh.listen", "mesh.key", "mesh.relay", "mesh.state", "mesh.token_ttl"] {
-				if let Some(origin) = resolved.origin_key(key) {
-					anyhow::bail!("{} needs --mesh-url (mesh.url)", origin.describe());
-				}
-			}
-		}
 		Ok(merged)
 	}
 
-	/// The policy these settings describe, refusing a cadence the relay would spin on.
+	/// The policy these settings describe.
 	fn policy(&self) -> anyhow::Result<Policy> {
 		let revalidate = self.revalidate.map(std::time::Duration::from);
 		let expires = self.expires.map(Into::into);
-		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
-			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
-		}
 		if revalidate.is_some() && expires.is_none() {
 			anyhow::bail!("--revalidate needs --expires, so a grant re-checked through an outage still has a bound");
 		}
@@ -741,38 +638,10 @@ impl Serve {
 			anyhow::bail!("--key, --key-dir, and --key-set conflict; pick one");
 		}
 
-		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
-		// broadcast `anon`, so either silent reading would mislead someone upgrading.
-		let mut flags = vec![
-			(
-				"--public-publish".to_string(),
-				self.public.publish.iter().collect::<Vec<_>>(),
-			),
-			("--public-subscribe".to_string(), self.public.subscribe.iter().collect()),
-			("--mtls-publish".to_string(), mtls.publish.iter().collect()),
-			("--mtls-subscribe".to_string(), mtls.subscribe.iter().collect()),
-		];
-		for (hash, rule) in &mtls.certificates {
-			for (direction, patterns) in [("publish", &rule.publish), ("subscribe", &rule.subscribe)] {
-				let patterns = patterns.iter().flat_map(|patterns| patterns.iter()).collect();
-				flags.push((format!("mtls.certificates.{hash}.{direction}"), patterns));
-			}
-		}
-		for (flag, patterns) in flags {
-			for pattern in patterns.into_iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+		let rules = |publish: &[Prefix], subscribe: &[Prefix]| {
 			Permissions::new(
-				publish.iter().cloned().collect::<moq_auth::Patterns>(),
-				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+				publish.iter().cloned().collect::<moq_auth::Prefixes>(),
+				subscribe.iter().cloned().collect::<moq_auth::Prefixes>(),
 			)
 		};
 		let mut policy = Policy::default();
@@ -794,14 +663,8 @@ impl Serve {
 		Ok(policy)
 	}
 
-	/// Where to listen, refusing a non-loopback address without `--listen-public`, and
-	/// that without `--listen-secret`.
+	/// Where to listen, refusing a non-loopback address without `--listen-secret`.
 	fn listener(&self) -> anyhow::Result<Listen> {
-		if self.listen_public && self.listen_secret.is_none() {
-			anyhow::bail!(
-				"--listen-public needs --listen-secret, so only relays can record sessions and fill the session limits"
-			);
-		}
 		if let Some(path) = self.listen.strip_prefix("unix:") {
 			// A unix URL carries no userinfo for a client to send the secret from.
 			if self.listen_secret.is_some() {
@@ -815,39 +678,12 @@ impl Serve {
 			.listen
 			.parse()
 			.with_context(|| format!("--listen expects a socket address or unix:<path>, got {}", self.listen))?;
-		if !addr.ip().is_loopback() && !self.listen_public {
+		if !addr.ip().is_loopback() && self.listen_secret.is_none() {
 			anyhow::bail!(
-				"--listen {addr} is not a loopback address; pass --listen-public with --listen-secret to expose it on purpose"
+				"--listen {addr} is not a loopback address; pass --listen-secret, so only relays can record sessions and fill the session limits"
 			);
 		}
 		Ok(Listen::Tcp(addr))
-	}
-
-	/// The mesh coordinator these settings describe, if `--mesh-url` asks for one.
-	fn coordinator(&self) -> anyhow::Result<Option<moq_auth::mesh::Coordinator>> {
-		let Some(url) = &self.mesh.url else {
-			return Ok(None);
-		};
-		if self.listen_public {
-			anyhow::bail!(
-				"--mesh-url serves the mesh owner's API on --listen, which every relay holding --listen-secret could reach, so it cannot be combined with --listen-public"
-			);
-		}
-		let path = self
-			.mesh
-			.key
-			.as_ref()
-			.context("--mesh-url needs --mesh-key to sign tokens")?;
-		let key = moq_auth::Key::from_file(path).with_context(|| format!("failed to read {}", path.display()))?;
-		let ttl = std::time::Duration::from(self.mesh.token_ttl);
-		if ttl.is_zero() {
-			anyhow::bail!("--mesh-token-ttl must be longer than 0s");
-		}
-		let mut config = moq_auth::mesh::Config::new(url.clone(), key);
-		config.relays = self.mesh.relay.clone();
-		config.state = self.mesh.state.clone();
-		config.token_ttl = ttl;
-		Ok(Some(moq_auth::mesh::Coordinator::new(config)?))
 	}
 
 	/// Re-read the file and answer with its policy, leaving `server` as it was when
@@ -863,14 +699,9 @@ impl Serve {
 		Ok(serve)
 	}
 
-	/// The settings only a restart applies: the listeners, their secret, and the mesh.
-	fn restart_only(&self) -> (&str, bool, Option<&PathBuf>, &MeshServe) {
-		(
-			&self.listen,
-			self.listen_public,
-			self.listen_secret.as_ref(),
-			&self.mesh,
-		)
+	/// The settings only a restart applies: the listener and its secret.
+	fn restart_only(&self) -> (&str, Option<&PathBuf>) {
+		(&self.listen, self.listen_secret.as_ref())
 	}
 
 	/// The secret in [`listen_secret`](Self::listen_secret), without its trailing newline.
@@ -902,7 +733,7 @@ impl Serve {
 		let reload = |quiet: bool| match self.apply(server, cli, &usage_rs::config::EnvLayer::from_process()) {
 			Ok(serve) if serve.restart_only() != running.restart_only() => tracing::error!(
 				file = %path.display(),
-				"reloaded the policy; listener and mesh changes take effect on restart"
+				"reloaded the policy; listener changes take effect on restart"
 			),
 			Ok(_) if quiet => {}
 			Ok(_) => tracing::info!(file = %path.display(), "reloaded the policy"),
@@ -925,25 +756,7 @@ impl Serve {
 		if let Some(secret) = serve.secret()? {
 			server = server.with_secret(secret);
 		}
-		// The device-facing contract runs beside the auth server; either stopping ends both.
-		let mut mesh = None;
-		if let Some(coordinator) = serve.coordinator()? {
-			let addr = serve.mesh.listen;
-			let listener = tokio::net::TcpListener::bind(addr)
-				.await
-				.with_context(|| format!("failed to bind {addr}"))?;
-			let addr = listener.local_addr().context("failed to read the bound address")?;
-			tracing::info!(%addr, url = ?serve.mesh.url, "mesh coordinator listening");
-			mesh = Some((coordinator.clone(), listener));
-			server = server.with_mesh(coordinator);
-		}
 		let reload = self.reload(&serve, &server, cli);
-		let mesh = async move {
-			match mesh {
-				Some((coordinator, listener)) => coordinator.serve(listener).await,
-				None => std::future::pending().await,
-			}
-		};
 		let auth = async {
 			match listen {
 				Listen::Tcp(addr) => {
@@ -970,129 +783,7 @@ impl Serve {
 		};
 		tokio::select! {
 			res = auth => res,
-			res = mesh => res.context("the mesh coordinator stopped"),
 			res = reload => res,
-		}
-	}
-}
-
-/// `moq auth mesh`: the mesh owner's commands, sent to the auth server's own listener.
-#[derive(usage_rs::Args, Clone, Debug)]
-#[usage(unknown_flags = "error", args_override_self = false)]
-pub struct Mesh {
-	/// The auth server's listener, which serves the owner's API alongside `POST /`:
-	/// `http://` for a TCP `--listen`, or `unix:///path` for a unix socket.
-	/// With `--listen-secret`, put the secret in the URL as its password: `http://owner:SECRET@127.0.0.1:4440`.
-	#[usage(long, default = "http://127.0.0.1:4440")]
-	url: url::Url,
-
-	#[usage(subcommand)]
-	command: MeshCommand,
-}
-
-#[derive(usage_rs::Subcommands, Clone, Debug)]
-enum MeshCommand {
-	/// Create an enrollment key, printing it once.
-	CreateKey {
-		/// A tag every device it enrolls carries (repeatable).
-		#[usage(long)]
-		tag: Vec<String>,
-
-		/// How long until it stops enrolling. Never, by default.
-		#[usage(long)]
-		expires: Option<moq_tokio::cli::Duration>,
-
-		/// Enroll any number of devices, instead of one.
-		#[usage(long)]
-		reusable: bool,
-	},
-
-	/// List enrollment keys, without their secrets.
-	Keys,
-
-	/// Revoke an enrollment key so it enrolls nothing new. Its devices stay.
-	RevokeKey {
-		/// The key's ID: the part before the dot.
-		id: String,
-	},
-
-	/// List enrolled devices.
-	Devices,
-
-	/// Revoke a device: its next refresh fails, and it cannot enroll again.
-	Revoke {
-		/// The device's endpoint ID.
-		endpoint: String,
-	},
-}
-
-impl Mesh {
-	async fn run(self) -> anyhow::Result<()> {
-		let (client, base) = self.client()?;
-		let url = |path: &str, segments: &[&str]| {
-			let mut url = base.clone();
-			let prefix = url.path().trim_end_matches('/').to_string();
-			url.set_path(&format!("{prefix}{path}"));
-			if let Ok(mut parts) = url.path_segments_mut() {
-				parts.extend(segments);
-			}
-			url
-		};
-		let request = match &self.command {
-			MeshCommand::CreateKey { tag, expires, reusable } => {
-				let mut new = moq_auth::mesh::NewKey::default();
-				new.tags = tag.clone();
-				new.expires_in = expires.map(std::time::Duration::from);
-				new.reusable = *reusable;
-				client.post(url("/mesh/keys", &[])).json(&new)
-			}
-			MeshCommand::Keys => client.get(url("/mesh/keys", &[])),
-			MeshCommand::RevokeKey { id } => client.delete(url("/mesh/keys", &[id])),
-			MeshCommand::Devices => client.get(url("/mesh/devices", &[])),
-			MeshCommand::Revoke { endpoint } => client.delete(url("/mesh/devices", &[endpoint])),
-		};
-		let response = request.send().await.with_context(|| {
-			let mut shown = self.url.clone();
-			let _ = shown.set_password(None);
-			format!("failed to reach {shown}")
-		})?;
-		let status = response.status();
-		let body = response.text().await.context("failed to read the reply")?;
-		if status == reqwest::StatusCode::NOT_FOUND {
-			// The routes exist only with `--mesh-url`, so a miss there is the likelier cause.
-			anyhow::bail!(match self.command {
-				MeshCommand::RevokeKey { .. } if !body.is_empty() => "no enrollment key has that ID",
-				MeshCommand::Revoke { .. } if !body.is_empty() => "no device has that endpoint ID",
-				_ => "not found; is the server running with --mesh-url?",
-			});
-		}
-		if !status.is_success() {
-			anyhow::bail!("{status}: {body}");
-		}
-		match serde_json::from_str::<serde_json::Value>(&body) {
-			Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
-			Err(_) if body.is_empty() => println!("ok"),
-			Err(_) => println!("{body}"),
-		}
-		Ok(())
-	}
-
-	/// The HTTP client for `--url` and the URL its requests target: a `unix://` URL names
-	/// the socket, and the requests go to the server's root over it.
-	fn client(&self) -> anyhow::Result<(reqwest::Client, url::Url)> {
-		let builder = reqwest::Client::builder();
-		match self.url.scheme() {
-			"http" | "https" => Ok((builder.build()?, self.url.clone())),
-			#[cfg(unix)]
-			"unix" => {
-				let path = self
-					.url
-					.to_file_path()
-					.map_err(|()| anyhow::anyhow!("--url {} names no socket path", self.url))?;
-				let target = url::Url::parse("http://localhost/").expect("a constant URL parses");
-				Ok((builder.unix_socket(path).build()?, target))
-			}
-			_ => anyhow::bail!("--url expects http://, https://, or unix://, got {}", self.url),
 		}
 	}
 }
@@ -1290,110 +981,9 @@ mod tests {
 	}
 
 	#[test]
-	fn mesh_flags_need_a_mesh_url_and_key() {
-		let err = merged(&["moq", "auth", "serve", "--mesh-relay", "https://relay.example"])
-			.err()
-			.unwrap();
-		assert!(err.to_string().contains("--mesh-relay needs --mesh-url"), "{err}");
-
-		let flags = serve(&["moq", "auth", "serve", "--mesh-url", "https://mesh.example"]);
-		let err = flags.coordinator().err().expect("no signing key");
-		assert!(err.to_string().contains("--mesh-key"), "{err}");
-
-		let dir = tempfile::tempdir().unwrap();
-		let key = dir.path().join("mesh.jwk");
-		moq_auth::Key::generate(Algorithm::HS256, None)
-			.unwrap()
-			.to_file(&key)
-			.unwrap();
-		let flags = serve(&[
-			"moq",
-			"auth",
-			"serve",
-			"--mesh-url",
-			"https://mesh.example",
-			"--mesh-key",
-			key.to_str().unwrap(),
-			"--mesh-relay",
-			"https://a.example",
-			"--mesh-relay",
-			"https://b.example",
-		]);
-		assert_eq!(flags.mesh.relay.len(), 2);
-		assert!(flags.mesh.listen.ip().is_loopback());
-		assert!(flags.coordinator().unwrap().is_some());
-		assert!(serve(&["moq", "auth", "serve"]).coordinator().unwrap().is_none());
-
-		// The owner's API rides --listen, so a public one would hand out enrollment keys.
-		let flags = serve(&[
-			"moq",
-			"auth",
-			"serve",
-			"--listen",
-			"0.0.0.0:4440",
-			"--listen-public",
-			"--mesh-url",
-			"https://mesh.example",
-			"--mesh-key",
-			key.to_str().unwrap(),
-		]);
-		let err = flags.coordinator().err().expect("a public owner API");
-		assert!(err.to_string().contains("--listen-public"), "{err}");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test]
-	async fn mesh_commands_reach_a_unix_listener() {
-		let dir = tempfile::tempdir().unwrap();
-		let key = moq_auth::Key::generate(Algorithm::HS256, None).unwrap();
-		let config = moq_auth::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
-		let coordinator = moq_auth::mesh::Coordinator::new(config).unwrap();
-		let server = moq_auth::serve::Server::new(Policy::default())
-			.unwrap()
-			.with_mesh(coordinator.clone());
-		let path = dir.path().join("auth.sock");
-		let listener = tokio::net::UnixListener::bind(&path).unwrap();
-		tokio::spawn(async move { server.serve_unix(listener).await });
-
-		let url = format!("unix://{}", path.display());
-		run(&["moq", "auth", "mesh", "--url", &url, "create-key", "--expires", "1d"])
-			.await
-			.unwrap();
-		let keys = coordinator.keys();
-		assert_eq!(keys.len(), 1);
-		assert!(keys[0].expires.is_some());
-	}
-
-	#[test]
-	fn mesh_commands_parse() {
-		for args in [
-			&[
-				"moq",
-				"auth",
-				"mesh",
-				"create-key",
-				"--tag",
-				"robot",
-				"--reusable",
-				"--expires",
-				"1d",
-			][..],
-			&["moq", "auth", "mesh", "devices"],
-			&["moq", "auth", "mesh", "--url", "http://127.0.0.1:9000", "revoke", "ab"],
-		] {
-			assert!(matches!(parse(args).unwrap().command, Command::Mesh(_)), "{args:?}");
-		}
-	}
-
-	#[test]
-	fn serve_refuses_a_public_bind_without_saying_so() {
-		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
-			.listener()
-			.unwrap_err();
-		assert!(err.to_string().contains("--listen-public"), "{err}");
-
+	fn serve_refuses_a_public_bind_without_a_secret() {
 		// Public, anyone could record sessions under a victim's address.
-		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440", "--listen-public"])
+		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
 			.listener()
 			.unwrap_err();
 		assert!(err.to_string().contains("--listen-secret"), "{err}");
@@ -1404,7 +994,6 @@ mod tests {
 				"serve",
 				"--listen",
 				"0.0.0.0:4440",
-				"--listen-public",
 				"--listen-secret",
 				"secret.txt"
 			])
@@ -1446,11 +1035,11 @@ mod tests {
 			"--key-dir",
 			"/keys",
 			"--public-subscribe",
-			"anon/**",
+			"anon",
 			"--mtls-publish",
-			"**",
+			"",
 			"--mtls-subscribe",
-			"**",
+			"",
 			"--mtls-link",
 			"upstream",
 			"--tier",
@@ -1467,13 +1056,10 @@ mod tests {
 		.policy()
 		.unwrap();
 		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
-		assert_eq!(
-			policy.public.subscribe,
-			["anon/**".parse().unwrap()].into_iter().collect()
-		);
+		assert_eq!(policy.public.subscribe, ["anon".parse().unwrap()].into_iter().collect());
 		assert!(policy.public.publish.is_empty());
-		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
+		assert_eq!(policy.mtls.publish, ["".parse().unwrap()].into_iter().collect());
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -1496,10 +1082,8 @@ mod tests {
 		assert_eq!(bare.expires, None);
 
 		for (args, needs) in [
-			// A zero cadence would have every client re-check in a tight loop.
-			(&["--revalidate", "0s", "--expires", "1h"][..], "longer than 0s"),
 			// The contract refuses a cadence without a bound.
-			(&["--revalidate", "1m"], "--revalidate needs --expires"),
+			(&["--revalidate", "1m"][..], "--revalidate needs --expires"),
 			// Only a re-check keeps a slot alive.
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
@@ -1512,6 +1096,14 @@ mod tests {
 		}
 		let expiring = serve(&["moq", "auth", "serve", "--expires", "1h"]).policy().unwrap();
 		assert_eq!(expiring.revalidate, None);
+
+		// The server refuses a cadence the grant can't write, so the flag needs no check of its own.
+		let args = ["moq", "auth", "serve", "--revalidate", "999ms", "--expires", "1h"];
+		let short = serve(&args).policy().unwrap();
+		assert!(matches!(
+			moq_auth::serve::Server::new(short),
+			Err(moq_auth::Error::ShortRevalidate)
+		));
 	}
 
 	#[test]
@@ -1533,78 +1125,50 @@ mod tests {
 			format!(
 				r#"
 listen = "0.0.0.0:4440"
-listen_public = true
 listen_secret = "/etc/moq/auth.secret"
 tier = "from-file"
 revalidate = "30s"
 expires = "2h"
 
 [mtls]
-subscribe = ["**"]
+subscribe = [""]
 link = "peer"
 
 [mtls.certificates.{leaf}]
-publish = ["alice/**"]
+publish = {{ path = ["alice"], rate = 1000000 }}
 link = "none"
-publish_rate = 1000000
-
-[mesh]
-relay = ["https://relay.example"]
 "#
 			),
 		)
 		.unwrap();
 		let path = file.to_str().unwrap();
 
-		let err = merged(&["moq", "auth", "serve", path]).err().unwrap();
-		assert!(err.to_string().contains("mesh.relay needs --mesh-url"), "{err}");
-
-		let (serve, _) = merged(&[
-			"moq",
-			"auth",
-			"serve",
-			path,
-			"--tier",
-			"from-flag",
-			"--mesh-url",
-			"https://mesh.example",
-		])
-		.unwrap();
+		let (serve, _) = merged(&["moq", "auth", "serve", path, "--tier", "from-flag"]).unwrap();
 		assert!(matches!(serve.listener(), Ok(Listen::Tcp(addr)) if !addr.ip().is_loopback()));
 		assert_eq!(
 			serve.listen_secret.as_deref(),
 			Some(std::path::Path::new("/etc/moq/auth.secret"))
 		);
-		assert_eq!(serve.mesh.relay.len(), 1);
 		let policy = serve.policy().unwrap();
 		assert_eq!(policy.tier.as_deref(), Some("from-flag"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
-		assert_eq!(policy.mtls.subscribe, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Peer));
+		assert_eq!(policy.mtls.subscribe, ["".parse().unwrap()].into_iter().collect());
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Peer));
 		let rule = &policy.certificates[&leaf.parse().unwrap()];
-		assert_eq!(rule.publish, Some(["alice/**".parse().unwrap()].into_iter().collect()));
+		let publish = rule.publish.as_ref().expect("the rule names publish");
+		assert_eq!(publish.path, ["alice".parse().unwrap()].into_iter().collect());
+		assert_eq!(publish.rate, moq_auth::Rate::from_bps(1_000_000).ok());
 		assert_eq!(rule.subscribe, None);
 		assert_eq!(rule.link, Some(moq_auth::serve::RuleLink::None));
-		assert_eq!(rule.publish_rate, moq_auth::Rate::from_bps(1_000_000).ok());
 
 		// A flag replaces the file's list rather than adding to it.
-		let (serve, _) = merged(&[
-			"moq",
-			"auth",
-			"serve",
-			path,
-			"--mtls-subscribe",
-			"room/**",
-			"--mesh-url",
-			"https://mesh.example",
-		])
-		.unwrap();
-		assert_eq!(serve.mtls.subscribe, vec!["room/**".parse::<Pattern>().unwrap()]);
+		let (serve, _) = merged(&["moq", "auth", "serve", path, "--mtls-subscribe", "room"]).unwrap();
+		assert_eq!(serve.mtls.subscribe, vec!["room".parse::<Prefix>().unwrap()]);
 
 		for (body, needs) in [
 			("lisen = \"127.0.0.1:1\"", "lisen"),
-			("[mtls.certificates.nothex]\npublish = [\"**\"]", "SHA-256"),
-			(&format!("[mtls.certificates.{leaf}]\npublsh = [\"**\"]"), "publsh"),
+			("[mtls.certificates.nothex]\npublish = [\"\"]", "SHA-256"),
+			(&format!("[mtls.certificates.{leaf}]\npublsh = [\"\"]"), "publsh"),
 			(&format!("[mtls.certificates.{leaf}]\nlink = \"sideways\""), "sideways"),
 		] {
 			std::fs::write(&file, body).unwrap();
@@ -1621,11 +1185,8 @@ relay = ["https://relay.example"]
 		let err = serve.policy().unwrap_err().to_string();
 		assert!(err.contains("conflict"), "{err}");
 		let (serve, _) = merged(&["moq", "auth", "serve", path]).unwrap();
-		let err = serve.policy().unwrap_err().to_string();
-		assert!(
-			err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")),
-			"{err}"
-		);
+		// The literal `alice` names one broadcast, so the rule is valid.
+		serve.policy().unwrap();
 	}
 
 	/// A file edit narrows or revokes at the next re-check, and an edit that does not
@@ -1636,7 +1197,7 @@ relay = ["https://relay.example"]
 		let file = dir.path().join("auth.toml");
 		let leaf = "ab".repeat(32);
 		let write = |body: &str| std::fs::write(&file, body).unwrap();
-		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"**\"]"));
+		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"\"]"));
 		// Reloads start from the command line, never from a merge that already holds the file.
 		let (serve, cli) = parsed(&["moq", "auth", "serve", file.to_str().unwrap()]);
 		let env = usage_rs::config::EnvLayer::new([]);
@@ -1650,21 +1211,21 @@ relay = ["https://relay.example"]
 			expires: None,
 			issuer: "CN=affiliates".into(),
 		});
-		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish;
+		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish.path;
 		assert_eq!(
 			publish(server.answer(&session).await.unwrap()),
-			["**".parse().unwrap()].into_iter().collect()
+			["".parse().unwrap()].into_iter().collect()
 		);
 
 		session.event = moq_auth::Event::Revalidate;
-		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\"]"));
+		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"alice\"]"));
 		serve.apply(&server, &cli, &env).unwrap();
-		let narrowed = ["alice/**".parse().unwrap()].into_iter().collect();
+		let narrowed = ["alice".parse().unwrap()].into_iter().collect();
 		assert_eq!(publish(server.answer(&session).await.unwrap()), narrowed);
 
 		for broken in [
-			format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\""),
-			format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\"]\ntier = \"not a tier\""),
+			format!("[mtls.certificates.{leaf}]\npublish = [\"alice\""),
+			format!("[mtls.certificates.{leaf}]\npublish = [\"alice\"]\ntier = \"not a tier\""),
 			"revalidate = \"1m\"".to_string(),
 		] {
 			write(&broken);
@@ -1677,41 +1238,35 @@ relay = ["https://relay.example"]
 		assert!(server.answer(&session).await.is_err(), "deleting the rule revokes it");
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free rule refuses to start rather than pick silently.
+	/// A rule is a prefix, covering its path and everything beneath it.
 	#[test]
-	fn serve_refuses_a_rule_without_a_wildcard() {
-		for (flag, rule, hint) in [
-			("--public-publish", "anon", "anon/**"),
-			("--public-subscribe", "event/cam1.hang", "event/cam1.hang/**"),
-			("--mtls-publish", "", "**"),
-			("--mtls-subscribe", "origin", "origin/**"),
+	fn serve_accepts_prefix_rules() {
+		for (flag, rule) in [
+			("--public-publish", "anon"),
+			("--public-subscribe", "event/cam1.hang"),
+			("--mtls-publish", ""),
+			("--mtls-subscribe", "origin"),
 		] {
-			let err = serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap_err();
-			let err = err.to_string();
-			assert!(err.contains(flag) && err.contains(&format!("`{hint}`")), "{err}");
+			serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap();
 		}
-		assert!(
-			serve(&[
-				"moq",
-				"auth",
-				"serve",
-				"--public-subscribe",
-				"*/chat",
-				"--mtls-publish",
-				"origin/*"
-			])
+		let policy = serve(&["moq", "auth", "serve", "--public-publish", "anon"])
 			.policy()
-			.is_ok()
+			.unwrap();
+		assert_eq!(
+			policy.public.publish,
+			["anon".parse::<Prefix>().unwrap()].into_iter().collect()
 		);
+	}
 
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(
-			serve(&["moq", "auth", "serve", "--public-subscribe", &deepest])
-				.policy()
-				.is_ok()
-		);
+	/// A wildcard rule is refused where it is parsed, naming the prefix to write instead.
+	#[test]
+	fn serve_refuses_a_wildcard_rule() {
+		for rule in ["anon/**", "**", "*", "*/chat", "cam-*.hang"] {
+			let err = parse(&["moq", "auth", "serve", "--public-publish", rule]).unwrap_err();
+			assert!(format!("{err:#}").contains("wildcard"), "{rule}: {err:#}");
+		}
+		let err = parse(&["moq", "auth", "serve", "--public-publish", "anon/**"]).unwrap_err();
+		assert!(format!("{err:#}").contains("`anon` covers `anon`"), "{err:#}");
 	}
 
 	#[cfg(unix)]
@@ -1765,7 +1320,7 @@ relay = ["https://relay.example"]
 			"--root",
 			"demo",
 			"--publish",
-			"alice/**",
+			"alice",
 			"--issued",
 			"1700000000",
 			"--expires",
@@ -1782,7 +1337,7 @@ relay = ["https://relay.example"]
 			.sign(
 				&moq_auth::Claims::default()
 					.with_root("demo")
-					.with_publish(["alice/**".parse().unwrap()]),
+					.with_publish(["alice".parse().unwrap()]),
 			)
 			.unwrap();
 		let path = dir.path().join("alice.jwt");

@@ -12,9 +12,11 @@ const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn routing(version: &str, cluster: bool) {
@@ -71,12 +73,14 @@ async fn routing(version: &str, cluster: bool) {
 		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
-	let mut group = track.append_group().unwrap();
-	group.write_frame(None, &b"conformance"[..]).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(0), &b"conformance"[..])
+		.unwrap();
 	group.finish().unwrap();
 	let track = track.finish().unwrap();
 	let mut received = subscription.recv_group().await.unwrap().unwrap();
-	assert_eq!(received.sequence, 0);
+	assert_eq!(received.start, 0);
 	assert_eq!(
 		received.read_frame().await.unwrap().unwrap().payload.as_ref(),
 		b"conformance"

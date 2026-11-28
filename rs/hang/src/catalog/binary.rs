@@ -25,11 +25,21 @@ pub struct Binary {
 	///
 	/// A map rather than an array so it works with JSON Merge Patch, and a `BTreeMap` so keys are
 	/// sorted for *some* deterministic behavior.
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub tracks: BTreeMap<String, BinaryConfig>,
 }
 
-impl crate::catalog::Section for Binary {
-	const MAP: &'static str = "tracks";
+impl crate::catalog::Entry for BinaryConfig {
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
+	}
+
+	fn claims_version(&self) -> bool {
+		self.extra.contains_key("version")
+	}
 }
 
 impl Binary {
@@ -71,6 +81,7 @@ pub struct BinaryConfig {
 	/// broadcast that served this catalog (e.g. `./source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -81,18 +92,8 @@ pub struct BinaryConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
-
-	/// The instance of the stream the reference names, when the catalog knows it. Absent names
-	/// whichever stream the reader resolves first, as in every catalog before this field.
-	///
-	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
-	/// over a wire that carries no instance has one its session minted, which proves nothing,
-	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
-	/// catalog's own stream.
-	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub instance: Option<moq_net::Instance>,
 
 	/// Whether the track is a latest-value blob or an append log. Always stated: see [`Mode`].
 	#[serde_as(as = "serde_with::DisplayFromStr")]
@@ -101,27 +102,31 @@ pub struct BinaryConfig {
 	/// An optional media type for each payload (e.g. `image/jpeg`). Purely descriptive: a consumer
 	/// that doesn't recognize it can still read the track.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub mime: Option<String>,
 
-	/// The maximum bitrate of the track in bits per second, if known.
+	/// The maximum bitrate of the track in bits per second, if known, at most 2^53 - 1.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
-	/// The maximum delay between a payload being ready and the publisher flushing it, with the same
-	/// meaning and whole-millisecond encoding as [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
+	/// The largest media span the publisher hands to the transport behind a payload's timestamp,
+	/// with the same meaning and whole-millisecond encoding as
+	/// [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
-	/// How far this track's payloads reach the transport behind the broadcast's earliest
-	/// rendition, with the same meaning and encoding as
+	/// How far this track's payloads persistently trail what the broadcast's other tracks already
+	/// wrote, with the same meaning and encoding as
 	/// [`VideoConfig::delay`](crate::catalog::VideoConfig::delay). Only measured for payloads that
 	/// carry a capture time.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
 
-	/// Fields this build doesn't recognize, kept so the entry round-trips.
+	/// Fields this build doesn't recognize, kept so the entry round-trips. Never `version`, which
+	/// is computed when the entry is written.
 	///
 	/// A future [`Mode`] almost certainly comes with fields describing it, and
 	/// preserving the discriminant without them would leave a relay republishing an entry nothing
@@ -137,7 +142,6 @@ impl BinaryConfig {
 		Self {
 			broadcast: None,
 			track: None,
-			instance: None,
 			mode,
 			mime: None,
 			bitrate: None,

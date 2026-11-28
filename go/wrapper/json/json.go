@@ -19,6 +19,7 @@ import (
 	stdjson "encoding/json"
 	"fmt"
 	"iter"
+	"time"
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -90,6 +91,11 @@ func (p *SnapshotProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. The producer is unusable afterwards.
+func (p *SnapshotProducer) Close() { p.inner.Destroy() }
+
 // Finish closes the snapshot track.
 func (p *SnapshotProducer) Finish() error {
 	return p.inner.Finish()
@@ -130,6 +136,13 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. Once it appended a record, Finish it:
+// closing it unfinished is not supported, and aborts its track with Dropped, since another
+// producer could not continue its log. The producer is unusable afterwards.
+func (p *StreamProducer) Close() { p.inner.Destroy() }
+
 // Finish closes the stream track.
 func (p *StreamProducer) Finish() error {
 	return p.inner.Finish()
@@ -139,8 +152,9 @@ func (p *StreamProducer) Finish() error {
 type Timed struct {
 	// Value is the JSON document.
 	Value stdjson.RawMessage
-	// Timestamp is on the broadcast clock, or nil on an untimed track.
-	Timestamp *moq.Timestamp
+	// Timestamp is on the broadcast clock, or moq.Unscaled at the frame's group key on a
+	// scale-less track.
+	Timestamp moq.Timestamp
 }
 
 func timed(value *ffi.MoqJsonValue) *Timed {
@@ -160,13 +174,22 @@ type SnapshotConsumerOptions struct {
 	// Priority is the subscription's delivery priority, higher first, as
 	// moq.Subscription.Priority.
 	Priority int8
+	// Delay is the reader's playout delay behind the live edge, the subscription's
+	// Delay.Min and Delay.Max. Zero skips a snapshot the moment a newer one arrives. A
+	// reader that holds each snapshot until media reaches its timestamp sets its delay, so
+	// a superseded snapshot it may still need stays deliverable that long and Next yields it.
+	Delay time.Duration
 }
 
 // NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
-// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max
-// and the options' priority; a read waits for it to resolve and fails if it cannot.
+// lossy latest-value JSON track. The consumer owns its subscription, at the options'
+// priority and delay; a read waits for it to resolve and fails if it cannot.
 func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options SnapshotConsumerOptions) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, options.Priority)
+	if err := bridge.NonNegative(&options.Delay, "snapshot delay"); err != nil {
+		return nil, err
+	}
+	config := ffi.MoqJsonSnapshotConsumerConfig{Priority: options.Priority, Delay: options.Delay}
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, &config)
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +304,13 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. Once it pushed a record, Finish it:
+// closing it unfinished is not supported, and aborts its track with Dropped, since another
+// producer would number its records afresh. The producer is unusable afterwards.
+func (p *WindowProducer) Close() { p.inner.Destroy() }
+
 // Finish closes the window track.
 func (p *WindowProducer) Finish() error {
 	return p.inner.Finish()
@@ -325,10 +355,10 @@ func (WindowEventSkip) windowEvent() {}
 type WindowTimed struct {
 	// Event is the change to the window.
 	Event WindowEvent
-	// Timestamp is on the broadcast clock, or nil on an untimed track. A record
-	// first learned of from a group's restatement carries that frame's time, not
-	// its original push time.
-	Timestamp *moq.Timestamp
+	// Timestamp is on the broadcast clock, or moq.Unscaled at the frame's group key on a
+	// scale-less track. A record first learned of from a group's restatement carries that
+	// frame's time, not its original push time.
+	Timestamp moq.Timestamp
 }
 
 func windowTimed(value *ffi.MoqJsonWindowTimed) (*WindowTimed, error) {

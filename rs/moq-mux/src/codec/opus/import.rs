@@ -12,8 +12,8 @@ use crate::container::Frame;
 /// frame of each group a keyframe (the rest extend it): frames accumulate into the current group
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
 /// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: cut per packet for one group (one QUIC stream) forwarded immediately, or
-/// less often to batch frames into fewer groups. Opus' packet loss concealment handles drops.
+/// caller's either way: [`Join`](crate::container::Join) says when a group (one QUIC stream)
+/// holds its 100 ms. Opus' packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -47,10 +47,19 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::AudioConfig>> {
+		self.track.finish()
+	}
+
+	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
+	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
+		self.track.end_with(None)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -73,9 +82,9 @@ impl Import {
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -89,11 +98,15 @@ impl Import {
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
+		let payload = frame.into_bytes();
+		// The packet states its own duration, so a pause's marker lands where its audio stops.
+		let duration = super::packet_samples(&payload)
+			.and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), 48_000).ok());
 		self.track.write(Frame {
 			timestamp,
-			payload: frame.into_bytes(),
+			payload,
 			keyframe,
-			duration: None,
+			duration,
 		})?;
 		Ok(())
 	}
@@ -205,6 +218,58 @@ mod tests {
 		assert_eq!(frame.payload.as_ref(), payload);
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
+	}
+
+	/// A pause ends where the last packet's audio does, as its TOC byte says, not where the packet
+	/// starts: hang's marker is the only place a reader learns where a group's audio stops.
+	#[tokio::test(start_paused = true)]
+	async fn a_pause_ends_where_the_last_packet_does() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		// Delayed, so the reader starts from the first group rather than the newest.
+		let subscriber =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(5)),
+						max: Some(Duration::from_secs(5)),
+					},
+				)]),
+			);
+		let config: hang::catalog::AudioConfig = crate::codec::opus::Config::new(48_000, 2).into();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let mut import = super::Import::new(track, catalog.reserve(), config).unwrap();
+
+		// Two 20 ms CELT packets, then a pause.
+		for start in [0, 20_000] {
+			import
+				.decode(&[31 << 3, 0][..], Some(Timestamp::from_micros(start).unwrap()))
+				.unwrap();
+		}
+		import.discontinuity().unwrap();
+		let _finished = import.finish().unwrap();
+
+		let mut media = crate::container::Consumer::new(subscriber, wire);
+		let mut reads = Vec::new();
+		while let Some(read) = kio::clock::timeout(Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+		{
+			reads.push(match read {
+				crate::container::Read::Frame { frame, .. } => {
+					format!("frame {}", frame.timestamp.as_micros().unwrap())
+				}
+				crate::container::Read::End { end, .. } => format!("end {}", end.as_micros().unwrap()),
+				crate::container::Read::Gap { .. } => continue,
+			});
+		}
+		// The marker sits one unit of the track's timescale before the packet's end, so what resumes
+		// right there still starts after it.
+		assert_eq!(reads, ["frame 0", "frame 20000", "end 39999"]);
 	}
 }

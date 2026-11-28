@@ -33,7 +33,7 @@ jobs:
       # Use the existing app identity to publish the validated draft proposal.
       # Mint it after evaluating nixpkgs so the update itself holds no write token.
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -43,7 +43,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
       - name: Propose the update
-        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           token: ${{ steps.token.outputs.token }}
           branch: smoke/toolchain-update

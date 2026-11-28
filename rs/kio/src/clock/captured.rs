@@ -1,5 +1,7 @@
 //! The ambient clock, captured so it reads the same from anywhere.
 
+use std::time::Duration;
+
 use crate::clock::{Instant, Wall};
 
 /// The ambient clock as it was when [`current`](Self::current) captured it.
@@ -83,14 +85,39 @@ impl Clock {
 	/// reads before 1970.
 	pub fn wall(&self) -> Wall {
 		match &self.0 {
-			// Paused tokio does not pause wall time.
 			Source::Host => super::runtime::wall(),
 			#[cfg(feature = "runtime")]
-			Source::Runtime(_) => super::runtime::wall(),
+			Source::Runtime(runtime) => {
+				let _entered = runtime.enter();
+				super::runtime::runtime_wall()
+			}
 			#[cfg(feature = "manual")]
 			Source::Installed(clock) => clock.wall(),
 			#[cfg(feature = "sim")]
 			Source::Sim(id) => super::sim::wall_in(*id),
+		}
+	}
+
+	/// How long the host has spent suspended, which [`now`](Self::now) does not count.
+	///
+	/// Its growth between two reads is how long the host slept between them, so adding it to the
+	/// instants' difference measures time as the wall clock does across a suspend. The host's reads
+	/// the platform where its monotonic clock stops while asleep (Linux, Android, Apple) and is zero
+	/// elsewhere, as on Windows, whose monotonic clock already counts sleep. A paused runtime reads
+	/// the host's too. Two reads taken within nanoseconds of each other can differ by that much.
+	///
+	/// # Panics
+	///
+	/// When captured inside a simulator run and read outside it.
+	pub fn suspended(&self) -> Duration {
+		match &self.0 {
+			Source::Host => super::runtime::suspended(),
+			#[cfg(feature = "runtime")]
+			Source::Runtime(_) => super::runtime::suspended(),
+			#[cfg(feature = "manual")]
+			Source::Installed(clock) => clock.suspended(),
+			#[cfg(feature = "sim")]
+			Source::Sim(id) => super::sim::suspended_in(*id),
 		}
 	}
 }
@@ -106,7 +133,10 @@ impl PartialEq for Clock {
 			(Source::Installed(a), Source::Installed(b)) => a.same(b),
 			#[cfg(feature = "sim")]
 			(Source::Sim(a), Source::Sim(b)) => a == b,
-			#[allow(unreachable_patterns, reason = "only the host clock exists without features")]
+			#[cfg_attr(
+				not(any(feature = "runtime", feature = "sim")),
+				expect(unreachable_patterns, reason = "only the host clock exists without features")
+			)]
 			_ => false,
 		}
 	}
@@ -204,6 +234,31 @@ mod tests {
 		});
 	}
 
+	/// The host's suspend clocks read, and its sleep never shrinks beyond the gap between two reads.
+	#[test]
+	#[cfg_attr(miri, ignore = "reads the host's suspend clock, which Miri does not support")]
+	fn the_host_suspend_reads() {
+		let host = Clock::current();
+		let slept = host.suspended();
+		assert!(host.suspended() + Duration::from_micros(100) >= slept);
+	}
+
+	/// A simulated suspend counts as suspended without moving the instant.
+	#[test]
+	fn a_suspend_is_counted_apart_from_the_instant() {
+		crate::clock::sim::run(async {
+			let clock = Clock::current();
+			let start = clock.now();
+			crate::clock::sim::suspend(Duration::from_secs(3600));
+			assert_eq!(clock.now(), start);
+			assert_eq!(clock.suspended(), Duration::from_secs(3600));
+			assert_eq!(
+				clock.wall(),
+				crate::clock::Manual::WALL_START + Duration::from_secs(3600)
+			);
+		});
+	}
+
 	/// A queue entered on a thread is read through the clock it is advanced from.
 	#[test]
 	fn an_entered_queue_captures_its_clock() {
@@ -216,5 +271,18 @@ mod tests {
 			};
 			assert_eq!(clock, Clock::current());
 		});
+	}
+
+	/// A queue entered on a runtime with no installed clock, as an io_uring worker
+	/// enters one, is advanced from the host's clock, so that is its capture.
+	#[test]
+	fn an_entered_queue_on_a_runtime_captures_the_host() {
+		let host = Clock::current();
+		let runtime = paused();
+		let _runtime = runtime.enter();
+		assert_ne!(Clock::current(), host, "a paused runtime is a clock of its own");
+		let deadlines = crate::clock::Deadlines::new(crate::clock::now());
+		let _entered = deadlines.enter();
+		assert_eq!(Clock::current(), host);
 	}
 }

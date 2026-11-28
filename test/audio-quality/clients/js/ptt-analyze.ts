@@ -49,7 +49,7 @@ const presses = result.presses
 		});
 		const earliest = received.toSorted((a, b) => a[0] - b[0])[0];
 		// An onset during a zero-gap press may belong to its still-playing predecessor.
-		// A constant tone has no utterance ID, so only separated presses have identifiable onsets.
+		// A looping tone has no utterance ID, so only separated presses have identifiable onsets.
 		const separated = i === 0 || i >= 8;
 		const audible = separated
 			? result.audible.find(

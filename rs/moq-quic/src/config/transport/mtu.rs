@@ -76,6 +76,8 @@ pub struct Config {
 	pub upper_bound: u16,
 
 	/// The minimum MTU change to stop the MTU discovery phase, 20 by default
+	///
+	/// Must be at least 1.
 	pub minimum_change: u16,
 
 	/// How long MTU discovery waits after a black hole was detected before running again, one

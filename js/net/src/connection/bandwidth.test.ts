@@ -126,7 +126,6 @@ const silent: { name: string; shape: (quic: MockTransport) => void }[] = [
 			(quic as unknown as { getStats?: unknown }).getStats = undefined;
 		},
 	},
-	{ name: "WebRTC", shape: (quic) => Object.assign(quic, { transport: "webrtc" }) },
 ];
 
 for (const kind of silent) {

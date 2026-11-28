@@ -1,0 +1,444 @@
+#![cfg(feature = "async")]
+
+//! Lite-07 routes by their path, on real sessions with time paused.
+//!
+//! A route names every relay it crossed and the session each learned it on. A relay that
+//! loses a session names that hop in one DEAD, and every relay drops the routes through
+//! it and moves onto what is left at once. A claim left without a route is shown
+//! unavailable for [`DEBOUNCE`], in case a route returns, and goes offline after.
+
+use crate::route_change::{link, next, payload, produce_origin, read, timed};
+use crate::support;
+use support::{AppendNext, AtStart};
+
+use std::time::Duration;
+
+use futures::channel::mpsc;
+use moq_net::{Error, Prefix, Prefixes, Version, auth::Grant, origin};
+use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
+
+/// How long a relay lets an announce stream stall before closing its session.
+pub(super) const HOLD: Duration = Duration::from_secs(10);
+
+/// How long a claim no route reaches is shown unavailable before it goes offline.
+pub(super) const DEBOUNCE: Duration = Duration::from_millis(800);
+
+/// The wip version the path rule runs on.
+pub(super) fn lite07() -> Version {
+	"moq-lite-07-wip".parse().unwrap()
+}
+
+/// One change a node showed at a path: how long after the cut, its kind, and whether a
+/// usable route reached the publisher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Seen {
+	pub at: Duration,
+	pub kind: support::Kind,
+	pub available: bool,
+	/// The cost of the route shown, which tells its path apart.
+	pub cost: u64,
+}
+
+/// The changes a node shows at a path.
+pub(super) struct Watch {
+	rx: mpsc::UnboundedReceiver<(kio::clock::Instant, support::Kind, bool, u64)>,
+}
+
+impl Watch {
+	/// What the node showed since the last call, timed from `start`.
+	pub(super) fn seen(&mut self, start: kio::clock::Instant) -> Vec<Seen> {
+		std::iter::from_fn(|| self.rx.try_recv().ok())
+			.map(|(at, kind, available, cost)| Seen {
+				at: at.saturating_duration_since(start),
+				kind,
+				available,
+				cost,
+			})
+			.collect()
+	}
+}
+
+/// Watch every change `node` shows at `path`, past what it shows now.
+pub(super) async fn record(node: &origin::Producer, path: &'static str) -> Watch {
+	let mut routes = node.consume().routes();
+	let (tx, rx) = mpsc::unbounded();
+	kio::clock::sim::spawn(async move {
+		while let Some(event) = routes.next().await {
+			if event.announce.prefix.as_str() != path {
+				continue;
+			}
+			let kind = match event.kind {
+				origin::RouteKind::Start => support::Kind::Start,
+				origin::RouteKind::Update => support::Kind::Update,
+				origin::RouteKind::Restart => support::Kind::Restart,
+				origin::RouteKind::End => support::Kind::End,
+				origin::RouteKind::Offline => support::Kind::Offline,
+				kind => panic!("unexpected route kind {kind:?}"),
+			};
+			let route = &event.announce.route;
+			let seen = (kio::clock::now(), kind, route.available(), route.cost().value());
+			if tx.unbounded_send(seen).is_err() {
+				break;
+			}
+		}
+	});
+	let mut watch = Watch { rx };
+	land().await;
+	watch.seen(kio::clock::now());
+	watch
+}
+
+/// Whether the node let go of the path, ended or offline.
+pub(super) fn withdrawn(seen: &Seen) -> bool {
+	matches!(seen.kind, support::Kind::End | support::Kind::Offline)
+}
+
+/// Close a session at both ends, as a dropped connection does.
+pub(super) fn cut(pair: &MockPair) {
+	pair.server.abort(Error::Cancel);
+	pair.client.abort(Error::Cancel);
+}
+
+/// Publish `path` on `node`.
+pub(super) fn publish(node: &origin::Producer, path: &str) -> origin::Route {
+	let route = node.route(path, origin::RouteOptions::hidden()).unwrap();
+	route.announce().unwrap();
+	route
+}
+
+/// Wait long enough for every message in flight to land, well within the debounce.
+pub(super) async fn land() {
+	kio::clock::sleep(Duration::from_millis(100)).await;
+}
+
+/// Let the network settle, every debounce and stall included.
+pub(super) async fn quiesce() {
+	kio::clock::sleep(HOLD + DEBOUNCE).await;
+}
+
+/// `W` reaches `P` through `A`, and through `C` and `D`, which never cross `A`. The session
+/// from `A` to `W` closes: `W` moves onto the detour at once and the claim never turns
+/// unavailable.
+#[kio::test]
+async fn a_detour_avoiding_the_far_end_is_taken_at_once() {
+	let version = lite07();
+	let [p, a, c, d, w] = [1, 2, 3, 4, 5].map(produce_origin);
+	let _live = publish(&p, "live");
+	let _p_a = peer(version, &p, &a).await;
+	let a_w = peer(version, &a, &w).await;
+	let _p_c = peer(version, &p, &c).await;
+	let _c_d = peer(version, &c, &d).await;
+	let _d_w = peer(version, &d, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let start = kio::clock::now();
+	cut(&a_w);
+	land().await;
+	let seen = watch.seen(start);
+	assert!(
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"the detour serves at once: {seen:?}"
+	);
+}
+
+/// `W` reaches `P` through `A`, and through `B`, whose route crosses `A` too. The session
+/// from `A` to `W` closes, which names a hop `B`'s route never crossed: `W` moves onto it
+/// at once and the claim never turns unavailable.
+#[kio::test]
+async fn a_detour_through_the_far_end_is_taken_at_once() {
+	let version = lite07();
+	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
+	let _live = publish(&p, "live");
+	let _p_a = peer(version, &p, &a).await;
+	let a_w = peer(version, &a, &w).await;
+	let _a_b = peer(version, &a, &b).await;
+	let _b_w = peer(version, &b, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let start = kio::clock::now();
+	cut(&a_w);
+	quiesce().await;
+	let seen = watch.seen(start);
+	assert!(
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"B's route serves at once: {seen:?}"
+	);
+}
+
+/// `P` is on `A` and `B`, which peer with each other, and `W` is behind both. `P`'s session
+/// to `A` closes and reopens every half second. `B`'s route never crossed that session,
+/// so `W` shows the claim available throughout and its subscriber reads each group at
+/// once.
+#[kio::test]
+async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
+	const FLAP: Duration = Duration::from_millis(500);
+	let version = lite07();
+	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
+	let live = publish(&p, "live");
+	let track = live.broadcast().create_track("video", timed()).unwrap();
+	let mut p_a = peer(version, &p, &a).await;
+	let _p_b = peer(version, &p, &b).await;
+	let _a_b = peer(version, &a, &b).await;
+	let _a_w = peer(version, &a, &w).await;
+	let _b_w = peer(version, &b, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let broadcast = w.consume().request("live", None).await.unwrap();
+	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+	let start = kio::clock::now();
+	for flap in 0..8 {
+		match flap % 2 {
+			0 => cut(&p_a),
+			_ => p_a = peer(version, &p, &a).await,
+		}
+		let sent = kio::clock::now();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
+		group.finish().unwrap();
+		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
+		let late = kio::clock::now().saturating_duration_since(sent);
+		assert!(late < FLAP, "flap {flap}: read {late:?} after it was written");
+		kio::clock::sleep(FLAP).await;
+	}
+	let seen = watch.seen(start);
+	assert!(
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"available throughout: {seen:?}"
+	);
+}
+
+/// `X` is `P`'s only way out and neighbours `R1`, `R2` and `R3`, which mesh with each other.
+/// `X` dies: each relay hears its own session close and its neighbours' DEADs. One that
+/// hears its own first may move onto a neighbour's route through `X`, which nothing yet
+/// says is dead, only until that neighbour's DEAD lands, here in the same instant. Each
+/// withdraws the claim once.
+#[kio::test]
+async fn a_dead_relay_reaches_every_neighbour_as_withdrawals() {
+	let version = lite07();
+	let [p, x, r1, r2, r3] = [1, 2, 3, 4, 5].map(produce_origin);
+	let _live = publish(&p, "live");
+	let mut dying = vec![peer(version, &p, &x).await];
+	for r in [&r1, &r2, &r3] {
+		dying.push(peer(version, &x, r).await);
+	}
+	let _mesh = [
+		peer(version, &r1, &r2).await,
+		peer(version, &r2, &r3).await,
+		peer(version, &r1, &r3).await,
+	];
+	quiesce().await;
+
+	let mut watched = Vec::new();
+	for r in [&r1, &r2, &r3] {
+		watched.push(record(r, "live").await);
+	}
+	let start = kio::clock::now();
+	dying.iter().for_each(cut);
+	quiesce().await;
+	for (i, watch) in watched.iter_mut().enumerate() {
+		let seen = watch.seen(start);
+		assert!(
+			seen.iter().all(|seen| !seen.available || seen.at.is_zero()),
+			"R{}: on a route through X only until its DEAD lands: {seen:?}",
+			i + 1
+		);
+		assert_eq!(
+			seen.iter().filter(|seen| withdrawn(seen)).count(),
+			1,
+			"R{}: {seen:?}",
+			i + 1
+		);
+		assert!(withdrawn(seen.last().unwrap()), "R{}: {seen:?}", i + 1);
+	}
+}
+
+/// `P` feeds `A`, which feeds `C`, and peers with `B`, which learned the route from `A` and
+/// offers it back. `P`'s session to `A` closes: `A` waits for nobody, so `C` sees the claim
+/// unavailable at once and offline when the debounce runs out, with no move onto `B`'s
+/// route between.
+#[kio::test]
+async fn a_claim_without_a_route_goes_offline_after_the_debounce() {
+	let version = lite07();
+	let [p, a, b, c] = [1, 2, 3, 4].map(produce_origin);
+	let _live = publish(&p, "live");
+	let p_a = link(version, &p, &a).await;
+	let _a_b = peer(version, &a, &b).await;
+	let _a_c = link(version, &a, &c).await;
+	// A reader at `B` asks `A` for its routes.
+	let _reader = record(&b, "live").await;
+	quiesce().await;
+
+	let mut watch = record(&c, "live").await;
+	let start = kio::clock::now();
+	cut(&p_a);
+	quiesce().await;
+	let seen = watch.seen(start);
+	assert!(
+		matches!(
+			seen.first(),
+			Some(Seen {
+				kind: support::Kind::Update,
+				available: false,
+				..
+			})
+		),
+		"unavailable first: {seen:?}"
+	);
+	assert!(seen.iter().all(|seen| !seen.available), "{seen:?}");
+	assert_eq!(seen.iter().filter(|seen| withdrawn(seen)).count(), 1, "{seen:?}");
+	let ended = seen.last().unwrap();
+	assert!(withdrawn(ended), "{seen:?}");
+	assert!(
+		ended.at >= DEBOUNCE && ended.at < DEBOUNCE + Duration::from_millis(100),
+		"{seen:?}"
+	);
+}
+
+/// `W` reaches `P` through `A`. `Y` and `Z` peer with `W` and with each other, and carry
+/// nothing of `P`'s: their session closing names a hop no route of `W`'s crosses, which
+/// changes nothing there.
+#[kio::test]
+async fn an_unknown_hop_in_a_dead_changes_nothing() {
+	let version = lite07();
+	let [p, a, w, y, z] = [1, 2, 3, 4, 5].map(produce_origin);
+	let _live = publish(&p, "live");
+	let _p_a = peer(version, &p, &a).await;
+	let _a_w = peer(version, &a, &w).await;
+	let _w_y = peer(version, &w, &y).await;
+	let _w_z = peer(version, &w, &z).await;
+	let y_z = peer(version, &y, &z).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let start = kio::clock::now();
+	cut(&y_z);
+	quiesce().await;
+	assert_eq!(watch.seen(start), [], "W keeps its route as it was");
+}
+
+/// A chain one relay longer than a claim's chain allows. Each session here exchanges no
+/// routes, so each relay takes the claim across it and names itself in the chain, the
+/// publisher's own relay first: the chain names at most 31 relays, so the 32nd refuses it.
+#[kio::test]
+async fn a_path_at_the_hop_limit_is_refused() {
+	let version = lite07();
+	let nodes: Vec<_> = (1..=32).map(produce_origin).collect();
+	let mut watched = Vec::new();
+	for node in &nodes {
+		watched.push(record(node, "live").await);
+	}
+	let start = kio::clock::now();
+	let _live = publish(&nodes[0], "live");
+	let mut links = Vec::new();
+	for pair in nodes.windows(2) {
+		links.push(link(version, &pair[0], &pair[1]).await);
+	}
+	quiesce().await;
+
+	let reached: Vec<bool> = (watched.iter_mut())
+		.map(|watch| watch.seen(start).iter().any(|seen| seen.available))
+		.collect();
+	assert!(reached[..31].iter().all(|reached| *reached), "{reached:?}");
+	assert!(!reached[31], "the full chain is refused");
+}
+
+/// A peer whose session is limited to `a` reports its own session closing. That DEAD
+/// covers only the routes that peer sent: `W` keeps the route through `B`, which crosses
+/// the same hop, until `B` says so too, and moves onto it meanwhile.
+#[kio::test]
+async fn a_scoped_peers_dead_leaves_other_sessions_routes_alone() {
+	let version = lite07();
+	let [p, s, b, w] = [1, 2, 3, 4].map(produce_origin);
+	let _live = publish(&p, "a/live");
+	let p_s = link(version, &p, &s).await;
+	let _s_b = link(version, &s, &b).await;
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(b.consume());
+	options.client_subscribe = Some(w.clone());
+	options.latency = Duration::from_millis(300);
+	let _b_w = connect_mock(options).await;
+	let mut options = MockConnectOptions::new(version);
+	options.client_publish = Some(s.consume());
+	options.server_subscribe = Some(w.clone());
+	let s_w = connect_mock(options).await;
+	let mut grant = Grant::default();
+	grant.publish = Prefixes::from(Prefix::try_from("a").unwrap());
+	s_w.server.auth().authorize(&grant);
+	quiesce().await;
+
+	let mut watch = record(&w, "a/live").await;
+	let start = kio::clock::now();
+	cut(&p_s);
+	kio::clock::sleep(Duration::from_millis(200)).await;
+	let early = watch.seen(start);
+	assert!(
+		early.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"B's route serves until B reports the hop: {early:?}"
+	);
+	quiesce().await;
+	let late = watch.seen(start);
+	assert!(late.iter().any(withdrawn), "B's report withdraws it: {late:?}");
+}
+
+/// A peer that stops reading its announce stream stalls every route its relay sends it:
+/// the relay closes the session once nothing moved for [`HOLD`].
+#[kio::test]
+async fn a_peer_that_stops_reading_is_closed() {
+	let version = lite07();
+	let [p, w] = [1, 2].map(produce_origin);
+	let _first = publish(&p, "first");
+	let p_w = link(version, &p, &w).await;
+	quiesce().await;
+
+	p_w.server_transport.hold_writes();
+	let start = kio::clock::now();
+	let _second = publish(&p, "second");
+	let closed = kio::clock::timeout(HOLD * 2, p_w.server.closed()).await;
+	let after = kio::clock::now().saturating_duration_since(start);
+	assert!(closed.is_ok(), "the session closes");
+	assert!(after >= HOLD, "not before the hold: {after:?}");
+}
+
+/// `P` and `W` are endpoints, with no relay between them, and `W` reads `P`'s broadcast.
+/// `P` closes it: `W` is shown its end at once, never the claim unavailable and then
+/// offline, which only a lost claim is.
+#[kio::test]
+async fn an_endpoint_closing_its_broadcast_ends_it_for_its_reader() {
+	let version = lite07();
+	let [p, w] = [(), ()].map(|()| {
+		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		support::harness::spawn(driver);
+		producer
+	});
+	let live = publish(&p, "live");
+	let track = live.broadcast().create_track("video", timed()).unwrap();
+	let _p_w = link(version, &p, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let broadcast = w.consume().request("live", None).await.unwrap();
+	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
+
+	let start = kio::clock::now();
+	live.broadcast().close();
+	quiesce().await;
+	let seen = watch.seen(start);
+	assert!(
+		matches!(
+			seen[..],
+			[Seen {
+				kind: support::Kind::End,
+				available: true,
+				..
+			}]
+		),
+		"the reader is shown one end: {seen:?}"
+	);
+}

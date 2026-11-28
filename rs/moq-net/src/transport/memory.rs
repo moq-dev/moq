@@ -14,7 +14,9 @@
 //!
 //! [`finish`](poll::SendStream::finish) closes the channel cleanly once its messages are
 //! read. A [`reset`](poll::SendStream::reset) or [`stop`](poll::RecvStream::stop) closes it
-//! with a code and drops what it queued. Closing the session keeps queued messages
+//! with a code and drops what it queued, except that a
+//! [`reset_at`](poll::SendStream::reset_at) keeps the bytes before its offset for the reader
+//! ahead of the code. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
 //! Reads return the channel's room as they go, so streams lease through
@@ -85,10 +87,7 @@ impl Default for Config {
 
 /// Create two connected sessions: streams one opens, the other accepts.
 pub fn pair(config: Config) -> (Session, Session) {
-	let mut secret = [0; 32];
-	rand::RngExt::fill(&mut kio::clock::rng(), &mut secret);
 	let conn = Arc::new(Conn {
-		secret: rind::hkdf::Salt::new(&rind::hkdf::HKDF_SHA256, &[]).extract(&secret),
 		close: Default::default(),
 		incoming: [Incoming::default(), Incoming::default()],
 		config,
@@ -168,8 +167,6 @@ fn closed(close: &Close) -> Option<Error> {
 /// State shared by both sides of a pair.
 struct Conn {
 	config: Config,
-	/// What both sides export keying material from, standing in for a TLS handshake's secret.
-	secret: rind::hkdf::Prk,
 	close: Close,
 	/// What each side has yet to accept.
 	incoming: [Incoming; 2],
@@ -317,6 +314,13 @@ pub struct Session {
 }
 
 impl Session {
+	/// A handle that closes this session without keeping it open, as a cut link would.
+	pub fn closer(&self) -> Closer {
+		Closer {
+			conn: self.side.conn.clone(),
+		}
+	}
+
 	fn conn(&self) -> &Conn {
 		&self.side.conn
 	}
@@ -340,6 +344,25 @@ impl Session {
 		queue
 			.try_push(item)
 			.map_err(|_| closed(&self.conn().close).expect("peer dropped"))
+	}
+}
+
+/// Closes a [`Session`] from outside it, holding neither side open: the session still
+/// closes once both of its handles drop.
+#[derive(Clone)]
+pub struct Closer {
+	conn: Arc<Conn>,
+}
+
+impl Closer {
+	/// Close the session for both sides, unless it already closed.
+	pub fn close(&self, code: u32, reason: &str) {
+		self.conn.close(code, reason);
+	}
+
+	/// Whether the session has closed, by either side or by this handle.
+	pub fn is_closed(&self) -> bool {
+		self.conn.close.read().is_some()
 	}
 }
 
@@ -464,16 +487,9 @@ impl poll::Session for Session {
 		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
 
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		// Length-prefixed, so no label and context pair collides with another.
-		let lengths = [u8::try_from(label.len()).ok()?, u8::try_from(context.len()).ok()?];
-		let mut output = [0; 32];
-		self.conn()
-			.secret
-			.expand(&[&lengths, label, context], output.len())
-			.fill(&mut output)
-			.expect("32 bytes fit HKDF-SHA256");
-		Some(output)
+	/// A reset queues behind the prefix it keeps, which the reader still drains.
+	fn reliable_reset(&self) -> bool {
+		true
 	}
 }
 
@@ -483,7 +499,9 @@ struct Channel {
 	messages: VecDeque<Message>,
 	/// The bytes in `messages`.
 	queued: usize,
-	/// The bytes the reader took, which stand in for delivered ones.
+	/// The bytes the writer queued, which its offsets count.
+	written: u64,
+	/// The bytes the reader took, which stand in for acknowledged ones.
 	taken: u64,
 	/// How the channel closed, once it has.
 	end: Option<End>,
@@ -535,13 +553,44 @@ impl Channel {
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
 	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
+		self.abort_at(0, end);
+	}
+
+	/// [`Self::abort`], but keep the bytes before `offset` queued for the reader, unless a
+	/// stop already said it reads no more.
+	fn abort_at(&mut self, offset: u64, end: End) {
 		if self.end.is_none() || !self.messages.is_empty() {
 			self.end = Some(end);
 		}
-		self.messages.clear();
-		self.queued = 0;
+		let mut keep = match self.end {
+			Some(End::Stop(_)) => 0,
+			_ => offset.saturating_sub(self.taken),
+		};
+		self.messages.retain_mut(|message| {
+			let len = message.bytes.len() as u64;
+			let kept = len.min(keep);
+			message.bytes.truncate(kept as usize);
+			keep -= kept;
+			kept > 0
+		});
+		self.queued = self.messages.iter().map(|message| message.bytes.len()).sum();
 		// Nothing is left in flight for the writer to wait on.
 		self.finished = None;
+	}
+
+	/// Whether the reader took every byte before `offset`, which stands in for an
+	/// acknowledgement, failing once a reset or stop means it never will.
+	fn acked(&self, offset: u64) -> Poll<Result<(), Error>> {
+		if offset <= self.taken {
+			return Poll::Ready(Ok(()));
+		}
+		match self.end {
+			// The bytes a reset still delivers wait for the reader.
+			Some(End::Reset(_)) if offset <= self.taken + self.queued as u64 => Poll::Pending,
+			Some(End::Reset(_)) => Poll::Ready(Err(Error::Closed)),
+			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
+			_ => Poll::Pending,
+		}
 	}
 
 	/// How the writer sees the channel close: reset, stopped, or finished and drained.
@@ -571,6 +620,22 @@ pub struct SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = crate::transport::poll::Ungrouped;
+	type Offset = u64;
+
+	fn offset(&self) -> u64 {
+		self.channel.lock().written
+	}
+
+	/// Delivered once the reader took every byte before `offset`, which stands in for an
+	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Error>> {
+		// Check the close first, so bytes taken before it still count below.
+		let closed = poll_close(&self.close, waiter);
+		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| channel.acked(*offset).map(drop)) {
+			return channel.acked(*offset);
+		}
+		closed.map(Err)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
@@ -611,6 +676,7 @@ impl poll::SendStream for SendStream {
 			lands: landing(self.latency),
 		});
 		channel.queued += size;
+		channel.written += size as u64;
 
 		Poll::Ready(Ok(size))
 	}
@@ -642,6 +708,10 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
+		self.reset_at(&0, code);
+	}
+
+	fn reset_at(&mut self, offset: &u64, code: u32) {
 		if std::mem::replace(&mut self.done, true) {
 			return;
 		}
@@ -649,7 +719,7 @@ impl poll::SendStream for SendStream {
 		// close is checked under the channel lock so a concurrent close can't land between.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Reset(code));
+			channel.abort_at(*offset, End::Reset(code));
 		}
 		drop(channel);
 		self.credit = None;
@@ -665,31 +735,6 @@ impl poll::SendStream for SendStream {
 			return channel.sent();
 		}
 		closed.map(Err)
-	}
-
-	/// Whether the reader took every message written so far, which stands in for an
-	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
-	fn acknowledged(&self) -> Option<bool> {
-		let channel = self.channel.lock();
-		// A reset on a closed session leaves the channel as it was, so only `done` records it.
-		let finished = matches!(channel.end, Some(End::Fin)) && channel.finished.is_none();
-		let open = channel.end.is_none() && !self.done;
-		Some((open || finished) && channel.messages.is_empty())
-	}
-
-	/// The bytes the reader took, standing in for delivered ones as it does for
-	/// [`acknowledged`](poll::SendStream::acknowledged).
-	fn delivered(&self) -> Option<u64> {
-		Some(self.channel.lock().taken)
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.channel
-			.poll(waiter, |channel| match channel.queued {
-				0 => Poll::Ready(()),
-				_ => Poll::Pending,
-			})
-			.map(drop)
 	}
 }
 
@@ -818,8 +863,9 @@ impl poll::Chunks for Chunks {
 		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
 			return Poll::Ready(err);
 		}
+		// A reset that still delivers bytes fails only once they were read, as QUIC's does.
 		let channel = ready!(self.channel.poll(waiter, |channel| match channel.end {
-			Some(End::Reset(_)) => Poll::Ready(()),
+			Some(End::Reset(_)) if channel.messages.is_empty() => Poll::Ready(()),
 			_ => Poll::Pending,
 		}));
 		let Some(End::Reset(code)) = channel.end else {
@@ -897,6 +943,23 @@ mod tests {
 	fn bounds() {
 		fn boxable<S: poll::Boxable>() {}
 		boxable::<Session>();
+	}
+
+	#[test]
+	fn closer_cuts_without_holding_open() {
+		// A closer closes the session for both sides.
+		let (a, b) = pair(Config::default());
+		let closer = a.closer();
+		closer.close(7, "cut");
+		assert!(closer.is_closed());
+		assert!(matches!(ready(b.poll_closed(&noop())), Error::Session { code: 7, .. }));
+
+		// A side dropped closes the session even while a closer is held.
+		let (a, b) = pair(Config::default());
+		let closer = b.closer();
+		drop(b);
+		assert!(closer.is_closed());
+		assert!(a.poll_closed(&noop()).is_ready());
 	}
 
 	#[test]
@@ -1043,6 +1106,31 @@ mod tests {
 		));
 	}
 
+	/// A reset at an offset still delivers the bytes before it, and fails the reader, or a
+	/// wait for the reset, only once they were read. A stop drops them.
+	#[test]
+	fn reset_at_delivers_the_prefix() {
+		let (a, b) = pair(buffer(64));
+		let (mut send, mut recv) = uni(&a, &b);
+
+		ready(write(&mut send, &Bytes::from_static(b"head"))).unwrap();
+		ready(write(&mut send, &Bytes::from_static(b"er-body"))).unwrap();
+		send.reset_at(&6, 7);
+		let at = 6;
+		assert!(send.poll_acked(&noop(), &at).is_pending(), "the prefix is still owed");
+		assert!(poll::RecvStream::poll_reset(&mut recv, &noop()).is_pending());
+		assert_eq!(ready(read(&mut recv, 4)).unwrap().unwrap(), "head");
+		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap().unwrap(), "er");
+		assert!(ready(send.poll_acked(&noop(), &at)).is_ok());
+		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
+
+		let (mut send, mut recv) = uni(&a, &b);
+		ready(write(&mut send, &Bytes::from_static(b"header"))).unwrap();
+		poll::RecvStream::stop(&mut recv, 3);
+		send.reset_at(&6, 7);
+		assert!(matches!(ready(send.poll_acked(&noop(), &6)), Err(Error::Stopped(3))));
+	}
+
 	/// The next chunk `recv` reads, once it lands.
 	async fn landed(recv: &mut RecvStream) -> Option<Bytes> {
 		kio::wait(|waiter| poll::Chunks::poll_read_chunk(recv.get_mut(), waiter, usize::MAX))
@@ -1101,12 +1189,10 @@ mod tests {
 			// closed the session now would beat its finish to the reader.
 			send.finish().unwrap();
 			assert!(send.poll_closed(&noop()).is_pending());
-			assert_eq!(send.acknowledged(), Some(false));
 			let start = kio::clock::now();
 			assert_eq!(landed(&mut recv).await, None);
 			assert_eq!(start.elapsed(), LATENCY);
 			assert!(ready(send.poll_closed(&noop())).is_ok());
-			assert_eq!(send.acknowledged(), Some(true));
 
 			// A reader that stops before the finish lands leaves the writer finished.
 			let (mut send, recv) = uni(&a, &b);
@@ -1173,6 +1259,44 @@ mod tests {
 		send.finish().unwrap();
 		drop(recv);
 		assert!(matches!(ready(send.poll_closed(&noop())), Err(Error::Stopped(0))));
+	}
+
+	/// An offset is acknowledged once the reader took every byte before it, and still is after a
+	/// reset; the rest fails once a reset or stop means the reader never will take it.
+	#[test]
+	fn an_offset_is_acknowledged_once_the_reader_takes_it() {
+		let acked = |send: &SendStream, offset: u64| send.poll_acked(&noop(), &offset);
+		let (a, b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&a, &b);
+		assert!(matches!(acked(&send, send.offset()), Poll::Ready(Ok(()))));
+
+		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+		let one = send.offset();
+		ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap();
+		let two = send.offset();
+		assert_eq!((one, two), (3, 6));
+		assert!(acked(&send, one).is_pending());
+
+		// A waiter parked on the offset wakes once the reader takes the bytes.
+		let count = Arc::new(Count::default());
+		let waiter = kio::Waiter::new(Waker::from(count.clone()));
+		assert!(send.poll_acked(&waiter, &one).is_pending());
+		assert_eq!(text(read(&mut recv, 4)), "one");
+		assert!(count.0.load(Ordering::Relaxed) > 0, "the read did not wake the writer");
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(()))));
+		assert!(acked(&send, two).is_pending());
+
+		send.reset(1);
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(()))));
+		assert!(matches!(acked(&send, two), Poll::Ready(Err(Error::Closed))));
+
+		let (mut send, mut recv) = uni(&a, &b);
+		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+		recv.stop(3);
+		assert!(matches!(
+			acked(&send, send.offset()),
+			Poll::Ready(Err(Error::Stopped(3)))
+		));
 	}
 
 	#[test]

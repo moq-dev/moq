@@ -4,14 +4,14 @@ package dev.moq.json
 // producer takes over a `dev.moq.TrackProducer` (the snapshot and stream
 // producers also advertise it in the broadcast's catalog, which has no window
 // mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
-// a group yet. Compression is the track's, set through `TrackInfo(compression =
-// Compression.DEFLATE)`.
+// a group yet. Compression is the track's, set through `TrackInfo(maxAge = Duration.ZERO,
+// compression = Compression.deflate())`.
 // Every write (a snapshot update, a stream append, a window push or pop) takes a
 // timestamp on the broadcast clock, the epoch every track in the broadcast
 // shares, so the track needs a timescale; one without is refused:
 //
-//     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compression =
-// Compression.DEFLATE))
+//     val track = broadcast.publishTrack("status", TrackInfo(maxAge = Duration.ZERO,
+//         timescale = 1_000uL, compression = Compression.deflate()))
 //     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
 //     status.update(Status(state = "live"), CatalogProducer(broadcast).now())
 //     val reader = SnapshotConsumer(consumer, "status")
@@ -29,7 +29,10 @@ typealias SnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
 /** Consumes reconstructed latest-value JSON snapshots from a track it subscribes to itself. */
 typealias SnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
 
-/** Publishes a lossless stream of JSON records on a track it takes over. */
+/**
+ * Publishes a lossless stream of JSON records on a track it takes over. Once it appended a record,
+ * finish it: closing it unfinished is not supported, and aborts its track with `Dropped`.
+ */
 typealias StreamProducer = uniffi.moq.MoqJsonStreamProducer
 
 /** Consumes a lossless stream of JSON records from a track it takes over. */
@@ -38,10 +41,17 @@ typealias StreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 /** Configures a lossy latest-value JSON producer. */
 typealias SnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 
+/** A snapshot consumer's subscription priority and playout delay. */
+typealias SnapshotConsumerConfig = uniffi.moq.MoqJsonSnapshotConsumerConfig
+
 /** A JSON string and the timestamp of the frame that carried it. */
 typealias Value = uniffi.moq.MoqJsonValue
 
-/** Publishes a sliding window of JSON records, pushed at the back and popped from the front. */
+/**
+ * Publishes a sliding window of JSON records, pushed at the back and popped from the front. Once it
+ * pushed a record, finish it: closing it unfinished is not supported, and aborts its track with
+ * `Dropped`.
+ */
 typealias WindowProducer = uniffi.moq.MoqJsonWindowProducer
 
 /** Consumes each push, pop, and skip of a JSON window from a track it takes over. */
@@ -67,8 +77,11 @@ typealias WindowEventSkip = uniffi.moq.MoqJsonWindowEvent.Skip
 /** A [WindowEvent] and the timestamp of the frame that carried it. */
 typealias WindowTimed = uniffi.moq.MoqJsonWindowTimed
 
-/** A decoded JSON value and its frame timestamp on the broadcast clock, or null when untimed. */
-data class Timed<T>(val value: T, val timestamp: Timestamp?)
+/**
+ * A decoded JSON value and its frame timestamp on the broadcast clock, or its group's [unscaled]
+ * key on a scale-less track.
+ */
+data class Timed<T>(val value: T, val timestamp: Timestamp)
 
 /** Decode [Value.value] as [T], keeping the timestamp. */
 inline fun <reified T> Value.decode(): Timed<T> =

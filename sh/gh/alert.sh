@@ -9,7 +9,7 @@
 #   DISCORD_WEBHOOK   Required. The #alerts channel webhook URL.
 #   RUN_NAME          Workflow name (github.event.workflow_run.name).
 #   RUN_URL           Run html_url.
-#   RUN_CONCLUSION    failure / timed_out.
+#   RUN_CONCLUSION    failure / timed_out / cancelled.
 #   RUN_EVENT         What triggered the failed run (push, schedule, ...).
 #   RUN_REF           head_branch: a branch name, or a tag for tag-triggered runs.
 #   RUN_TITLE         display_title, usually the commit subject.
@@ -116,8 +116,9 @@ const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
 // only by these needs no entry.
 const UNWATCHED = new Set(["pull_request", "pull_request_target", "merge_group", "workflow_call"]);
 // These workflows validate branches or run an agent on request; none publishes.
-// A Queue dispatch only reports the skipped merge queue context on a branch head.
-const CI_ONLY = new Set(["OBS", "Platform", "Pullfrog", "Quest", "Queue", "Runner VM"]);
+// A Queue (pull request) dispatch only reports the skipped merge queue context on a branch head.
+// QUIC interop runs on a schedule only as a call from Nightly, which alerts as Nightly.
+const CI_ONLY = new Set(["OBS", "Platform", "QUIC interop", "Quest", "Queue (pull request)", "Runner VM"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());

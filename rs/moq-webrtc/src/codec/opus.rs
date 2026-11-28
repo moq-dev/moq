@@ -7,6 +7,7 @@ use crate::{Result, codec};
 
 pub struct Bridge {
 	import: moq_mux::codec::opus::Import,
+	join: moq_mux::container::Join,
 }
 
 impl Bridge {
@@ -17,24 +18,51 @@ impl Bridge {
 		channel_count: u32,
 	) -> Result<Self> {
 		let config = moq_mux::codec::opus::Config::new(sample_rate, channel_count);
-		let track = broadcast.unique_track(".opus", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+		let track = broadcast.unique_track(".opus", catalog.track_info(hang::catalog::PRIORITY.audio));
 		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config.into())?;
-		Ok(Self { import })
+		Ok(Self {
+			import,
+			join: moq_mux::container::Join::default(),
+		})
 	}
 }
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
+		// The packet states its own length; one that does not counts as none.
+		let end = moq_mux::codec::opus::packet_samples(&frame.payload)
+			.map(|samples| {
+				frame
+					.timestamp_us
+					.saturating_add(u64::from(samples) * 1_000_000 / 48_000)
+			})
+			.map(moq_net::Timestamp::from_micros)
+			.transpose()
+			.map_err(moq_mux::Error::from)?;
+		// The importer writes each packet at once and only accumulates the group, so the packet that
+		// fills a join closes it, and the relay sees the group finish without waiting for the next.
+		// An encoder entering DTX sends one header-only packet and then nothing until speech
+		// resumes, so that packet closes the group too.
+		let dtx = frame.payload.len() <= 2;
 		self.import.decode(&frame.payload, Some(pts))?;
-		// The importer accumulates; cut each packet into its own group (one QUIC stream) so the
-		// relay forwards it without waiting for the next.
-		self.import.cut(None)?;
+		let full = self.join.fill(pts, end.unwrap_or(pts));
+		if full.is_some() || dtx {
+			self.join.reset();
+			// A full group ends past its furthest packet, which a rewound packet's own end can fall below.
+			self.import.cut(end.map(|end| full.unwrap_or(end)))?;
+		}
 		Ok(())
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		Ok(self.import.finish()?)
+	fn discontinuity(&mut self) -> Result<()> {
+		self.import.discontinuity()?;
+		self.join.reset();
+		Ok(())
+	}
+
+	fn finish(self: Box<Self>) -> Result<codec::Finished> {
+		Ok(Box::new(self.import.finish()?))
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {

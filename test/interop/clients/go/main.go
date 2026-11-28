@@ -65,17 +65,27 @@ const (
 )
 
 // publishTone feeds the encoder a real-time tone per channel, interleaved, until ctx is cancelled.
+//
+// Each batch is due at its timestamp past the start, and a late one is written as soon as it can be.
+// A ticker would drop the ticks a starved runtime misses instead, leaving the tone a batch further
+// behind the video, which is stamped on arrival, for each one: a player that plays audio on the
+// video's clock then skips all of it as too late.
 func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64) {
-	ticker := time.NewTicker(audioBatchUs * time.Microsecond)
-	defer ticker.Stop()
-
 	data := make([]byte, audioBatchSamples*len(tones)*4)
+	start := time.Now()
 	phase := 0
+	// The furthest a write has fallen behind its due time, logged as it grows past one batch.
+	worst := time.Duration(audioBatchUs) * time.Microsecond
 	for {
+		due := start.Add(time.Duration(phase) * time.Second / audioRate)
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-time.After(time.Until(due)):
+		}
+		if late := time.Since(due); late > worst {
+			worst = late
+			fmt.Fprintf(os.Stderr, "tone: a write at %v ran %v behind its due time\n", due.Sub(start), late)
 		}
 		for i := 0; i < audioBatchSamples; i++ {
 			for c, hz := range tones {
@@ -84,7 +94,7 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 			}
 		}
 		// Stamped on the sample clock, so every batch time is exact.
-		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(phase), Scale: audioRate}, Data: data}); err != nil {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(phase), audioRate), Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
@@ -164,7 +174,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil})
+	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.H264VideoFormat(), Data: nil})
 	if err != nil {
 		return err
 	}
@@ -256,7 +266,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := live.WriteFrame(moq.Frame{Payload: []byte("session-alive")}); err != nil {
+	if err := live.WriteFrame(moq.Frame{Payload: []byte("session-alive"), Timestamp: moq.Unscaled(0)}); err != nil {
 		return err
 	}
 	if err := live.Finish(); err != nil {
@@ -288,7 +298,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 // encodes on demand) may announce a rendition in a later update rather than the
 // first snapshot, so wait for a catalog that has both video and audio.
 func catalogWithMedia(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +334,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return err
 	}
@@ -435,7 +445,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+	// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 	if frame == nil || string(frame.Payload) != "session-alive" {
 		return errors.New("unexpected session health payload")
 	}
@@ -467,13 +477,14 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string, rendition moqmedia.Audio, out string, audioMs int) error {
 	codec, _, _ := strings.Cut(rendition.Codec, ".")
 	out += "." + codec
+	playout := maxDelay
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format: moq.AudioSampleFormatF32,
 		// moq-audio waits on a missing group for its playout delay, measured from arrival timing at tens
 		// of ms, so a runtime starved longer than that skips a group that is only late. This reader
 		// checks delivery between implementations, not a real-time deadline: it holds a playout delay of
 		// the max delay, waiting on a hole for the same budget it grants a late group.
-		Delay:  moq.Delay{Min: maxDelay, Max: maxDelay},
+		Delay: moq.Delay{Min: &playout, Max: maxDelay},
 	})
 	if err != nil {
 		return err
@@ -511,7 +522,11 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 		}
 		samples := len(frame.Data) / frameBytes
 
-		fmt.Fprintf(log, "%d %d\n", moq.TimestampToDuration(frame.Timestamp).Microseconds(), samples)
+		at, err := moq.TimestampToDuration(frame.Timestamp)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(log, "%d %d\n", at.Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
 		}

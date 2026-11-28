@@ -1,7 +1,7 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";
 const ORDERS: Order[] = ["monotonic", "reverse", "mixed"];
@@ -10,8 +10,9 @@ const PAYLOAD = 8;
 // Arrivals timed per append row, so a sample spans enough work to read.
 const APPENDS = 64;
 const REPS = 5;
-// Every retained group, however old: replay is the work being measured.
-const SUBSCRIPTION = { ranges: [{ start: { absolute: 0n } }], delay: { max: null } };
+// Every retained group, however old: replay is the work being measured. Ascending, so a reader
+// drains its backlog oldest first whatever order it arrived in.
+const SUBSCRIPTION: Track.Subscription = { order: "ascending", ranges: [{ start: 0n }] };
 
 // The arrival order of sequences 0..count-1: ascending, descending, or a seeded shuffle.
 function arrivals(count: number, order: Order): number[] {
@@ -33,7 +34,7 @@ function publish(track: Track.Producer, sequence: number): void {
 	const group = track.createGroup(BigInt(sequence));
 	const payload = new Uint8Array(PAYLOAD);
 	new DataView(payload.buffer).setUint32(0, sequence);
-	group.writeFrame({ payload });
+	group.writeFrame({ payload, timestamp: Time.Timestamp.unscaled(group.start) });
 	group.finish();
 }
 
@@ -41,7 +42,7 @@ function publish(track: Track.Producer, sequence: number): void {
 function drain(subscriber: Track.Subscriber, count: number): void {
 	let next = 0;
 	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup(), next++) {
-		if (group.sequence !== BigInt(next)) throw new Error(`group ${group.sequence} delivered, expected ${next}`);
+		if (group.start !== BigInt(next)) throw new Error(`group ${group.start} delivered, expected ${next}`);
 		const payload = group.tryReadFrame()?.payload;
 		if (payload?.byteLength !== PAYLOAD || new DataView(payload.buffer, payload.byteOffset).getUint32(0) !== next)
 			throw new Error(`group ${next} payload mismatch`);

@@ -42,12 +42,17 @@ bbb url='http://localhost:4443' *args:
         -map 0 -map 1:v -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - \
         | cargo run --bin moq -- "${@:2}" --connect "{{ url }}" --broadcast bbb.hang import ts
 
+# Retime the source's repeated timestamps in place, before encoding the SD rendition from it.
+retime-bbb:
+    just download bbb
+    python3 bbb.py retime
+
 # Encode the video-only SD rendition, preserving source timestamps and loop duration.
 encode-bbb-sd:
     just download bbb
     python3 bbb.py encode
 
-# Verify the hosted rendition's frames, keyframes, and three complete loops.
+# Verify the hosted renditions' strictly increasing timestamps, frames, keyframes, and three complete loops.
 check-bbb:
     just download bbb
     just download bbb-sd
@@ -89,14 +94,14 @@ h264 name url="http://localhost:4443" *args:
     	-c:v copy -an \
     	-bsf:v h264_mp4toannexb \
     	-f h264 \
-    	- | cargo run --bin moq -- "${@:3}" --connect "{{ url }}" --broadcast "{{ name }}.hang" import avc3
+    	- | cargo run --bin moq -- "${@:3}" --connect "{{ url }}" --broadcast "{{ name }}.hang" import h264
 
 # Publish a video using ffmpeg directly from moq to the localhost.
 [positional-arguments]
 serve name *args:
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- "${@:2}" --listen "[::]:4443" --listen-tls-generate "localhost" --auth-public "**" --broadcast "{{ name }}.hang" import ts
+    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- "${@:2}" --listen "[::]:4443" --listen-tls-generate "localhost" --auth-public "" --broadcast "{{ name }}.hang" import ts
 
 # Generate and serve an HLS stream from a video for testing.
 [positional-arguments]

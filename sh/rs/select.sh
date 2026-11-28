@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Run `just rs check|check-test|lint|fix|test` on the crates a diff touches,
-# plus their dependents. `platform` is the Windows and macOS compile.
+# plus their dependents. `platform` is the Windows and macOS compile on those
+# hosts, and `cross` lints for both from any host.
 #
-# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -20,7 +21,12 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    # The flake pins the cross toolchain and zig.
+    if [[ "$action" == cross && -f "$list" ]] && grep -qE '^flake\.(nix|lock)$' "$list"; then
+        echo ALL
+        return
+    fi
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/(nextest|hakari)\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -47,21 +53,44 @@ select_packages() {
         return
     fi
 
-    local seeds benches edges selected
-    # A crate's `benches/` builds only its own bench targets, which no other crate can
-    # depend on, so it selects that crate alone (for its lint) rather than every
-    # dependent's tests.
-    benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
-    # A target can also sit outside its crate, as moq-cli's interop examples
+    local seeds targets readers edges selected
+    # A crate's `benches/`, `tests/`, and `examples/` build only its own
+    # targets, which no other crate can depend on, so a change there selects
+    # that crate alone rather than every dependent, unless its library reads
+    # the file (sh/rs/reads.sh lists those reads too).
+    # A crate that reads a file outside itself, such as a fixture, a script its
+    # tests run, or another crate's bench module, is a seed when that file
+    # changes, or only a target change when the reading source is one of its
+    # targets. sh/rs/reads.sh lists the reads as globs, made regexes here. A
+    # read is followed through the files it reads: a change to a module that an
+    # included module includes in turn reaches the crate at the top.
+    readers=$(bash sh/rs/reads.sh | jq -nrR --rawfile list "$list" '
+        def escape: gsub("(?<c>[.+?^$()\\[\\]{}|\\\\])"; "\\\(.c)");
+        def regex: split("**/") | map(split("**") | map(split("*") | map(escape) | join("[^/]*")) | join(".*"))
+            | "^\(join("(.*/)?"))(/.*)?$";
+        [inputs | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) (?<file>.*):[0-9]+$") | .regex = (.glob | regex)] as $reads
+        | def hit($paths): [$reads[] | select(.regex as $regex | any($paths[]; test($regex)))];
+          def changed: (. + [hit(.)[].file] | unique) as $more | if $more == . then . else $more | changed end;
+        ($list | split("\n") | map(select(. != "")) | unique | changed) as $paths
+        | hit($paths)[]
+        | "\(.crate) \(if .file | test("^rs/[^/]+/(benches|tests|examples)/") then "target" else "library" end)"')
+    targets=$({
+        sed -nE 's#^rs/([^/]*)/(benches|tests|examples)/.*#\1#p' "$list"
+        sed -n 's/ target$//p' <<<"$readers"
+    } | sort -u)
+    # A target can also sit outside its crate, as moq-interop's clients
     # under test/interop/clients/rust/ do, so a change in the directory of a
     # target's root file, which holds that file's modules, seeds its crate.
     # Cargo leaves the manifest's `..` in `src_path`, so they are resolved here.
     # sh/dispatch.sh's `rs` scope must match those directories too; the
     # selector's tests check that.
     seeds=$({
-        sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
-        # moq-relay's tests read its NixOS module.
-        sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
+        sed -nE '\#^rs/[^/]*/(benches|tests|examples)/#d; s#^rs/([^/]*)/.*#\1#p' "$list"
+        sed -n 's/ library$//p' <<<"$readers"
+        # The gate's Send-depth proof of moq-net's session driver is this script.
+        sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
+        # The gate compiles the C fixtures and doc samples against libmoq's header.
+        sed -nE 's#^(sh/rs/c-tests\.sh|doc/lib/c/.*|doc/lib/samples\.sh)$#libmoq#p' "$list"
         jq -r --rawfile list "$list" '
             def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
                 if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
@@ -74,48 +103,61 @@ select_packages() {
                     | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
             | .name' <<<"$metadata"
     } | sort -u)
-    edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
+    edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name) \(.kind // "normal")"' <<<"$metadata")
 
-    # A crate is rebuilt when anything it depends on changed, so walk the edges
-    # backwards until the selection stops growing. Test the value, not the key:
-    # awk creates a key on every `want[dep[i]]` read. The id lookup below drops
-    # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
-    # The seeds go through the environment because BSD awk (macOS) rejects a
-    # newline in a `-v` value.
+    # A library is rebuilt when a normal or build dependency changed, so walk
+    # those edges backwards until the selection stops growing. A dev-dependency
+    # reaches only the tests of the crate that takes it, whose library and
+    # dependents stay as they were, so it selects that crate and stops there.
+    # Test the value, not the key: awk creates a key on every `want[dep[i]]`
+    # read. The id lookup below drops names that are not workspace crates, such
+    # as a seed from `rs/AGENTS.md`. The seeds go through the environment
+    # because BSD awk (macOS) rejects a newline in a `-v` value.
     selected=$(SEEDS="$seeds" awk '
 		BEGIN { split(ENVIRON["SEEDS"], s, "\n"); for (i in s) want[s[i]] = 1 }
-		{ pkg[NR] = $1; dep[NR] = $2 }
+		{ pkg[NR] = $1; dep[NR] = $2; dev[NR] = $3 == "dev" }
 		END {
 			do {
 				grew = 0
 				for (i = 1; i <= NR; i++)
-					if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
+					if (!dev[i] && want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
 			} while (grew)
+			for (i = 1; i <= NR; i++) if (dev[i] && want[dep[i]]) tests[pkg[i]] = 1
 			for (name in want) if (want[name]) print name
+			for (name in tests) print name
 		}
 	' <<<"$edges")
-    selected=$(printf '%s\n%s\n' "$selected" "$benches" | sed '/^$/d' | sort -u)
+    selected=$(printf '%s\n%s\n' "$selected" "$targets" | sed '/^$/d' | sort -u)
 
     [[ -n "$selected" ]] || return 0
 
     # Cargo's own package ids, not bare names: a workspace crate that is also
     # pulled from crates.io (kio) makes `--package kio` ambiguous, and cargo
     # refuses before compiling anything.
-    jq -r --arg selected "$selected" '
+    local pkg_flags
+    pkg_flags=$(jq -r --arg selected "$selected" '
 		($selected | split("\n")) as $want
 		| .packages[]
 		| select(.name as $name | $want | index($name) != null)
 		| "--package \(.id)"
-	' <<<"$metadata" | sort -u | tr '\n' ' '
+	' <<<"$metadata" | sort -u | tr '\n' ' ')
+    [[ -n "$pkg_flags" ]] || return 0
+    printf '%s\n%s\n' "$pkg_flags" "$(printf '%s\n' "$seeds" | tr '\n' ' ')"
 }
 
 # A command substitution clears -e, so a failing jq inside selection would
 # otherwise print a partial selection. Restore it there; Bash 4.4's
 # `inherit_errexit` would too, but macOS ships Bash 3.2.
-packages=$(
+selection=$(
     set -e
     select_packages
 )
+packages=${selection%%$'\n'*}
+if [[ "$selection" == *$'\n'* ]]; then
+    seed_names=${selection#*$'\n'}
+else
+    seed_names=
+fi
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
 names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
@@ -123,6 +165,58 @@ names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u 
 # True when the selection includes a crate matching the pattern.
 wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
+}
+
+# True when the diff directly seeded a crate matching the pattern (or selected ALL).
+seeded() {
+    [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$seed_names"
+}
+
+# The crates whose source or manifest names a platform: a cfg on the OS,
+# family, environment, vendor, or architecture, an OS-specific `std::os`
+# module, a build script reading the target, or a target-specific dependency.
+# Target pointer width and endianness are left out: the host and both cross
+# targets are 64-bit little-endian.
+platform_crates() {
+    local files rc=0
+    files=$(git grep --untracked -lE \
+        'target_(os|family|env|vendor|arch)([^a-z_]|$)|cfg(_attr)?!?\((.*[^a-z_:])?(unix|windows)([^a-z_]|$)|^[[:space:]]*(unix|windows)[[:space:]]*[,)]|std::os::|CARGO_CFG_TARGET_|^\[target\.([^.]*-|.*(unix|windows|target_))' \
+        -- 'rs/*.rs' 'rs/*/Cargo.toml' ':!rs/*/fuzz/**') || rc=$?
+    ((rc <= 1)) || return "$rc"
+    cut -d/ -f2 <<<"$files" | sort -u
+}
+
+# The `package/feature` pairs named by `required-features` on the targets of
+# the crates in $1 (every non-fuzz crate under ALL). Cargo skips a target whose
+# required features are off without a word. $2 is `tests` for tested targets
+# (`.test`), `benches-examples` for benches and examples, or `all` for
+# `--all-targets`.
+required_features() {
+    cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$1" --arg all "$packages" --arg which "$2" '
+        ($names | split(" ") | map(select(. != ""))) as $want
+        | .packages[]
+        | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+        | .name as $name
+        | .targets[]
+        | select(
+            $which == "all"
+            or ($which == "tests" and .test)
+            or ($which == "benches-examples" and (.kind // [] | any(. == "bench" or . == "example")))
+        )
+        | (.["required-features"] // [])[]
+        | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
+}
+
+# Prints `true` when any selected crate in $1 (or any non-fuzz crate under ALL)
+# defines a bench or example, else `false`.
+has_benches_or_examples() {
+    cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$1" --arg all "$packages" '
+        ($names | split(" ") | map(select(. != ""))) as $want
+        | any(
+            .packages[];
+            (if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+            and any(.targets[]; .kind // [] | any(. == "bench" or . == "example"))
+        )'
 }
 
 case "$packages" in
@@ -142,7 +236,10 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
+    # Assigned apart so a failure stops the script.
+    fuzz_crates=$(bash sh/rs/no-fuzz.sh)
+    flags=(--workspace)
+    for fuzz in $fuzz_crates; do flags+=(--exclude "$fuzz"); done
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -154,26 +251,73 @@ case "$action" in
         if wants '(moq-uring|moq-relay)'; then just rs uring; fi
         ;;
     check | check-test | lint)
+        # The session driver's Send proof runs on nightly in its own target dir
+        # (target/send-depth), so overlap it with the stable lint steps and
+        # print its buffered output once it finishes.
+        send_depth_pid=
+        send_depth_log=
+        trap 'rm -f "${send_depth_log:-}"' EXIT
+        if [[ "$action" == lint ]] && wants '(moq-net|moq-tokio)'; then
+            send_depth_log=$(mktemp)
+            just rs send-depth >"$send_depth_log" 2>&1 &
+            send_depth_pid=$!
+        fi
+
+        fail=0
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
-        # Nightly runs the Send-depth proof (`just rs send-depth`) on its
-        # pinned toolchain.
-        just rs "$action" "${flags[@]}"
+        just rs "$action" "${flags[@]}" || fail=1
+        # Lint benches and examples in check mode (no codegen or linking) with
+        # their required features, since `test` runs nextest on `--tests` alone.
+        if [[ "$fail" -eq 0 && ("$action" == lint || "$action" == check-test) ]]; then
+            has_targets=$(
+                set -e
+                has_benches_or_examples "$names"
+            ) || fail=1
+            if [[ "$fail" -eq 0 && "$has_targets" == true ]]; then
+                target_flags=("${flags[@]}")
+                required=$(
+                    set -e
+                    required_features "$names" benches-examples
+                ) || fail=1
+                if [[ "$fail" -eq 0 ]]; then
+                    features=()
+                    for feature in $required; do
+                        [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+                    done
+                    if ((${#features[@]})); then target_flags+=(--features "${features[*]}"); fi
+                    just rs lint-targets "${target_flags[@]}" || fail=1
+                fi
+            fi
+        fi
         # The test build enables device features, which can hide unused items
         # in the default-feature test cfg. Keep this compile isolated from the
         # selected dependents, whose features would unify capture back in.
-        if [[ "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
-            just rs media-defaults
+        if [[ "$fail" -eq 0 && "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
+            just rs media-defaults || fail=1
         fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
-            if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
+        if [[ "$fail" -eq 0 && "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
+            if [[ "$action" == check-test ]]; then just rs capture-test || fail=1; else just rs capture || fail=1; fi
         fi
         # moq-net without `async`, which every other build unifies back in.
-        if wants moq-net; then just rs no-async; fi
+        if [[ "$fail" -eq 0 ]] && wants moq-net; then just rs no-async || fail=1; fi
+        # moq-net's `fuzz` module without the `test-support` other builds unify in.
+        if [[ "$fail" -eq 0 ]] && wants moq-net; then just rs net-fuzz || fail=1; fi
+        # Every C caller still matches libmoq's generated header. rs/libmoq/build.rs
+        # generates moq.h from rs/libmoq/src alone, so transitive upstream edits
+        # cannot alter the header (and `test rs` still compiles libmoq against them).
+        if [[ "$fail" -eq 0 && "$action" == lint ]] && seeded libmoq; then just rs c-tests --syntax || fail=1; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
-        if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
+        if [[ "$fail" -eq 0 && "$action" == check-test ]] && wants moq-cli; then just rs play || fail=1; fi
+        if [[ -n "$send_depth_pid" ]]; then
+            send_depth_rc=0
+            wait "$send_depth_pid" || send_depth_rc=$?
+            cat "$send_depth_log"
+            if [[ "$send_depth_rc" -ne 0 ]]; then fail=1; fi
+        fi
+        exit "$fail"
         ;;
     fix)
         just rs fix "${flags[@]}"
@@ -182,9 +326,6 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
-        # Benches and examples join the build only to be linted; nextest's
-        # default filter leaves the benches unrun.
-        flags+=(--benches --examples)
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
@@ -198,31 +339,18 @@ case "$action" in
         if wants '(moq-video|moq-audio)'; then
             [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
             building+=" moq-video moq-audio"
-            features+=(moq-video/capture moq-audio/capture moq-audio/playback)
+            features+=(moq-video/capture moq-video/openh264 moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The WebRTC data channel's hostile-input tests, such as mDNS backpressure.
-        if wants moq-webrtc; then features+=(moq-webrtc/p2p); fi
-        # The relay's io_uring listener, Linux-only. A moq-uring change selects
-        # the relay too, as its dependent.
-        if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
+        if wants moq-relay; then features+=(moq-relay/test-support); fi
         # Cargo skips a target whose `required-features` are off without a word,
-        # and a crate alone in the selection (a bench-only change, or moq-boy,
-        # whose one target is its binary) has no dependent to turn them on. Turn
-        # on every one named by a target this build holds: benches, examples, and
-        # every target with tests. All of them are additive and build wherever the
-        # gate runs; moq-uring's targets compile to nothing off Linux.
+        # and a crate alone in the selection (such as moq-boy, whose one target
+        # is its binary) has no dependent to turn them on. Turn on every one
+        # named by a tested target this build holds; benches and examples are
+        # linted in check mode during `lint` instead of linked here.
         required=$(
             set -e
-            cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
-                ($names | split(" ") | map(select(. != ""))) as $want
-                | .packages[]
-                | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
-                | .name as $name
-                | .targets[]
-                | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
-                | (.["required-features"] // [])[]
-                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+            required_features "$building" tests
         )
         for feature in $required; do
             [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
@@ -230,8 +358,29 @@ case "$action" in
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
-    platform)
-        # moq-gst links GStreamer via pkg-config, which the runners don't have.
+    platform | cross)
+        # A local cross lint covers only the selected crates that name a
+        # platform, where a macOS- or Windows-only error can hide. `just ci`
+        # (CI_STRICT), which the merge queue runs, lints every selected crate.
+        if [[ "$action" == cross && -z "${CI_STRICT:-}" ]]; then
+            if [[ "$packages" == ALL ]]; then
+                packages=$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | "--package \(.id)"' | tr '\n' ' ')
+            fi
+            platform=" $(
+                set -e
+                platform_crates | tr '\n' ' '
+            ) "
+            kept=()
+            for id in $packages; do
+                name=${id%%#*}
+                [[ "$id" == --package || "$platform" != *" ${name##*/} "* ]] || kept+=(--package "$id")
+            done
+            packages=${kept[*]-}
+            names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
+            echo "rs: cross-linting the crates that name a platform: ${names:-none}"
+        fi
+        # moq-gst links GStreamer via pkg-config, which neither the runners nor
+        # a cross build have.
         if [[ "$packages" == ALL ]]; then
             flags+=(--exclude moq-gst)
         else
@@ -250,8 +399,25 @@ case "$action" in
         # when moq-cli is selected, since cargo rejects a feature of a package
         # outside the selection; a change to anything they reach selects
         # moq-cli anyway.
-        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
-        cargo check --locked "${flags[@]}" --all-targets
+        features=()
+        if wants moq-cli; then features+=(moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio); fi
+        # `--all-targets` skips a target whose required features are off, such
+        # as moq-boy's binary without `openh264`, so turn those on for the
+        # selected crates, as the test build does. moq-gst is never built here.
+        building=$(tr ' ' '\n' <<<"$names" | grep -vx moq-gst | tr '\n' ' ' || true)
+        required=$(
+            set -e
+            required_features "$building" all
+        )
+        for feature in $required; do
+            [[ "$feature" == moq-gst/* || " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+        done
+        if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
+        if [[ "$action" == cross ]]; then
+            sh/rs/cross-lint.sh "${flags[@]}"
+        else
+            cargo check --locked "${flags[@]}" --all-targets
+        fi
         ;;
     *)
         echo "$usage" >&2

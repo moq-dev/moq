@@ -1,14 +1,14 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
 use std::{
-	collections::{BTreeMap, HashMap, hash_map::Entry},
+	collections::{HashMap, hash_map::Entry},
 	task::{Poll, ready},
 	time::Duration,
 };
 
 use crate::{
 	Error, Path, SessionError, Timescale, broadcast,
-	coding::{Decode, DecodeError, Decoder, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Decoder, Reader, Stream, StreamCodes as _, Writer},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
@@ -290,8 +290,9 @@ impl Drop for State {
 	fn drop(&mut self) {
 		// The session dispatcher owns this state and can be dropped at any await. A
 		// session that ended with an error already aborted these with it; what
-		// remains was cancelled with the dispatcher.
-		self.abort(&Error::Cancel);
+		// remains was cancelled with the dispatcher, which ends the session: a route replacing
+		// it continues what these copies closed short.
+		self.abort(&SessionError::Cancel.into());
 	}
 }
 
@@ -317,7 +318,7 @@ enum Fill {
 	/// A fetch stream is writing the head. A second one answers no request of ours.
 	Active,
 
-	/// The head is written: `sequence` holds objects up to but excluding `next`, and its
+	/// The head is written: `key` holds objects up to but excluding `next`, and its
 	/// producer is waiting for the live tail to claim it.
 	///
 	/// The tail is what ends the group, and a publisher serving the subscription's range
@@ -330,7 +331,7 @@ enum Fill {
 	/// tail is coming, but streams are independent: the tail's own can still be behind it.
 	/// Finishing the head on that guess drops the tail when it lands.
 	Ready {
-		sequence: u64,
+		key: u64,
 		next: u64,
 		producer: group::Producer,
 	},
@@ -340,11 +341,11 @@ enum Fill {
 	/// since only a requested head says where its group begins.
 	Done,
 
-	/// The head of `sequence` was requested and is never coming: the fill was refused,
+	/// The head of `key` was requested and is never coming: the fill was refused,
 	/// failed, or ended without it. That group's mid-group stream has a hole at the front,
 	/// so it gets dropped whether it arrives before this settles or after, which degrades
 	/// the join to the next group boundary.
-	Failed { sequence: u64 },
+	Failed { key: u64 },
 
 	/// The publisher ended the track, so no tail is coming. Unlike
 	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
@@ -364,27 +365,27 @@ impl Fill {
 	/// it would have headed. Without one, the fill was owed nothing.
 	fn failed(largest: Option<u64>) -> Self {
 		match largest {
-			Some(sequence) => Fill::Failed { sequence },
+			Some(key) => Fill::Failed { key },
 			None => Fill::Done,
 		}
 	}
 
-	/// Whether a stream for `sequence` starting mid-group is missing the head it was owed.
-	fn headless(&self, sequence: u64) -> bool {
-		matches!(*self, Fill::Failed { sequence: s } if s == sequence)
+	/// Whether a stream for `key` starting mid-group is missing the head it was owed.
+	fn headless(&self, key: u64) -> bool {
+		matches!(*self, Fill::Failed { key: s } if s == key)
 	}
 
-	/// Take the head for `sequence`, if this is one and it ends where the tail begins.
+	/// Take the head for `key`, if this is one and it ends where the tail begins.
 	///
 	/// `start` is the Object ID the tail stream starts at, or `None` for a tail with no
 	/// objects of its own, which takes the head whatever it ends at.
-	fn claim(&mut self, sequence: u64, start: Option<u64>) -> Result<Option<(group::Producer, u64)>, Error> {
+	fn claim(&mut self, key: u64, start: Option<u64>) -> Result<Option<(group::Producer, u64)>, Error> {
 		match *self {
-			Fill::Ready { sequence: s, next, .. } if s == sequence => {
+			Fill::Ready { key: s, next, .. } if s == key => {
 				if start.is_some_and(|start| start != next) {
 					// A head that stops somewhere other than where the tail starts leaves a
 					// hole the model cannot express, so neither half of the group is usable.
-					tracing::warn!(sequence, next, start, "the fill does not meet the live tail");
+					tracing::warn!(key, next, start, "the fill does not meet the live tail");
 					self.cancel();
 					return Err(Error::Unsupported);
 				}
@@ -464,7 +465,7 @@ impl Fill {
 				let _ = producer.abort(err);
 			}
 			Fill::Ended => *self = Fill::Ended,
-			Fill::Failed { sequence } => *self = Fill::Failed { sequence },
+			Fill::Failed { key } => *self = Fill::Failed { key },
 			_ => {}
 		}
 	}
@@ -513,7 +514,7 @@ enum GroupFetch {
 
 /// What FETCH_OK settled about a range FETCH, for the fetch stream writing its groups.
 struct RangeFetch {
-	fill: std::sync::Arc<track::Fill>,
+	fill: std::sync::Arc<track::FillGroups>,
 	timescale: Option<Timescale>,
 	/// The first group requested.
 	first: u64,
@@ -546,8 +547,8 @@ impl RangeWriter {
 	}
 
 	/// The group being written.
-	fn sequence(&self) -> Option<u64> {
-		self.current.as_ref().map(|(sequence, _)| *sequence)
+	fn key(&self) -> Option<u64> {
+		self.current.as_ref().map(|(key, _)| *key)
 	}
 
 	/// The current group's producer, `None` while its objects are read past.
@@ -555,44 +556,40 @@ impl RangeWriter {
 		self.current.as_mut()?.1.as_mut()
 	}
 
-	/// The exclusive Object ID bounding group `sequence`, if FETCH_OK's End Location falls
+	/// The exclusive Object ID bounding group `key`, if FETCH_OK's End Location falls
 	/// inside it.
-	fn bound(&self, sequence: u64) -> Option<u64> {
-		self.fetch.end.filter(|_| sequence == self.fetch.last)
+	fn bound(&self, key: u64) -> Option<u64> {
+		self.fetch.end.filter(|_| key == self.fetch.last)
 	}
 
-	/// Finish the current group and open group `sequence`, returning the first Object ID it
-	/// starts at. The sequences between them do not exist. A group cached since it was asked
+	/// Finish the current group and open group `key`, returning the first Object ID it
+	/// starts at. The keys between them do not exist. A group cached since it was asked
 	/// is read past, as is a datagram, which a stream track never holds.
-	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
-		if sequence < self.next || sequence > self.fetch.last {
+	fn open(&mut self, key: u64, datagram: bool) -> Result<u64, Error> {
+		if key < self.next || key > self.fetch.last {
 			tracing::warn!(
-				sequence,
+				key,
 				"a group fetch's group is out of order or past FETCH_OK's End Location"
 			);
 			return Err(Error::ProtocolViolation);
 		}
 		self.finish()?;
 		let fill = &self.fetch.fill;
-		fill.drop_groups(self.next..sequence);
-		self.next = sequence + 1;
+		fill.drop_groups(self.next..key);
+		self.next = key + 1;
 
-		let start = match sequence == self.fetch.first {
+		let start = match key == self.fetch.first {
 			true => self.fetch.start,
 			false => 0,
 		};
 		let producer = match datagram {
 			true => {
-				tracing::debug!(sequence, "dropping a datagram group from a fetch");
-				fill.drop_groups(sequence..sequence + 1);
+				tracing::debug!(key, "dropping a datagram group from a fetch");
+				fill.drop_groups(key..key + 1);
 				None
 			}
-			false => match fill.accept(sequence, None) {
-				Ok(producer) => Some(crate::recv::Group::new(producer)),
-				// Delivered since it was asked: this fetch's copy is a duplicate.
-				Err(Error::Duplicate) => None,
-				Err(err) => return Err(err),
-			},
+			// None once delivered since it was asked: this fetch's copy is a duplicate.
+			false => fill.accept(key, None)?.map(crate::recv::Group::new),
 		};
 		if let Some(producer) = &producer {
 			let handle = producer.handle().clone();
@@ -602,7 +599,7 @@ impl RangeWriter {
 				*state = GroupFetch::Receiving(Some(handle));
 			}
 		}
-		self.current = Some((sequence, producer));
+		self.current = Some((key, producer));
 		if let Some(producer) = self.producer() {
 			// The objects keep the IDs they have in the group rather than restarting at 0.
 			producer.start_at(start)?;
@@ -779,8 +776,8 @@ impl Target {
 		let Self::Resume(idle) = self else {
 			return None;
 		};
-		let wanted = idle.demand.wanted()?;
-		let latest = idle.track.latest_sequence()?;
+		let wanted = idle.demand.asked()?;
+		let latest = idle.track.latest_key()?;
 		(wanted > latest).then_some(wanted)
 	}
 
@@ -806,7 +803,7 @@ impl Target {
 /// TRACK_STATUS_OK).
 ///
 /// The copy keeps the units the publisher declared, so it matches a copy of the same
-/// instance that arrived over another route: resuming across routes refuses one whose
+/// identity that arrived over another route: resuming across routes refuses one whose
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
@@ -822,7 +819,7 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		))
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
-		.with_refresh(properties.dynamic_groups.then_some(0));
+		.with_refresh(track::Refresh::default().with_ratio(properties.dynamic_groups.then_some(0)));
 	info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
 		version,
 		values: properties.unknown.clone(),
@@ -842,19 +839,29 @@ fn refused(properties: &ietf::Properties, version: Version, negotiated: bool) ->
 
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
 fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Option<u64> {
-	answer.map(|largest| largest.group).max(track.latest_sequence())
+	answer.map(|largest| largest.group).max(track.latest_key())
 }
 
 /// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
 /// Object in group `edge`: a reader asked for it ([`track::Subscription::feed`]), or one of
 /// its ranges is open, counts back from the live edge, or reaches the group the publisher
-/// may still be writing. Ranges wholly below it read only history, which fills serve.
+/// may still be writing. Ranges wholly below it read only history, which fills serve when
+/// each names one key. A wider one subscribes instead: its fill would FETCH every key in it,
+/// spanning groups the copy cannot tell apart, and our publishers answer only a one-group
+/// FETCH.
 fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	if subscription.ranges.is_empty() {
 		return false;
 	}
 	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
-	subscription.feed || !history
+	// An empty range, ending before it starts, fetches nothing either.
+	let one_key = subscription.ranges.iter().all(|range| {
+		matches!(
+			(range.start, range.end),
+			(track::Start::Time(start), Some(end)) if end <= start
+		)
+	});
+	subscription.feed || !history || !one_key
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -959,7 +966,7 @@ struct BroadcastState {
 	route: crate::origin::RouteInfo,
 
 	// Each live advertisement of the namespace with the route it describes, oldest first.
-	// A publisher replacing its instance withdraws one advertisement and makes another, on
+	// A publisher replacing its identity withdraws one advertisement and makes another, on
 	// separate streams that can arrive in either order: the newest stands until it goes,
 	// and an update to an older one changes nothing.
 	adverts: Vec<(u64, crate::origin::RouteInfo)>,
@@ -1114,7 +1121,7 @@ pub(super) struct Subscriber {
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
 	// extension; otherwise this is the one the session assigned it (a fresh id per
-	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
+	// dialed or accepted session, unless the caller pinned one with `with_peer_node`),
 	// or `Hop::UNKNOWN` (0) when none was assigned.
 	//
 	// The assigned id stays local: it is never written into a hop chain, so a peer
@@ -1134,8 +1141,8 @@ pub(super) struct Subscriber {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; this session's routes then rank last
-	// (draining), so a replacement session outranks it. Requests keep opening,
+	// Set once the peer sends a GOAWAY; this session's routes then rank below every
+	// available route (draining), so a replacement session outranks it. Requests keep opening,
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
@@ -1226,7 +1233,7 @@ impl Subscriber {
 		session: Transport,
 		origin: origin::Producer,
 		control: Control,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		self_origin: crate::Hop,
 		cost: Option<u64>,
@@ -1237,10 +1244,9 @@ impl Subscriber {
 		Self {
 			runtime,
 			session,
-			// Its own frame budget, so a peer's declared sizes crowd out no other session.
-			origin: origin.with_own_frames(),
+			origin,
 			control,
-			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			session_origin: peer_node.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
 			solicit: true,
@@ -2959,13 +2965,13 @@ impl Subscriber {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
 				// Another advertisement of a namespace the peer holds is the same stream.
-				route.instance = entry.route.instance.clone();
+				route.identity = entry.route.identity.clone();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
 				}
 				// The newest advertisement stands, and an update to an older one changes
-				// nothing. A repeat of the same instance re-prices in place and in-flight
+				// nothing. A repeat of the same identity re-prices in place and in-flight
 				// tracks keep flowing.
 				let (newest, route) = entry.adverts.last().expect("just recorded");
 				if *newest == id {
@@ -2977,9 +2983,9 @@ impl Subscriber {
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// moq-transport carries no instance, so each namespace the peer advertises anew
+				// moq-transport carries no identity, so each namespace the peer advertises anew
 				// is a stream of its own, even one it advertised before on this session.
-				route.instance = Some(crate::Instance::minted());
+				route.identity = Some(crate::Identity::minted());
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = match slot {
 					Some(slot) => slot,
@@ -3180,7 +3186,7 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
-		let mut once = SubscribeOnce::new(self, broadcast_path, track_name, target, gate)?;
+		let mut once = SubscribeOnce::new(self, broadcast_path, track_name, target, gate);
 		kio::wait(|waiter| once.poll(waiter, self, broadcast_path, track_name, group_fetches)).await
 	}
 }
@@ -3293,7 +3299,7 @@ impl kio::Task for RunRoute {
 				Some(requested) => requested.clone(),
 				None => continue,
 			};
-			// The source takes new tracks only while the peer still selects that instance.
+			// The source takes new tracks only while the peer still selects that identity.
 			let validity = {
 				let state = this.state.lock();
 				let entry = state
@@ -3338,7 +3344,7 @@ impl kio::Task for RunRoute {
 
 /// Serves one minted source's track requests, taken through its `broadcast` handler,
 /// until it closes: its namespace is retracted (`route` closes), the peer stops
-/// selecting its instance, nothing holds it any more, or the session dies.
+/// selecting its identity, nothing holds it any more, or the session dies.
 struct RunBroadcast {
 	datagrams: broadcast::DatagramRequests,
 	this: Subscriber,
@@ -3581,16 +3587,13 @@ impl kio::Task for RunSubscribe {
 						_ => {
 							// `SubscribeOnce` counts the subscription itself.
 							self.setup = None;
-							match SubscribeOnce::new(
+							RunStep::Subscribe(SubscribeOnce::new(
 								&self.this,
 								&self.broadcast_path,
 								&self.track_name,
 								Target::Request(request),
 								&self.gate,
-							) {
-								Some(once) => RunStep::Subscribe(once),
-								None => return Poll::Ready(()),
-							}
+							))
 						}
 					};
 				}
@@ -3621,16 +3624,13 @@ impl kio::Task for RunSubscribe {
 					};
 					// `SubscribeOnce` counts the subscription itself.
 					self.setup = None;
-					let Some(once) = SubscribeOnce::new(
+					self.step = RunStep::Subscribe(SubscribeOnce::new(
 						&self.this,
 						&self.broadcast_path,
 						&self.track_name,
 						Target::Resume(next),
 						&self.gate,
-					) else {
-						return Poll::Ready(());
-					};
-					self.step = RunStep::Subscribe(once);
+					));
 				}
 				RunStep::Subscribe(once) => {
 					once.source = self.source.clone();
@@ -3676,7 +3676,7 @@ enum ServeEnd {
 	Idle,
 	Revoked,
 	Done(Result<ietf::PublishDone<'static>, Error>),
-	Fill(track::Fill),
+	Fill(track::FillGroups),
 	/// An update to send, and the bounds it asks for once its range changed.
 	Update(RequestId, Update, WireBounds),
 	Invalid(Error),
@@ -3695,18 +3695,14 @@ struct SubscribeOnce {
 	gate: crate::auth::Gate,
 	_working: crate::session::Working,
 	validity: crate::model::broadcast::RequestValidity,
-	resolved: ResolvedRanges,
 	plan: Plan,
 	step: OnceStep,
 }
 
 /// What a subscription asks for, resolved against the copy as it starts.
 struct Plan {
-	/// The aggregate asked for, resolved against the copy.
+	/// The aggregate asked for.
 	subscription: Option<track::Subscription>,
-	/// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
-	/// the live join that names it goes first and the answer resolves the anchor.
-	deferred: bool,
 	start: Option<u64>,
 	join: Join,
 	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest; the
@@ -3716,37 +3712,17 @@ struct Plan {
 }
 
 impl Plan {
-	/// Resolve what `target` asks for, or why it cannot be asked.
-	fn new(resolved: &mut ResolvedRanges, target: &Target, version: Version) -> Result<Self, Error> {
-		let subscription = target
-			.subscription()
-			.map(|subscription| match target.producer() {
-				Some(track) => resolved.resolve(track, &subscription),
-				None if needs_resolution(&subscription) => Err(Error::Unsupported),
-				None => Ok(subscription),
-			})
-			.transpose();
-		// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
-		// the live join that names it goes first and the answer resolves the anchor. No Group
-		// ID arithmetic spells it upstream. A time anchor names no group the answer settles.
-		let deferred = matches!(subscription, Err(Error::Unsupported))
-			&& target
-				.subscription()
-				.is_some_and(|subscription| !has_time(&subscription));
-		let subscription = match subscription {
-			Ok(subscription) => subscription,
-			Err(_) if deferred => None,
-			Err(err) => return Err(err),
-		};
-		let start = subscription.as_ref().and_then(|s| s.start());
+	/// What `target` asks for.
+	fn new(target: &Target, version: Version) -> Self {
+		let subscription = target.subscription();
+		let start = subscription.as_ref().and_then(wire_start);
 		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), version);
-		Ok(Self {
+		Self {
 			live: !matches!(join.filter, Filter::Absolute { .. }),
 			subscription,
-			deferred,
 			start,
 			join,
-		})
+		}
 	}
 }
 
@@ -3763,10 +3739,8 @@ struct OnceRequest {
 
 /// What the request went out with.
 struct Sent {
-	/// What the peer's SETUP negotiated: MAX_AGE, and compressed properties.
-	max_age_supported: bool,
+	/// Whether the peer's SETUP negotiated compressed properties.
 	flate: bool,
-	max_age: Option<u64>,
 	priority: i8,
 	new_group: Option<u64>,
 	properties_wanted: bool,
@@ -3905,22 +3879,16 @@ struct Established {
 	/// until the Largest Group reaches it, and joins meanwhile ask for the same group.
 	requested: Option<u64>,
 	dynamic_groups: bool,
-	/// The group the track's consumers want, `None` once nobody does.
-	wanted: Option<u64>,
-	/// MAX_AGE is negotiated, so an update carries the aggregate's.
-	max_age_supported: bool,
+	/// Whether the track's consumers want it.
+	wanted: bool,
 	/// The subscriber priority upstream holds, and the one the aggregate now asks for.
-	sent_max_age: Option<u64>,
-	wanted_max_age: Option<u64>,
 	sent_priority: i8,
 	priority: i8,
 	sent_bounds: WireBounds,
-	wanted_bounds: Result<WireBounds, Error>,
-	/// A deferred relative anchor, until the copy learns the live edge it counts back from:
-	/// an answer with no Largest leaves it to the first group. The bounds it then resolves
-	/// to go upstream as an update, absolute like any other.
-	unsettled: Option<track::Subscription>,
-	edge: track::Consumer,
+	wanted_bounds: WireBounds,
+	/// The group a live join started at: the Largest its SUBSCRIBE_OK named, or group 0 when
+	/// it named none, since the publisher had nothing yet. `None` for a SUBSCRIBE with a start.
+	joined: Option<u64>,
 	/// REQUEST_UPDATEs sent and not yet answered.
 	unanswered: u64,
 	demand: track::Demand,
@@ -3930,22 +3898,14 @@ struct Established {
 }
 
 impl SubscribeOnce {
-	/// `None` once the target failed at once, for asking what no request can spell.
 	fn new(
 		this: &Subscriber,
 		broadcast_path: &Path,
 		track_name: &str,
 		target: Target,
 		gate: &crate::auth::Gate,
-	) -> Option<Self> {
-		let mut resolved = ResolvedRanges::default();
-		let plan = match Plan::new(&mut resolved, &target, this.version) {
-			Ok(plan) => plan,
-			Err(err) => {
-				target.fail(err);
-				return None;
-			}
-		};
+	) -> Self {
+		let plan = Plan::new(&target, this.version);
 		let key = (broadcast_path.clone(), track_name.into());
 		// A listed track's paused subscription is already this track's upstream copy, so
 		// resume it rather than open a second one.
@@ -3956,16 +3916,15 @@ impl SubscribeOnce {
 				open: Default::default(),
 			},
 		};
-		Some(Self {
+		Self {
 			source: None,
 			key,
 			gate: gate.unnamed(),
 			_working: this.session.work().start(),
 			validity: this.validity.start(),
-			resolved,
 			plan,
 			step,
-		})
+		}
 	}
 
 	fn poll(
@@ -4277,15 +4236,11 @@ impl SubscribeOnce {
 		// the order.
 		let aggregate = target.subscription();
 		let sent = Sent {
-			max_age_supported: peer.max_age,
 			flate: peer.flate,
 			priority: aggregate.as_ref().map(|s| s.priority).unwrap_or(0),
-			max_age: peer
-				.max_age
-				.then(|| super::max_age::millis(aggregate.as_ref().map_or(Duration::MAX, |s| s.budget()))),
 			// Without an Established subscription, a relay includes the request it holds.
 			new_group: target.new_group(),
-			// A timed copy asks for the units that opt its objects into timestamps.
+			// A timed copy asks for the units its Group IDs are in.
 			properties_wanted: match &target {
 				Target::Request(_) => true,
 				Target::Resume(idle) => idle.properties.timescale.is_some(),
@@ -4306,7 +4261,6 @@ impl SubscribeOnce {
 					filter: Some(join.filter),
 					fill: join.fill,
 					priority: Some(sent.priority),
-					max_age: sent.max_age,
 					// Only a track declaring DYNAMIC_GROUPS takes one on an update.
 					new_group: sent.new_group.filter(|_| held.properties.dynamic_groups),
 				};
@@ -4315,7 +4269,6 @@ impl SubscribeOnce {
 			None => req.stream.writer.buffer_message(
 				ietf::Subscribe::ID,
 				&ietf::Subscribe {
-					max_age: sent.max_age,
 					new_group: sent.new_group,
 					request_id,
 					track_namespace: broadcast_path.clone(),
@@ -4618,12 +4571,13 @@ impl SubscribeOnce {
 			}
 		};
 		track.received();
-		track.anchored_cached();
+		track.anchored();
+		track.starts_at_keys();
 		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_object(largest.group, largest.object);
-			// A live join's Largest is where its feed is, which a relative anchor counts back
+			// A live join's Largest is where its feed is, which a reader's live join measures
 			// from even when a newer group lands before the joined one.
 			if plan.live {
 				track.report_edge(largest.group);
@@ -4631,10 +4585,13 @@ impl SubscribeOnce {
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
-		// may still arrive after a higher one's. This resolves the pending start.
-		let _ = match plan.live {
-			true => track.start_at(largest.map_or(0, |largest| largest.group)),
-			false => track.start_at(plan.start),
+		// may still arrive after a higher one's. This resolves the pending start. The publisher
+		// placed a live join at its edge, so the groups below stay fillable for whatever each
+		// reader's budget reaches, even one from the oldest group, which names none of them.
+		let _ = match (plan.live, largest) {
+			(true, Some(largest)) => track.start_resolved(largest.group),
+			(true, None) => track.start_at(0),
+			(false, _) => track.start_at(plan.start),
 		};
 		let shared = match (this.session.max_datagram_size() > 0, &self.source) {
 			(true, Some(source)) => Shared::new(this, source, self.key.clone(), &track),
@@ -4643,14 +4600,6 @@ impl SubscribeOnce {
 		if let Some(staged) = staged {
 			staged.commit();
 		}
-		// Resolved while the answer's Largest is still the live edge: no data stream reaches
-		// the copy before its alias is bound below.
-		let settled = match plan.deferred {
-			true => track
-				.subscription()
-				.map(|subscription| (settle_bounds(&mut self.resolved, &track, &subscription), subscription)),
-			false => None,
-		};
 		{
 			let mut state = this.state.lock();
 			if let Some(held) = state.subscribes.get_mut(&request_id) {
@@ -4698,18 +4647,11 @@ impl SubscribeOnce {
 			false => None,
 		};
 
+		let joined = (plan.live && plan.start.is_none()).then(|| largest.map_or(0, |largest| largest.group));
 		let sent_bounds = (
 			plan.start,
 			plan.subscription.as_ref().and_then(|subscription| subscription.end()),
 		);
-		let mut wanted_bounds = Ok(sent_bounds);
-		let mut unsettled = None;
-		match settled {
-			Some((Ok(Some(bounds)), _)) => wanted_bounds = Ok(bounds),
-			Some((Ok(None), subscription)) => unsettled = Some(subscription),
-			Some((Err(err), _)) => wanted_bounds = Err(err),
-			None => {}
-		}
 		let live = Established {
 			alias,
 			properties,
@@ -4719,17 +4661,13 @@ impl SubscribeOnce {
 			resuming,
 			fetching,
 			requested: sent.new_group,
-			dynamic_groups: track.info().refresh.is_some(),
-			wanted: None,
-			max_age_supported: sent.max_age_supported,
-			sent_max_age: sent.max_age,
-			wanted_max_age: sent.max_age,
+			dynamic_groups: track.info().refresh.enabled(),
+			wanted: false,
 			sent_priority: sent.priority,
 			priority: sent.priority,
 			sent_bounds,
-			wanted_bounds,
-			unsettled,
-			edge: track.consume(),
+			wanted_bounds: sent_bounds,
+			joined,
 			unanswered: 0,
 			demand: track.demand(),
 			subscribed: track
@@ -4784,9 +4722,10 @@ impl SubscribeOnce {
 				// A feed ending before the answer's Largest never shows it, so the
 				// answer alone makes the copy current. A live join's feed is open.
 				Some(largest) if !self.plan.live && live.sent_bounds.1.is_some_and(|end| end <= largest.group) => {
-					track.set_live_ahead(largest, from)
+					track.set_live_ahead(Some(largest), None, from)
 				}
-				largest => track.set_live(largest, from),
+				// An Object ID is no frame ordinal, so the cache does not record it.
+				largest => track.set_live(largest, None, from),
 			};
 			live.resuming = None;
 			// An answer behind the copy's cache fails it.
@@ -4801,41 +4740,22 @@ impl SubscribeOnce {
 			live.subscribed = subscription
 				.as_ref()
 				.is_some_and(|subscription| !subscription.ranges.is_empty());
-			live.unsettled = None;
 			if let Some(subscription) = subscription {
 				live.priority = subscription.priority;
-				match settle_bounds(&mut self.resolved, &live.track, &subscription) {
-					Ok(Some(bounds)) => live.wanted_bounds = Ok(bounds),
-					Ok(None) => live.unsettled = Some(subscription.clone()),
-					Err(err) => live.wanted_bounds = Err(err),
-				}
-				if live.max_age_supported {
-					live.wanted_max_age = Some(super::max_age::millis(subscription.budget()));
-				}
-			}
-		}
-		if let Some(subscription) = &live.unsettled {
-			while let Poll::Ready(Some(_)) = live.edge.poll_largest(waiter) {}
-			match settle_bounds(&mut self.resolved, &live.track, subscription) {
-				Ok(Some(bounds)) => {
-					live.wanted_bounds = Ok(bounds);
-					live.unsettled = None;
-				}
-				Ok(None) => {}
-				Err(err) => return Poll::Ready(ServeEnd::Invalid(err)),
+				live.wanted_bounds = wire_bounds(&subscription, live.joined);
 			}
 		}
 		loop {
 			match live.demand.poll_wanted_changed(waiter) {
 				Poll::Ready(Ok(next)) => live.wanted = next,
-				Poll::Ready(Err(_)) => live.wanted = None,
+				Poll::Ready(Err(_)) => live.wanted = false,
 				Poll::Pending => break,
 			}
-			if live.wanted.is_none() {
+			if !live.wanted {
 				break;
 			}
 		}
-		if !live.subscribed || live.wanted.is_none() {
+		if !live.subscribed || !live.wanted {
 			return Poll::Ready(ServeEnd::Idle);
 		}
 		let updating = &live.track;
@@ -4864,15 +4784,12 @@ impl SubscribeOnce {
 		if live.unanswered > 0 {
 			return Poll::Pending;
 		}
-		let new_group = live.wanted.filter(|&value| {
+		let new_group = live.demand.poll_asked(waiter).filter(|&value| {
 			live.dynamic_groups
 				&& largest_group(&live.track, live.largest).is_some_and(|largest| value > largest)
 				&& live.requested.is_none_or(|requested| value > requested)
 		});
-		let bounds = match &live.wanted_bounds {
-			Ok(bounds) => *bounds,
-			Err(err) => return Poll::Ready(ServeEnd::Invalid(err.clone())),
-		};
+		let bounds = live.wanted_bounds;
 		let sent_bounds = live.sent_bounds;
 		let widened = match (bounds.0, sent_bounds.0) {
 			(None, Some(_)) => true,
@@ -4919,7 +4836,6 @@ impl SubscribeOnce {
 			filter: ranges.as_ref().map(|join| join.filter),
 			fill: ranges.and_then(|join| join.fill),
 			priority: (live.priority != live.sent_priority).then_some(live.priority),
-			max_age: live.wanted_max_age.filter(|_| live.wanted_max_age != live.sent_max_age),
 			new_group,
 		};
 		let mut state = this.state.lock();
@@ -4946,19 +4862,15 @@ impl SubscribeOnce {
 		} else {
 			None
 		};
-		if update.priority.is_none()
-			&& update.max_age.is_none()
-			&& update.new_group.is_none()
-			&& update.filter.is_none()
-		{
+		if update.priority.is_none() && update.new_group.is_none() && update.filter.is_none() {
 			return Poll::Pending;
 		}
 		let update_id = this.control.next_request_id();
 		if let Some(mut filling) = filling {
 			// A handler may already have the old header and be waiting on its
 			// answer. It must keep the old state, never claim the new request.
-			if let Fill::Failed { sequence } = *filling {
-				held.headless_through = held.headless_through.max(Some(sequence));
+			if let Fill::Failed { key } = *filling {
+				held.headless_through = held.headless_through.max(Some(key));
 			}
 			filling.cancel();
 			drop(filling);
@@ -4994,11 +4906,10 @@ impl SubscribeOnce {
 			}
 			ServeEnd::Update(update_id, update, bounds) => {
 				let changed_range = update.filter.is_some();
-				let (asked, new_group, asked_age) = (update.priority, update.new_group, update.max_age);
+				let (asked, new_group) = (update.priority, update.new_group);
 				if let Err(err) = req.stream.writer.buffer_message(
 					ietf::SubscribeUpdate::ID,
 					&ietf::SubscribeUpdate {
-						max_age: update.max_age,
 						request_id: update_id,
 						subscriber_priority: update.priority.map(super::priority::to_wire),
 						forward: None,
@@ -5015,9 +4926,6 @@ impl SubscribeOnce {
 				if changed_range {
 					live.sent_bounds = bounds;
 					let _ = live.track.start_at(live.sent_bounds.0);
-				}
-				if asked_age.is_some() {
-					live.sent_max_age = asked_age;
 				}
 				if let Some(asked) = asked {
 					live.sent_priority = asked;
@@ -5222,8 +5130,10 @@ impl Established {
 		// track may run past: a later reader subscribes afresh to the same
 		// name, and its groups continue.
 		match end {
-			// A no-op once an END_OF_TRACK declared the end, whose readers
-			// wait for a missing group only as long as the grace.
+			// Once an END_OF_TRACK declared the end at the newest group, this
+			// ends the copy's wait for the keys below it that never arrived:
+			// every data stream is accounted for, so with sparse starts they
+			// never existed.
 			Ok(()) => {
 				let _ = self.track.finish_shared();
 			}
@@ -5266,7 +5176,7 @@ struct Linger {
 
 /// What ended a wait while lingering.
 enum LingerStep {
-	Fill(track::Fill),
+	Fill(track::FillGroups),
 	Subscribe,
 	Expired,
 	Revoked,
@@ -5665,7 +5575,7 @@ impl JoinFetch {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				// Served by the subscription it joins, which named the instance.
+				// Served by the subscription it joins, which named the identity.
 			},
 		)?;
 		Poll::Ready(Ok(stream))
@@ -5949,7 +5859,7 @@ impl LearnTrackStatus {
 					} else if let Poll::Ready(res) = response {
 						Some(SetupResponse::Response(res))
 					} else if let Poll::Ready(err) = this.session.poll_closed(waiter) {
-						Some(SetupResponse::Cancelled(Error::from_transport(err)))
+						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
 						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_fill(waiter) {
@@ -6039,7 +5949,8 @@ impl LearnTrackStatus {
 					// Marked received before any reader sees it, so none resolves an anchor this
 					// wire dropped.
 					track.received();
-					track.anchored_cached();
+					track.anchored();
+					track.starts_at_keys();
 					if let Some(largest) = ok.largest {
 						track.report_object(largest.group, largest.object);
 					}
@@ -6130,27 +6041,21 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		let timestamp = match &datagram.properties {
-			Some(raw) => {
-				let bytes = bytes::Bytes::copy_from_slice(raw);
-				match super::object::read(&bytes, self.version, timescale) {
-					Ok(object) => object.timestamp,
-					Err(err) => {
-						tracing::debug!(%err, "dropping a datagram with unreadable object properties");
-						return Ok(None);
-					}
-				}
-			}
-			None => None,
-		};
-		if timescale.is_some() && timestamp.is_none() {
+		if let Some(raw) = &datagram.properties
+			&& let Err(err) = super::object::read(&bytes::Bytes::copy_from_slice(raw), self.version)
+		{
+			tracing::debug!(%err, "dropping a datagram with unreadable object properties");
+			return Ok(None);
+		}
+		// Its time is its sequence, as a group's is its ID.
+		let Ok(timestamp) = object_time(timescale, datagram.group_id) else {
 			tracing::debug!(
 				alias = datagram.track_alias,
 				group = datagram.group_id,
-				"dropping a datagram without a timestamp on a timed track"
+				"dropping a datagram whose sequence is past the latest time"
 			);
 			return Ok(None);
-		}
+		};
 		if let Err(err) = producer.insert(crate::datagram::Datagram {
 			sequence: datagram.group_id,
 			timestamp,
@@ -6178,7 +6083,7 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 	}
 	// Lower groups may still be on the wire, behind the one that carried the end: the
 	// received copy holds readers at a hole for the grace.
-	if let Err(err) = track.finish_at(end, None) {
+	if let Err(err) = track.finish_at(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
@@ -6387,6 +6292,7 @@ impl RecvGroup {
 
 		let mut ingest: GroupIngest = GroupIngest::new(this.version, &group, timescale);
 		ingest.expected_first = Some(start);
+		ingest.track = Some(track.clone());
 		let res = wait!(Ingest => {
 			if let Poll::Ready(err) = track.poll_aborted(waiter) {
 				Poll::Ready(Err(err))
@@ -6411,21 +6317,21 @@ impl RecvGroup {
 				| Error::FrameTooLarge
 				| Error::GroupTooLarge),
 			) => {
-				tracing::warn!(%err, group = %producer.sequence, "refusing group");
+				tracing::warn!(%err, group = %producer.key, "refusing group");
 				let _ = producer.abort(err.clone());
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				Err(err)
 			}
 			// The track is malformed, not just this group, so no later group is trusted.
 			Err(Error::MalformedTrack) => {
-				tracing::warn!(group = %producer.sequence, "malformed track");
+				tracing::warn!(group = %producer.key, "malformed track");
 				let _ = producer.abort(Error::MalformedTrack);
 				let _ = track.abort(Error::MalformedTrack);
 				Err(Error::MalformedTrack)
 			}
 			// The peer reset the stream, the transport failed, or the track went away.
 			Err(err) => {
-				tracing::debug!(%err, group = %producer.sequence, "group error");
+				tracing::debug!(%err, group = %producer.key, "group error");
 				let _ = producer.abort(err);
 				Ok(())
 			}
@@ -6497,10 +6403,12 @@ impl OpenGroup {
 		header: &ietf::GroupHeader,
 		reading: &mut Reading,
 	) -> Poll<Result<Opened, Error>> {
-		let sequence = header.group_id;
+		let key = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
-		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
+		// through the tagged `track::Producer`. A group the copy already holds arrived twice,
+		// and the model has one producer per group, so the second stream is refused.
+		let create =
+			|track: &mut track::Producer| track.claim_group(group::Info { start: key })?.ok_or(Error::Duplicate);
 
 		loop {
 			match self.step {
@@ -6527,9 +6435,7 @@ impl OpenGroup {
 					};
 				}
 				OpenStep::ClaimEarly => {
-					if let Some((producer, next)) =
-						ready!(poll_claim_fill(fill, track, sequence, None, reading, waiter))?
-					{
+					if let Some((producer, next)) = ready!(poll_claim_fill(fill, track, key, None, reading, waiter))? {
 						return Poll::Ready(Ok(Opened::Group(producer, next)));
 					}
 					self.step = OpenStep::PeekFirst;
@@ -6574,14 +6480,10 @@ impl OpenGroup {
 					// unless it claims FIRST_OBJECT: a group may start past object 0.
 					if !fill.read().outstanding() {
 						let start = first.map_or(0, |first| first.id);
-						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(sequence))
-						{
-							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(key)) {
+							tracing::warn!(key, start, "no fill to stitch a mid-group stream onto");
 							// Never arriving whole, the group is dropped so readers stop owing it.
-							track.give_up(
-								sequence..sequence + 1,
-								crate::track::Hole::drop(crate::StreamError::NotFound),
-							);
+							track.give_up(key..key + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6590,13 +6492,13 @@ impl OpenGroup {
 					// The first object's ID delta is its absolute Object ID (see `next_object_id`).
 					match first.map(|first| first.id) {
 						// A group delivered from its start stands alone, unless the fill already
-						// headed this very sequence: the publisher then served those objects
+						// headed this very key: the publisher then served those objects
 						// twice, and the model has one producer per group. Refuse both unfinished
 						// pieces rather than cache a cut group as complete.
 						Some(0) => {
-							let headed = matches!(*fill.read(), Fill::Ready { sequence: s, .. } if s == sequence);
+							let headed = matches!(*fill.read(), Fill::Ready { key: s, .. } if s == key);
 							if headed {
-								tracing::warn!(sequence, "a whole group arrived for one the fill already headed");
+								tracing::warn!(key, "a whole group arrived for one the fill already headed");
 								if let Ok(mut state) = fill.write() {
 									state.cancel();
 								}
@@ -6619,15 +6521,12 @@ impl OpenGroup {
 					return Poll::Ready(Ok(Opened::EndOfTrack { object, properties }));
 				}
 				OpenStep::ClaimTail(start) => {
-					let claimed = ready!(poll_claim_fill(fill, track, sequence, start, reading, waiter))?;
+					let claimed = ready!(poll_claim_fill(fill, track, key, start, reading, waiter))?;
 					return Poll::Ready(match (start, claimed) {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
-							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
-							track.give_up(
-								sequence..sequence + 1,
-								crate::track::Hole::drop(crate::StreamError::NotFound),
-							);
+							tracing::warn!(key, start, "no fill to stitch a mid-group stream onto");
+							track.give_up(key..key + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -6639,7 +6538,7 @@ impl OpenGroup {
 	}
 }
 
-/// Take the head the fill fetch stream delivered for `sequence`, once it has finished
+/// Take the head the fill fetch stream delivered for `key`, once it has finished
 /// writing it.
 ///
 /// The model has one producer per group, so this is the handoff: the fill owns the
@@ -6655,7 +6554,7 @@ impl OpenGroup {
 fn poll_claim_fill(
 	fill: &kio::Producer<Fill>,
 	track: &track::Producer,
-	sequence: u64,
+	key: u64,
 	start: Option<u64>,
 	reading: &mut Reading,
 	waiter: &kio::Waiter,
@@ -6687,14 +6586,16 @@ fn poll_claim_fill(
 				debug_assert!(false, "fill closed while claiming its head");
 				Error::Cancel
 			})?
-			.claim(sequence, start),
+			.claim(key, start),
 	)
 }
 
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
-/// the id delta, the extension headers (carrying the timestamp), the size, the
-/// status for empty objects, and the streamed payload.
+/// the id delta, the extension headers, the size, the status for empty objects, and the
+/// streamed payload.
 pub(crate) struct GroupIngest {
+	/// The track a Prior Group ID Gap skips keys on, none to ignore it.
+	pub(crate) track: Option<track::Producer>,
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -6705,6 +6606,8 @@ pub(crate) struct GroupIngest {
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	gap: Option<u64>,
+	/// The object's Prior Group ID Gap, applied only once the object proves to be a frame.
+	group_gap: Option<u64>,
 	inflated: Option<u64>,
 	phase: IngestPhase,
 }
@@ -6717,9 +6620,9 @@ enum IngestPhase {
 	/// Reading (and decoding or discarding) the extension block.
 	ExtBytes { size: usize },
 	/// Reading the object size.
-	Size { timestamp: Option<crate::Timestamp> },
+	Size,
 	/// Reading the status of an empty object.
-	Status { timestamp: Option<crate::Timestamp> },
+	Status,
 	/// Waiting to admit the object, or an empty one's properties, until the group's
 	/// fastest reader leaves room for it.
 	Admit { header: frame::Header },
@@ -6733,6 +6636,7 @@ enum IngestPhase {
 impl GroupIngest {
 	pub(crate) fn new(version: Version, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
+			track: None,
 			has_extensions: group.flags.has_extensions,
 			timescale,
 			version,
@@ -6741,6 +6645,7 @@ impl GroupIngest {
 			properties: Default::default(),
 			raw: bytes::Bytes::new(),
 			gap: None,
+			group_gap: None,
 			inflated: None,
 			phase: IngestPhase::Delta,
 		}
@@ -6905,7 +6810,7 @@ impl RecvFill {
 			}
 		};
 
-		if matches!(head, Fill::Ready { sequence, .. } if largest.is_some_and(|largest| sequence < largest)) {
+		if matches!(head, Fill::Ready { key, .. } if largest.is_some_and(|largest| key < largest)) {
 			head.release();
 		}
 		// A fill that ended without reaching the Largest Group still owed that group's head.
@@ -6955,6 +6860,8 @@ struct RunFill {
 	skipped: Option<(u64, u64)>,
 	budget: kio::coop::Budget,
 	first: bool,
+	/// The prior entry was an End of Group, so the current group takes no more objects.
+	ended: bool,
 	step: FillStep,
 }
 
@@ -6967,6 +6874,8 @@ enum FillStep {
 	Header,
 	/// Yielding before taking in the object just read.
 	Yield(FetchedObject),
+	/// Yielding after an End of Group, so a run of them is paced like objects.
+	Pace,
 	/// Reading past an object of a group the copy already owns.
 	Skip(SkipPayload, u64),
 	/// Writing an object's payload into the head.
@@ -6984,6 +6893,7 @@ impl RunFill {
 			skipped: None,
 			budget: kio::coop::Budget::new(32),
 			first: true,
+			ended: false,
 			step: FillStep::Header,
 		}
 	}
@@ -6996,8 +6906,8 @@ impl RunFill {
 	) -> Poll<Result<Fill, Error>> {
 		Poll::Ready(match ready!(self.poll_objects(waiter, stream, track)) {
 			Ok(()) => Ok(match self.head.take() {
-				Some((sequence, next, producer)) => Fill::Ready {
-					sequence,
+				Some((key, next, producer)) => Fill::Ready {
+					key,
 					next,
 					producer: producer.into_inner(),
 				},
@@ -7023,9 +6933,22 @@ impl RunFill {
 		loop {
 			match &mut self.step {
 				FillStep::Header => {
-					let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-						return Poll::Ready(Ok(()));
+					let object = match ready!(poll_fetch_object(stream, self.first, waiter))? {
+						None => return Poll::Ready(Ok(())),
+						// A fill ends where its subscription starts, which then says where
+						// the group ends.
+						Some(Fetched::End { .. }) => {
+							self.ended = true;
+							self.step = FillStep::Pace;
+							continue;
+						}
+						Some(Fetched::Object(object)) => object,
 					};
+					// Past an End of Group only an object that names another group can follow.
+					if std::mem::take(&mut self.ended) && object.group.is_none() {
+						tracing::warn!("a fill object continues a group past its End of Group");
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
 					self.first = false;
 					self.step = FillStep::Yield(object);
 				}
@@ -7035,6 +6958,10 @@ impl RunFill {
 						unreachable!()
 					};
 					self.step = self.take(object, track)?;
+				}
+				FillStep::Pace => {
+					ready!(self.budget.poll_yield(waiter));
+					self.step = FillStep::Header;
 				}
 				FillStep::Skip(skip, id) => {
 					ready!(skip.poll(waiter, stream))?;
@@ -7067,8 +6994,8 @@ impl RunFill {
 		{
 			return Err(Error::ProtocolViolation);
 		}
-		if let Some(sequence) = group {
-			self.prior_group = Some(sequence);
+		if let Some(key) = group {
+			self.prior_group = Some(key);
 		}
 
 		// A datagram is never a stream track's, so a FETCH stream has no group to rebuild.
@@ -7078,15 +7005,15 @@ impl RunFill {
 		}
 
 		let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
-		let decoded = super::object::read(&raw, self.version, self.timescale)?;
+		let decoded = super::object::read(&raw, self.version)?;
 		let expected = self
 			.head
 			.as_ref()
-			.filter(|(sequence, _, _)| group.is_none_or(|group| group == *sequence))
+			.filter(|(key, _, _)| group.is_none_or(|group| group == *key))
 			.map(|(_, next, _)| *next)
 			.or_else(|| {
 				self.skipped
-					.filter(|(sequence, _)| group.is_none_or(|group| group == *sequence))
+					.filter(|(key, _)| group.is_none_or(|group| group == *key))
 					.map(|(_, next)| next)
 			})
 			.unwrap_or(0);
@@ -7095,6 +7022,7 @@ impl RunFill {
 			(false, Some(delta)) => expected
 				.checked_sub(1)
 				.and_then(|prior| prior.checked_add(delta))
+				.and_then(|id| id.checked_add(ietf::FetchObject::object_delta_bias(self.version)))
 				.ok_or(Error::ProtocolViolation)?,
 			(false, None) => expected,
 			_ => return Err(Error::ProtocolViolation),
@@ -7108,8 +7036,8 @@ impl RunFill {
 		let current = self
 			.head
 			.as_ref()
-			.map(|(sequence, _, _)| *sequence)
-			.or_else(|| self.skipped.map(|(sequence, _)| sequence));
+			.map(|(key, _, _)| *key)
+			.or_else(|| self.skipped.map(|(key, _)| key));
 		if current.is_some() && group.is_some_and(|group| Some(group) != current) && !self.multiple {
 			return Err(Error::Unsupported);
 		}
@@ -7118,13 +7046,14 @@ impl RunFill {
 				producer.finish()?;
 			}
 			self.skipped = None;
-			let sequence = group.ok_or(Error::ProtocolViolation)?;
-			match open_fill_group(track, &mut self.head, sequence) {
-				Ok(()) => {}
+			let key = group.ok_or(Error::ProtocolViolation)?;
+			if !open_fill_group(track, &mut self.head, key)? {
 				// Widening a range can fill groups the copy already owns. Drain their
 				// objects without replacing their producer or cutting the rest of the fill.
-				Err(Error::Duplicate) if self.multiple => self.skipped = Some((sequence, 0)),
-				Err(err) => return Err(err),
+				if !self.multiple {
+					return Err(Error::Duplicate);
+				}
+				self.skipped = Some((key, 0));
 			}
 		}
 		if self.skipped.is_some() {
@@ -7149,7 +7078,13 @@ impl RunFill {
 impl Subscriber {
 	/// Serve a whole fill with one FETCH, as [`ServeFill`] serves each run.
 	#[cfg(test)]
-	async fn run_group_fetch(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+	async fn run_group_fetch(
+		self,
+		broadcast: Path,
+		name: String,
+		fill: track::FillGroups,
+		timescale: Option<Timescale>,
+	) {
 		let run = fill.start().group..fill.end();
 		let mut fetch = FetchRun::new(
 			self,
@@ -7181,7 +7116,7 @@ struct ServeFill {
 	_working: crate::session::Working,
 	broadcast: Path,
 	name: String,
-	fill: std::sync::Arc<track::Fill>,
+	fill: std::sync::Arc<track::FillGroups>,
 	timescale: Later<Option<Timescale>>,
 	heading: Option<Heading>,
 	/// The run fetched last, which coming back means it went unanswered.
@@ -7207,7 +7142,7 @@ impl ServeFill {
 		this: Subscriber,
 		broadcast: Path,
 		name: String,
-		fill: track::Fill,
+		fill: track::FillGroups,
 		timescale: Later<Option<Timescale>>,
 		heading: Option<Heading>,
 	) -> Self {
@@ -7308,7 +7243,7 @@ struct FetchRun {
 	this: Subscriber,
 	broadcast: Path,
 	name: String,
-	fill: std::sync::Arc<track::Fill>,
+	fill: std::sync::Arc<track::FillGroups>,
 	run: std::ops::Range<u64>,
 	timescale: Later<Option<Timescale>>,
 	validity: crate::model::broadcast::RequestValidity,
@@ -7358,7 +7293,7 @@ impl FetchRun {
 		this: Subscriber,
 		broadcast: Path,
 		name: String,
-		fill: std::sync::Arc<track::Fill>,
+		fill: std::sync::Arc<track::FillGroups>,
 		run: std::ops::Range<u64>,
 		timescale: Later<Option<Timescale>>,
 	) -> Self {
@@ -7687,9 +7622,13 @@ impl FetchRun {
 	/// when the answer covers nothing it can take.
 	fn answered(&self, req: FetchRequest, ok: ietf::FetchOk, timescale: Option<Timescale>) -> FetchRunStep {
 		let (run, last, start) = (self.run.clone(), self.last, self.start);
+		// Draft-23 has no End Location: the answer ends at its LARGEST_OBJECT, inclusive like
+		// draft-22's End Location, or without one at the end this FETCH asked for, the whole
+		// of its last group (section 3.2).
+		let requested = ietf::FetchOk::id(self.this.version) != ietf::FetchOk::ID && ok.largest.is_none();
 		// Draft-22's End Location is inclusive; older drafts spell a bounded object one past it.
 		let mut end = ok.end_location;
-		if self.draft20 {
+		if self.draft20 && !requested {
 			let Some(object) = end.object.checked_add(1) else {
 				return self.refuse(req, run, Error::ProtocolViolation);
 			};
@@ -7698,12 +7637,13 @@ impl FetchRun {
 
 		// Before draft-22, Object 0 covers the whole named group. Legacy answers one
 		// group past it still pass the exclusive comparison below.
-		let whole_last = !self.draft20 && end.group == last && end.object == 0;
+		let whole_last = requested || (!self.draft20 && end.group == last && end.object == 0);
 
 		// Draft-22's answer ends at or after its start and never past the requested end, which
 		// a publisher following section 9.11 cuts at the Largest Object. Validate before accepting a group or letting End of
 		// Track mark where the track ends.
 		if self.draft20
+			&& !requested
 			&& (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start))
 		{
 			let err = Error::ProtocolViolation;
@@ -7718,10 +7658,10 @@ impl FetchRun {
 
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
-			let Some(final_sequence) = end.group.checked_add(u64::from(whole_last || end.object > 0)) else {
+			let Some(final_key) = end.group.checked_add(u64::from(whole_last || end.object > 0)) else {
 				return self.refuse(req, run, Error::ProtocolViolation);
 			};
-			self.fill.finish_track_at(final_sequence);
+			self.fill.finish_track_at(final_key);
 		}
 
 		// Before draft-22, an empty answer opens no fetch stream at all.
@@ -7818,7 +7758,8 @@ impl Subscriber {
 		let mut data = body.decoder(self.version);
 
 		Poll::Ready(match type_id {
-			ietf::FetchOk::ID => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
+			// FETCH_OK through draft-22, REQUEST_OK from draft-23 on; each refuses the other's.
+			id if id == ietf::FetchOk::id(self.version) => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				Err(request::from_code(msg.error_code, request::Kind::Fetch, self.version))
@@ -7925,8 +7866,13 @@ struct GroupFetchObjects {
 	next: u64,
 	prior_group: Option<u64>,
 	first: bool,
+	/// The prior entry was draft-23's End of Group or End of Track, so the current group
+	/// takes no more objects.
+	ended: bool,
 	/// The object whose payload is being read: its group, its Object ID, and where it goes.
 	payload: Option<(u64, u64, FetchPayloadRead)>,
+	/// Charged an entry at a time, so a stream of ready entries still yields.
+	budget: kio::coop::Budget,
 }
 
 /// Where a fetch object's payload goes.
@@ -7947,7 +7893,9 @@ impl GroupFetchObjects {
 			next: 0,
 			prior_group: None,
 			first: true,
+			ended: false,
 			payload: None,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -7959,7 +7907,7 @@ impl GroupFetchObjects {
 	) -> Poll<Result<(), Error>> {
 		let timescale = writer.fetch.timescale;
 		loop {
-			if let Some((sequence, id, payload)) = &mut self.payload {
+			if let Some((key, id, payload)) = &mut self.payload {
 				match payload {
 					FetchPayloadRead::Write(recv) => {
 						let producer = writer.producer().expect("the object's group is being written");
@@ -7967,19 +7915,39 @@ impl GroupFetchObjects {
 					}
 					FetchPayloadRead::Skip(skip) => ready!(skip.poll(waiter, stream))?,
 				}
-				let (sequence, id) = (*sequence, *id);
+				let (key, id) = (*key, *id);
 				self.payload = None;
 				self.next = id.checked_add(1).ok_or(Error::ProtocolViolation)?;
-				if writer.bound(sequence).is_some_and(|end| self.next > end) {
-					tracing::warn!(sequence, "a group fetch continued past FETCH_OK's End Location");
+				if writer.bound(key).is_some_and(|end| self.next > end) {
+					tracing::warn!(key, "a group fetch continued past FETCH_OK's End Location");
 					return Poll::Ready(Err(Error::ProtocolViolation));
 				}
 			}
 
-			let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-				break;
+			ready!(self.budget.poll_yield(waiter));
+			let object = match ready!(poll_fetch_object(stream, self.first, waiter))? {
+				None => break,
+				Some(Fetched::End { track }) => {
+					// The publisher knows where the track ends, which a range FETCH downstream
+					// needs. Draft-23 says so here rather than in FETCH_OK.
+					if track && let Some(key) = self.prior_group {
+						let final_key = key.checked_add(1).ok_or(Error::ProtocolViolation)?;
+						writer.fetch.fill.finish_track_at(final_key);
+					}
+					// The group is whole now, so a stream that stalls or resets after this keeps it.
+					writer.finish()?;
+					self.ended = true;
+					continue;
+				}
+				Some(Fetched::Object(object)) => object,
 			};
 			self.first = false;
+			// Past an End of Group the prior Object ID is 2^64-1, so only an object that names
+			// another group can follow (draft-23 section 11.4.2.2).
+			if std::mem::take(&mut self.ended) && object.group.is_none() {
+				tracing::warn!("a fetch object continues a group past its End of Group");
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
 			if !object.subgroup_ok && !object.datagram {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Poll::Ready(Err(Error::Unsupported));
@@ -7990,9 +7958,9 @@ impl GroupFetchObjects {
 				self.prior_group = Some(group);
 			}
 			// The first object always names its group, so a later one leaving it out stays in it.
-			let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
-			if writer.sequence() != Some(sequence) {
-				self.next = writer.open(sequence, object.datagram)?;
+			let key = group.or(writer.key()).ok_or(Error::ProtocolViolation)?;
+			if writer.key() != Some(key) {
+				self.next = writer.open(key, object.datagram)?;
 			} else if object.datagram {
 				// A datagram group has one object, so it never shares one with a stream.
 				return Poll::Ready(Err(Error::ProtocolViolation));
@@ -8004,6 +7972,7 @@ impl GroupFetchObjects {
 				(false, Some(delta)) => next
 					.checked_sub(1)
 					.and_then(|prior| prior.checked_add(delta))
+					.and_then(|id| id.checked_add(ietf::FetchObject::object_delta_bias(self.version)))
 					.ok_or(Error::ProtocolViolation)?,
 				(false, None) => next,
 				_ => return Poll::Ready(Err(Error::ProtocolViolation)),
@@ -8012,7 +7981,7 @@ impl GroupFetchObjects {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
-			let decoded = super::object::read(&raw, self.version, timescale)?;
+			let decoded = super::object::read(&raw, self.version)?;
 			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
@@ -8020,7 +7989,7 @@ impl GroupFetchObjects {
 				Some(_) => FetchPayloadRead::Write(FetchPayloadRecv::new(FetchPayload { decoded, timescale, id })),
 				None => FetchPayloadRead::Skip(SkipPayload::new()),
 			};
-			self.payload = Some((sequence, id, payload));
+			self.payload = Some((key, id, payload));
 		}
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
@@ -8029,11 +7998,11 @@ impl GroupFetchObjects {
 		// stream must reach the bounded group at all, not just its objects.
 		if !Filter::is_draft20(self.version)
 			&& let Some(end) = writer.fetch.end
-			&& (writer.sequence() != Some(writer.fetch.last) || self.next < end)
+			&& (writer.key() != Some(writer.fetch.last) || self.next < end)
 		{
-			let sequence = writer.sequence();
+			let key = writer.key();
 			let next = self.next;
-			tracing::warn!(?sequence, next, "a group fetch ended before FETCH_OK's End Location");
+			tracing::warn!(?key, next, "a group fetch ended before FETCH_OK's End Location");
 			return Poll::Ready(Err(Error::ProtocolViolation));
 		}
 
@@ -8114,8 +8083,7 @@ impl FetchPayloadRecv {
 		producer.mark_gap(payload.id, payload.decoded.gap)?;
 		let size = wait!(Size => stream.poll_varint(waiter))?;
 		let FetchPayload { decoded, timescale, id } = payload;
-		super::object::check_frame(&decoded.properties, timescale)?;
-		let timestamp = object_time(timescale, decoded.timestamp)?;
+		let timestamp = object_time(timescale, producer.key)?;
 		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
@@ -8151,21 +8119,39 @@ struct FetchedObject {
 	properties: Option<Vec<u8>>,
 }
 
+/// One entry on a fetch stream, as its readers act on it.
+enum Fetched {
+	Object(FetchedObject),
+	/// Draft-23's End of Group, or with `track` its End of Track: the prior Object is the
+	/// last in its Group, or in the Track.
+	End {
+		track: bool,
+	},
+}
+
 /// The next fetch object header, or `None` at stream end.
 ///
 /// The `first` object on a stream has no prior to inherit from, so a field it leaves to
-/// the prior object is a protocol violation.
+/// the prior object is a protocol violation, and so is an End of Group with no object
+/// before it.
 fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 	stream: &mut Reader<R, Version>,
 	first: bool,
 	waiter: &kio::Waiter,
-) -> Poll<Result<Option<FetchedObject>, Error>> {
+) -> Poll<Result<Option<Fetched>, Error>> {
 	Poll::Ready(Ok(
 		match ready!(stream.poll_decode_maybe::<ietf::FetchObject>(waiter))? {
 			None => None,
 			Some(ietf::FetchObject::EndOfRange { .. }) => {
 				tracing::warn!("a fill with an End of Range cannot be stitched");
 				return Poll::Ready(Err(Error::Unsupported));
+			}
+			Some(ietf::FetchObject::EndOfGroup { track }) => {
+				if first {
+					tracing::warn!("a fetch stream starts with an End of Group");
+					return Poll::Ready(Err(Error::ProtocolViolation));
+				}
+				Some(Fetched::End { track })
 			}
 			Some(ietf::FetchObject::Object {
 				subgroup,
@@ -8182,7 +8168,7 @@ fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 					tracing::warn!("the first fetch object refers to a prior object");
 					return Poll::Ready(Err(Error::ProtocolViolation));
 				}
-				Some(FetchedObject {
+				Some(Fetched::Object(FetchedObject {
 					group,
 					object,
 					datagram: subgroup == ietf::FetchSubgroup::Datagram,
@@ -8191,7 +8177,7 @@ fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 						ietf::FetchSubgroup::Zero | ietf::FetchSubgroup::Prior | ietf::FetchSubgroup::Explicit(0)
 					),
 					properties,
-				})
+				}))
 			}
 		},
 	))
@@ -8213,12 +8199,15 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 	Ok(Some(group))
 }
 
+/// Open the fill's group at `key` as the head, or return false when the copy already holds it.
 fn open_fill_group(
 	track: &mut track::Producer,
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
-	sequence: u64,
-) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { sequence })?;
+	key: u64,
+) -> Result<bool, Error> {
+	let Some(producer) = track.claim_group(group::Info { start: key })? else {
+		return Ok(false);
+	};
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -8228,8 +8217,8 @@ fn open_fill_group(
 		fetchable: true,
 		last: None,
 	})?;
-	*head = Some((sequence, 0, crate::recv::Group::new(producer)));
-	Ok(())
+	*head = Some((key, 0, crate::recv::Group::new(producer)));
+	Ok(true)
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -8326,22 +8315,49 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 	piece.expect("the run holds the group")
 }
 
-/// A Normal object's timestamp: none on an untimed track, and required on a timed one,
-/// where an object without a Timestamp is malformed.
-fn object_time(
-	timescale: Option<Timescale>,
-	timestamp: Option<crate::Timestamp>,
-) -> Result<Option<crate::Timestamp>, Error> {
-	match (timescale, timestamp) {
-		(Some(_), None) => Err(Error::MalformedTrack),
-		(_, timestamp) => Ok(timestamp),
+/// A received object's timestamp: its group's `key`, in the track's `timescale` when it
+/// declares one. Nothing reads time from an object's properties, which pass between
+/// moq-transport peers untouched, so every object of a group shares its start.
+fn object_time(timescale: Option<Timescale>, key: u64) -> Result<crate::Timestamp, Error> {
+	match timescale {
+		// A key past the latest time is a group we cannot carry.
+		Some(timescale) => crate::Timestamp::new(key, timescale).map_err(|_| Error::Unsupported),
+		None => Ok(crate::Timestamp::unscaled(key)),
 	}
 }
 
 impl GroupIngest {
+	/// Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap
+	/// says none of them will ever exist. Best effort: a publisher that sends none leaves
+	/// the keys to arrive or be given up. Once per group, since every object naming it must
+	/// agree.
+	fn skip_prior(&mut self, key: u64, gap: Option<u64>) -> Result<(), Error> {
+		let Some(gap) = gap.filter(|gap| *gap > 0) else {
+			return Ok(());
+		};
+		let start = key.checked_sub(gap).ok_or(Error::MalformedTrack)?;
+		let Some(track) = self.track.take() else {
+			return Ok(());
+		};
+		// A group that arrived was produced after all: it keeps the group, and the session
+		// goes on, as for a lite SUBSCRIBE_SKIP.
+		if let Some(cached) = track.skip_received(start..key).iter().next() {
+			tracing::warn!(
+				track = %track.name(),
+				group = key,
+				gap,
+				cached = cached.start,
+				"protocol error: a Prior Group ID Gap covers a group that arrived; keeping the group"
+			);
+		}
+		Ok(())
+	}
+
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
-		super::object::check_frame(&self.properties, self.timescale)?;
 		let id = self.prior_object.expect("payload follows object ID");
+		// A status object refused for its properties must not have skipped keys already.
+		let gap = self.group_gap.take();
+		self.skip_prior(group.start, gap)?;
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
 		let plain = id == group.frame_count() as u64 && self.properties.is_empty();
 		let fields = (!plain).then(|| {
@@ -8385,10 +8401,11 @@ impl GroupIngest {
 					self.properties = Default::default();
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
+					self.group_gap = None;
 					self.inflated = None;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
-						false => IngestPhase::Size { timestamp: None },
+						false => IngestPhase::Size,
 					};
 				}
 				IngestPhase::ExtSize => {
@@ -8397,21 +8414,21 @@ impl GroupIngest {
 				}
 				IngestPhase::ExtBytes { size } => {
 					let ext = ready!(reader.poll_read_exact(waiter, *size))?;
-					let decoded = super::object::read(&ext, self.version, self.timescale)?;
-					let timestamp = decoded.timestamp;
+					let decoded = super::object::read(&ext, self.version)?;
+					self.group_gap = decoded.group_gap;
 					self.properties = decoded.properties;
 					self.raw = ext;
 					self.gap = decoded.gap;
 					self.inflated = decoded.inflated;
-					self.phase = IngestPhase::Size { timestamp };
+					self.phase = IngestPhase::Size;
 				}
-				IngestPhase::Size { timestamp } => {
+				IngestPhase::Size => {
 					let size = ready!(reader.poll_varint(waiter))?;
 					if size == 0 {
-						self.phase = IngestPhase::Status { timestamp: *timestamp };
+						self.phase = IngestPhase::Status;
 						continue;
 					}
-					let timestamp = object_time(self.timescale, *timestamp)?;
+					let timestamp = object_time(self.timescale, group.start)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8431,16 +8448,15 @@ impl GroupIngest {
 						false => self.phase = IngestPhase::Payload { frame },
 					}
 				}
-				IngestPhase::Status { timestamp } => {
+				IngestPhase::Status => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
-						let timestamp = object_time(self.timescale, *timestamp)?;
+						let timestamp = object_time(self.timescale, group.start)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
 					}
-					// A status object has no frame to hold its time, so its block keeps it.
-					self.properties = super::object::unframed(&self.raw, self.version, self.timescale)?;
+					self.properties = super::object::unframed(&self.raw, self.version)?;
 					super::object::check_status(&self.properties)?;
 					if status == END_OF_GROUP {
 						group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
@@ -8502,7 +8518,7 @@ mod tests {
 	/// authored track defaults to; one that sends it keeps that value.
 	#[test]
 	fn a_received_track_keeps_its_max_cache_duration() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let absent = accepted_info(&ietf::Properties::default(), version);
 			assert_eq!(absent.max_age, None, "{version}");
 			let present = accepted_info(
@@ -8737,7 +8753,7 @@ mod tests {
 	#[kio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let gate = kio::Producer::new(true);
@@ -8762,7 +8778,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let mut namespaces = crate::model::interest_prefixes(&subscriber.origin.allowed());
+		let mut namespaces = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>();
 		assert_eq!(
 			namespaces,
 			vec![crate::Path::from_static("cam")],
@@ -8788,7 +8806,7 @@ mod tests {
 	/// and there is no answer to wait for.
 	#[kio::test]
 	async fn a_namespace_request_stalled_on_credit_ends_when_cancelled() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_send_window(1);
 			let log = session.log.clone();
 			let (tasks, _task_set) = crate::util::TaskSet::new();
@@ -8878,7 +8896,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
@@ -8901,7 +8919,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -9000,7 +9020,9 @@ mod tests {
 		);
 		subscriber.announces = crate::session::Slots::new(1);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -9583,7 +9605,7 @@ mod tests {
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
 	#[kio::test]
 	async fn cancelling_a_subscription_stops_the_publisher() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let log = cancel_a_subscription(version).await;
 			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
 			// routine unsubscribe would read to the publisher as a fault on our side.
@@ -9866,7 +9888,7 @@ mod tests {
 	/// cancels the subscribe at once, not once the peer answers or acknowledges the cancel.
 	#[kio::test]
 	async fn a_revocation_never_waits_behind_subscribe_ok() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// A peer that accepts the stream and then says nothing at all, not even
 			// acknowledging the cancellation's FIN.
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_unacked_fin();
@@ -9923,7 +9945,7 @@ mod tests {
 		}
 	}
 
-	/// An unanswered unnamed request cannot prove which instance the peer resolved.
+	/// An unanswered unnamed request cannot prove which identity the peer resolved.
 	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[kio::test]
 	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
@@ -10195,14 +10217,22 @@ mod tests {
 		};
 	}
 
-	setup_wait_test!(invalid_subscribe_open_is_refused, SubscribeOpen, [Draft22]);
-	setup_wait_test!(invalid_subscribe_write_is_refused, SubscribeWrite, [Draft18, Draft22]);
-	setup_wait_test!(invalid_status_open_is_refused, StatusOpen, [Draft22]);
-	setup_wait_test!(invalid_status_write_is_refused, StatusWrite, [Draft18, Draft22]);
-	setup_wait_test!(invalid_status_response_is_refused, StatusResponse, [Draft22]);
-	setup_wait_test!(invalid_fetch_open_is_refused, FetchOpen, [Draft22]);
-	setup_wait_test!(invalid_fetch_write_is_refused, FetchWrite, [Draft18, Draft22]);
-	setup_wait_test!(invalid_fetch_response_is_refused, FetchResponse, [Draft22]);
+	setup_wait_test!(invalid_subscribe_open_is_refused, SubscribeOpen, [Draft22, Draft23]);
+	setup_wait_test!(
+		invalid_subscribe_write_is_refused,
+		SubscribeWrite,
+		[Draft18, Draft22, Draft23]
+	);
+	setup_wait_test!(invalid_status_open_is_refused, StatusOpen, [Draft22, Draft23]);
+	setup_wait_test!(
+		invalid_status_write_is_refused,
+		StatusWrite,
+		[Draft18, Draft22, Draft23]
+	);
+	setup_wait_test!(invalid_status_response_is_refused, StatusResponse, [Draft22, Draft23]);
+	setup_wait_test!(invalid_fetch_open_is_refused, FetchOpen, [Draft22, Draft23]);
+	setup_wait_test!(invalid_fetch_write_is_refused, FetchWrite, [Draft18, Draft22, Draft23]);
+	setup_wait_test!(invalid_fetch_response_is_refused, FetchResponse, [Draft22, Draft23]);
 
 	/// The control messages that actually reached the wire, by type id.
 	///
@@ -10217,10 +10247,10 @@ mod tests {
 			let Ok(type_id) = buf.varint() else {
 				break;
 			};
-			let Ok(size) = buf.u16() else {
+			let Ok(size) = ietf::message::decode_length(&mut buf, version) else {
 				break;
 			};
-			if buf.slice(size as usize).is_err() {
+			if buf.slice(size).is_err() {
 				break;
 			}
 			types.push(type_id);
@@ -10241,7 +10271,7 @@ mod tests {
 	/// fallback, so a reset here means the cancellation never landed.
 	#[kio::test]
 	async fn cancelling_does_not_reset_away_the_unsubscribe() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let log = cancel_a_subscription(version).await;
 			assert!(
 				log.resets().is_empty(),
@@ -10652,7 +10682,7 @@ mod tests {
 			}
 		}
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let source = origin.route("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request("broadcast", None).await.unwrap();
@@ -10678,7 +10708,7 @@ mod tests {
 	/// including NOT_SUPPORTED and undefined codes, without opening a subscription.
 	#[kio::test]
 	async fn a_refused_track_status_never_subscribes() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for code in [3, u64::from(u32::MAX)] {
 				for fetching in [false, true] {
 					let refused = message(
@@ -10747,7 +10777,7 @@ mod tests {
 	#[kio::test]
 	async fn a_resumed_subscribe_opts_out_only_when_untimed() {
 		let declared = Timescale::new(90_000).unwrap();
-		for (version, timed) in [Version::Draft18, Version::Draft20, Version::Draft22]
+		for (version, timed) in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23]
 			.into_iter()
 			.flat_map(|version| [(version, true), (version, false)])
 		{
@@ -10823,8 +10853,8 @@ mod tests {
 			let mut subscribes = Vec::new();
 			while !buf.is_empty() {
 				let type_id = buf.varint().unwrap();
-				let size = buf.u16().unwrap();
-				let mut body = Decoder::new(buf.slice(size as usize).unwrap(), version.into());
+				let size = ietf::message::decode_length(&mut buf, version).unwrap();
+				let mut body = Decoder::new(buf.slice(size).unwrap(), version.into());
 				if type_id == ietf::Subscribe::ID {
 					subscribes.push(ietf::Subscribe::decode_msg(&mut body, version).unwrap());
 				}
@@ -10912,8 +10942,8 @@ mod tests {
 			let mut count = 0;
 			while !buf.is_empty() {
 				let type_id = buf.varint().unwrap();
-				let size = buf.u16().unwrap();
-				buf.slice(size as usize).unwrap();
+				let size = ietf::message::decode_length(&mut buf, version).unwrap();
+				buf.slice(size).unwrap();
 				count += usize::from(type_id == id);
 			}
 			count
@@ -11030,7 +11060,7 @@ mod tests {
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
-	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_node` is
 	/// stored as `via` for split-horizon and never written into the chain.
 	#[kio::test]
 	async fn assigned_peer_hop_attributes_announces() {
@@ -11086,14 +11116,14 @@ mod tests {
 		let mut announced = consumer.routes();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
-		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
+		// `Client::with_peer_node` hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).routes();
 
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
+			.forward("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -11127,7 +11157,7 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// Under another instance the fresh session is another source, so consumers restart
+	/// Under another identity the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[kio::test]
 	async fn reconnecting_peer_restarts_the_route() {
@@ -11485,7 +11515,7 @@ mod tests {
 
 	#[kio::test]
 	async fn publish_namespace_requester_fin_keeps_the_route() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for reset in [false, true] {
 				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let consumer = origin.consume();
@@ -12644,15 +12674,15 @@ mod tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Patterns::new(),
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				publish: crate::Prefixes::new(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				expires: None,
 			},
 		);
 		// We let the peer announce only "other".
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		assert!(
@@ -12683,8 +12713,8 @@ mod tests {
 	/// what an announcing peer's token must carry.
 	fn publish_grant_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: secs.map(|s| runtime.now().checked_add(std::time::Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -12793,7 +12823,7 @@ mod tests {
 	/// only afterwards.
 	#[kio::test]
 	async fn a_revoked_token_retracts_an_announce_whose_ok_is_blocked() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let gate = kio::Producer::new(false);
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 			let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -12860,8 +12890,8 @@ mod tests {
 			let mut rest = bytes.as_slice();
 			while !rest.is_empty() {
 				sent.push(crate::coding::decode_varint(&mut rest, version).unwrap());
-				let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-				rest = &rest[2 + len..];
+				let (len, width) = ietf::message::peek_length(rest, version);
+				rest = &rest[width + len..];
 			}
 			let expected = vec![ietf::RequestOk::ID];
 			assert_eq!(sent, expected, "{version}");
@@ -12965,8 +12995,8 @@ mod tests {
 	async fn a_covering_limit_still_verifies_the_token() {
 		const VERSION: Version = Version::Draft18;
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Pattern::subtree(subtree).unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from(subtree).unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let auth = crate::auth::Link::new(false);
@@ -13057,8 +13087,8 @@ mod tests {
 		assert!(routed, "the token admits the announce outside the limit");
 
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		for _ in 0..50 {
@@ -13314,7 +13344,7 @@ mod tests {
 	/// the stream.
 	#[kio::test]
 	async fn a_lapsed_announce_token_cancels_its_request_as_expired() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for end in [TokenEnd::Lapsed, TokenEnd::RevokedExpired, TokenEnd::Revoked] {
 				let (mut subscriber, mut requests, _cred, consumer, session) =
 					auth_announce_harness(version, Vec::new());
@@ -13518,7 +13548,7 @@ mod tests {
 	/// never changes. The refusal withdraws the announce.
 	#[kio::test]
 	async fn a_token_on_a_session_announce_update_is_refused() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -13554,7 +13584,7 @@ mod tests {
 	/// than acknowledged and held, so the publisher learns it at once.
 	#[kio::test]
 	async fn a_tokenless_announce_outside_the_limit_is_refused() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let probe = subscriber.clone();
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -13584,7 +13614,7 @@ mod tests {
 	/// held for a wider limit to bring back: the publisher re-announces.
 	#[kio::test]
 	async fn a_narrowed_limit_ends_a_session_announce() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let auth = subscriber.auth.clone();
 			let probe = subscriber.clone();
@@ -13613,8 +13643,8 @@ mod tests {
 
 			// Nothing was held for the limit to bring back.
 			auth.handle().authorize(&crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			});
 			settle().await;
@@ -13836,7 +13866,7 @@ mod tests {
 		};
 		assert_eq!(
 			SessionError::from(&err),
-			SessionError::TooManyRequestUpdates,
+			crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES,
 			"the flood must surface TOO_MANY_REQUEST_UPDATES"
 		);
 		assert!(
@@ -13844,7 +13874,7 @@ mod tests {
 				.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			session.log.closes()
 		);
@@ -14394,7 +14424,7 @@ mod tests {
 			matches!(
 				result,
 				Err(Error::Decode(DecodeError::Session(
-					crate::SessionError::UnknownAuthTokenAlias
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS
 				)))
 			),
 			"the queued update's unknown alias closes the session: {result:?}"
@@ -14407,13 +14437,13 @@ mod tests {
 	async fn an_announce_token_needs_a_publish_grant() {
 		const VERSION: Version = Version::Draft18;
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
@@ -14516,91 +14546,47 @@ struct Update {
 	fill: Option<ietf::Fill>,
 	/// The aggregate subscriber priority, in the model's higher-first terms.
 	priority: Option<i8>,
-	/// Subscriber age budget, in milliseconds.
-	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST.
 	new_group: Option<u64>,
-}
-
-/// Anchor resolutions live only as long as the ranges in the current aggregate. Cache
-/// eviction must not resolve an unchanged time end again at a different group.
-#[derive(Default)]
-struct ResolvedRanges(BTreeMap<track::Range, track::Range>);
-
-impl ResolvedRanges {
-	fn resolve(
-		&mut self,
-		track: &track::Producer,
-		subscription: &track::Subscription,
-	) -> Result<track::Subscription, Error> {
-		let mut next = BTreeMap::new();
-		let mut pending = Vec::new();
-		for range in &subscription.ranges {
-			match self.0.get(range) {
-				Some(resolved) => {
-					next.insert(*range, *resolved);
-				}
-				None => pending.push(*range),
-			}
-		}
-		let resolved = track.resolve_subscription(&track::Subscription {
-			ranges: pending.clone(),
-			..subscription.clone()
-		})?;
-		next.extend(pending.into_iter().zip(resolved.ranges));
-		let mut subscription = subscription.clone();
-		for range in &mut subscription.ranges {
-			*range = next[range];
-		}
-		self.0 = next;
-		Ok(subscription)
-	}
-}
-
-/// The wire bounds `subscription` resolves to, `None` while a relative anchor still waits
-/// for the live edge it counts back from.
-fn settle_bounds(
-	resolved: &mut ResolvedRanges,
-	track: &track::Producer,
-	subscription: &track::Subscription,
-) -> Result<Option<WireBounds>, Error> {
-	match resolved.resolve(track, subscription) {
-		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
-		Err(Error::Unsupported) if !has_time(subscription) => Ok(None),
-		Err(err) => Err(err),
-	}
-}
-
-fn has_time(subscription: &track::Subscription) -> bool {
-	subscription
-		.ranges
-		.iter()
-		.any(|range| matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_))))
-}
-
-fn needs_resolution(subscription: &track::Subscription) -> bool {
-	subscription.ranges.iter().any(|range| {
-		let start = match range.start {
-			track::Anchor::Oldest | track::Anchor::Absolute(_) | track::Anchor::Relative(0) => false,
-			track::Anchor::Relative(_) | track::Anchor::Time(_) => true,
-		};
-		start || matches!(range.end, Some(track::Anchor::Time(_) | track::Anchor::Relative(_)))
-	})
 }
 
 /// A subscription's single wire span: its start and exclusive end group, each open when `None`.
 type WireBounds = (Option<u64>, Option<u64>);
 
-/// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
-	let start = subscription.start().or_else(|| {
-		subscription
-			.ranges
-			.iter()
-			.any(|range| matches!(range.start, track::Anchor::Absolute(_)))
-			.then_some(0)
-	});
-	(start, subscription.end())
+/// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
+/// from group zero. A live join started at the group it `joined`: one that holds every start
+/// keeps the live join, so a reader adding a range the join already delivers widens nothing. So
+/// does a start at that group, as a from-oldest start on a join that began at group 0.
+fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
+	let end = subscription.end();
+	if let Some(start) = wire_start(subscription) {
+		return match joined == Some(start) {
+			true => (None, end),
+			false => (Some(start), end),
+		};
+	}
+	let first = (subscription.times())
+		.filter(|(range, _)| !range.is_empty())
+		.filter_map(|(_, time)| time)
+		.min();
+	let covered = joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
+	let start = match covered {
+		true => None,
+		false => first.map(|_| 0),
+	};
+	(start, end)
+}
+
+/// The start group a SUBSCRIBE asks from before it knows the live edge, `None` for a live join.
+/// A range from the oldest group is history, so it asks from group zero and the publisher
+/// delivers the backlog it holds: a wire without ranges can't name the oldest any other way.
+fn wire_start(subscription: &track::Subscription) -> Option<u64> {
+	// Only a time start can be empty, so every Oldest range delivers something.
+	let oldest = (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
+	match oldest {
+		true => Some(0),
+		false => subscription.start(),
+	}
 }
 
 /// What a SUBSCRIBE asks for: the range it delivers, and the backfill covering a head that
@@ -14721,6 +14707,89 @@ mod object_id_tests {
 mod filter_tests {
 	use super::*;
 
+	/// A live join with a range starting at or after the group it joined keeps its bounds, so
+	/// the copy sends no update widening it from group zero; a range below that group, or one
+	/// beside a range from the oldest group, widens the span to group zero.
+	#[test]
+	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
+		let live = |min: Option<Duration>, start: u64| {
+			let first = match min {
+				Some(min) => track::Range::from(track::Start::Live {
+					min: Some(min),
+					max: Some(std::time::Duration::ZERO),
+				}),
+				None => track::Range::ALL,
+			};
+			track::Subscription::default().with_ranges([
+				first,
+				track::Range {
+					start: crate::track::Start::Time(start),
+					end: None,
+				},
+			])
+		};
+		let joined = Some(10);
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 10), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
+		// A range from the oldest group is history, which reaches back to group zero.
+		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
+	}
+
+	/// A range from the oldest group, history, asks from group zero, alone or beside a live
+	/// join, before and after the join is placed, so the publisher delivers the backlog it holds.
+	#[test]
+	fn an_oldest_range_asks_from_group_zero() {
+		let oldest = track::Range::from(track::Start::Oldest);
+		let live = track::Range::from(track::Start::LATEST);
+		let asking = |ranges: &[track::Range]| track::Subscription::default().with_ranges(ranges.iter().copied());
+		for ranges in [vec![oldest], vec![oldest, live], vec![live, oldest]] {
+			let subscription = asking(&ranges);
+			assert_eq!(wire_start(&subscription), Some(0), "{ranges:?}");
+			for joined in [None, Some(10)] {
+				assert_eq!(
+					wire_bounds(&subscription, joined),
+					(Some(0), None),
+					"{ranges:?} {joined:?}"
+				);
+			}
+		}
+		let bounded = [track::Range {
+			start: track::Start::Oldest,
+			end: Some(4),
+		}];
+		assert_eq!(wire_bounds(&asking(&bounded), None), (Some(0), Some(5)));
+		// A live join alone asks from the live edge, whatever its max.
+		let patient = track::Range::from(track::Start::Live {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::from_secs(10)),
+		});
+		for subscription in [asking(&[live]), asking(&[patient])] {
+			assert_eq!(wire_start(&subscription), None, "{subscription:?}");
+			assert_eq!(wire_bounds(&subscription, Some(10)), (None, None), "{subscription:?}");
+		}
+	}
+
+	/// A start at the group the live join began keeps the join: a from-oldest reader on a join
+	/// answered with no Largest, which began at group 0, sends no update. Any other start still
+	/// bounds the span.
+	#[test]
+	fn a_start_at_the_joined_group_keeps_the_live_join() {
+		let from = |start: u64| track::Subscription::default().with_start(Some(start));
+		assert_eq!(wire_bounds(&from(0), Some(0)), (None, None));
+		assert_eq!(wire_bounds(&from(10), Some(10)), (None, None));
+		assert_eq!(wire_bounds(&from(0), Some(10)), (Some(0), None));
+		assert_eq!(wire_bounds(&from(12), Some(10)), (Some(12), None));
+		assert_eq!(wire_bounds(&from(0), None), (Some(0), None));
+		// A range from the oldest group reaches no further back than a join that began at group 0.
+		let oldest = track::Subscription::default()
+			.with_ranges([track::Range::from(track::Start::Oldest)])
+			.with_max(None);
+		assert_eq!(wire_bounds(&oldest, Some(0)), (None, None));
+		assert_eq!(wire_bounds(&oldest, Some(10)), (Some(0), None));
+	}
+
 	/// The live join is the draft's own: the subscription starts after the live edge and a
 	/// `StartGroup=1` fill covers the current group's head, so every object arrives exactly
 	/// once and the group still starts at a decodable point.
@@ -14760,7 +14829,7 @@ mod filter_tests {
 	/// The whole track joins live with no filter on every draft, and fetches what came before.
 	#[test]
 	fn the_whole_track_is_unfiltered() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert_eq!(
 				subscribe_join(Some(0), None, version),
 				Join {
@@ -14810,17 +14879,23 @@ mod stitch_tests {
 	const VERSION: Version = Version::Draft22;
 	const ALIAS: u64 = 7;
 	const REQUEST: RequestId = RequestId(1);
-	const SEQUENCE: u64 = 4;
+	const KEY: u64 = 4;
 
 	/// A distinct timestamp per object, so a stitched group's frames can be told apart.
+	/// The Timestamp property a publisher puts on object `index`, which nothing reads.
 	fn timestamp(index: usize) -> Timestamp {
 		Timestamp::from_micros(1000 + index as u64).expect("in range")
 	}
 
+	/// What a received frame of group `key` is stamped with on a microsecond track.
+	fn key_time(key: u64) -> Timestamp {
+		Timestamp::new(key, Timescale::MICRO).expect("in range")
+	}
+
 	/// A publisher's fill fetch stream: a FETCH_HEADER, then one object per payload
 	/// numbered from the group's first.
-	fn fill_stream(sequence: u64, payloads: &[&[u8]]) -> Vec<u8> {
-		fill_stream_for(REQUEST, &[(sequence, payloads)])
+	fn fill_stream(key: u64, payloads: &[&[u8]]) -> Vec<u8> {
+		fill_stream_for(REQUEST, &[(key, payloads)])
 	}
 
 	/// A joining FETCH stream named by its own request id, possibly spanning groups. The
@@ -14836,7 +14911,7 @@ mod stitch_tests {
 
 		let mut object_index = 0usize;
 		let mut prev_group = None;
-		for &(sequence, payloads) in groups {
+		for &(key, payloads) in groups {
 			for (index, payload) in payloads.iter().enumerate() {
 				let payload = payload.as_ref();
 				let mut properties = Vec::new();
@@ -14850,8 +14925,8 @@ mod stitch_tests {
 				let first = index == 0;
 				let group = match (first, prev_group) {
 					(false, _) => None,
-					(true, None) => Some(sequence),
-					(true, Some(prev)) => Some(sequence.checked_sub(prev + 1).expect("ascending groups")),
+					(true, None) => Some(key),
+					(true, Some(prev)) => Some(key.checked_sub(prev + 1).expect("ascending groups")),
 				};
 				ietf::FetchObject::Object {
 					subgroup: ietf::FetchSubgroup::Zero,
@@ -14869,7 +14944,7 @@ mod stitch_tests {
 				buf.extend_from_slice(payload);
 				object_index += 1;
 			}
-			prev_group = Some(sequence);
+			prev_group = Some(key);
 		}
 
 		buf.to_vec()
@@ -14878,11 +14953,11 @@ mod stitch_tests {
 	/// The subscription's own subgroup stream, starting at `start` because a strict
 	/// publisher delivers nothing before it: that head is the fill's job. Each object
 	/// carries the Timestamp of its Object ID.
-	pub(super) fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	pub(super) fn tail_stream(key: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: sequence,
+			group_id: key,
 			sub_group_id: 0,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
@@ -14928,12 +15003,12 @@ mod stitch_tests {
 	/// object's absolute ID. A strict publisher sets the bit exactly when `start` is 0;
 	/// one that is out of spec can leave it clear and still start there. Each object
 	/// carries the Timestamp of its Object ID, which the harness's timed track requires.
-	fn draft18_subgroup(sequence: u64, first_object: bool, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	fn draft18_subgroup(key: u64, first_object: bool, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let version = Version::Draft18;
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: sequence,
+			group_id: key,
 			sub_group_id: 0,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
@@ -15065,15 +15140,15 @@ mod stitch_tests {
 			self
 		}
 
-		/// Name `sequence` as the Largest Group the fill answers, so it owes that group's head.
-		fn with_largest(self, sequence: u64) -> Self {
+		/// Name `key` as the Largest Group the fill answers, so it owes that group's head.
+		fn with_largest(self, key: u64) -> Self {
 			self.subscriber
 				.state
 				.lock()
 				.subscribes
 				.get_mut(&REQUEST)
 				.unwrap()
-				.fill_largest = Some(sequence);
+				.fill_largest = Some(key);
 			self
 		}
 
@@ -15109,20 +15184,20 @@ mod stitch_tests {
 	}
 
 	/// Every frame of the next group, once it finishes.
-	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Option<Timestamp>, Vec<u8>)>) {
+	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Timestamp, Vec<u8>)>) {
 		let mut group = subscriber
 			.recv_group()
 			.await
 			.expect("track aborted")
 			.expect("track finished");
 
-		let sequence = group.sequence;
+		let key = group.start;
 		let mut frames = Vec::new();
 		while let Some(frame) = group.read_frame().await.expect("group aborted") {
 			frames.push((frame.timestamp, frame.payload.to_vec()));
 		}
 
-		(sequence, frames)
+		(key, frames)
 	}
 
 	/// Only the stream's end may follow an END_OF_GROUP or END_OF_TRACK status: an object
@@ -15131,15 +15206,15 @@ mod stitch_tests {
 	async fn an_object_after_an_end_status_ends_the_track() {
 		use futures::FutureExt;
 
-		let header = tail_stream(SEQUENCE, 0, &[]).len();
-		let object = &tail_stream(SEQUENCE, 0, &[b"past"])[header..];
+		let header = tail_stream(KEY, 0, &[]).len();
+		let object = &tail_stream(KEY, 0, &[b"past"])[header..];
 		for (payloads, status) in [
 			(&[&b"last"[..]][..], END_OF_GROUP),
 			(&[&b"last"[..]][..], END_OF_TRACK),
 			// A standalone END_OF_TRACK, which opens no group.
 			(&[][..], END_OF_TRACK),
 		] {
-			let mut bytes = end_marker(tail_stream(SEQUENCE, 0, payloads), status);
+			let mut bytes = end_marker(tail_stream(KEY, 0, payloads), status);
 			bytes.extend_from_slice(object);
 
 			let h = Harness::new(Fill::Done, vec![bytes]);
@@ -15164,8 +15239,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 2, &[b"tail-2"]),
 			],
 		);
 		let mut consumer = h.track.subscribe(None);
@@ -15179,14 +15254,14 @@ mod stitch_tests {
 		head.expect("fill");
 		tail.expect("tail");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
 			vec![
-				(Some(timestamp(0)), b"head-0".to_vec()),
-				(Some(timestamp(1)), b"head-1".to_vec()),
-				(Some(timestamp(2)), b"tail-2".to_vec()),
+				(key_time(KEY), b"head-0".to_vec()),
+				(key_time(KEY), b"head-1".to_vec()),
+				(key_time(KEY), b"tail-2".to_vec()),
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
@@ -15201,8 +15276,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream_for(REQUEST, &[(SEQUENCE - 2, history), (SEQUENCE, head)]),
-				tail_stream(SEQUENCE, 1, &[b"tail"]),
+				fill_stream_for(REQUEST, &[(KEY - 2, history), (KEY, head)]),
+				tail_stream(KEY, 1, &[b"tail"]),
 			],
 		);
 		let mut consumer = h
@@ -15210,7 +15285,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(..);
 		let mut fill = h.stream().await;
@@ -15220,17 +15295,14 @@ mod stitch_tests {
 		let (head, tail) = futures::join!(receiving.recv_fill(&mut fill), tailing.recv_group(&mut tail));
 		head.expect("fill");
 		tail.expect("tail");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE - 2);
-		assert_eq!(frames, vec![(Some(timestamp(0)), b"history".to_vec())]);
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY - 2);
+		assert_eq!(frames, vec![(key_time(KEY - 2), b"history".to_vec())]);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
-			vec![
-				(Some(timestamp(1)), b"head".to_vec()),
-				(Some(timestamp(1)), b"tail".to_vec())
-			]
+			vec![(key_time(KEY), b"head".to_vec()), (key_time(KEY), b"tail".to_vec())]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done));
 	}
@@ -15243,15 +15315,15 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				tail_stream(SEQUENCE, 0, &[b"initial"]),
-				tail_stream(SEQUENCE + 1, 1, &[b"tail"]),
-				tail_stream(SEQUENCE + 2, 0, &[b"next"]),
+				tail_stream(KEY, 0, &[b"initial"]),
+				tail_stream(KEY + 1, 1, &[b"tail"]),
+				tail_stream(KEY + 2, 0, &[b"next"]),
 			],
 		)
 		.with_update(UPDATE);
 		let mut initial = h.stream().await;
 		h.subscriber.clone().recv_group(&mut initial).await.unwrap();
-		let mut bytes = fill_stream_for(UPDATE, &[(SEQUENCE + 1, &[b"unfinished".as_slice()])]);
+		let mut bytes = fill_stream_for(UPDATE, &[(KEY + 1, &[b"unfinished".as_slice()])]);
 		bytes.pop();
 		let pending = ScriptedSession::new(bytes);
 		let (_, recv) = pending.open_bi(Default::default()).await.unwrap();
@@ -15269,8 +15341,8 @@ mod stitch_tests {
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.unwrap();
 		let mut reader = h.track.subscribe(None);
-		let (sequence, frames) = read_group(&mut reader).await;
-		assert_eq!(sequence, SEQUENCE + 2);
+		let (key, frames) = read_group(&mut reader).await;
+		assert_eq!(key, KEY + 2);
 		assert_eq!(frames[0].1, b"next");
 		assert!(h.session.log.closes().is_empty());
 	}
@@ -15283,8 +15355,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 2, &[b"tail-2"]),
 			],
 		);
 		let mut fill = h.stream().await;
@@ -15324,12 +15396,39 @@ mod stitch_tests {
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, None, false).await;
 		let hopped = relay_passthrough_via(script, ingress, egress, fetch, None, true).await;
+		// The bytes alone would pass a hop that wrote them and then reset the stream.
+		assert_eq!(
+			hopped.1.resets(),
+			direct.1.resets(),
+			"{ingress} -> {egress}: the moq-lite hop changed the resets"
+		);
 		let fetch_ok = |bytes: &[u8]| {
 			let mut decoder = Decoder::new(bytes, egress.into());
-			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;
+			(decoder.varint().ok()? == ietf::FetchOk::id(egress)).then_some(())?;
 			let ok = ietf::FetchOk::decode(&mut decoder, egress).ok()?;
 			Some((ok, bytes[bytes.len() - decoder.remaining()..].to_vec()))
 		};
+		// Draft-23 says where the track ends on the fetch stream, after the last object, so
+		// that is where the hop's answer may differ: End of Group for End of Track.
+		let indicator = |track| {
+			let mut bytes = Vec::new();
+			ietf::FetchObject::EndOfGroup { track }
+				.encode(&mut Encoder::new(&mut bytes, egress.into()), egress)
+				.map(|()| bytes)
+		};
+		if let (Ok(end_of_track), Ok(end_of_group)) = (indicator(true), indicator(false))
+			&& direct.0.ends_with(&end_of_track)
+			&& hopped.0.ends_with(&end_of_group)
+			&& fetch_ok(&direct.0).is_some()
+		{
+			let cut = |bytes: &[u8], tail: &[u8]| bytes[..bytes.len() - tail.len()].to_vec();
+			assert_eq!(
+				cut(&hopped.0, &end_of_group),
+				cut(&direct.0, &end_of_track),
+				"{ingress} -> {egress}: only End of Track may differ"
+			);
+			return direct;
+		}
 		match (fetch_ok(&direct.0), fetch_ok(&hopped.0)) {
 			// A moq-lite FETCH says nothing of the track, so only a subscription tells the
 			// second relay that the track ended. Everything else must match.
@@ -15426,11 +15525,11 @@ mod stitch_tests {
 					track: "video".into(),
 					filter: Filter::Absolute {
 						start: ietf::Location {
-							group: SEQUENCE,
+							group: KEY,
 							object: start,
 						},
 						end: Some(ietf::EndLocation {
-							group: SEQUENCE,
+							group: KEY,
 							object: Some(end - 1),
 						}),
 					},
@@ -15440,11 +15539,11 @@ mod stitch_tests {
 					namespace: Path::from_static("room"),
 					track: "video".into(),
 					start: ietf::Location {
-						group: SEQUENCE,
+						group: KEY,
 						object: start,
 					},
 					end: ietf::Location {
-						group: SEQUENCE,
+						group: KEY,
 						object: end,
 					},
 				}
@@ -15464,7 +15563,6 @@ mod stitch_tests {
 			ietf::Fetch::ID
 		} else {
 			ietf::Subscribe {
-				max_age: None,
 				new_group: None,
 				request_id: RequestId(3),
 				track_namespace: Path::from_static("room"),
@@ -15500,7 +15598,7 @@ mod stitch_tests {
 				.into_values()
 				.find(|bytes| {
 					ietf::GroupHeader::decode(&mut Decoder::new(bytes, egress.into()), egress)
-						.is_ok_and(|header| header.group_id == SEQUENCE)
+						.is_ok_and(|header| header.group_id == KEY)
 				})
 				.expect("the relay emitted the group")
 		};
@@ -15517,11 +15615,11 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_preserves_object_properties_through_dispatch() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let mut script = Vec::new();
 			ietf::GroupHeader {
 				track_alias: ALIAS,
-				group_id: SEQUENCE,
+				group_id: KEY,
 				sub_group_id: 0,
 				publisher_priority: 0,
 				flags: ietf::GroupFlags {
@@ -15548,39 +15646,103 @@ mod stitch_tests {
 		}
 	}
 
-	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
-	/// track on the publisher's grid, so a copy of the same instance over another route
-	/// matches it, including across a moq-lite hop that negotiated the `ietf` extension.
+	/// A subscribed moq-transport group crosses two relays joined by a moq-lite hop with the
+	/// `ietf` extension byte for byte, as it crosses one: its Object IDs, the gaps between
+	/// them and their marks, its properties, and its END_OF_GROUP status object.
 	#[kio::test]
-	async fn passthrough_keeps_the_publishers_timestamp_units() {
+	async fn passthrough_keeps_gaps_properties_and_the_end_across_two_relays() {
 		let version = Version::Draft22;
-		// Timestamp 42 (ms), then an unknown property that must survive beside it.
-		let properties = [0x10, 42, 0x70, 7];
+		let objects: [(u64, &[u8], Option<u64>); 3] = [
+			(6, &[0x3e, 6, 0x22, 1], None),
+			(9, &[0x3e, 2], None),
+			(10, &[], Some(super::super::object::END_OF_GROUP)),
+		];
+		let script = object_stream(version, true, &objects);
+		// Compares the two-relay path against the direct one.
+		let (bytes, log) = relay_passthrough_stream(script.clone(), version, version).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, version.into());
+		let header = ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+		assert!(header.flags.first_object && header.flags.has_extensions);
+		let mut previous = None;
+		for (id, properties, status) in objects {
+			let delta = previous.map_or(id, |previous: u64| id - previous - 1);
+			previous = Some(id);
+			assert_eq!(decoder.varint().unwrap(), delta, "Object {id}");
+			assert_eq!(decoder.bytes().unwrap(), properties, "Object {id}");
+			match status {
+				Some(status) => {
+					assert_eq!(decoder.varint().unwrap(), 0, "Object {id}");
+					assert_eq!(decoder.varint().unwrap(), status, "Object {id}");
+				}
+				None => {
+					assert_eq!(decoder.varint().unwrap(), 1, "Object {id}");
+					assert_eq!(decoder.slice(1).unwrap(), &[99], "Object {id}");
+				}
+			}
+		}
+		assert!(decoder.is_empty());
+	}
+
+	/// A publisher's Timestamp and Prior Group ID Gap are properties like any other, which
+	/// reach the next moq-transport peer byte for byte, including across a moq-lite hop that
+	/// negotiated the `ietf` extension.
+	#[kio::test]
+	async fn passthrough_keeps_the_publishers_properties() {
+		let version = Version::Draft22;
+		// Timestamp 42 (ms), a Prior Group ID Gap of 1, then an unknown property.
+		let properties = [0x10, 42, 0x3c - 0x10, 1, 0x70 - 0x3c, 7];
 		let script = object_stream(version, true, &[(0, &properties, None)]);
 		for hop in [false, true] {
-			let timestamp = Timestamp::new(42, Timescale::MILLI).ok();
 			let (bytes, log) =
 				relay_passthrough_via(script.clone(), version, version, None, Some(Timescale::MILLI), hop).await;
 			assert!(log.resets().is_empty(), "hop: {hop}");
 			let mut decoder = Decoder::new(&bytes, version.into());
 			ietf::GroupHeader::decode(&mut decoder, version).unwrap();
 			assert_eq!(decoder.varint().unwrap(), 0);
-			let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
-			let decoded = super::super::object::read(&relayed, version, timestamp.map(|_| Timescale::MILLI)).unwrap();
-			assert_eq!(decoded.timestamp, timestamp, "hop: {hop}");
-			assert_eq!(
-				super::super::object::listed(&decoded.properties, version).len(),
-				1,
-				"hop: {hop}"
-			);
+			assert_eq!(decoder.bytes().unwrap(), properties, "hop: {hop}");
 		}
+	}
+
+	/// A Prior Group ID Gap skips the keys just below its group on the track, so a reader
+	/// moves past them at once. One reaching below key 0 makes the track malformed.
+	#[kio::test]
+	async fn a_prior_group_id_gap_skips_the_keys_below() {
+		use futures::FutureExt;
+
+		let h = Harness::new(Fill::Done, vec![object_stream(VERSION, true, &[(0, &[0x3c, 2], None)])]);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		let track = h.track.consume();
+		assert_eq!(track.skipped_below(KEY), 2);
+		assert_eq!(track.skipped_below(KEY - 1), 1);
+		assert_eq!(track.skipped_below(KEY - 2), 0, "a gap names only the keys it covers");
+		let mut group = track.peek_group(KEY).unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp, key_time(KEY));
+
+		let past = [0x3c, KEY as u8 + 1];
+		let h = Harness::new(Fill::Done, vec![object_stream(VERSION, true, &[(0, &past, None)])]);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+
+		// A status object may not carry properties, so one refused for them skips nothing.
+		let h = Harness::new(
+			Fill::Done,
+			vec![object_stream(VERSION, true, &[(0, &[0x3c, 2], Some(END_OF_GROUP))])],
+		);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(res.is_err(), "{res:?}");
+		assert_eq!(h.track.consume().skipped_below(KEY), 0);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
 		let mut bytes = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: SEQUENCE,
+			group_id: KEY,
 			sub_group_id: 0,
 			publisher_priority: 128,
 			flags: ietf::GroupFlags {
@@ -15611,7 +15773,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_fetch_requires_marked_gaps_and_preserves_fields() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for marked in [false, true] {
 				let properties = if marked { vec![0x3e, 6] } else { vec![] };
 				let second = if marked { vec![0x3e, 1] } else { vec![] };
@@ -15625,13 +15787,15 @@ mod stitch_tests {
 						assert!(decoder.is_empty());
 						continue;
 					}
-					assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID);
+					assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::id(version));
 					let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
 					assert_eq!(
 						ok.end_location.object,
 						if Filter::is_draft20(version) { 8 } else { 9 },
 						"{version} start={start}"
 					);
+					// Draft-23 names the Largest Object the range reaches instead of an End Location.
+					assert_eq!(ok.largest.is_some(), version == Version::Draft23, "{version}");
 					assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
 					ietf::FetchHeader::decode(&mut decoder, version).unwrap();
 					let mut prior = None;
@@ -15647,16 +15811,27 @@ mod stitch_tests {
 						else {
 							panic!("object");
 						};
-						let wire = if version == Version::Draft22 {
-							prior.map_or(id, |prior| id - prior)
-						} else {
-							id
+						// Within a group the delta is the step, less two from draft-23 on.
+						let wire = match version {
+							Version::Draft22 => prior.map_or(id, |prior| id - prior),
+							Version::Draft23 => prior.map_or(id, |prior| id - prior - 2),
+							_ => id,
 						};
 						assert_eq!(object, Some(wire), "{version}");
 						assert_eq!(actual.as_ref(), Some(properties));
 						assert_eq!(decoder.varint().unwrap(), 1);
 						assert_eq!(decoder.slice(1).unwrap(), &[99]);
 						prior = Some(id);
+					}
+					// Draft-23 follows the group's last object with End of Group, or End of Track.
+					if ietf::FetchObject::has_group_end(version) {
+						assert!(
+							matches!(
+								ietf::FetchObject::decode(&mut decoder, version).unwrap(),
+								ietf::FetchObject::EndOfGroup { .. }
+							),
+							"{version} start={start}"
+						);
 					}
 					assert!(decoder.is_empty());
 					assert!(log.resets().is_empty());
@@ -15669,7 +15844,7 @@ mod stitch_tests {
 	/// END_OF_GROUP object, and the next relay fills its cache from that answer.
 	#[kio::test]
 	async fn passthrough_fetch_ends_at_the_last_frame() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let objects = [
 				(6, &[0x3e, 6][..], None),
 				(8, &[0x3e, 1][..], None),
@@ -15679,9 +15854,14 @@ mod stitch_tests {
 			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
 			assert!(log.resets().is_empty());
 			let mut decoder = Decoder::new(&bytes, version.into());
-			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::id(version), "{version}");
 			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
-			let last = if Filter::is_draft20(version) { 8 } else { 9 };
+			// Draft-22's End Location is the last frame. Draft-23 names the Largest Object
+			// instead, which here is the END_OF_GROUP object the answer does not carry.
+			let last = match version {
+				Version::Draft22 => 8,
+				_ => 9,
+			};
 			assert_eq!(ok.end_location.object, last, "{version}");
 			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
 			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
@@ -15709,7 +15889,7 @@ mod stitch_tests {
 	/// ingest.
 	#[kio::test]
 	async fn passthrough_keeps_properties_off_status_objects() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for status in [END_OF_GROUP, END_OF_TRACK] {
 				let script = object_stream(version, true, &[(0, &[], None), (1, &[0x20, 7], Some(status))]);
 				let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
@@ -15739,17 +15919,18 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_fetch_ingest_keeps_marked_gaps_and_stitches_its_tail() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let mut objects = Vec::new();
 			for (index, id) in [6u64, 8].into_iter().enumerate() {
 				let properties = vec![0x3e, if index == 0 { 6 } else { 1 }];
 				ietf::FetchObject::Object {
 					subgroup: ietf::FetchSubgroup::Zero,
-					group: (index == 0).then_some(SEQUENCE),
-					object: Some(if version == Version::Draft22 && index > 0 {
-						2
-					} else {
-						id
+					group: (index == 0).then_some(KEY),
+					// The first object states its ID; the second is a delta from 6 to 8, which
+					// draft-23 counts from two past the prior object.
+					object: Some(match index {
+						0 => id,
+						_ => 2 - ietf::FetchObject::object_delta_bias(version),
 					}),
 					priority: (index == 0).then_some(128),
 					properties: Some(properties),
@@ -15805,7 +15986,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_preserves_ids_first_object_and_end_status() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for first in [false, true] {
 				let objects = [
 					(6, &[][..], None),
@@ -15835,7 +16016,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_preserves_immutable_bytes() {
-		for ingress in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for ingress in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut inner = Vec::new();
 			let mut encoder = Encoder::new(&mut inner, ingress.into());
 			for value in [2u64, 96_000, 2, 128, 1] {
@@ -15846,7 +16027,7 @@ mod stitch_tests {
 			let mut encoder = Encoder::new(&mut properties, ingress.into());
 			encoder.varint(0x0bu64).unwrap();
 			encoder.bytes(&inner).unwrap();
-			for egress in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for egress in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 				let script = object_stream(ingress, true, &[(0, &properties, None)]);
 				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
 				assert!(log.resets().is_empty());
@@ -15895,14 +16076,14 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_translates_mutable_property_encodings() {
-		for ingress in [Version::Draft22] {
+		for ingress in [Version::Draft22, Version::Draft23] {
 			let mut properties = Vec::new();
 			let mut encoder = Encoder::new(&mut properties, ingress.into());
 			encoder.varint(0x80u64).unwrap();
 			encoder.varint(96_000u64).unwrap();
 			encoder.varint(1u64).unwrap();
 			encoder.bytes(&[42; 130]).unwrap();
-			for egress in [Version::Draft22] {
+			for egress in [Version::Draft22, Version::Draft23] {
 				let script = object_stream(ingress, true, &[(0, &properties, None)]);
 				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
 				assert!(log.resets().is_empty());
@@ -15921,11 +16102,11 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_accepts_nonzero_first_objects_and_gaps() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let mut script = Vec::new();
 			ietf::GroupHeader {
 				track_alias: ALIAS,
-				group_id: SEQUENCE,
+				group_id: KEY,
 				sub_group_id: 0,
 				publisher_priority: 0,
 				flags: ietf::GroupFlags::default(),
@@ -15943,13 +16124,16 @@ mod stitch_tests {
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42]); 3]));
+			assert_eq!(
+				read_group(&mut consumer).await,
+				(KEY, vec![(Timestamp::unscaled(KEY), vec![42]); 3])
+			);
 		}
 	}
 
 	#[kio::test]
 	async fn an_overflowing_object_id_reaches_session_teardown() {
-		let mut bytes = tail_stream(SEQUENCE, 0, &[b"head"]);
+		let mut bytes = tail_stream(KEY, 0, &[b"head"]);
 		crate::coding::Encoder::new(&mut bytes, VERSION.into())
 			.varint(u64::MAX)
 			.unwrap();
@@ -15968,7 +16152,7 @@ mod stitch_tests {
 		let mut refused = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: SEQUENCE,
+			group_id: KEY,
 			sub_group_id: 1,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
@@ -15980,7 +16164,7 @@ mod stitch_tests {
 		.encode(&mut crate::coding::Encoder::new(&mut refused, VERSION.into()), VERSION)
 		.unwrap();
 
-		let h = Harness::new(Fill::Done, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
+		let h = Harness::new(Fill::Done, vec![refused, tail_stream(KEY, 0, &[b"ok"])]);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut stream = h.stream().await;
@@ -15989,8 +16173,8 @@ mod stitch_tests {
 
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"ok");
 		assert!(h.session.log.closes().is_empty());
@@ -16002,12 +16186,12 @@ mod stitch_tests {
 	/// is subgroup 0.
 	#[kio::test]
 	async fn a_compact_non_zero_subgroup_is_refused() {
-		for version in [Version::Draft22] {
-			let compact = |sequence: u64, first: Option<u64>| {
+		for version in [Version::Draft22, Version::Draft23] {
+			let compact = |key: u64, first: Option<u64>| {
 				let mut bytes = Vec::new();
 				ietf::GroupHeader {
 					track_alias: ALIAS,
-					group_id: sequence,
+					group_id: key,
 					sub_group_id: 0,
 					publisher_priority: 0,
 					flags: ietf::GroupFlags {
@@ -16025,13 +16209,13 @@ mod stitch_tests {
 				}
 				bytes
 			};
-			let mut truncated = compact(SEQUENCE + 3, None);
+			let mut truncated = compact(KEY + 3, None);
 			Encoder::new(&mut truncated, version.into()).varint(2u64).unwrap();
 			let scripts = vec![
-				compact(SEQUENCE, Some(2)),
+				compact(KEY, Some(2)),
 				truncated,
-				compact(SEQUENCE + 1, Some(0)),
-				compact(SEQUENCE + 2, None),
+				compact(KEY + 1, Some(0)),
+				compact(KEY + 2, None),
 			];
 			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
 			h.subscriber.version = version;
@@ -16041,7 +16225,7 @@ mod stitch_tests {
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
 			assert_eq!(
-				h.track.latest_sequence(),
+				h.track.latest_key(),
 				None,
 				"{version}: the refused subgroup opened a group"
 			);
@@ -16050,29 +16234,32 @@ mod stitch_tests {
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
 			assert_eq!(
-				h.track.latest_sequence(),
+				h.track.latest_key(),
 				None,
 				"{version}: a truncated subgroup opened a group"
 			);
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
+			assert_eq!(
+				read_group(&mut consumer).await,
+				(KEY + 1, vec![(Timestamp::unscaled(KEY + 1), vec![42])])
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 2, vec![]));
+			assert_eq!(read_group(&mut consumer).await, (KEY + 2, vec![]));
 			assert!(h.session.log.closes().is_empty(), "{version}");
 		}
 	}
 
-	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the
+	/// A subgroup stream for `key` without extension headers, starting at object 0: the
 	/// header, then `varints`, then `payload` verbatim.
-	fn raw_stream(sequence: u64, varints: &[u64], payload: &[u8]) -> Vec<u8> {
+	fn raw_stream(key: u64, varints: &[u64], payload: &[u8]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: sequence,
+			group_id: key,
 			sub_group_id: 0,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
@@ -16094,7 +16281,7 @@ mod stitch_tests {
 	#[kio::test]
 	async fn a_malformed_extension_block_is_refused() {
 		// Delta 0, then a 1-byte extension block holding half of a 2-byte varint.
-		let mut stream = tail_stream(SEQUENCE, 0, &[b"ok"]);
+		let mut stream = tail_stream(KEY, 0, &[b"ok"]);
 		stream.extend_from_slice(&[0, 1, 0x40]);
 		let h = Harness::new(Fill::Done, vec![stream]);
 		h.dispatch_refused().await;
@@ -16103,7 +16290,7 @@ mod stitch_tests {
 	/// A FIN before the declared payload ends.
 	#[kio::test]
 	async fn a_payload_cut_short_is_refused() {
-		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(KEY, &[0, 4], &[1, 2])], None);
 		h.dispatch_refused().await;
 	}
 
@@ -16111,14 +16298,14 @@ mod stitch_tests {
 	#[kio::test]
 	async fn an_oversized_frame_is_refused() {
 		let size = crate::group::MAX_CACHE_BYTES + 1;
-		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(KEY, &[0, size], &[])], None);
 		h.dispatch_refused().await;
 	}
 
 	/// A second stream for a group the track already holds.
 	#[kio::test]
 	async fn a_second_stream_for_a_group_is_refused() {
-		let whole = raw_stream(SEQUENCE, &[0, 1], &[42]);
+		let whole = raw_stream(KEY, &[0, 1], &[42]);
 		let h = Harness::with_timescale(Fill::Done, vec![whole.clone(), whole], None);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -16132,7 +16319,7 @@ mod stitch_tests {
 				let mut script = Vec::new();
 				ietf::GroupHeader {
 					track_alias: ALIAS,
-					group_id: SEQUENCE,
+					group_id: KEY,
 					sub_group_id: 0,
 					publisher_priority: 0,
 					flags: ietf::GroupFlags {
@@ -16197,10 +16384,10 @@ mod stitch_tests {
 		stream
 	}
 
-	/// A fill object without a Timestamp on a timed track ends the track, as a subgroup
-	/// object does: the fill is the head of a group the subscription carries.
+	/// A fill object without a Timestamp on a timed track is its group's, as a subgroup
+	/// object is: nothing reads time from an object.
 	#[kio::test]
-	async fn an_unstamped_fill_object_ends_the_track() {
+	async fn an_unstamped_fill_object_is_accepted() {
 		use futures::FutureExt;
 
 		let mut script = Vec::new();
@@ -16212,7 +16399,7 @@ mod stitch_tests {
 			.unwrap();
 		ietf::FetchObject::Object {
 			subgroup: ietf::FetchSubgroup::Zero,
-			group: Some(SEQUENCE),
+			group: Some(KEY),
 			object: Some(0),
 			priority: Some(0),
 			properties: None,
@@ -16226,24 +16413,20 @@ mod stitch_tests {
 
 		let h = Harness::new(Fill::Serving(Some(Timescale::MICRO)), vec![script]);
 		let mut stream = h.stream().await;
-		let res = h.subscriber.clone().recv_fill(&mut stream).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			h.track.closed().now_or_never(),
-			Some(Err(Error::MalformedTrack))
-		));
+		h.subscriber.clone().recv_fill(&mut stream).await.unwrap();
+		assert!(h.track.closed().now_or_never().is_none(), "the track goes on");
 	}
 
-	/// A subgroup object without a Timestamp on a timed track makes the whole track
-	/// malformed, so the track ends rather than only its group.
+	/// Every object of a group on a timed track is stamped with the group's key in the
+	/// track's units, whatever Timestamp property it carries or lacks.
 	#[kio::test]
-	async fn an_unstamped_subgroup_object_ends_the_track() {
+	async fn a_subgroup_object_is_stamped_with_its_group_key() {
 		use futures::FutureExt;
 
 		let mut script = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
-			group_id: SEQUENCE,
+			group_id: KEY,
 			sub_group_id: 0,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
@@ -16257,13 +16440,13 @@ mod stitch_tests {
 		script.extend_from_slice(&[0, 1, 42]);
 
 		let h = Harness::new(Fill::Done, vec![script]);
+		let mut consumer = h.track.subscribe(None);
 		let mut stream = h.stream().await;
-		let res = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			h.track.closed().now_or_never(),
-			Some(Err(Error::MalformedTrack))
-		));
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert!(h.track.closed().now_or_never().is_none(), "the track goes on");
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
+		assert_eq!(frames, vec![(key_time(KEY), vec![42])]);
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
@@ -16271,19 +16454,13 @@ mod stitch_tests {
 	async fn an_end_of_track_after_a_group_ends_the_track_after_it() {
 		let h = Harness::new(
 			Fill::Done,
-			vec![end_marker(tail_stream(SEQUENCE, 0, &[b"last"]), END_OF_TRACK)],
+			vec![end_marker(tail_stream(KEY, 0, &[b"last"]), END_OF_TRACK)],
 		);
 		let mut consumer = h.track.subscribe(None);
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(
-			h.track.finished(),
-			Some(track::Position {
-				group: SEQUENCE,
-				frame: 1
-			})
-		);
+		assert_eq!(h.track.finished(), Some(track::Position { group: KEY, frame: 1 }));
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
@@ -16301,11 +16478,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.finished(), Some(track::Position { group: 5, frame: 5 }));
-		assert_eq!(
-			h.track.latest_sequence(),
-			None,
-			"a terminal marker creates no payload group"
-		);
+		assert_eq!(h.track.latest_key(), None, "a terminal marker creates no payload group");
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -16314,8 +16487,8 @@ mod stitch_tests {
 	async fn a_group_past_the_declared_end_aborts_the_track() {
 		use futures::FutureExt;
 
-		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
-		h.track.finish_at(track::Position::group(SEQUENCE), None).unwrap();
+		let mut h = Harness::new(Fill::Done, vec![tail_stream(KEY, 0, &[b"late"])]);
+		h.track.finish_at(track::Position::group(KEY)).unwrap();
 		let mut stream = h.stream().await;
 
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
@@ -16330,15 +16503,12 @@ mod stitch_tests {
 	/// and no group is created for it.
 	#[kio::test]
 	async fn an_end_of_track_at_object_zero_creates_no_group() {
-		let h = Harness::new(
-			Fill::Done,
-			vec![end_marker(tail_stream(SEQUENCE, 0, &[]), END_OF_TRACK)],
-		);
+		let h = Harness::new(Fill::Done, vec![end_marker(tail_stream(KEY, 0, &[]), END_OF_TRACK)]);
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.finished(), Some(track::Position::group(SEQUENCE)));
-		assert_eq!(h.track.latest_sequence(), None, "no group was created");
+		assert_eq!(h.track.finished(), Some(track::Position::group(KEY)));
+		assert_eq!(h.track.latest_key(), None, "no group was created");
 	}
 
 	/// The group ended exactly where we joined it, so the subscription's stream carries no
@@ -16347,10 +16517,7 @@ mod stitch_tests {
 	async fn an_empty_tail_finishes_the_filled_group() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
-				tail_stream(SEQUENCE, 2, &[]),
-			],
+			vec![fill_stream(KEY, &[b"head-0", b"head-1"]), tail_stream(KEY, 2, &[])],
 		);
 		let mut consumer = h.track.subscribe(None);
 
@@ -16360,8 +16527,8 @@ mod stitch_tests {
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 2, "the head is the whole group");
 	}
 
@@ -16374,23 +16541,23 @@ mod stitch_tests {
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
 				fill_stream_for::<&[u8]>(REQUEST, &[]),
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
-				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+				tail_stream(KEY, 2, &[b"tail-2"]),
+				tail_stream(KEY + 1, 0, &[b"next-0"]),
 			],
 		)
-		.with_largest(SEQUENCE);
+		.with_largest(KEY);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
-		assert!(matches!(*h.fill.read(), Fill::Failed { sequence: SEQUENCE }));
+		assert!(matches!(*h.fill.read(), Fill::Failed { key: KEY }));
 
 		h.dispatch_refused().await;
 
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY + 1, "the headless group was dropped");
 		assert_eq!(frames.len(), 1);
 	}
 
@@ -16402,11 +16569,11 @@ mod stitch_tests {
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
 				fill_stream_for::<&[u8]>(REQUEST, &[]),
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
-				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+				tail_stream(KEY, 2, &[b"tail-2"]),
+				tail_stream(KEY + 1, 0, &[b"next-0"]),
 			],
 		)
-		.with_largest(SEQUENCE);
+		.with_largest(KEY);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut fill = h.stream().await;
@@ -16419,8 +16586,8 @@ mod stitch_tests {
 
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY + 1, "the headless group was dropped");
 		assert_eq!(frames.len(), 1);
 	}
 
@@ -16428,13 +16595,13 @@ mod stitch_tests {
 	/// still stands alone.
 	#[kio::test]
 	async fn a_mid_group_stream_without_a_fill_stands_alone() {
-		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
+		let h = Harness::new(Fill::Done, vec![tail_stream(KEY, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut tail = h.stream().await;
 		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 1);
 	}
 
@@ -16449,14 +16616,14 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
 		// `remove_subscribe` got there first.
 		let mut fill = Fill::Done;
 		fill.install(Fill::Ready {
-			sequence: SEQUENCE,
+			key: KEY,
 			next: 1,
 			producer,
 		});
@@ -16475,20 +16642,17 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
-		let mut fill = Fill::Failed { sequence: SEQUENCE };
+		let mut fill = Fill::Failed { key: KEY };
 		fill.install(Fill::Ready {
-			sequence: SEQUENCE,
+			key: KEY,
 			next: 1,
 			producer,
 		});
-		assert!(
-			matches!(fill, Fill::Failed { sequence: SEQUENCE }),
-			"Failed is terminal"
-		);
+		assert!(matches!(fill, Fill::Failed { key: KEY }), "Failed is terminal");
 
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
@@ -16503,18 +16667,15 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
-		let mut fill = Fill::Failed { sequence: SEQUENCE };
+		let mut fill = Fill::Failed { key: KEY };
 		fill.end();
-		assert!(
-			matches!(fill, Fill::Failed { sequence: SEQUENCE }),
-			"the end keeps it failed"
-		);
+		assert!(matches!(fill, Fill::Failed { key: KEY }), "the end keeps it failed");
 		fill.install(Fill::Ready {
-			sequence: SEQUENCE,
+			key: KEY,
 			next: 1,
 			producer,
 		});
@@ -16526,65 +16687,66 @@ mod stitch_tests {
 	/// Object ID is past zero, so it is delivered rather than dropped as a cut tail.
 	#[kio::test]
 	async fn a_headless_group_claiming_its_first_object_is_delivered() {
-		let h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 6, &[b"six"])]);
+		let h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 6, &[b"six"])]);
 		h.subscriber
 			.state
 			.lock()
 			.subscribes
 			.get_mut(&REQUEST)
 			.unwrap()
-			.headless_through = Some(SEQUENCE);
+			.headless_through = Some(KEY);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.expect("group");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 1);
 	}
 
-	/// A refused headless group is reported dropped, so a reader in sequence order, as a
-	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	/// A refused headless group is reported dropped, so a reader in key order moves on to the next group rather than wait on it.
 	#[kio::test]
 	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
 		let h = Harness::new(
 			Fill::Done,
-			vec![
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
-				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
-			],
+			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
-		// Subscribed before the answer, as the socket does.
+		// Subscribed before the answer.
 		let mut ordered = h
 			.track
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(0..)
 			.ordered();
 		h.track.received();
-		h.track.anchored_cached();
-		h.track.clone().start_at(SEQUENCE).unwrap();
+		h.track.anchored();
+		h.track.clone().start_at(KEY).unwrap();
 		h.subscriber
 			.state
 			.lock()
 			.subscribes
 			.get_mut(&REQUEST)
 			.unwrap()
-			.headless_through = Some(SEQUENCE);
+			.headless_through = Some(KEY);
 
 		h.dispatch_refused().await;
 
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		// The refused group comes back as a gap, then the next group.
+		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
+			panic!("the refused group is not reported");
+		};
+		assert!(range.contains(&KEY), "{range:?}");
 		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(group))) => group,
-			Poll::Ready(other) => panic!("no next group: {:?}", other.map(|group| group.map(|g| g.sequence))),
+			Poll::Ready(_) => panic!("no next group"),
 			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
 		};
-		assert_eq!(group.sequence, SEQUENCE + 1);
+		assert_eq!(group.start, KEY + 1);
 	}
 
 	/// Widening updates replaced fills that failed to head this group and the next, and the
@@ -16594,10 +16756,7 @@ mod stitch_tests {
 	async fn a_headless_tail_after_its_fill_was_replaced_is_dropped() {
 		let h = Harness::new(
 			Fill::Done,
-			vec![
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
-				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
-			],
+			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
 		h.subscriber
 			.state
@@ -16605,15 +16764,15 @@ mod stitch_tests {
 			.subscribes
 			.get_mut(&REQUEST)
 			.unwrap()
-			.headless_through = Some(SEQUENCE + 1);
+			.headless_through = Some(KEY + 1);
 		let mut consumer = h.track.subscribe(None);
 
 		h.dispatch_refused().await;
 
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY + 1, "the headless group was dropped");
 		assert_eq!(frames.len(), 1);
 	}
 
@@ -16624,14 +16783,14 @@ mod stitch_tests {
 	async fn an_unclaimed_head_is_cancelled_when_the_subscription_goes() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+			vec![fill_stream(KEY, &[b"head-0"])],
 		);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		let mut group = consumer.recv_group().await.unwrap().unwrap();
-		assert_eq!(group.sequence, SEQUENCE);
+		assert_eq!(group.start, KEY);
 
 		h.subscriber.remove_subscribe(REQUEST).expect("subscribed");
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
@@ -16642,7 +16801,7 @@ mod stitch_tests {
 	async fn an_unclaimed_head_is_cancelled_when_the_session_closes() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+			vec![fill_stream(KEY, &[b"head-0"])],
 		);
 		let mut consumer = h.track.subscribe(None);
 		let mut fill = h.stream().await;
@@ -16660,16 +16819,16 @@ mod stitch_tests {
 		);
 	}
 
-	/// A publisher that serves a head and then opens a whole group for the same sequence
+	/// A publisher that serves a head and then opens a whole group for the same key
 	/// has contradicted its own fill. The model holds one producer per group, so the
 	/// duplicate stream and unfinished head are refused without caching a cut group.
 	#[kio::test]
-	async fn a_whole_group_for_a_headed_sequence_is_refused() {
+	async fn a_whole_group_for_a_headed_key_is_refused() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
-				tail_stream(SEQUENCE, 0, &[b"again-0"]),
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 0, &[b"again-0"]),
 			],
 		);
 		let mut consumer = h.track.subscribe(None);
@@ -16694,7 +16853,7 @@ mod stitch_tests {
 	async fn a_cancelled_session_aborts_a_waiting_fill_head() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+			vec![fill_stream(KEY, &[b"head-0"])],
 		);
 		let mut consumer = h.track.subscribe(None);
 
@@ -16711,7 +16870,7 @@ mod stitch_tests {
 		drop(h);
 
 		assert!(
-			matches!(group.read_frame().await, Err(Error::Cancel)),
+			matches!(group.read_frame().await, Err(Error::Session(SessionError::Cancel))),
 			"a waiting fill head must be cancelled, not left parked"
 		);
 	}
@@ -16720,7 +16879,7 @@ mod stitch_tests {
 	async fn session_death_keeps_a_waiting_fill_heads_resume_position() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+			vec![fill_stream(KEY, &[b"head-0"])],
 		);
 		let track = h.track.consume();
 		let mut consumer = h.track.subscribe(None);
@@ -16728,13 +16887,7 @@ mod stitch_tests {
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		let mut group = consumer.recv_group().await.unwrap().expect("the fill head arrived");
 		let resume = track.resume_position();
-		assert_eq!(
-			resume,
-			Some(track::Position {
-				group: SEQUENCE,
-				frame: 1
-			})
-		);
+		assert_eq!(resume, Some(track::Position { group: KEY, frame: 1 }));
 		let err = Error::Session(crate::SessionError::App(7));
 		h.subscriber.abort(&err);
 		assert_eq!(track.resume_position(), resume);
@@ -16746,15 +16899,15 @@ mod stitch_tests {
 
 	/// The same contradiction as above, with the streams the other way round: the whole
 	/// group lands before the fill has written its head. The model holds one producer per
-	/// live sequence, so the fill loses the race to create it and gives up, rather than a
+	/// live key, so the fill loses the race to create it and gives up, rather than a
 	/// second producer appearing and the objects being delivered twice.
 	#[kio::test]
-	async fn a_whole_group_that_precedes_the_head_wins_the_sequence() {
+	async fn a_whole_group_that_precedes_the_head_wins_the_key() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				tail_stream(SEQUENCE, 0, &[b"whole-0"]),
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 0, &[b"whole-0"]),
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
 			],
 		);
 		let mut consumer = h.track.subscribe(None);
@@ -16773,15 +16926,15 @@ mod stitch_tests {
 			.await
 			.expect("overlapping fill is drained without another producer");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 1, "the group is whatever one producer wrote, not both");
 	}
 
 	/// A standalone subgroup tail keeps its identity while plain readers see its payload.
 	#[kio::test]
 	async fn a_tail_without_a_fill_is_preserved() {
-		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
+		let h = Harness::new(Fill::Done, vec![tail_stream(KEY, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
 		let mut tail = h.stream().await;
 		h.subscriber.clone().recv_group(&mut tail).await.unwrap();
@@ -16793,7 +16946,7 @@ mod stitch_tests {
 	/// group. The publisher is out of spec on the bit, not missing a head.
 	#[kio::test]
 	async fn a_clear_first_object_at_zero_delivers_the_group() {
-		let bytes = draft18_subgroup(SEQUENCE, false, 0, &[b"whole", b"next"]);
+		let bytes = draft18_subgroup(KEY, false, 0, &[b"whole", b"next"]);
 		assert_eq!(
 			u64::from(bytes[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT,
 			0,
@@ -16807,8 +16960,8 @@ mod stitch_tests {
 
 		h.subscriber.clone().recv_group(&mut stream).await.expect("the group");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].1, b"whole");
 		assert_eq!(frames[1].1, b"next");
@@ -16821,7 +16974,7 @@ mod stitch_tests {
 		use futures::FutureExt;
 
 		let payloads: [&[u8]; 5] = [b"o0", b"o1", b"o2", b"o3", b"o4"];
-		let bytes = end_marker(draft18_subgroup(SEQUENCE, true, 0, &payloads), END_OF_GROUP);
+		let bytes = end_marker(draft18_subgroup(KEY, true, 0, &payloads), END_OF_GROUP);
 		let flags = ietf::GroupFlags::decode(u64::from(bytes[0])).unwrap();
 		assert!(flags.has_end, "the header marks the group's end");
 
@@ -16834,7 +16987,7 @@ mod stitch_tests {
 
 		// The stream was read to its end, so everything is already delivered.
 		let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(group.sequence, SEQUENCE);
+		assert_eq!(group.start, KEY);
 		for payload in payloads {
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), payload);
@@ -16846,8 +16999,8 @@ mod stitch_tests {
 	/// FIRST_OBJECT and the starting ID are independent relay metadata.
 	#[kio::test]
 	async fn a_clear_first_object_past_zero_is_preserved() {
-		let partial = draft18_subgroup(SEQUENCE, false, 3, &[b"tail-3"]);
-		let whole = draft18_subgroup(SEQUENCE + 1, true, 0, &[b"next"]);
+		let partial = draft18_subgroup(KEY, false, 3, &[b"tail-3"]);
+		let whole = draft18_subgroup(KEY + 1, true, 0, &[b"next"]);
 		assert_eq!(u64::from(partial[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT, 0);
 
 		let mut h = Harness::new(Fill::Done, vec![partial, whole]);
@@ -16856,8 +17009,8 @@ mod stitch_tests {
 
 		let mut partial = read_draft18(&h.session).await;
 		h.subscriber.clone().recv_group(&mut partial).await.unwrap();
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames[0].1, b"tail-3");
 
 		let mut whole = read_draft18(&h.session).await;
@@ -16867,40 +17020,42 @@ mod stitch_tests {
 			.await
 			.expect("the next group");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE + 1);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY + 1);
 		assert_eq!(frames[0].1, b"next");
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted: a
-	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
+	/// A received group whose first object rewinds past the group before it is refused: a
+	/// moq-transport frame's time is its Group ID, so its timed tracks are checked like any.
 	#[kio::test]
-	async fn a_received_rewind_is_accepted() {
+	async fn a_received_rewind_is_refused() {
 		use futures::FutureExt;
 
-		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])]);
+		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 0, &[b"rewound"])]);
 		h.subscriber.version = Version::Draft18;
 		// Starts past the incoming group's first object, at `timestamp(0)`.
-		let mut before = h.track.create_group((SEQUENCE - 1).into()).unwrap();
+		let mut before = h.track.create_group((KEY - 1).into()).unwrap();
 		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
 		before.finish().unwrap();
 
 		let mut consumer = h.track.subscribe(None);
-		assert_eq!(read_group(&mut consumer).await.0, SEQUENCE - 1);
+		assert_eq!(read_group(&mut consumer).await.0, KEY - 1);
 
 		let mut stream = read_draft18(&h.session).await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		// The stream was read to its end, so the group is already delivered.
 		let mut group = consumer
 			.recv_group()
 			.now_or_never()
 			.expect("delivered")
 			.unwrap()
 			.unwrap();
-		assert_eq!(group.sequence, SEQUENCE);
-		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload.as_ref(), b"rewound");
+		assert_eq!(group.start, KEY);
+		// The group fails, but the track stays open for the groups after it.
+		assert!(matches!(
+			group.read_frame().now_or_never().unwrap(),
+			Err(Error::TimestampMismatch)
+		));
 		assert!(h.track.closed().now_or_never().is_none());
 	}
 
@@ -16911,8 +17066,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
-				tail_stream(SEQUENCE, 5, &[b"tail-5"]),
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 5, &[b"tail-5"]),
 			],
 		);
 		let mut consumer = h.track.subscribe(None);
@@ -16946,7 +17101,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn receive_drain_ends_a_fill_waiting_for_subscribe_ok() {
-		let h = Harness::new(Fill::Requested, vec![fill_stream(SEQUENCE, &[b"head"])]);
+		let h = Harness::new(Fill::Requested, vec![fill_stream(KEY, &[b"head"])]);
 		let mut stream = h.stream().await;
 		let mut subscriber = h.subscriber.clone();
 		let mut receiving = Box::pin(subscriber.recv_fill(&mut stream));
@@ -16962,7 +17117,7 @@ mod stitch_tests {
 	async fn receive_drain_ends_a_tail_waiting_for_a_missing_fill() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![tail_stream(SEQUENCE, 1, &[b"tail"])],
+			vec![tail_stream(KEY, 1, &[b"tail"])],
 		);
 		let mut stream = h.stream().await;
 		let mut subscriber = h.subscriber.clone();
@@ -16976,7 +17131,7 @@ mod stitch_tests {
 	async fn receive_drain_preserves_a_buffered_fill_and_tail() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![tail_stream(SEQUENCE, 1, &[b"tail"]), fill_stream(SEQUENCE, &[b"head"])],
+			vec![tail_stream(KEY, 1, &[b"tail"]), fill_stream(KEY, &[b"head"])],
 		);
 		let mut consumer = h.track.subscribe(None);
 		let mut tail = h.stream().await;
@@ -17001,7 +17156,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn receive_drain_ends_a_group_fetch_waiting_for_fetch_ok() {
-		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head"])]);
+		let h = Harness::new(Fill::Done, vec![fill_stream(KEY, &[b"head"])]);
 		h.subscriber
 			.state
 			.lock()
@@ -17022,7 +17177,7 @@ mod stitch_tests {
 	/// for that response instead of looking up a producer that does not exist yet.
 	#[kio::test]
 	async fn an_early_fill_waits_for_subscribe_ok() {
-		let h = Harness::new(Fill::Requested, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
+		let h = Harness::new(Fill::Requested, vec![fill_stream(KEY, &[b"head-0"])]);
 		{
 			let mut state = h.subscriber.state.lock();
 			state.subscribes.get_mut(&REQUEST).unwrap().producer = None;
@@ -17044,7 +17199,7 @@ mod stitch_tests {
 	/// subscription itself is delivering, so it is refused rather than written.
 	#[kio::test]
 	async fn an_unsolicited_fill_is_refused() {
-		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
+		let h = Harness::new(Fill::Done, vec![fill_stream(KEY, &[b"head-0"])]);
 		let mut fill = h.stream().await;
 
 		assert!(matches!(
@@ -17062,8 +17217,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])]),
-				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				fill_stream_for(FETCH, &[(KEY, &[b"head-0", b"head-1"])]),
+				tail_stream(KEY, 2, &[b"tail-2"]),
 			],
 		)
 		.with_joining(FETCH);
@@ -17078,8 +17233,8 @@ mod stitch_tests {
 		head.expect("joining fetch");
 		tail.expect("tail");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 3);
 		assert_eq!(frames[0].1, b"head-0");
 		assert_eq!(frames[1].1, b"head-1");
@@ -17093,8 +17248,8 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				tail_stream(SEQUENCE, 0, &[b"whole-0"]),
-				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])]),
+				tail_stream(KEY, 0, &[b"whole-0"]),
+				fill_stream_for(FETCH, &[(KEY, &[b"head-0", b"head-1"])]),
 			],
 		)
 		.with_joining(FETCH);
@@ -17110,11 +17265,11 @@ mod stitch_tests {
 			.expect("the whole group");
 		assert!(
 			h.subscriber.clone().recv_fill(&mut fill).await.is_err(),
-			"the fetch cannot create a second producer for a live sequence"
+			"the fetch cannot create a second producer for a live key"
 		);
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"whole-0");
 	}
@@ -17158,9 +17313,9 @@ mod stitch_tests {
 		let headers = [
 			// Both IDs omitted: "the requested group, from its start" is exactly the bug.
 			header(None, None, Zero, Some(0)),
-			header(Some(SEQUENCE), None, Zero, Some(0)),
-			header(Some(SEQUENCE), Some(0), Prior, Some(0)),
-			header(Some(SEQUENCE), Some(0), Zero, None),
+			header(Some(KEY), None, Zero, Some(0)),
+			header(Some(KEY), Some(0), Prior, Some(0)),
+			header(Some(KEY), Some(0), Zero, None),
 		];
 
 		for version in [VERSION] {
@@ -17184,11 +17339,10 @@ mod stitch_tests {
 		}
 	}
 
-	/// On a timed track every Normal object carries a Timestamp, so one without is
-	/// malformed rather than stamped with its arrival time.
+	/// A fetched object on a timed track needs no Timestamp: it takes its group's key.
 	#[kio::test]
-	async fn an_unstamped_object_on_a_timed_track_is_malformed() {
-		let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"a"])).await;
+	async fn an_unstamped_fetched_object_is_accepted() {
+		let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(KEY, 0, &[b"a"])).await;
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"timed",
@@ -17196,12 +17350,8 @@ mod stitch_tests {
 		);
 		run.track = track.clone();
 		let (slot, _) = run.slot(Some(Timescale::MICRO), None).await;
-		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			futures::FutureExt::now_or_never(track.closed()),
-			Some(Err(Error::MalformedTrack))
-		));
+		run.subscriber.recv_group_fetch(&mut run.stream, slot).await.unwrap();
+		assert!(futures::FutureExt::now_or_never(track.closed()).is_none());
 	}
 
 	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it
@@ -17215,7 +17365,7 @@ mod stitch_tests {
 			let short = Filter::is_draft20(version);
 			for (count, complete) in [(2, short), (3, true), (4, false)] {
 				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
-				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
+				let mut run = GroupFetchRun::new(version, group_fetch_objects(KEY, 0, &payloads)).await;
 
 				let (slot, fetch) = run.slot(None, Some(END)).await;
 				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
@@ -17246,21 +17396,23 @@ mod stitch_tests {
 	/// for now, since objects past the bound may still be written.
 	#[kio::test]
 	async fn a_range_fetch_must_reach_its_bounded_group() {
-		let last = SEQUENCE + 2;
+		let last = KEY + 2;
 		for version in [Version::Draft18, VERSION] {
-			for objects in [Vec::new(), group_fetch_objects(SEQUENCE, 0, &[b"a"])] {
+			for objects in [Vec::new(), group_fetch_objects(KEY, 0, &[b"a"])] {
 				let empty = objects.is_empty();
 				let mut run = GroupFetchRun::new(version, objects).await;
 				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
 				run.track.start_at(last + 1).unwrap();
 				run.track.create_group((last + 1).into()).unwrap().finish().unwrap();
+				// From group 0, which a time start names whatever is held, so the history below
+				// the feed is asked as a miss rather than looked up.
 				let mut reading = consumer
 					.subscribe(Some(
 						track::Subscription::default()
-							.with_range(SEQUENCE..last + 1)
+							.with_range(0..last + 1)
 							.with_order(crate::track::Order::Ascending)
-							.with_delay(track::Delay::default().with_max(None)),
+							.with_max(None),
 					))
 					.await
 					.unwrap();
@@ -17270,7 +17422,7 @@ mod stitch_tests {
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 					fill: std::sync::Arc::new(fill),
 					timescale: None,
-					first: SEQUENCE,
+					first: 0,
 					last,
 					start: 0,
 					end: Some(2),
@@ -17298,14 +17450,14 @@ mod stitch_tests {
 	}
 
 	/// One Object published as a datagram, as a fetch stream may carry it.
-	fn datagram_object(sequence: u64) -> Vec<u8> {
+	fn datagram_object(key: u64) -> Vec<u8> {
 		let mut properties = Vec::new();
 		let w = &mut Encoder::new(&mut properties, VERSION.into());
 		ietf::encode_object_time(w, timestamp(0), Timescale::MICRO).unwrap();
 		let mut buf = Vec::new();
 		ietf::FetchObject::Object {
 			subgroup: ietf::FetchSubgroup::Datagram,
-			group: Some(sequence),
+			group: Some(key),
 			object: Some(0),
 			priority: Some(0),
 			properties: Some(properties),
@@ -17321,20 +17473,20 @@ mod stitch_tests {
 	/// drops its group, caching nothing, and reads on past its payload.
 	#[kio::test]
 	async fn a_group_fetch_drops_a_datagram_group() {
-		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
+		let mut run = GroupFetchRun::new(VERSION, datagram_object(KEY)).await;
 		let (slot, fetch) = run.slot(None, None).await;
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(res.is_ok(), "{res:?}");
 		assert!(matches!(fetch.await, Err(Error::NotFound)));
-		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
+		assert!(run.track.consume().peek_group(KEY).is_none(), "nothing is cached");
 	}
 
 	/// A refused multi-group FETCH names every owed group dropped, without retrying
 	/// each group or ending the live track. This exercises the wire refusal decoder.
 	#[kio::test]
 	async fn a_refused_range_fetch_reports_every_owed_group_dropped() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut refusal = Vec::new();
 			let mut writer = Encoder::new(&mut refusal, version.into());
 			writer.varint(ietf::RequestError::ID).unwrap();
@@ -17353,18 +17505,17 @@ mod stitch_tests {
 			run.track.start_at(3).unwrap();
 			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
 			let requests = run.track.requests();
-			let mut reader = run.track.subscribe(
-				track::Subscription::default()
-					.with_range(1..3)
-					.with_delay(track::Delay::default().with_max(None)),
-			);
+			// From group 0, which a time start names whatever is held.
+			let mut reader = run
+				.track
+				.subscribe(track::Subscription::default().with_range(0..3).with_max(None));
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());
 			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("{version}: missing history was not requested");
 			};
-			assert_eq!((fill.start().group, fill.end()), (1, 3));
+			assert_eq!((fill.start().group, fill.end()), (0, 3));
 			run.subscriber
 				.clone()
 				.run_group_fetch(Path::from_static("broadcast"), "video".into(), fill, None)
@@ -17376,7 +17527,7 @@ mod stitch_tests {
 				.poll(now.saturating_add(crate::ledger::GRACE), &waiter);
 			assert_eq!(
 				reader.poll_drop(&waiter),
-				Poll::Ready((1..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
+				Poll::Ready((0..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
 				"{version}"
 			);
 			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
@@ -17391,7 +17542,7 @@ mod stitch_tests {
 	/// caches the supplied groups and reports the gaps between them as misses.
 	#[kio::test]
 	async fn a_range_fetch_caches_the_groups_with_the_groups_between_dropped() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut objects = group_fetch_objects(4, 0, &[b"4-0", b"4-1"]);
 			// Later Group IDs are deltas, so 1 advances from group 4 to group 6.
 			objects.extend(group_fetch_objects(1, 0, &[b"6-0", b"6-1"]));
@@ -17400,12 +17551,14 @@ mod stitch_tests {
 			let consumer = run.track.consume();
 			run.track.start_at(7).unwrap();
 			run.track.create_group(7u64.into()).unwrap().finish().unwrap();
+			// From group 0, which a time start names whatever is held, so the history below
+			// the feed is asked as a miss rather than looked up.
 			let mut reading = consumer
 				.subscribe(Some(
 					track::Subscription::default()
-						.with_range(3..7)
+						.with_range(0..7)
 						.with_order(crate::track::Order::Ascending)
-						.with_delay(track::Delay::default().with_max(None)),
+						.with_max(None),
 				))
 				.await
 				.unwrap();
@@ -17413,15 +17566,15 @@ mod stitch_tests {
 			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
-				(3, 7),
+				(0, 7),
 				"{version}: one fill for the run"
 			);
 			// Readers of the missing groups join that fill.
-			let missing = [3, 5].map(|sequence| consumer.fetch_group(sequence, None));
+			let missing = [3, 5].map(|key| consumer.fetch_group(key, None));
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale: None,
-				first: 3,
+				first: 0,
 				last: 6,
 				start: 0,
 				end: None,
@@ -17434,13 +17587,13 @@ mod stitch_tests {
 			.expect("recv");
 			assert!(res.is_ok(), "{version}: {res:?}");
 			assert_eq!(consumer.cached_groups(0..7), [4, 6], "{version}");
-			for sequence in [4, 6] {
-				let mut group = consumer.fetch_group(sequence, None).await.unwrap();
+			for key in [4, 6] {
+				let mut group = consumer.fetch_group(key, None).await.unwrap();
 				for object in 0..2 {
 					let frame = group.read_frame().await.unwrap().unwrap();
 					assert_eq!(
 						frame.payload.as_ref(),
-						format!("{sequence}-{object}").as_bytes(),
+						format!("{key}-{object}").as_bytes(),
 						"{version}"
 					);
 				}
@@ -17470,11 +17623,11 @@ mod stitch_tests {
 		ietf::FetchHeader { request_id: REQUEST }
 			.encode(&mut crate::coding::Encoder::new(&mut fill, VERSION.into()), VERSION)
 			.unwrap();
-		fill.extend(datagram_object(SEQUENCE));
+		fill.extend(datagram_object(KEY));
 
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![fill, tail_stream(SEQUENCE + 1, 0, &[b"next"])],
+			vec![fill, tail_stream(KEY + 1, 0, &[b"next"])],
 		);
 		let mut consumer = h.track.subscribe(None);
 		let mut fill = h.stream().await;
@@ -17490,21 +17643,21 @@ mod stitch_tests {
 			.await
 			.expect("the subscription carries on");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE + 1);
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY + 1);
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"next");
 	}
 
 	/// A group fetch's objects after the FETCH_HEADER: the first one names the group and
 	/// `start`, and every later one is the next object.
-	fn group_fetch_objects(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	fn group_fetch_objects(key: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		for (index, payload) in payloads.iter().enumerate() {
 			let first = index == 0;
 			ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
-				group: first.then_some(sequence),
+				group: first.then_some(key),
 				object: first.then_some(start),
 				priority: first.then_some(0),
 				properties: None,
@@ -17519,11 +17672,85 @@ mod stitch_tests {
 		buf.to_vec()
 	}
 
+	/// One of draft-23's indicators, as the fetch stream carries it.
+	fn group_end(track: bool) -> Vec<u8> {
+		let version = Version::Draft23;
+		let mut buf = Vec::new();
+		ietf::FetchObject::EndOfGroup { track }
+			.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		buf
+	}
+
+	/// Draft-23 has no End Of Track in the answer: the fetch stream follows the track's last
+	/// object with End of Track, which declares the track's end as FETCH_OK's flag did. End
+	/// of Group declares nothing about the track.
+	#[kio::test]
+	async fn an_end_of_track_on_a_fetch_stream_ends_the_track() {
+		for track in [false, true] {
+			let objects = [group_fetch_objects(KEY, 0, &[b"a", b"b"]), group_end(track)].concat();
+			let mut run = GroupFetchRun::new(Version::Draft23, objects).await;
+
+			let mut group = run.recv_cached(None, None).await.expect("the group is cached");
+			for _ in 0..2 {
+				assert!(group.read_frame().await.unwrap().is_some());
+			}
+			assert!(group.read_frame().await.unwrap().is_none());
+			assert_eq!(
+				run.track.consume().final_key(),
+				track.then_some(KEY + 1),
+				"End of Track: {track}"
+			);
+		}
+	}
+
+	/// Past an End of Group the group takes no more objects, and a fetch stream cannot
+	/// start with one. Drafts before 23 have no such indicator at all.
+	#[kio::test]
+	async fn an_end_of_group_closes_its_group_to_later_objects() {
+		// Each object written on its own names its group; the second one here does not.
+		let pair = group_fetch_objects(KEY, 0, &[b"a", b"b"]);
+		let first = group_fetch_objects(KEY, 0, &[b"a"]);
+		let second = pair[first.len()..].to_vec();
+		let continued = [first, group_end(false), second].concat();
+		let mut run = GroupFetchRun::new(Version::Draft23, continued).await;
+		let res = run.recv_objects().await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+
+		let mut run = GroupFetchRun::new(Version::Draft23, group_end(false)).await;
+		let res = run.recv_objects().await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+
+		let ended = [group_fetch_objects(KEY, 0, &[b"a"]), group_end(false)].concat();
+		let mut run = GroupFetchRun::new(VERSION, ended).await;
+		assert!(run.recv_objects().await.is_err(), "draft-22 has no End of Group");
+	}
+
+	/// End of Group finishes its group at once, so a stream that stalls after it leaves the
+	/// group whole rather than open until the next group or the stream's end.
+	#[kio::test]
+	async fn an_end_of_group_finishes_its_group_before_the_stream_ends() {
+		let objects = [group_fetch_objects(KEY, 0, &[b"a", b"b"]), group_end(false)].concat();
+		let mut run = GroupFetchRun::stalled(Version::Draft23, objects).await;
+		let (slot, fetch) = run.slot(None, None).await;
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot.clone()));
+		assert!(futures::poll!(&mut receive).is_pending());
+		assert!(matches!(&*slot.read(), GroupFetch::Receiving(None)));
+
+		let mut group = fetch.await.expect("the group is cached");
+		for _ in 0..2 {
+			assert!(group.read_frame().await.unwrap().is_some());
+		}
+		let end = futures::poll!(std::pin::pin!(group.read_frame()));
+		assert!(matches!(end, Poll::Ready(Ok(None))), "{end:?}");
+	}
+
 	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its
 	/// error instead of leaving the run's readers waiting on the stream.
 	#[kio::test]
 	async fn a_group_aborted_under_a_stalled_fetch_ends_the_run() {
-		let mut run = GroupFetchRun::stalled(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"0"])).await;
+		let mut run = GroupFetchRun::stalled(VERSION, group_fetch_objects(KEY, 0, &[b"0"])).await;
 		let (slot, _fetch) = run.slot(None, None).await;
 		let mut receiving = run.subscriber.clone();
 		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot.clone()));
@@ -17597,7 +17824,7 @@ mod stitch_tests {
 		}
 
 		/// Queue the cache miss through the same request state as a wire FETCH, answered
-		/// through group `SEQUENCE`'s object `end` when set. The fetch resolves once the stream
+		/// through group `KEY`'s object `end` when set. The fetch resolves once the stream
 		/// writes the group.
 		async fn slot(
 			&self,
@@ -17608,27 +17835,27 @@ mod stitch_tests {
 			std::pin::Pin<Box<kio::Pending<track::Fetching>>>,
 		) {
 			let dynamic = self.track.requests();
-			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
+			let mut fetch = Box::pin(self.track.consume().fetch_group(KEY, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
 			let fill = dynamic.requested_fill().await.expect("group request");
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale,
-				first: SEQUENCE,
-				last: SEQUENCE,
+				first: KEY,
+				last: KEY,
 				start: 0,
 				end,
 			}));
 			(slot, fetch)
 		}
 
-		/// Decode the stream as the answer for group `SEQUENCE`.
+		/// Decode the stream as the answer for group `KEY`.
 		async fn recv_objects(&mut self) -> Result<(), Error> {
 			let (slot, _fetch) = self.slot(None, None).await;
 			self.subscriber.recv_group_fetch(&mut self.stream, slot).await
 		}
 
-		/// Decode the stream as the answer for group `SEQUENCE` through the exclusive object
+		/// Decode the stream as the answer for group `KEY` through the exclusive object
 		/// `end`, in `timescale`, and read back the group it cached.
 		async fn recv_cached(
 			&mut self,
@@ -17684,10 +17911,11 @@ mod joining_fetch_tests {
 
 	fn fetch_ok(version: Version) -> Vec<u8> {
 		message_bytes(
-			ietf::FetchOk::ID,
+			ietf::FetchOk::id(version),
 			&ietf::FetchOk {
 				end_of_track: false,
 				end_location: ietf::Location { group: 4, object: 2 },
+				largest: None,
 				properties: Default::default(),
 			},
 			version,
@@ -17751,6 +17979,17 @@ mod joining_fetch_tests {
 		}
 
 		async fn subscribe(version: Version, start: Option<u64>, session: ScriptedSession, control: Control) -> Self {
+			let subscription = start.map(|start| track::Subscription::default().with_start(start));
+			Self::subscribe_to(version, subscription, session, control).await
+		}
+
+		/// Serve the SUBSCRIBE a reader of `subscription` asks for, or demand alone for `None`.
+		async fn subscribe_to(
+			version: Version,
+			subscription: Option<track::Subscription>,
+			session: ScriptedSession,
+			control: Control,
+		) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -17770,10 +18009,7 @@ mod joining_fetch_tests {
 			let mut dynamic = producer.requests();
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
-			let subscription = match start {
-				None => track.subscribe(None),
-				Some(start) => track.subscribe(track::Subscription::default().with_start(start)),
-			};
+			let subscription = track.subscribe(subscription);
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let mut serving_subscriber = subscriber.clone();
@@ -17804,14 +18040,14 @@ mod joining_fetch_tests {
 			track.fill.read().outstanding()
 		}
 
-		fn fill_headless(&self, sequence: u64) -> bool {
+		fn fill_headless(&self, key: u64) -> bool {
 			let state = self.subscriber.state.lock();
 			let track = state
 				.subscribes
 				.values()
 				.next()
 				.expect("the subscription is registered");
-			track.fill.read().headless(sequence)
+			track.fill.read().headless(key)
 		}
 	}
 
@@ -17854,7 +18090,7 @@ mod joining_fetch_tests {
 
 	/// The parent keeps its child FETCH cancellation moving while its own FIN awaits ACK.
 	async fn revoked_child_fetch(accepted: bool) {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let session = ScriptedSession::per_stream(vec![
 				subscribe_ok(version, None),
 				if accepted { fetch_ok(version) } else { Vec::new() },
@@ -18166,7 +18402,7 @@ mod joining_fetch_tests {
 	#[kio::test]
 	async fn a_zero_start_joins_unfiltered_without_a_joining_fetch() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 			let messages = decode_messages(&run.session.log, version);
@@ -18185,6 +18421,68 @@ mod joining_fetch_tests {
 		}
 	}
 
+	/// A reader from the oldest group joins as one from time 0 does: a filterless SUBSCRIBE,
+	/// then once the copy is current one range FETCH for the groups below Largest, so a
+	/// publisher that answers it delivers the backlog it holds rather than only the live group.
+	#[kio::test]
+	async fn an_oldest_reader_fetches_the_groups_below_largest() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 9, object: 0 });
+		for start in [track::Start::Time(0), track::Start::Oldest] {
+			let subscription = track::Subscription::default().with_ranges([track::Range::from(start)]);
+			let session = ScriptedSession::per_stream(vec![
+				subscribe_ok(version, largest),
+				super::stitch_tests::tail_stream(10, 0, &[b"live"]),
+				fetch_ok(version),
+			]);
+			let run = JoinRun::subscribe_to(
+				version,
+				Some(subscription.clone()),
+				session.clone(),
+				Control::new(false),
+			)
+			.await;
+			let mut reader = run._hold.1.subscribe(subscription).await.unwrap();
+
+			// A group past Largest makes the copy current, which is when its readers judge
+			// what they miss below it.
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut live = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
+			let mut ingesting = run.subscriber.clone();
+			let ingest = ingesting.recv_group(&mut live);
+			futures::select_biased! {
+				_ = reader.recv_group().fuse() => {},
+				_ = ingest.fuse() => {},
+				_ = settle().fuse() => {},
+			}
+			settle().await;
+
+			let messages = decode_messages(&run.session.log, version);
+			let subscribe = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Subscribe::ID)
+				.expect("SUBSCRIBE");
+			let msg = crate::coding::decode_from(&mut &subscribe.1[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(msg.filter, Filter::Unfiltered, "{start:?}");
+			let fetch = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Fetch::ID)
+				.unwrap_or_else(|| panic!("{start:?}: no FETCH for the backlog"));
+			let msg = crate::coding::decode_from(&mut &fetch.1[..], version, ietf::Fetch::decode_msg).unwrap();
+			let FetchType::Filtered { filter, .. } = msg.fetch_type else {
+				panic!("{start:?}: a standalone FETCH, got {:?}", msg.fetch_type);
+			};
+			assert_eq!(
+				filter,
+				Filter::Absolute {
+					start: ietf::Location { group: 0, object: 0 },
+					end: Some(ietf::EndLocation { group: 8, object: None }),
+				},
+				"{start:?}: every group below Largest"
+			);
+		}
+	}
+
 	/// A group-0 start fetches only the groups below Largest, so when the publisher is
 	/// already partway through the Largest group, that group's mid-group stream is a cut
 	/// message. It is marked headless, so the stream is dropped and readers skip the group
@@ -18195,7 +18493,7 @@ mod joining_fetch_tests {
 	async fn a_zero_start_drops_the_largest_groups_cut_tail() {
 		for (object, headless) in [(2, Some(4)), (0, Some(4))] {
 			let largest = Some(ietf::Location { group: 4, object });
-			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
 				let state = run.subscriber.state.lock();
 				let held = state
@@ -18249,7 +18547,7 @@ mod joining_fetch_tests {
 			group = consumer.recv_group().fuse() => group.expect("track aborted").expect("track finished"),
 			res = ingest.fuse() => panic!("the next group's stream ended: {res:?}"),
 		};
-		assert_eq!(group.sequence, 5, "the cut group was skipped");
+		assert_eq!(group.start, 5, "the cut group was skipped");
 	}
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of
@@ -18339,10 +18637,10 @@ mod joining_fetch_tests {
 			(held.producer.clone().unwrap(), held.fill.clone())
 		};
 		let mut head = None;
-		open_fill_group(&mut track, &mut head, 4).unwrap();
-		let (sequence, next, producer) = head.unwrap();
+		assert!(open_fill_group(&mut track, &mut head, 4).unwrap());
+		let (key, next, producer) = head.unwrap();
 		*fill.write().ok().unwrap() = Fill::Ready {
-			sequence,
+			key,
 			next,
 			producer: producer.into_inner(),
 		};
@@ -18351,7 +18649,7 @@ mod joining_fetch_tests {
 		let Poll::Ready(Ok(group)) = futures::poll!(fetch.as_mut()) else {
 			panic!("the miss must resolve from the cache");
 		};
-		assert_eq!(group.sequence, 4);
+		assert_eq!(group.start, 4);
 	}
 
 	/// Only the joined group waits for the subscription's fill. A head that never arrives
@@ -18554,7 +18852,7 @@ mod joining_fetch_tests {
 
 			let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
 			let mut group = subscriber.recv_group().await.unwrap().unwrap();
-			assert_eq!(group.sequence, 4, "{version}");
+			assert_eq!(group.start, 4, "{version}");
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
 
 			// The grace runs out with the head still being written, ending the subscription.
@@ -18641,7 +18939,7 @@ mod joining_fetch_tests {
 
 				let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
 				let mut group = subscriber.recv_group().await.unwrap().unwrap();
-				assert_eq!(group.sequence, 4, "{version}/{status_code}");
+				assert_eq!(group.start, 4, "{version}/{status_code}");
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
 
 				while !run.subscriber.state.lock().subscribes.is_empty() {
@@ -18763,7 +19061,7 @@ mod joining_fetch_tests {
 			);
 			assert!(subscriber.state.lock().group_fetches.is_empty());
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 			return;
@@ -18781,7 +19079,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
@@ -18793,6 +19091,7 @@ mod joining_fetch_tests {
 						group: GROUP,
 						object: 0,
 					},
+					largest: None,
 					properties: Default::default(),
 				},
 				version,
@@ -18952,6 +19251,7 @@ mod joining_fetch_tests {
 					group: GROUP,
 					object: 0,
 				},
+				largest: None,
 				properties: Default::default(),
 			},
 			VERSION,
@@ -19016,6 +19316,7 @@ mod joining_fetch_tests {
 					&ietf::FetchOk {
 						end_of_track,
 						end_location,
+						largest: None,
 						properties: Default::default(),
 					},
 					version,
@@ -19059,11 +19360,7 @@ mod joining_fetch_tests {
 					.run_group_fetch(Path::from_static("broadcast"), "video".into(), request, None)
 					.await;
 
-				assert_eq!(
-					consumer.final_sequence(),
-					None,
-					"{version}: rejected end changed the track"
-				);
+				assert_eq!(consumer.final_key(), None, "{version}: rejected end changed the track");
 				assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
 				let violation = SessionError::from(&Error::ProtocolViolation).to_code();
 				assert!(
@@ -19119,6 +19416,7 @@ mod joining_fetch_tests {
 			&ietf::FetchOk {
 				end_of_track: ended,
 				end_location,
+				largest: None,
 				properties: Default::default(),
 			},
 			version,
@@ -19202,7 +19500,7 @@ mod joining_fetch_tests {
 			.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 		serving.await.expect("run_group_fetch");
 
-		assert_eq!(consumer.final_sequence(), ended.then_some(GROUP + 1));
+		assert_eq!(consumer.final_key(), ended.then_some(GROUP + 1));
 		let mut group = fetch.await.expect("fetched");
 		assert_eq!(group.index(), START, "the group starts where the reader wanted");
 		let mut payloads = Vec::new();
@@ -19337,15 +19635,19 @@ mod new_group_tests {
 			(stream, msg.new_group)
 		}
 
-		/// Group `sequence` lands in the copy: a first frame, and a delta when `delta`.
-		fn land(&mut self, sequence: u64, delta: bool) {
+		/// Group `key` lands in the copy: a first frame, and a delta when `delta`.
+		fn land(&mut self, key: u64, delta: bool) {
 			let state = self.probe.state.lock();
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
-			let mut group = copy.create_group(group::Info { sequence }).unwrap();
-			group.write_frame(None, b"key".as_slice()).unwrap();
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
+				.unwrap();
 			if delta {
-				group.write_frame(None, b"delta".as_slice()).unwrap();
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice())
+					.unwrap();
 			}
 			self.landed.push(group);
 		}
@@ -19583,6 +19885,33 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
+	/// A live join answered with no Largest began at group 0, so a reader that then asks from
+	/// the oldest group, as a moq-transport SUBSCRIBE on an empty copy does once it finds no
+	/// group, sends no REQUEST_UPDATE. A publisher without REQUEST_UPDATE support would end
+	/// the subscription over it.
+	#[kio::test]
+	async fn a_from_oldest_reader_on_an_empty_join_sends_no_update() {
+		let (mut relay, mut first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		stream.writer.varint(ietf::SubscribeOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::SubscribeOk {
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			})
+			.await
+			.unwrap();
+		settle().await;
+
+		first
+			.update(track::Subscription::default().with_start(Some(0)))
+			.unwrap();
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
 	/// An identified fill keeps ownership until its head is handed off. A fill with no
 	/// header can instead be superseded, since a reset may have discarded that header.
 	#[kio::test]
@@ -19637,11 +19966,11 @@ mod new_group_tests {
 			let _ = read(&mut stream).await;
 			answer(&mut stream).await;
 
-			let wanted = track::Subscription::default();
-			let wanted = match end {
-				Some(end) => wanted.with_range(..end),
-				None => wanted,
-			};
+			// A live join, ending before group `end` when one is given.
+			let wanted = track::Subscription::default().with_ranges([track::Range {
+				start: track::Start::LATEST,
+				end: end.map(|end| end - 1),
+			}]);
 			first.update(wanted).unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::SubscribeUpdate::ID);
@@ -19739,7 +20068,7 @@ mod new_group_tests {
 		let mut current = header(newest.request_id).await;
 		relay.probe.clone().recv_fill(&mut current).await.unwrap();
 		assert!(
-			matches!(*fill.read(), Fill::Failed { sequence: 5 }),
+			matches!(*fill.read(), Fill::Failed { key: 5 }),
 			"only the current header claimed the slot, and it carried no head"
 		);
 		relay.serving.abort();
@@ -19803,14 +20132,14 @@ mod new_group_tests {
 			let mut empty = header(widening.request_id).await;
 			relay.probe.clone().recv_fill(&mut empty).await.unwrap();
 			let fill = relay.probe.state.lock().subscribes[&subscription].fill.clone();
-			assert!(matches!(*fill.read(), Fill::Failed { sequence } if sequence == largest));
+			assert!(matches!(*fill.read(), Fill::Failed { key } if key == largest));
 			failed.push((largest, fill));
 		}
 
-		for (sequence, fill) in &failed {
+		for (key, fill) in &failed {
 			assert!(
-				fill.read().headless(*sequence),
-				"a stream already opening on the old fill still finds group {sequence} headless"
+				fill.read().headless(*key),
+				"a stream already opening on the old fill still finds group {key} headless"
 			);
 		}
 		assert_eq!(
@@ -19837,7 +20166,7 @@ mod track_property_tests {
 	};
 
 	/// The newest draft and an older one, both with a request stream per subscription.
-	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const VERSIONS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	/// Subscribe to one track through a relay on `version`, whose publisher answers with
 	/// `block` as SUBSCRIBE_OK's Track Properties, returning what the subscriber got.
@@ -19889,7 +20218,7 @@ mod track_property_tests {
 		Encoder::new(&mut frame, version.into())
 			.varint(ietf::SubscribeOk::ID)
 			.unwrap();
-		frame.extend(u16::try_from(body.len()).unwrap().to_be_bytes());
+		frame.extend(ietf::message::length_bytes(body.len(), version));
 		frame.extend(body);
 		stream.writer.write_all(&mut bytes::Bytes::from(frame)).await.unwrap();
 
@@ -20035,7 +20364,7 @@ mod full_track_name_tests {
 	/// session carries the next one.
 	#[kio::test]
 	async fn an_unencodable_track_name_fails_only_its_subscription() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (session, peer) = memory::pair(memory::Config::default());
 			let (tasks, _task_set) = TaskSet::new();
 			let subscriber = Subscriber::new(
@@ -20101,7 +20430,7 @@ mod compression_negotiation_tests {
 			compress: true,
 			..Default::default()
 		};
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert!(matches!(
 				refused(&properties, version, false),
 				Some(Error::UnsupportedExtension)

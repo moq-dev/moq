@@ -2,24 +2,34 @@
 
 //! Control counters cross real protocol drivers, including legacy multiplexing.
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::{
 	harness::{MockConnectOptions, connect_mock, now, spawn, subscribed},
 	mock::create_mock_session_pair,
 };
 use moq_net::{
-	Timescale, Timestamp, origin,
+	Timescale, origin,
 	stats::{Message, Registry, Tier},
 };
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(Default::default());
+	let mut config = origin::Config::default();
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
 async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload() {
-	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in [
+		"moq-lite-03",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let publisher = origin();
 		let subscriber = origin();
 		let registry = Registry::new(Default::default());
@@ -52,9 +62,9 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![7; 64 * 1024]))
+			.write_frame(group.at_start(), bytes::Bytes::from(vec![7; 64 * 1024]))
 			.unwrap();
 		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
@@ -79,7 +89,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 /// admitted with, even for a session with neither origin.
 #[kio::test]
 async fn setup_counts_under_the_admitted_stats() {
-	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: moq_net::Version = version.parse().unwrap();
 		let registry = Registry::new(Default::default());
 		let tier = Tier::new(moq_net::Path::from_static("internal"));
@@ -97,7 +107,7 @@ async fn setup_counts_under_the_admitted_stats() {
 			session
 		};
 		let server = async {
-			let request = server.accept_request(now(), server_transport).await.unwrap();
+			let request = server.handshake(now(), server_transport).await.unwrap();
 			let (session, driver) = request.with_stats(stats).ok().await.unwrap();
 			spawn(driver);
 			session

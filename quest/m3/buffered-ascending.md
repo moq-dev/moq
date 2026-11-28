@@ -49,6 +49,14 @@ Decided 2026-10-23 by the maintainer:
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
   Not chosen: m2; wiring it now behind the lite-07 gate.
 
+Decided 2026-11-24 (maintainer, /quest-plan of [audio groups span
+200 ms](https://github.com/moq-dev/moq/pull/9561)): ✅ live audio stays newest-first
+(rejected: always ascending for audio; measure first). With 200 ms groups, the
+race ascending fixes (G-1's retransmitted tail queued behind G) happens only
+once per group boundary. Newest-first is what lets a live player skip a backlog
+after a stall, where ascending would first send audio the player then trims.
+The sweep that favored ascending never measured trimmed audio.
+
 Implementation:
 
 - `subscribeMedia` (`js/watch/src/media.ts`) takes the order. Audio and video
@@ -59,9 +67,9 @@ Implementation:
   ascending. A voice reply track has one subscriber, so it goes ascending end
   to end. Say in the watch docs that a mixed audience gets newest-first
   upstream.
-- The draft says an ascending subscriber SHOULD raise `Subscriber Max Age`.
-  Buffered mode already subscribes with `delay + lookahead`; confirm that covers
-  it.
+- The draft says an ascending subscriber SHOULD drain a backlog from a
+  history range, or raise its live join's `Max Age`. Buffered mode already
+  joins with a max of `delay + lookahead`; confirm that covers it.
 - Replace `Order`'s release rules in `js/watch/src/audio/order.ts` with the
   floor span, keeping `admit()` and the epoch reset ordering from #6549. Keep
   the decoder tests for a reversed head (now released at the floor) and the
@@ -83,7 +91,3 @@ keeps waiting on lite-07 for the head-hold simplification.
 ## Required
 
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
-
-## Related
-
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

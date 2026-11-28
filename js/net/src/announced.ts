@@ -37,29 +37,24 @@ export interface Announce {
 export type Routed = Omit<Announce, "route"> & { route: WireRoute };
 
 /**
- * What an announcement listing yields: a path becoming present, absent, or offline, or its
- * availability changing.
+ * What an announcement listing yields: a path becoming present or absent.
  *
  * `present`: a route now covers the path, which was absent; it may arrive unavailable (see
- * {@link RouteInfo.available}). `unavailable`: the present path lost every usable path to its
- * origin but may recover one, so it stays present while requests for it may fail.
- * `available`: it recovered one: request it again. `absent`: the origin withdrew the path, and
- * no route covers it any more. `offline`: this side let go of the path, and no route covers it
- * any more: the session it arrived on closed, or the network lost every path to it, so its
- * origin may still serve it. Both carry its last advertised route.
+ * {@link RouteInfo.available}). `absent`: no route covers the path any more, whether its origin
+ * withdrew it or this side let go of it; carries its last advertised route.
  *
- * Another instance taking a path over keeps it present: follow it with the origin's
- * `follow(path)` to see the broadcast change.
+ * Another identity taking a path over keeps it present, and a change in availability is not
+ * reported: follow it with the origin's `follow(path)` to see the broadcast change.
  *
  * @public
  */
-export type Event = { kind: "present" | "unavailable" | "available" | "absent" | "offline" } & Announce;
+export type Event = { kind: "present" | "absent" } & Announce;
 
 /**
  * Every change to a route, for code that forwards or routes them.
  *
  * `start`: a route now covers the prefix. `update`: the route covering it changed hops, cost,
- * or availability, in place. `restart`: another instance now serves the prefix. `end`: the
+ * or availability, in place. `restart`: another identity now serves the prefix. `end`: the
  * origin withdrew it, and no route covers it any more. `offline`: this side let go of it,
  * and no route covers it any more.
  *
@@ -85,8 +80,9 @@ export interface Options {
 	 * Also report every route that could serve a path in scope, not just those whose literal
 	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
 	 * `.chat` names at any depth still reports a route at `room`, which can serve
-	 * `room/lobby.chat`. Code that routes or forwards needs these; listing broadcasts does
-	 * not. Requests resolve through covering routes either way.
+	 * `room/lobby.chat`. A broadcast serves only its own path, yet is reported too, since it
+	 * shadows broader routes beneath it, as in Rust. Code that routes or forwards needs these;
+	 * listing broadcasts does not. Requests resolve through covering routes either way.
 	 */
 	covering?: boolean;
 }
@@ -297,8 +293,7 @@ export class Routes {
 let makeConsumer: (routes: Routes) => Consumer;
 
 /**
- * The paths announced under a scope, each reported as it becomes present, absent, or offline,
- * and as its availability changes.
+ * The paths announced under a scope, each reported as it becomes present or absent.
  *
  * Created internally: obtain one from an origin or the connection's `announced(scope)`.
  *
@@ -306,8 +301,6 @@ let makeConsumer: (routes: Routes) => Consumer;
  */
 export class Consumer {
 	#routes: Routes;
-	// The present paths last reported unavailable, bounded by the present set.
-	#unavailable = new Set<Path.Valid>();
 
 	private constructor(routes: Routes) {
 		this.#routes = routes;
@@ -318,6 +311,7 @@ export class Consumer {
 	}
 
 	/** Settles once the stream closes: `null` on a clean close, or the abort {@link Error}. */
+	// fallow-ignore-next-line unused-class-member
 	get closed(): GetPromise<Error | null> {
 		return this.#routes.closed;
 	}
@@ -350,24 +344,9 @@ export class Consumer {
 			const event = await this.#routes.next();
 			if (!event) return undefined;
 			const { kind, prefix, captures } = event;
+			if (kind === "update" || kind === "restart") continue;
 			const route = routeInfo(event.route);
-			switch (kind) {
-				case "start":
-					if (!route.available) this.#unavailable.add(prefix);
-					return { kind: "present", prefix, captures, route };
-				case "update":
-				case "restart": {
-					const was = !this.#unavailable.has(prefix);
-					if (was === route.available) continue;
-					if (route.available) this.#unavailable.delete(prefix);
-					else this.#unavailable.add(prefix);
-					return { kind: route.available ? "available" : "unavailable", prefix, captures, route };
-				}
-				case "end":
-				case "offline":
-					this.#unavailable.delete(prefix);
-					return { kind: kind === "end" ? "absent" : "offline", prefix, captures, route };
-			}
+			return { kind: kind === "start" ? "present" : "absent", prefix, captures, route };
 		}
 	}
 
@@ -381,8 +360,7 @@ export class Consumer {
 }
 
 /**
- * The listing over a route stream: only paths becoming present, absent, or offline, and their
- * availability changing.
+ * The listing over a route stream: only paths becoming present or absent.
  *
  * @internal
  */

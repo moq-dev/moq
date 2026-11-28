@@ -1,4 +1,4 @@
-//! The MoQ Cluster extension (draft-lcurley-moq-cluster-01).
+//! The MoQ Cluster extension (draft-lcurley-moq-cluster).
 //!
 //! moq-transport carries no routing information, so a mesh of relays gossiping
 //! namespaces loops forever and has no basis for choosing between two peers
@@ -223,7 +223,7 @@ pub fn peer_from_setup(params: &super::Parameters) -> Result<Peer, DecodeError> 
 
 /// Write our cluster Setup Options into a SETUP parameter block.
 ///
-/// `cost` is the price we put on this link, which only the dialing side declares.
+/// `cost` is the price we put on this link, which either side may declare.
 pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Option<u64>) {
 	params.set_varint(super::ParameterVarInt::HopId, self_hop.id());
 

@@ -60,9 +60,11 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default an established session redials
-  /// with backoff whenever the transport drops; a first dial that reaches no
-  /// session ends it with that error instead.
+  /// Set true for a one-shot dial. By default a session whose credential the peer accepted,
+  /// or that the peer drained with a GOAWAY (or, on moq-lite 03/04, which never answer it,
+  /// that stayed up 1s), redials with backoff whenever the transport
+  /// drops; before then, a failed dial or a closed session, such as a refused
+  /// credential, ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.
@@ -128,10 +130,10 @@ final class QuicConfig {
   /// Path MTU discovery; null leaves the choice to the backend.
   final bool? mtuDiscovery;
 
-  /// The congestion control family; null leaves the choice to the backend.
+  /// The congestion control algorithm; null runs BBR v3.
   final CongestionControl? congestionControl;
 
-  /// Directory to write qlog traces into; fails unless [qlogSupported].
+  /// Directory, which must exist, to write qlog traces into.
   final String? qlog;
 
   /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
@@ -182,9 +184,6 @@ final class WebSocketConfig {
 /// way [ConnectOptions.versions] takes them.
 List<String> versions() => moqVersions();
 
-/// Whether this build can write qlog traces for [QuicConfig.qlog].
-bool qlogSupported() => moqQlogSupported();
-
 /// A MoQ session with publishing and subscription conveniences.
 final class Moq {
   final Client _client;
@@ -223,27 +222,27 @@ final class Moq {
   MoqRoute route(String path, {RouteOptions? options}) =>
       session.publish().route(path: path, options: options ?? RouteOptions());
 
-  /// List the paths matching [options] as each becomes present, absent, or offline, or changes availability;
+  /// List the paths matching [options] as each becomes present or absent;
   /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
   /// that releases the cursor when the subscription ends. A new publisher
-  /// instance keeps its path present, so use [follow] to see it.
+  /// identity keeps its path present, so use [follow] to see it.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next instance serving it, such as a restarted publisher, or null once the
-  /// path goes offline. Pass an [instance] a route reported to follow only that
+  /// next identity serving it, such as a restarted publisher, or null once the
+  /// path goes offline. Pass an [identity] a route reported to follow only that
   /// stream; another one taking over also resolves null.
-  Following follow(String path, {Instance? instance}) =>
-      session.consume().follow(path: path, instance: instance);
+  Following follow(String path, {Identity? identity}) =>
+      session.consume().follow(path: path, identity: identity);
 
-  /// Resolve one publisher instance of the broadcast at [path]. Pass an
-  /// [instance] a route reported to refuse any other stream.
-  Future<BroadcastConsumer> request(String path, {Instance? instance}) =>
-      session.consume().request(path: path, instance: instance);
+  /// Resolve one publisher identity of the broadcast at [path]. Pass an
+  /// [identity] a route reported to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {Identity? identity}) =>
+      session.consume().request(path: path, identity: identity);
 
   /// The session's bandwidth allocator.
   ///
@@ -274,8 +273,7 @@ final class Moq {
   /// [Tokens.set_] replaces them, such as before the current ones expire: the
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
-  /// answered, even when one is refused. After an authorization refusal the
-  /// session redials only if they changed. An empty token throws
+  /// answered, even when one is refused. An empty token throws
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
 
@@ -311,24 +309,6 @@ extension GrantConsumerUpdates on GrantConsumer {
   Stream<Grant?> updates() => _Grants(this);
 }
 
-/// A route's instance under the name the other bindings use.
-extension RouteInstance on MoqRoute {
-  /// The stream this route serves now, or once cancelled, the last one it
-  /// reported or announced under (null if it did neither). A named instance
-  /// never changes. A job's route takes its claim's current one when it first
-  /// announces or when this first reads it, so a hidden job route returns it
-  /// before announcing, and [MoqRoute.announce] fails with `Unroutable` once
-  /// the claim has moved past it.
-  Instance? instance() => instanceId();
-}
-
-/// A claim's instance under the name the other bindings use.
-extension ClaimInstance on MoqClaim {
-  /// The stream this claim serves now. A named instance never changes. Unnamed,
-  /// the claim moves to a fresh one each time a job holding its current one ends.
-  Instance instance() => instanceId();
-}
-
 /// A [Stream] view over an announcement cursor.
 extension AnnounceConsumerUpdates on AnnounceConsumer {
   /// Stream announce events until the cursor ends.
@@ -350,7 +330,7 @@ final class _Grants extends NativeStream<Grant?> {
 
   @override
   bool ended(Object error) =>
-      error is CancelledMoqException || error is ClosedMoqException;
+      error is MoqException && moqErrorIsShutdown(err: error);
 
   @override
   void release() {

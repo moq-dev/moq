@@ -1,4 +1,3 @@
-import { Duration } from "@moq/clock";
 import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
@@ -125,7 +124,7 @@ export class Echo {
 			let broadcast: Moq.Broadcast.Producer | undefined;
 			let writer: Report.Writer<Schema.Snapshot, Schema.SnapshotInput>;
 			try {
-				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
+				// A fresh identity, so a reader sees a replaced feedback broadcast as a restart.
 				const route = origin.route(path, { hidden: true });
 				broadcast = route.broadcast;
 				writer = new Report.Writer(broadcast, Schema.TRACK, Schema.SnapshotSchema);
@@ -148,12 +147,12 @@ export class Echo {
 			effect.cleanup(() => published.close());
 			effect.cleanup(() => writer.finish());
 			effect.cleanup(write);
-			effect.interval(write, Duration.millis(Report.INTERVAL));
+			effect.interval(write, Report.INTERVAL);
 
 			// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
 			const demand = writer.track.demand();
 			effect.run((inner) => {
-				if (inner.get(demand.wanted) !== undefined) inner.get(this.in.probe);
+				if (inner.get(demand.wanted)) inner.get(this.in.probe);
 			});
 		});
 	}

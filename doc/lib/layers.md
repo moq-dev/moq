@@ -21,7 +21,7 @@ namespace tells them apart: `media.TrackConsumer` reads what
 Exceptions:
 
 - **C++** is one flat `moq::` namespace with the layer folded into the name (`moq::MediaTrackProducer`, `moq::JsonSnapshotProducer`).
-- **C** is the hand-written moq-c ABI, grouped by direction (`moq_publish_*`, `moq_consume_*`) rather than by layer, so its rows name function prefixes. Its `moq_publish_video` and `moq_consume_video` move encoded frames (media); the codecs are `moq_encode_*` and `moq_decode_*`, which always publish to or subscribe from a broadcast, so C has no codec-only `Encoder`.
+- **C** is the hand-written libmoq ABI, grouped by direction (`moq_publish_*`, `moq_consume_*`) rather than by layer, so its rows name function prefixes. Its `moq_publish_video` and `moq_consume_video` move encoded frames (media); the codecs are `moq_encode_*` and `moq_decode_*`, which always publish to or subscribe from a broadcast, so C has no codec-only `Encoder`.
 - **Dart** has no `audio` or `video` library, because its published binaries carry no codecs.
 - **TypeScript** is a separate implementation with its own [packages](/lib/js/), so it is not mapped here.
 
@@ -43,8 +43,8 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 | C | `moq_session_*`, `moq_origin_*`, `moq_publish_track_*`, `moq_consume_track_*` | `moq_publish_track` |
 
 On-demand broadcast requests in every binding can answer with held content
-without announcing an exact route. The answer uses the claim's
-continuous sequence space at that path. Use a fresh publication for a job
+without announcing an exact route. The answer continues the claim's
+group starts at that path. Use a fresh publication for a job
 that may restart independently; see [work on demand](/concept/identity#work-on-demand)
 and the [Go](/lib/go/) and [C](/lib/c/) binding references.
 

@@ -3,10 +3,11 @@
 //! A client session asks its peer to announce only the prefixes its origin's readers
 //! watch, keeps a request open while anything at or beneath it is watched, and lets
 //! it go once nothing has been for a linger. A relay's link still asks for everything.
+//! Lite-07 asks on the session's one Announce Stream, an edit for each change.
 
 use std::time::Duration;
 
-use moq_net::{Error, Pattern, Patterns, Version, origin};
+use moq_net::{Error, Pattern, Prefixes, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -23,10 +24,57 @@ const LINGERED: Duration = Duration::from_secs(3);
 /// The first byte of a moq-lite ANNOUNCE stream.
 const ANNOUNCE: u8 = 1;
 
+/// The first byte of a lite-07 Announce Stream, and its ANNOUNCE_START and
+/// ANNOUNCE_REQUEST messages.
+const ANNOUNCE_STREAM: u8 = 3;
+const ANNOUNCE_START: u64 = 0;
+const ANNOUNCE_REQUEST: u64 = 5;
+
+/// A lite-07 varint off the front of `buf`: as many leading ones as bytes follow.
+fn varint(buf: &mut &[u8]) -> Option<u64> {
+	let first = *buf.first()?;
+	let more = first.leading_ones() as usize;
+	let rest = buf.get(1..1 + more)?;
+	let lead = match more {
+		8 => 0,
+		more => u64::from(first & (0xff >> (more + 1))),
+	};
+	let value = rest.iter().fold(lead, |value, byte| (value << 8) | u64::from(*byte));
+	*buf = &buf[1 + more..];
+	Some(value)
+}
+
+/// How many messages of `kind` `transport`'s side has sent on its lite-07 Announce Stream.
+fn sent(transport: &support::mock::MockSession, kind: u64) -> usize {
+	let mut count = 0;
+	for stream in transport.uni_writes(ANNOUNCE_STREAM) {
+		let mut buf = stream.as_slice();
+		while let (Some(typ), Some(size)) = (varint(&mut buf), varint(&mut buf)) {
+			let Some(rest) = buf.get(size as usize..) else {
+				break;
+			};
+			buf = rest;
+			count += usize::from(typ == kind);
+		}
+	}
+	count
+}
+
+/// How many requests `transport`'s side has made of its peer: the announce streams it
+/// opened, or on lite-07 the edits it sent on its one Announce Stream.
+fn requests(transport: &support::mock::MockSession) -> usize {
+	let streams = (transport.bidi_types().into_iter())
+		.filter(|kind| *kind == ANNOUNCE)
+		.count();
+	streams + sent(transport, ANNOUNCE_REQUEST)
+}
+
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A server publishing `a/x` and `b/y`, and a client fed into `subscriber` asking
@@ -66,21 +114,16 @@ impl Lazy {
 		}
 	}
 
-	/// How many announce requests the client has opened.
+	/// How many announce requests the client has made.
 	fn requests(&self) -> usize {
-		self.pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count()
+		requests(&self.pair.client_transport)
 	}
 
 	/// Watch everything under `prefix`.
 	fn watch(&self, prefix: &str) -> origin::Routes {
 		self.subscriber
 			.consume()
-			.scope(prefix, &Patterns::from(Pattern::all()))
+			.scope(prefix, &Prefixes::all())
 			.unwrap()
 			.routes()
 	}
@@ -90,7 +133,7 @@ impl Lazy {
 		let consumer = self
 			.subscriber
 			.consume()
-			.scope("", &Patterns::from(Pattern::literal(path).unwrap()))
+			.filter(&Pattern::literal(path).unwrap())
 			.unwrap();
 		let mut announced = consumer.routes();
 		matches!(
@@ -115,15 +158,18 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => seen.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	seen.sort();
@@ -157,11 +203,7 @@ async fn asks_only_about_the_watched_prefix() {
 #[kio::test]
 async fn a_new_session_asks_about_existing_watches() {
 	let subscriber = produce_origin(2);
-	let mut watch = subscriber
-		.consume()
-		.scope("b", &Patterns::from(Pattern::all()))
-		.unwrap()
-		.routes();
+	let mut watch = subscriber.consume().scope("b", &Prefixes::all()).unwrap().routes();
 	let lazy = Lazy::with("moq-lite-07-wip", subscriber).await;
 	assert_eq!(synced(&mut watch).await, ["y"]);
 	assert_eq!(lazy.requests(), 1);
@@ -265,6 +307,39 @@ async fn a_broader_request_holds_a_lingering_narrower_open() {
 	}
 }
 
+/// Lite-07 swaps a narrower request for a broader one, and back, in one edit each. Both
+/// ends drop what the removed prefix covered at the edit's answer and the peer tells it
+/// again under the added one, so a reader never sees the claim both sets cover retracted,
+/// and the narrowing drops only what it uncovers.
+#[kio::test]
+async fn a_swap_edit_retracts_nothing_both_sets_cover() {
+	let lazy = Lazy::new("moq-lite-07-wip").await;
+	let server = &lazy.pair.server_transport;
+	let mut narrower = lazy.watch("a");
+	assert_eq!(synced(&mut narrower).await, ["x"]);
+	assert_eq!(lazy.requests(), 1);
+	assert_eq!(sent(server, ANNOUNCE_START), 1);
+
+	let mut root = lazy.watch("");
+	assert_eq!(synced(&mut root).await, ["a/x", "b/y"]);
+	assert_eq!(lazy.requests(), 2, "one edit swaps the narrower prefix for the broader");
+	assert_eq!(sent(server, ANNOUNCE_START), 3, "a/x is told again, and b/y is new");
+	assert!(narrower.try_next().is_none(), "nothing retracted");
+
+	// The broader request holds the narrower one open, and lingers out first.
+	drop(narrower);
+	kio::clock::sleep(LINGERED).await;
+	assert!(root.try_next().is_none(), "nothing retracted");
+	drop(root);
+	kio::clock::sleep(LINGERED).await;
+	assert_eq!(lazy.requests(), 3, "one edit swaps back");
+	assert!(!lazy.routes("b/y").await);
+	assert!(lazy.routes("a/x").await);
+	assert_eq!(sent(server, ANNOUNCE_START), 4, "a/x is told again");
+	assert_eq!(lazy.pair.client_transport.close_reason(), None);
+	assert_eq!(server.close_reason(), None);
+}
+
 /// A broadcast resolved through a discovered route keeps it discovered after the
 /// listing that found it closes.
 #[kio::test]
@@ -362,28 +437,20 @@ async fn serving_the_peer_asks_nothing() {
 		let pair = connect_mock(options).await;
 		kio::clock::sleep(SETTLE).await;
 
-		let requests = pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count();
-		assert_eq!(requests, 0, "{version}");
+		assert_eq!(requests(&pair.client_transport), 0, "{version}");
 		// An application request is a reader, unlike the peer's serving view.
 		let _read = local.consume().request("a/x", None).await.unwrap();
-		let requests = pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count();
-		assert_eq!(requests, 1, "{version}: only the application request starts discovery");
+		assert_eq!(
+			requests(&pair.client_transport),
+			1,
+			"{version}: only the application request starts discovery"
+		);
 	}
 }
 
 /// Resolving a path owns the discovery that makes the peer's announcement visible.
 #[kio::test]
-async fn requesting_an_unwatched_path_discovers_its_instance() {
+async fn requesting_an_unwatched_path_discovers_its_identity() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
 		assert_eq!(lazy.requests(), 0, "{version}");
@@ -392,7 +459,7 @@ async fn requesting_an_unwatched_path_discovers_its_instance() {
 			.consume()
 			.request("a/x", None)
 			.await
-			.expect("request discovers the announced instance without a separate watcher");
+			.expect("request discovers the announced identity without a separate watcher");
 		assert_eq!(broadcast.info().path.as_str(), "a/x");
 		assert_eq!(lazy.requests(), 1, "{version}");
 	}
@@ -424,7 +491,7 @@ async fn an_unwatched_missing_path_is_unroutable_after_sync() {
 }
 
 /// Every moq-transport draft. These read what arrived once everything in flight has.
-const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// Apply what `announced` reports once everything in flight has arrived to `held`, and
 /// say whether any of it ended a prefix.
@@ -436,10 +503,12 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => held.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())
@@ -448,6 +517,7 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	held.sort();

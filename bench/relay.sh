@@ -96,7 +96,7 @@ relay_config() {
         "${stream_config[@]}" \
         '' \
         '[auth]' \
-        'public = "**"' \
+        'public = ""' \
         "${runtime_config[@]}" >"$path"
     if [[ $PROFILE == heap ]]; then
         # Its /sessions list shows when the relay has dropped every session after the load.

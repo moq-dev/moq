@@ -10,12 +10,16 @@ use std::{
 };
 
 use crate::transport::poll::Session as _;
-use crate::transport::{Error as _, Metrics as _};
+use crate::transport::{Error as _, Liveness, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The least time a transport this side closed gets to confirm it, before the session
+/// ends without its confirmation.
+const CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 /// A close requested by a session handle, executed by the driver.
 #[derive(Clone)]
@@ -139,6 +143,16 @@ pub struct Stats {
 	/// A count above zero means the receive window is too small for what the peer sends.
 	pub streams_evicted: Option<u64>,
 
+	/// Total times the sender blocked with all the peer's connection-level credit (`MAX_DATA`)
+	/// spent: an episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more. A count rising while [`Self::credit_stalled`] grows means the peer
+	/// is not granting credit, rather than loss or congestion slowing the session.
+	pub credit_stalls: Option<u64>,
+
+	/// Total time the sender spent blocked on the peer's connection-level credit, across
+	/// [`Self::credit_stalls`]. A wait in progress counts up to the transport's latest step.
+	pub credit_stalled: Option<Duration>,
+
 	/// Total datagrams received for a subscription with no datagram track: one this session
 	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
 	/// datagrams: moq-transport and moq-lite before 05.
@@ -215,6 +229,8 @@ pub struct Session {
 	work: Work,
 	/// What [`Stats::datagrams_unrouted`] reads.
 	datagrams_unrouted: Option<Arc<AtomicU64>>,
+	/// The peer's liveness, under a keep-alive.
+	liveness: Option<kio::Consumer<Liveness>>,
 }
 
 /// Two handles are equal when they are clones of the same session.
@@ -225,6 +241,14 @@ impl PartialEq for Session {
 }
 
 impl Eq for Session {}
+
+impl std::fmt::Debug for Session {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Session")
+			.field("version", &self.version())
+			.finish_non_exhaustive()
+	}
+}
 
 impl Session {
 	/// Returns the negotiated protocol version.
@@ -367,6 +391,10 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// A close this side sent counts as closed once the transport confirms it, or after
+	/// three round trips (at least 100ms) without that, since a peer that is gone may never
+	/// let it; the transport keeps delivering the close in the background.
+	///
 	/// The driver keeps draining group streams already delivered to the transport
 	/// after this resolves, so keep driving it until it completes.
 	///
@@ -404,33 +432,46 @@ impl Session {
 		}
 	}
 
-	/// Drain the peer gracefully: the handle for sending this session's single
-	/// GOAWAY.
+	/// Drain the peer gracefully: send this session's single GOAWAY.
 	///
-	/// The graceful counterpart to [`abort`](Self::abort). Send the message with
-	/// [`goaway::Producer::send`], then await [`closed`](Self::closed) to observe
-	/// the peer leaving.
+	/// The graceful counterpart to [`abort`](Self::abort). Await
+	/// [`closed`](Self::closed) afterwards to observe the peer leaving.
 	///
 	/// Only a [`Goaway`](goaway::Goaway) carrying a [`timeout`](goaway::Goaway::timeout)
 	/// schedules a close of our own, so without one this waits for a peer that may
-	/// never leave. Set a deadline when the drain has to finish.
+	/// never leave. Set a deadline when the drain has to finish. It starts at the driver
+	/// poll this send wakes, so the session must stay driven for the message to reach
+	/// the wire and for the deadline to close it.
 	///
 	/// Available on every version. A version with no GOAWAY message (moq-lite-03
 	/// and earlier) simply carries no explanation to the peer; the deadline is the
 	/// sender's own timer either way, so the session still closes on schedule and
 	/// the caller does not branch on the negotiated version.
-	pub fn drain(&self) -> goaway::Producer {
-		self.goaway.producer()
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::ProtocolViolation`] when a client names a redirect URI, which
+	/// the peer would be required to close the session over (draft-22 section 9.2), or
+	/// when the URI exceeds the 8,192-byte wire cap.
+	///
+	/// Returns [`Error::Duplicate`] if this session already sent one. The wire carries
+	/// at most one, so the second is dropped rather than replacing the first, but the
+	/// caller is told rather than left guessing. A session that already closed has
+	/// nothing left to drain, which is no error.
+	pub fn goaway(&self, goaway: goaway::Goaway) -> Result<(), Error> {
+		self.goaway.send(goaway)
 	}
 
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
-	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
-	/// every other eligible route, whatever their preference or cost, on this node
-	/// only: requests keep opening on it until a replacement session's route
-	/// outranks it, and existing subscriptions keep flowing until the session
-	/// closes. A relay still forwards the routes at their real cost.
+	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank as draining:
+	/// below every eligible route of their claim that is not, whatever their preference or
+	/// cost, though a more specific claim still shadows a broader one. Requests keep opening
+	/// on it until a replacement session's route outranks it, and existing subscriptions keep
+	/// flowing until the session closes. A relay still forwards the routes at their real
+	/// cost, and tells a moq-lite-07 peer they drain so it ranks them alike; an older version
+	/// carries no drain, so its peers rank them as before.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
@@ -440,8 +481,30 @@ impl Session {
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// A session that sent a GOAWAY can then close without cutting any reader off.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
+	}
+
+	/// Whether the peer was heard within the [`KeepAlive`](crate::transport::KeepAlive)'s `soft` limit, or `None` when the
+	/// session runs without one.
+	pub fn liveness(&self) -> Option<Liveness> {
+		self.liveness.as_ref().map(|liveness| *liveness.read())
+	}
+
+	/// Ready with the peer's liveness once it differs from `last`, or `None` once the session
+	/// ends or when it runs without a [`KeepAlive`](crate::transport::KeepAlive).
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_liveness_changed(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Option<Liveness>> {
+		let Some(liveness) = &self.liveness else {
+			return Poll::Ready(None);
+		};
+		let changed = liveness.poll(waiter, |now| match **now != last {
+			true => Poll::Ready(**now),
+			false => Poll::Pending,
+		});
+		changed.map(Result::ok)
 	}
 
 	/// The tokens this side presented and the grant they earned, plus the tokens
@@ -459,6 +522,19 @@ impl Session {
 	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
+	}
+
+	/// Ready once the peer accepted the connection credential: with its SETUP, or on
+	/// moq-lite-07-wip the AUTH_OK to the connection's own credential. Ready at once when the
+	/// handshake already carried that answer, and never on moq-lite 03/04, which have none.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.link.poll_accepted(waiter)
+	}
+
+	/// Whether the peer never answers the connection credential, as on moq-lite 03/04, so
+	/// only uptime suggests it took the credential.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.link.is_silent()
 	}
 
 	/// This session's side of its [`auth`](Self::auth) handle.
@@ -548,6 +624,7 @@ impl Session {
 			demanded: false,
 		});
 		let work = session.work().clone();
+		let liveness = session.keeps_alive().then(|| kio::Producer::new(Liveness::Live));
 
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
@@ -566,7 +643,9 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			unconfirmed: None,
 			auth: auth.clone(),
+			liveness: liveness.clone(),
 		};
 
 		let session = Self {
@@ -585,6 +664,7 @@ impl Session {
 			credential,
 			work,
 			datagrams_unrouted,
+			liveness: liveness.map(|liveness| liveness.consume()),
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -604,7 +684,8 @@ impl Session {
 /// samples the connection stats (including the send-bandwidth estimate) while
 /// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
-/// Finishes once the transport reports closed; everything else is moot then.
+/// Finishes once the transport reports closed, or once a close this side sent goes
+/// unconfirmed past its grace; everything else is moot then.
 pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
@@ -633,11 +714,17 @@ pub(crate) struct Supervisor {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// Set once this side closed the transport: past it, the session ends without the
+	/// transport confirming the close.
+	unconfirmed: Option<crate::time::Deadline>,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
 	/// This session's side of its auth handle, closed before the end is published so a
 	/// replacement session built on the same handle never finds this one still active.
 	auth: auth::Link,
+	/// Where the transport's report of the peer's liveness is published, under a keep-alive.
+	/// Dropped with the supervisor, which ends every wait on it.
+	liveness: Option<kio::Producer<Liveness>>,
 }
 
 /// A transport's sender and the two targets it probes up to, whichever is larger.
@@ -725,38 +812,78 @@ impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// The transport's terminal error ends the supervisor.
-		if let Poll::Ready(err) = self.closed_watch.poll_closed(waiter) {
-			// Nothing samples once this returns, but `stats()` keeps serving
-			// this cell, so leave it holding the session's final counters
-			// rather than whichever sample the last demand happened to catch.
-			self.stats.lock().sample = snapshot(&self.session);
-			self.wire.take();
-			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
-				Drain::Done(res) => Some(res),
-				_ => None,
-			};
-			let err = match err.close_kind() {
-				// The transport only knows this side closed it, so the reason is ours.
-				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
-				}
-				_ => self.version.transport_error(err),
-			};
-			// Anything the peer is told is "no error" ended the session cleanly, by
-			// either side: one spelling for the handles and the stats.
-			let err = match SessionError::from(&err) {
-				SessionError::Cancel => Error::Cancel,
-				_ => err,
-			};
-			self.auth.close(err.clone());
-			self.context.end(&err);
-			if let Ok(mut closed) = self.closed.write() {
-				*closed = Some(Ended { err, drain });
-			}
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
 			return Poll::Ready(());
 		}
+		self.poll_running(waiter);
+		// A close executed this turn starts its grace, which has to register its wakeup.
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
+			return Poll::Ready(());
+		}
+		Poll::Pending
+	}
 
+	/// Resolve with why the session ended: the transport's terminal error, or this side's
+	/// reason once the transport reports or has had its grace to confirm this side's close.
+	fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let err = match self.closed_watch.poll_closed(waiter) {
+			Poll::Ready(err) => match err.close_kind() {
+				// The transport only knows this side closed it, so the reason is ours.
+				crate::transport::CloseKind::Closed if err.session_error().is_none() => None,
+				_ => return Poll::Ready(self.version.transport_error(err)),
+			},
+			// A peer that is gone never lets some transports confirm a close, such as a
+			// WebTransport close waiting for its capsule's acknowledgement until the idle
+			// timeout. So a close this side sent, by a handle or the protocol, ends the
+			// session after three round trips and at least [`CLOSE_GRACE`], the time a live
+			// peer takes; the transport goes on delivering it on its own.
+			Poll::Pending => {
+				if self.unconfirmed.is_none() && self.session.closing().is_sent() {
+					let rtt = snapshot(&self.session).rtt.unwrap_or_default();
+					let grace = (rtt * 3).max(CLOSE_GRACE);
+					self.unconfirmed = Some(crate::time::Deadline::after(&self.runtime, grace));
+				}
+				match &mut self.unconfirmed {
+					Some(grace) => {
+						ready!(grace.poll(waiter));
+						None
+					}
+					None => return Poll::Pending,
+				}
+			}
+		};
+		Poll::Ready(err.unwrap_or_else(|| self.session.closing().cause(self.version).unwrap_or(Error::Cancel)))
+	}
+
+	/// Publish the session's end with `err`.
+	fn end(&mut self, err: Error) {
+		// Nothing samples once this returns, but `stats()` keeps serving
+		// this cell, so leave it holding the session's final counters
+		// rather than whichever sample the last demand happened to catch.
+		self.stats.lock().sample = snapshot(&self.session);
+		self.wire.take();
+		let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
+			Drain::Done(res) => Some(res),
+			_ => None,
+		};
+		// Anything the peer is told is "no error" ended the session cleanly, by
+		// either side: one spelling for the handles and the stats.
+		let err = match SessionError::from(&err) {
+			SessionError::Cancel => Error::Cancel,
+			_ => err,
+		};
+		self.auth.close(err.clone());
+		self.context.end(&err);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended { err, drain });
+		}
+	}
+
+	/// Run everything a live session does: its GOAWAY deadline, the handles' close
+	/// requests, and the samplers.
+	fn poll_running(&mut self, waiter: &kio::Waiter) {
 		if let Some(goaway) = &mut self.goaway
 			&& let Poll::Ready(timeout) = goaway.poll(waiter)
 		{
@@ -816,7 +943,25 @@ impl Supervisor {
 			probe.poll(waiter);
 		}
 
-		Poll::Pending
+		self.poll_liveness(waiter);
+	}
+
+	/// Publish each change in the peer's liveness the transport reports.
+	fn poll_liveness(&mut self, waiter: &kio::Waiter) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		loop {
+			let last = *liveness.read();
+			let Poll::Ready(now) = self.session.poll_liveness(waiter, last) else {
+				return;
+			};
+			match liveness.write() {
+				Ok(mut current) => *current = now,
+				// Every consumer is gone for good.
+				Err(_) => return,
+			}
+		}
 	}
 
 	pub(crate) fn draining(&self) -> bool {
@@ -985,6 +1130,8 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_received: metrics.packets_received(),
 		packets_lost: metrics.packets_lost(),
 		streams_evicted: metrics.streams_evicted(),
+		credit_stalls: wire.as_ref().map(crate::transport::Wire::credit_stalls),
+		credit_stalled: wire.as_ref().map(crate::transport::Wire::credit_stalled),
 		// Counted by the protocol, not the transport: filled in by `Session::stats`.
 		datagrams_unrouted: None,
 	}
@@ -1080,6 +1227,7 @@ impl Drop for Working {
 /// ```
 /// let mut limits = moq_net::session::Limits::default();
 /// limits.announces = 1_000;
+/// limits.live_edges = Some(256 << 20);
 /// let client = moq_net::Client::new().with_limits(limits);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1087,12 +1235,25 @@ impl Drop for Working {
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
+
+	/// Bytes the newest group of every track we receive from the peer may hold in all.
+	///
+	/// The cache never evicts a live track's newest group, so a peer holding many quiet
+	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
+	/// session sheds its own live edges in delivery's priority order, the lowest-priority
+	/// track and then the edge that moved longest ago first: the frames readers took (a
+	/// compressed track's inflated copies aside), then whole edges, of which the one being
+	/// written keeps its newest frame. `None` leaves them unbounded.
+	pub live_edges: Option<u64>,
 }
 
 impl Default for Limits {
 	/// Generous enough for a relay mesh carrying a large origin; lower it for untrusted peers.
 	fn default() -> Self {
-		Self { announces: 100_000 }
+		Self {
+			announces: 100_000,
+			live_edges: None,
+		}
 	}
 }
 
@@ -1112,11 +1273,6 @@ impl Slots {
 			max,
 			stats: None,
 		}
-	}
-
-	/// A count of its own under the same cap, starting empty and reported nowhere.
-	pub(crate) fn split(&self) -> Self {
-		Self::new(self.max)
 	}
 
 	/// Report how many are held to `stats`, as `cap`'s peak.

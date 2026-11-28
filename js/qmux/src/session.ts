@@ -1,6 +1,14 @@
-import { Duration, Elapsed, Instant, type Interval, interval, MissedTickBehavior, now, timeout } from "@moq/clock";
+import { Duration, Elapsed, Instant, now, sleepUntil, timeout } from "@moq/clock";
 import { Credit, StreamLimit, Window } from "./credit.ts";
-import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
+import {
+	resetCode,
+	SessionError,
+	StreamError,
+	streamCode,
+	TransportCode,
+	TransportError,
+	transportCode,
+} from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
@@ -29,10 +37,8 @@ export type SendStreamOptions = WebTransportSendStreamOptions & {
 
 /** Configuration for a QMux session. */
 export interface Config {
-	/** Max concurrent bidirectional streams the peer can open. */
-	maxStreamsBidi?: bigint;
-	/** Max concurrent unidirectional streams the peer can open. */
-	maxStreamsUni?: bigint;
+	/** Max concurrent streams the peer can open, in each direction. */
+	maxStreams?: bigint;
 	/** Connection-level receive window in bytes. */
 	receiveWindow?: bigint;
 	/** Receive window in bytes for every stream. */
@@ -53,9 +59,26 @@ export interface Config {
 	maxDatagramFrameSize?: bigint | null;
 }
 
+/** How long a peer may go unheard: stale after `soft`, closed after `hard`. See {@link Session.keepAlive}. */
+export interface KeepAlive {
+	/** How long the peer may go unheard before it counts as stale. A QX_PING goes out every half of it while it stays unheard. */
+	soft: Duration;
+	/** How long the peer may go unheard before the session closes. */
+	hard: Duration;
+}
+
+/** A keep-alive in force. */
+interface Liveness {
+	config: KeepAlive;
+	stale: boolean;
+	/** When this keep-alive last sent a QX_PING. */
+	pinged: Instant;
+	/** Ends the keep-alive's timer, when the session ends or another keep-alive replaces it. */
+	stop: AbortController;
+}
+
 const DEFAULT_CONFIG: Required<Config> = {
-	maxStreamsBidi: 100n,
-	maxStreamsUni: 100n,
+	maxStreams: 100n,
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: Duration.secs(30),
@@ -90,6 +113,7 @@ function resolveConfig(config?: Config): Required<Config> {
 			VarInt.from(value);
 		}
 	}
+	if (resolved.maxStreams > Frame.MAX_STREAMS) throw new Error("maxStreams must be at most 2^60");
 	if (resolved.maxDatagramFrameSize === 0n) throw new Error("maxDatagramFrameSize must be positive or null");
 	if (resolved.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
 		throw new Error(`maxRecordSize must be at least ${Frame.DEFAULT_MAX_RECORD_SIZE}`);
@@ -104,8 +128,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
 		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
 		initialMaxStreamDataUni: config.streamReceiveWindow,
-		initialMaxStreamsBidi: config.maxStreamsBidi,
-		initialMaxStreamsUni: config.maxStreamsUni,
+		initialMaxStreamsBidi: config.maxStreams,
+		initialMaxStreamsUni: config.maxStreams,
 		// Clamp to maxRecordSize so we never advertise a datagram larger than our
 		// record layer accepts.
 		maxDatagramFrameSize:
@@ -369,6 +393,19 @@ export interface SendStream extends WritableStream<Uint8Array> {
 	sendOrder: number;
 	/** What the stream has written, sent, and had acknowledged so far. */
 	getStats(): Promise<SendStreamStats>;
+	/**
+	 * Non-standard: reset the stream like `abort(reason)`, but still deliver its first `offset`
+	 * bytes, which writes that already resolved must cover. Where {@link reliableReset}, the peer
+	 * reads them before the reset; otherwise a RESET_STREAM goes after them, which lets the peer
+	 * discard any it has not read. A stream the peer already stopped, or that already ended, is
+	 * left as it is.
+	 */
+	resetAt(offset: number, reason?: unknown): void;
+	/**
+	 * Non-standard: whether {@link resetAt} still delivers its prefix to the peer's reader, which
+	 * takes a RESET_STREAM_AT: both sides advertised `reset_stream_at`, as only qmux-02 does.
+	 */
+	readonly reliableReset: boolean;
 }
 
 /** A bidirectional stream whose send half is a {@link SendStream}. */
@@ -635,6 +672,8 @@ type End =
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export class Session implements WebTransport {
+	/** The transport label MoQ reports, telling this session apart from native WebTransport. */
+	readonly transport = "websocket";
 	// The transport: a native `WebSocketStream` when the platform has one,
 	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
 	// way, one API.
@@ -727,17 +766,22 @@ export class Session implements WebTransport {
 
 	// QMux01 idle-timeout tracking (engaged once we've received the peer's params).
 	#lastRecvAt = now();
-	#lastSendAt = now();
-	// Deadline bookkeeping for #idleActivityAt: the newest receive observed, the
-	// send last allowed to restart the deadline, and whether a send may restart it.
-	#recvSeen = Instant.ZERO;
+	// The send that last restarted the idle deadline, and whether the next send may, which
+	// each receive allows once; see #idleActivityAt.
 	#sendResetAt = Instant.ZERO;
 	#sendCredit = true;
 	#nextPingSeq = 0;
+	// When the idle keep-alive last sent a QX_PING.
+	#lastPingAt = Instant.ZERO;
 	// Highest sequence seen in a received QX_PING request (draft-02 requires them
-	// to strictly increase). Undefined until the first request arrives.
+	// to strictly increase), which the response always answers. Undefined until the
+	// first request arrives.
 	#lastPingRecv?: bigint;
-	#idleTimer?: Interval;
+	// Stops the idle loop, which a restart or the session's end replaces.
+	#idleStop?: AbortController;
+	#liveness?: Liveness;
+	// Settles on the next change to `stale`, or the session's end; see {@link staleChanged}.
+	#staleChanged = Promise.withResolvers<void>();
 
 	/** Open a QMux session as the **client**, dialing `url`.
 	 *
@@ -781,8 +825,8 @@ export class Session implements WebTransport {
 		// Receive limits are version-independent.
 		const notify = () => this.#scheduler?.notify();
 		this.#recvData = new Window(this.#ourParams.initialMaxData, notify);
-		this.#recvBiLimit = new StreamLimit(this.#config.maxStreamsBidi, notify);
-		this.#recvUniLimit = new StreamLimit(this.#config.maxStreamsUni, notify);
+		this.#recvBiLimit = new StreamLimit(this.#config.maxStreams, notify);
+		this.#recvUniLimit = new StreamLimit(this.#config.maxStreams, notify);
 
 		const ready = Promise.withResolvers<void>();
 		this.ready = ready.promise;
@@ -914,7 +958,11 @@ export class Session implements WebTransport {
 				// to silently drop (which would desync the session).
 				if (typeof value === "string") {
 					const reason = "text frames are not valid for QMux";
-					this.#end({ clean: false, cause: new Error(reason), send: { code: 1003, reason } });
+					this.#end({
+						clean: false,
+						cause: new Error(reason),
+						send: { code: TransportCode.PROTOCOL_VIOLATION, reason },
+					});
 					return;
 				}
 				// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks,
@@ -954,7 +1002,10 @@ export class Session implements WebTransport {
 		this.#scheduler = new SendScheduler(sink, {
 			first: params,
 			onActivity: () => {
-				this.#lastSendAt = now();
+				if (this.#sendCredit) {
+					this.#sendResetAt = now();
+					this.#sendCredit = false;
+				}
 			},
 			// A failed write leaves the session unable to send anything, even if the
 			// socket hasn't reported closing yet.
@@ -972,7 +1023,9 @@ export class Session implements WebTransport {
 		this.#connCredit = new Credit(0n);
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
-		// Our own idle deadline applies until the peer's parameters arrive.
+		// Our own idle deadline applies until the peer's parameters arrive, counted from the
+		// open rather than construction, so a slow WebSocket open doesn't eat the window.
+		this.#lastRecvAt = now();
 		this.#startIdleTimerIfEnabled();
 		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
 		// a peer that never sends its parameters can't hold `ready` forever.
@@ -987,13 +1040,19 @@ export class Session implements WebTransport {
 
 	#onData(data: Uint8Array) {
 		this.#lastRecvAt = now();
+		this.#sendCredit = true;
+		if (this.#liveness?.stale) {
+			this.#liveness.stale = false;
+			this.#notifyStale();
+		}
 		// The WebSocket binding makes an empty message a no-op on every version, unlike an
 		// empty record, as Rust's transport does.
 		if (data.byteLength === 0) return;
 		try {
 			if (usesRecords(this.#version)) {
 				if (BigInt(data.byteLength) > this.#ourParams.maxRecordSize) {
-					throw new Error(
+					throw new TransportError(
+						TransportCode.FRAME_ENCODING_ERROR,
 						`record exceeds our max_record_size (${data.byteLength} > ${this.#ourParams.maxRecordSize})`,
 					);
 				}
@@ -1008,7 +1067,10 @@ export class Session implements WebTransport {
 				// never do, so the initial value is what a peer may send. Each message
 				// is one frame here.
 				if (this.#version === "qmux-00" && data.byteLength > Frame.MAX_FRAME_SIZE) {
-					throw new Error(`frame exceeds max_frame_size (${data.byteLength} > ${Frame.MAX_FRAME_SIZE})`);
+					throw new TransportError(
+						TransportCode.FRAME_ENCODING_ERROR,
+						`frame exceeds max_frame_size (${data.byteLength} > ${Frame.MAX_FRAME_SIZE})`,
+					);
 				}
 				const frame = Frame.decode(data, this.#version);
 				if (frame !== null) {
@@ -1016,12 +1078,13 @@ export class Session implements WebTransport {
 				}
 			}
 		} catch (error) {
-			// A decode failure or a frame that violates a negotiated limit is fatal.
+			// A decode failure or a frame that violates a negotiated limit is fatal, closing
+			// with the QUIC transport error code the violation carries.
 			console.error("Protocol violation:", error);
 			this.#end({
 				clean: false,
 				cause: toError(error, "Protocol violation"),
-				send: { code: 1002, reason: "Protocol violation" },
+				send: { code: transportCode(error), reason: "Protocol violation" },
 			});
 		}
 	}
@@ -1035,6 +1098,10 @@ export class Session implements WebTransport {
 			if (isParams === this.#paramsReceived) {
 				throw new Error("QX_TRANSPORT_PARAMETERS must be the first frame");
 			}
+		}
+		// Draft-00 has no QX_PING.
+		if (!usesRecords(this.#version) && (frame.type === "ping_request" || frame.type === "ping_response")) {
+			throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "QX_PING on qmux-00");
 		}
 
 		if (frame.type === "stream") {
@@ -1059,7 +1126,7 @@ export class Session implements WebTransport {
 		} else if (frame.type === "max_data") {
 			this.#connCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_stream_data") {
-			this.#sendState(frame.id)?.send?.credit.increaseMax(frame.max);
+			this.#sendState(frame.id, "MAX_STREAM_DATA")?.send?.credit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_bidi") {
 			this.#bidiStreamCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_uni") {
@@ -1087,23 +1154,27 @@ export class Session implements WebTransport {
 			}
 			pushDatagram(this.#datagrams, frame.data);
 		} else if (frame.type === "ping_request") {
-			// Draft-02: request sequence numbers must strictly increase.
-			if (this.#version === "qmux-02") {
-				if (this.#lastPingRecv !== undefined && frame.sequence <= this.#lastPingRecv) {
-					throw new Error("QX_PING request sequence must strictly increase");
-				}
-				this.#lastPingRecv = frame.sequence;
+			// One response answers every request up to its sequence, so an older request
+			// never replaces the answer to a newer one still queued.
+			let answer = frame.sequence;
+			const last = this.#lastPingRecv;
+			if (last !== undefined && answer <= last) {
+				// Draft-02: request sequence numbers must strictly increase.
+				if (this.#version === "qmux-02") throw new Error("QX_PING request sequence must strictly increase");
+				answer = last;
 			}
-			// Respond to ping requests
-			this.#sendPriorityFrame({ type: "ping_response", sequence: frame.sequence });
+			this.#lastPingRecv = answer;
+			this.#sendPriorityFrame({ type: "ping_response", sequence: answer });
 		} else if (frame.type === "ping_response") {
 			// Draft-02: a response must echo a sequence we actually sent (0..nextPingSeq).
 			if (this.#version === "qmux-02" && frame.sequence >= BigInt(this.#nextPingSeq)) {
 				throw new Error("QX_PING response echoed a sequence we never sent");
 			}
+		} else if (frame.type === "stream_data_blocked") {
+			// Informational, but it still names a stream we must be able to receive on.
+			if (!this.#closed) this.#checkStream(frame.id, "recv", "STREAM_DATA_BLOCKED");
 		} else if (
 			frame.type === "data_blocked" ||
-			frame.type === "stream_data_blocked" ||
 			frame.type === "streams_blocked_bidi" ||
 			frame.type === "streams_blocked_uni"
 		) {
@@ -1112,12 +1183,15 @@ export class Session implements WebTransport {
 	}
 
 	#handleTransportParameters(params: TransportParams) {
-		if (this.#paramsReceived) return;
+		if (this.#paramsReceived) throw new Error("duplicate QX_TRANSPORT_PARAMETERS");
 		// Record-framed drafts: an advertised max_record_size MUST NOT go below the
 		// default minimum. Omitted values decode to the default, so only an explicit
 		// smaller value trips this (TRANSPORT_PARAMETER_ERROR).
 		if (usesRecords(this.#version) && params.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
-			throw new Error("max_record_size below the default minimum");
+			throw new TransportError(
+				TransportCode.TRANSPORT_PARAMETER_ERROR,
+				"max_record_size below the default minimum",
+			);
 		}
 		this.#paramsReceived = true;
 		this.#peerParams = params;
@@ -1164,6 +1238,103 @@ export class Session implements WebTransport {
 		this.#readyResolve();
 	}
 
+	/**
+	 * Probe a quiet peer and report it {@link stale} before closing on it.
+	 *
+	 * A QX_PING goes out each half of `soft` the peer stays unheard, {@link stale} turns true once
+	 * all of `soft` passes, and the session closes once `hard` does. Any frame the peer sends counts
+	 * as hearing it, so a busy session sends no probe. Replaces any keep-alive already running.
+	 *
+	 * Throws before {@link ready} resolves, on qmux-00, which has no QX_PING, on a `soft` under
+	 * 2 ns or longer than `hard`, and on a `hard` longer than the negotiated idle timeout, which
+	 * stays in force as a backstop.
+	 */
+	keepAlive(config: KeepAlive): void {
+		if (this.#closed) throw this.#closed;
+		if (!this.#paramsReceived) throw new Error("keep-alive needs the peer's transport parameters; await ready");
+		if (!usesRecords(this.#version)) throw new Error("qmux-00 has no QX_PING to probe the peer with");
+		// Mirrors Rust, where half of a 1 ns `soft` rounds to a zero probe interval.
+		if (config.soft.lt(Duration.nanos(2)) || config.soft.gt(config.hard)) {
+			throw new RangeError("keep-alive needs a soft limit of at least 2 ns and no longer than its hard limit");
+		}
+		const idle = this.#effectiveIdleTimeoutMs();
+		if (idle !== 0n && config.hard.gt(Duration.millis(Number(idle)))) {
+			throw new RangeError(`keep-alive hard limit ${config.hard} is longer than the idle timeout ${idle}ms`);
+		}
+		const previous = this.#liveness;
+		previous?.stop.abort();
+		const liveness: Liveness = { config, stale: false, pinged: Instant.ZERO, stop: new AbortController() };
+		this.#liveness = liveness;
+		if (previous?.stale) this.#notifyStale();
+		void this.#keepAliveLoop(liveness);
+	}
+
+	/** Whether the peer went unheard for the {@link keepAlive}'s `soft` limit. */
+	get stale(): boolean {
+		return this.#liveness?.stale ?? false;
+	}
+
+	/** Settles once {@link stale} changes, or the session ends. */
+	staleChanged(): Promise<void> {
+		if (this.#closed) return Promise.resolve();
+		return this.#staleChanged.promise;
+	}
+
+	#notifyStale() {
+		const changed = this.#staleChanged;
+		this.#staleChanged = Promise.withResolvers();
+		changed.resolve();
+	}
+
+	// Sleeps until the keep-alive's next deadline, reading when the peer was last heard on each
+	// wake: hearing only moves the deadlines later, so a sleep never needs cutting short.
+	async #keepAliveLoop(liveness: Liveness) {
+		const { soft, hard } = liveness.config;
+		const half = soft.div(2);
+		for (;;) {
+			if (this.#closed || this.#liveness !== liveness) return;
+			const at = now();
+			const heard = this.#lastRecvAt;
+			if (at.since(heard).ge(hard)) {
+				this.#end({ clean: false, cause: new Error("keep-alive timeout") });
+				return;
+			}
+			if (!liveness.stale && at.since(heard).ge(soft)) {
+				liveness.stale = true;
+				this.#notifyStale();
+			}
+			let probe = heard.max(liveness.pinged).saturatingAdd(half);
+			if (at.ge(probe)) {
+				this.#ping();
+				liveness.pinged = at;
+				probe = at.saturatingAdd(half);
+			}
+			let next = probe.min(heard.saturatingAdd(hard));
+			if (!liveness.stale) next = next.min(heard.saturatingAdd(soft));
+			try {
+				await sleepUntil(next, { signal: liveness.stop.signal, ref: false });
+			} catch {
+				return; // Replaced, or the session ended.
+			}
+		}
+	}
+
+	/** Send a QX_PING request. */
+	#ping() {
+		const seq = this.#nextPingSeq;
+		// Monotonic (never wraps within a session's life): the draft-02
+		// strictly-increasing rule requires it, and it must not wrap earlier
+		// than the Rust peer's u64 counter or a valid ping would be rejected.
+		this.#nextPingSeq += 1;
+		try {
+			this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
+		} catch (e) {
+			// Best effort - if the send fails, the close path will fire shortly.
+			// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
+			console.warn("qmux: keep-alive ping failed", e);
+		}
+	}
+
 	/** Effective idle timeout in ms, or 0 if disabled.
 	 *
 	 * Per RFC 9000 §10.1, the effective value is `min(our, peer)` of the non-zero advertised values
@@ -1181,34 +1352,48 @@ export class Session implements WebTransport {
 	}
 
 	#startIdleTimerIfEnabled() {
-		this.#idleTimer?.close();
-		this.#idleTimer = undefined;
+		this.#idleStop?.abort();
+		this.#idleStop = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
-		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
-		// but not so frequent it burns CPU on otherwise-quiet sessions.
-		const timeout = Duration.millis(Number(timeoutMs));
-		const timer = interval(Duration.millis(Math.max(50, Number(timeoutMs) / 6)));
-		timer.setMissedTickBehavior(MissedTickBehavior.Delay);
-		this.#idleTimer = timer;
-		void this.#idleLoop(timer, timeout);
+		const stop = new AbortController();
+		this.#idleStop = stop;
+		void this.#idleLoop(Duration.millis(Number(timeoutMs)), stop.signal);
 	}
 
-	async #idleLoop(timer: Interval, timeout: Duration) {
-		// The first tick is immediate; the first check belongs one period in.
-		let first = true;
+	// Sleeps until the idle deadline or the next keep-alive probe, whichever is first, reading
+	// the activity on each wake: it only moves both later, so a sleep never needs cutting short.
+	async #idleLoop(timeout: Duration, stop: AbortSignal) {
+		const third = timeout.div(3);
 		for (;;) {
-			try {
-				await timer.tick();
-			} catch {
-				return; // #end closed the timer.
-			}
-			if (this.#closed) {
-				timer.close();
+			if (this.#closed || stop.aborted) return;
+			const at = now();
+			const expiry = this.#idleActivityAt().saturatingAdd(timeout);
+			if (at.ge(expiry)) {
+				// No frames have been sent or received within the negotiated limit. Abnormal:
+				// without a rejection this is indistinguishable from a graceful close(), which
+				// also settles with closeCode 0.
+				this.#end({ clean: false, cause: new Error("idle timeout") });
 				return;
 			}
-			if (!first) this.#idleTick(timeout);
-			first = false;
+			let next = expiry;
+			// Keep-alive: probe the peer once it has been unheard for a third of the timeout,
+			// whatever we sent meanwhile, so even a one-way sender draws an answer before the
+			// deadline. Nothing to keep alive before the peer has spoken at all.
+			if (this.#paramsReceived) {
+				let probe = this.#lastRecvAt.max(this.#lastPingAt).saturatingAdd(third);
+				if (at.ge(probe)) {
+					this.#ping();
+					this.#lastPingAt = at;
+					probe = at.saturatingAdd(third);
+				}
+				next = next.min(probe);
+			}
+			try {
+				await sleepUntil(next, { signal: stop });
+			} catch {
+				return; // Restarted, or the session ended.
+			}
 		}
 	}
 
@@ -1218,52 +1403,16 @@ export class Session implements WebTransport {
 	 * A received frame always restarts the timer: it is the only direct proof the
 	 * peer is still there. A send restarts it too, but at most once per receive
 	 * (RFC 9000 §10.1). That proviso is what keeps the deadline reachable: our own
-	 * keep-alive pings advance `#lastSendAt`, so counting every send would let them
-	 * restart the very deadline they exist to test, and a peer that goes silent
-	 * while its socket still accepts our writes would never be reclaimed.
+	 * keep-alive pings are sends, so counting every send would let them restart the
+	 * very deadline they exist to test, and a peer that goes silent while its socket
+	 * still accepts our writes would never be reclaimed.
 	 *
 	 * Crediting the first send after each receive is what still lets a mostly
 	 * one-way sender stay open - its peer answers the keep-alive, and each answer
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
-		if (this.#lastRecvAt.gt(this.#recvSeen)) {
-			this.#recvSeen = this.#lastRecvAt;
-			this.#sendCredit = true;
-		}
-		if (this.#sendCredit && this.#lastSendAt.gt(this.#sendResetAt)) {
-			this.#sendResetAt = this.#lastSendAt;
-			this.#sendCredit = false;
-		}
-		return this.#recvSeen.max(this.#sendResetAt);
-	}
-
-	#idleTick(timeout: Duration) {
-		const at = now();
-		if (at.since(this.#idleActivityAt()).gt(timeout)) {
-			// No frames have been sent or received within the negotiated limit. Abnormal:
-			// without a rejection this is indistinguishable from a graceful close(), which
-			// also settles with closeCode 0.
-			this.#end({ clean: false, cause: new Error("idle timeout") });
-			return;
-		}
-		// Keep-alive: nudge the peer when our outbound side has been silent for a third
-		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
-		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) {
-			const seq = this.#nextPingSeq;
-			// Monotonic (never wraps within a session's life): the draft-02
-			// strictly-increasing rule requires it, and it must not wrap earlier
-			// than the Rust peer's u64 counter or a valid ping would be rejected.
-			this.#nextPingSeq += 1;
-			try {
-				this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
-			} catch (e) {
-				// Best effort - if the send fails, the close path will fire shortly.
-				// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
-				console.warn("qmux: keep-alive ping failed", e);
-			}
-		}
+		return this.#lastRecvAt.max(this.#sendResetAt);
 	}
 
 	/** Encode the next window update owed to the peer, or undefined once none is.
@@ -1290,6 +1439,24 @@ export class Session implements WebTransport {
 		const bytes = Frame.encode(frame, this.#version);
 		this.#validateRecordSize(bytes);
 		return bytes;
+	}
+
+	/** Refuse a frame naming a stream it can't act on (RFC 9000 §19.8-19.13): one without
+	 *  the `half` of ours the frame acts on, one of ours we never opened, or a peer's past
+	 *  the limit we advertised. */
+	#checkStream(id: Stream.Id, half: "send" | "recv", frame: string) {
+		const can = half === "send" ? id.canSend(this.#isServer) : id.canRecv(this.#isServer);
+		if (!can) {
+			const only = half === "send" ? "receive" : "send";
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, `${frame} for a ${only}-only stream`);
+		}
+		if (this.#isPeerStream(id)) {
+			if (!this.#recvLimit(id.dir).allows(id.index)) {
+				throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, `${frame} past the stream limit`);
+			}
+		} else if (id.index >= (id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId)) {
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, `${frame} for a stream we never opened`);
+		}
 	}
 
 	#isPeerStream(id: Stream.Id): boolean {
@@ -1334,7 +1501,7 @@ export class Session implements WebTransport {
 	#openPeerStream(id: Stream.Id): StreamState & { recv: RecvStream } {
 		// Per QUIC RFC 9000 §4.6, the limit applies to the stream index.
 		const limit = this.#recvLimit(id.dir);
-		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		if (!limit.open(id.index)) throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, "stream limit exceeded");
 		this.#recvOpen(id.dir).record(id.index);
 
 		const bidi = id.dir === Stream.Dir.Bi;
@@ -1389,9 +1556,7 @@ export class Session implements WebTransport {
 
 		const id = frame.id;
 		const streamId = id.value.value;
-		if (!id.canRecv(this.#isServer)) {
-			throw new Error("Invalid stream ID direction");
-		}
+		this.#checkStream(id, "recv", "STREAM");
 
 		const recv = this.#streams.get(streamId)?.recv;
 		if (recv) {
@@ -1400,12 +1565,8 @@ export class Session implements WebTransport {
 			return;
 		}
 
-		if (!this.#isPeerStream(id)) {
-			// One of ours whose receive half already ended: a late frame, dropped.
-			// One we never opened is malformed (canRecv leaves only bidi here).
-			if (id.index >= this.#nextBiStreamId) throw new Error("STREAM frame for a stream we never opened");
-			return;
-		}
+		// One of ours whose receive half already ended: a late frame, dropped.
+		if (!this.#isPeerStream(id)) return;
 		// A peer stream whose receive half already ended stays closed.
 		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
@@ -1421,15 +1582,16 @@ export class Session implements WebTransport {
 		// A RESET_STREAM_AT frame (reliableSize present, draft-02) is only legal if
 		// we advertised the `reset_stream_at` transport parameter. Receiving it
 		// otherwise - or on an earlier draft, which never advertises it - is a
-		// PROTOCOL_VIOLATION. Plain RESET_STREAM is always allowed.
+		// FRAME_ENCODING_ERROR. Plain RESET_STREAM is always allowed.
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
-			throw new Error("RESET_STREAM_AT received without advertising reset_stream_at");
+			throw new TransportError(
+				TransportCode.FRAME_ENCODING_ERROR,
+				"RESET_STREAM_AT received without advertising reset_stream_at",
+			);
 		}
 		const id = frame.id;
-		if (!id.canRecv(this.#isServer)) {
-			throw new Error("Invalid stream ID direction");
-		}
 		if (this.#closed) return;
+		this.#checkStream(id, "recv", "RESET_STREAM");
 
 		const streamId = id.value.value;
 		const err = new StreamError(streamCode(frame.code.value), "RESET_STREAM");
@@ -1440,19 +1602,15 @@ export class Session implements WebTransport {
 			return;
 		}
 
-		if (!this.#isPeerStream(id)) {
-			// One of ours whose receive half already ended, unless we never opened it.
-			const opened = id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
-			if (id.index >= opened) throw new Error("RESET_STREAM for a stream we never opened");
-			return;
-		}
+		// One of ours whose receive half already ended.
+		if (!this.#isPeerStream(id)) return;
 		// A terminal peer stream stays terminal, so a duplicate RESET can't charge its final size twice.
 		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
 		// A reset as the stream's first frame opens and closes it at once, and the
 		// application never sees it: charge its final size and return its slot.
 		const limit = this.#recvLimit(id.dir);
-		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		if (!limit.open(id.index)) throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, "stream limit exceeded");
 		this.#recvOpen(id.dir).record(id.index);
 		const size =
 			id.dir === Stream.Dir.Bi
@@ -1468,8 +1626,9 @@ export class Session implements WebTransport {
 
 	/** The stream a MAX_STREAM_DATA or STOP_SENDING names. As in QUIC, either can be
 	 *  the first frame of a peer's bidi stream, and opens it like a STREAM frame. */
-	#sendState(id: Stream.Id): StreamState | undefined {
+	#sendState(id: Stream.Id, frame: string): StreamState | undefined {
 		if (this.#closed) return undefined;
+		this.#checkStream(id, "send", frame);
 		const stream = this.#streams.get(id.value.value);
 		if (stream) return stream;
 		if (!this.#isPeerStream(id) || id.dir !== Stream.Dir.Bi) return undefined;
@@ -1480,15 +1639,19 @@ export class Session implements WebTransport {
 	}
 
 	#handleStopSending(frame: Frame.StopSending) {
-		const stream = this.#sendState(frame.id);
+		const stream = this.#sendState(frame.id, "STOP_SENDING");
 		if (!stream?.send) return;
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		this.#resetSend(frame.id, stream, stopped, frame.code);
 	}
 
 	/** Reset a stream's send half, unless it already ended: fail its writable and its
-	 *  queued frame, and send RESET_STREAM with every byte that took credit. */
-	#resetSend(id: Stream.Id, stream: StreamState, reason: Error, code: VarInt) {
+	 *  queued frame, and send RESET_STREAM with every byte that took credit.
+	 *
+	 *  The first `reliable` bytes, already on the socket, still reach the peer's reader: a
+	 *  RESET_STREAM_AT says so to a peer that accepts one, and any other gets a plain
+	 *  RESET_STREAM behind them. */
+	#resetSend(id: Stream.Id, stream: StreamState, reason: Error, code: VarInt, reliable = 0n) {
 		const finalSize = stream.send?.reset(reason);
 		if (finalSize === undefined) return;
 		const streamId = id.value.value;
@@ -1496,8 +1659,15 @@ export class Session implements WebTransport {
 			stream.writable?.error(reason);
 		} catch {}
 		this.#scheduler?.dropStream(streamId, reason);
-		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize });
+		const at = reliable > 0n && this.#reliableReset();
+		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize, reliableSize: at ? reliable : undefined });
 		this.#reap(streamId);
+	}
+
+	/** Whether a reset may carry a RESET_STREAM_AT. Only qmux-02 advertises the parameter, so this
+	 *  gates the frame on the version too. */
+	#reliableReset(): boolean {
+		return this.#ourParams.resetStreamAt && this.#peerParams.resetStreamAt;
 	}
 
 	/** The largest STREAM frame the peer accepts, in bytes.
@@ -1756,7 +1926,23 @@ export class Session implements WebTransport {
 			configurable: true,
 			value: async (): Promise<SendStreamStats> => ({ ...stats }),
 		});
-		// Both properties are defined above.
+		Object.defineProperty(writable, "reliableReset", {
+			configurable: true,
+			get: () => this.#reliableReset(),
+		});
+		Object.defineProperty(writable, "resetAt", {
+			configurable: true,
+			value: (offset: number, e?: unknown) => {
+				if (send.terminal) return;
+				// Bytes not yet on the socket could still be queued behind the reset.
+				if (!Number.isSafeInteger(offset) || offset < 0 || offset > stats.bytesSent) {
+					throw new RangeError(`resetAt offset ${offset} is past the ${stats.bytesSent} bytes sent`);
+				}
+				const reason = e instanceof Error ? e : new Error("stream aborted");
+				this.#resetSend(id, stream, reason, VarInt.from(resetCode(e)), BigInt(offset));
+			},
+		});
+		// The properties are defined above.
 		return writable as SendStream;
 	}
 
@@ -1789,8 +1975,10 @@ export class Session implements WebTransport {
 		if (end.clean) this.#closedResolve({ closeCode: end.code, reason: end.reason });
 		else this.#closedReject(new SessionError(error.message, { cause: error }));
 
-		this.#idleTimer?.close();
-		this.#idleTimer = undefined;
+		this.#idleStop?.abort();
+		this.#idleStop = undefined;
+		this.#liveness?.stop.abort();
+		this.#notifyStale();
 
 		// A clean end ends the incoming readables; an abort errors them with its cause.
 		const cause = end.clean ? undefined : error;

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Duration, type Installed, now, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { SessionError, StreamError } from "./error.ts";
+import { SessionError, StreamError, TransportCode } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
 import * as QMux from "./index.ts";
@@ -18,6 +18,8 @@ import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts"
 // holds).
 class FakePeer {
 	static last: FakePeer | undefined;
+	/** Leave the next sockets connecting until the test calls {@link open}. */
+	static deferOpen = false;
 
 	readonly url: string;
 	readonly opened: Promise<{
@@ -35,6 +37,7 @@ class FakePeer {
 	#unblockWrites: (() => void) | undefined;
 	#pongResolve?: () => void;
 	#writable: WritableStream<Uint8Array>;
+	#open: () => void;
 
 	/** Raw chunks the Session has written. */
 	sent: Uint8Array[] = [];
@@ -67,7 +70,10 @@ class FakePeer {
 			},
 		});
 		this.#writable = writable;
-		this.opened = Promise.resolve({ readable, writable, protocol, extensions: "" });
+		const opened = Promise.withResolvers<Awaited<FakePeer["opened"]>>();
+		this.opened = opened.promise;
+		this.#open = () => opened.resolve({ readable, writable, protocol, extensions: "" });
+		if (!FakePeer.deferOpen) this.#open();
 		const closed = Promise.withResolvers<{ closeCode?: number; reason?: string }>();
 		this.closed = closed.promise;
 		this.#closedResolve = closed.resolve;
@@ -103,6 +109,10 @@ class FakePeer {
 	}
 
 	// --- test controls ---
+	/** Finish connecting a socket created while {@link FakePeer.deferOpen} was set. */
+	open() {
+		this.#open();
+	}
 	/** Whether the session took the socket's writable, which it does as it starts. */
 	get started(): boolean {
 		return this.#writable.locked;
@@ -275,6 +285,13 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 }
 
 const ORIGINAL_WSS = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+
+// @moq/net tells the fallback from native WebTransport by this label alone, without loading qmux.
+test("a session labels its transport as websocket", () => {
+	const { session } = connect();
+	expect(session.transport).toBe("websocket");
+	session.close();
+});
 
 test("a non-finite sendBufferSize throws instead of parking every write", () => {
 	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
@@ -621,7 +638,7 @@ describe("Session integration (scripted peer)", () => {
 		// The peer may open any index under its credit, implicitly opening every
 		// lower one. Tracking each skipped index would let one tiny frame make us
 		// allocate (and loop) once per stream below it.
-		const { session, peer } = connect({ maxStreamsUni: 1n << 40n });
+		const { session, peer } = connect({ maxStreams: 1n << 40n });
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
 
@@ -659,7 +676,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("flow control error");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FLOW_CONTROL_ERROR);
 	});
 
 	test("RESET_STREAM final_size is cumulative with later stream data for MAX_DATA", async () => {
@@ -685,7 +702,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("flow control error");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FLOW_CONTROL_ERROR);
 	});
 
 	test("RESET_STREAM final_size replenishes connection credit once discarded", async () => {
@@ -777,7 +794,7 @@ describe("Session integration (scripted peer)", () => {
 
 			const err = await expectSessionFailure(session);
 			expect((err.cause as Error).message).toContain("does not continue the stream");
-			await waitFor(() => sentCloseCode(peer) === 1002);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 		});
 	}
 
@@ -791,7 +808,7 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "stream", id, offset: 5n, data: new Uint8Array(), fin: true });
 
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("a new stream must start at offset zero", async () => {
@@ -808,7 +825,7 @@ describe("Session integration (scripted peer)", () => {
 		});
 
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("frames without OFF from a pre-offset sender continue the stream", async () => {
@@ -884,12 +901,11 @@ describe("Session integration (scripted peer)", () => {
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await settle();
 
-			// Our writes stall, but the peer keeps talking, so the session stays up and
-			// every keep-alive tick finds our send side silent.
+			// Our writes stall and the peer goes quiet for most of the idle window, so
+			// keep-alives come due behind the stalled socket.
 			peer.blockWrites();
-			for (let i = 0; i < 40; i++) {
+			for (let i = 0; i < 5; i++) {
 				await clock.advance(Duration.millis(50));
-				peer.send({ type: "ping_response", sequence: 0n });
 				await settle();
 			}
 			peer.unblockWrites();
@@ -904,6 +920,78 @@ describe("Session integration (scripted peer)", () => {
 		}
 	});
 
+	test("keep-alive turns stale after soft, live on the next frame, and closes after hard", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		try {
+			const { session, peer } = connect();
+			await started(peer);
+			await waitFor(() => peer.has("transport_parameters"));
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(10) });
+			const stale = session.staleChanged();
+
+			// A silent peer draws a QX_PING at half of soft, then turns stale at soft.
+			await clock.advance(Duration.secs(1));
+			await settle();
+			expect(peer.count("ping_request")).toBe(1);
+			expect(session.stale).toBe(false);
+			await clock.advance(Duration.secs(1));
+			await settle();
+			expect(session.stale).toBe(true);
+			await stale;
+			// Still unheard, it pings every half of soft.
+			expect(peer.count("ping_request")).toBe(2);
+
+			// Its answer turns it live again.
+			const live = session.staleChanged();
+			peer.send({ type: "ping_response", sequence: 1n });
+			await settle();
+			expect(session.stale).toBe(false);
+			await live;
+
+			// Then it goes silent for good: the session closes once hard passes.
+			await clock.advance(Duration.millis(9_900));
+			await settle();
+			expect(session.stale).toBe(true);
+			await clock.advance(Duration.millis(200));
+			const err = await expectSessionFailure(session);
+			expect(err.message).toContain("keep-alive timeout");
+			// A wait started after the end settles at once rather than hanging.
+			let settled = false;
+			void session.staleChanged().then(() => {
+				settled = true;
+			});
+			await settle();
+			expect(settled).toBe(true);
+		} finally {
+			installed.close();
+		}
+	});
+
+	test("keep-alive is refused before ready, out of order, and past the idle timeout", async () => {
+		const { session, peer } = connect({ idleTimeout: Duration.secs(30) });
+		const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+		expect(() => session.keepAlive(keepAlive)).toThrow("await ready");
+		await started(peer);
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		expect(() => session.keepAlive({ soft: Duration.secs(3), hard: Duration.secs(2) })).toThrow(RangeError);
+		expect(() => session.keepAlive({ soft: Duration.nanos(1), hard: Duration.secs(2) })).toThrow(RangeError);
+		expect(() => session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(31) })).toThrow(RangeError);
+		session.keepAlive(keepAlive);
+		session.close();
+	});
+
+	test("keep-alive is refused on qmux-00, which has no QX_PING", async () => {
+		const { session, peer } = accept({ protocol: "qmux-00.moq-lite-04" });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		expect(() => session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(10) })).toThrow("qmux-00");
+		session.close();
+	});
+
 	test("malformed and unsupported config is refused before transport setup", () => {
 		const socket = {
 			opened: new Promise(() => {}),
@@ -915,8 +1003,10 @@ describe("Session integration (scripted peer)", () => {
 			{ receiveWindow: null },
 			{ receiveWindow: "64" },
 			{ streamReceiveWindow: 64 },
-			{ maxStreamsBidi: null },
-			{ maxStreamsUni: 1 },
+			{ maxStreams: null },
+			{ maxStreams: 1 },
+			{ maxStreamsBidi: 1n },
+			{ maxStreamsUni: 1n },
 			{ maxRecordSize: null },
 			{ maxDatagramFrameSize: 64 },
 			{ maxData: 64n },
@@ -950,6 +1040,20 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	test("one maxStreams is advertised for both directions", async () => {
+		const { session, peer } = connect({ maxStreams: 7n });
+		await started(peer);
+		await waitFor(() => peer.has("transport_parameters"));
+		const frame = peer
+			.received()
+			.find(
+				(frame): frame is Frame.TransportParameters => frame.type === "transport_parameters",
+			) as Frame.TransportParameters;
+		expect(frame.params.initialMaxStreamsBidi).toBe(7n);
+		expect(frame.params.initialMaxStreamsUni).toBe(7n);
+		session.close();
+	});
+
 	test("disabled config uses null and invalid durations fail before opening", () => {
 		// A plain number is the old millisecond config, refused rather than misread.
 		for (const value of [
@@ -972,9 +1076,14 @@ describe("Session integration (scripted peer)", () => {
 	test("config values that don't fit a varint are refused up front", () => {
 		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
 		expect(() => new Session("https://example/test", { config: { receiveWindow: -1n } })).toThrow("VarInt");
-		expect(() => new Session("https://example/test", { config: { maxStreamsBidi: VarInt.MAX + 1n } })).toThrow(
+		expect(() => new Session("https://example/test", { config: { maxStreams: VarInt.MAX + 1n } })).toThrow(
 			"VarInt",
 		);
+	});
+
+	test("maxStreams past 2^60 is refused up front, as no stream ID can name it", () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		expect(() => new Session("https://example/test", { config: { maxStreams: (1n << 60n) + 1n } })).toThrow("2^60");
 	});
 
 	test("a failed write closes the session even if the socket never reports closing", async () => {
@@ -1005,7 +1114,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("never opened");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.STREAM_STATE_ERROR);
 	});
 
 	test("a RESET_STREAM on a stream we never opened closes the session", async () => {
@@ -1022,6 +1131,70 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("never opened");
+	});
+
+	// RFC 9000 §19: each stream frame names a half it acts on, which must exist.
+	const client = (index: bigint, dir: Stream.DirType) => Stream.Id.create(index, dir, false);
+	const server = (index: bigint, dir: Stream.DirType) => Stream.Id.create(index, dir, true);
+	const illegal: Array<[string, Frame.Any, number]> = [
+		[
+			"MAX_STREAM_DATA on the peer's uni stream",
+			{ type: "max_stream_data", id: server(0n, Stream.Dir.Uni), max: 1n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STOP_SENDING on the peer's uni stream",
+			{ type: "stop_sending", id: server(0n, Stream.Dir.Uni), code: VarInt.from(0) },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED on our uni stream",
+			{ type: "stream_data_blocked", id: client(0n, Stream.Dir.Uni), limit: 0n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"MAX_STREAM_DATA on a bidi stream we never opened",
+			{ type: "max_stream_data", id: client(0n, Stream.Dir.Bi), max: 1n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED on a bidi stream we never opened",
+			{ type: "stream_data_blocked", id: client(0n, Stream.Dir.Bi), limit: 0n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED past the stream limit",
+			{ type: "stream_data_blocked", id: server(100n, Stream.Dir.Uni), limit: 0n },
+			TransportCode.STREAM_LIMIT_ERROR,
+		],
+		[
+			"MAX_STREAMS past 2^60",
+			{ type: "max_streams_bidi", max: (1n << 60n) + 1n },
+			TransportCode.FRAME_ENCODING_ERROR,
+		],
+		[
+			"STREAMS_BLOCKED past 2^60",
+			{ type: "streams_blocked_uni", limit: (1n << 60n) + 1n },
+			TransportCode.FRAME_ENCODING_ERROR,
+		],
+	];
+	for (const [name, frame, code] of illegal) {
+		test(`${name} closes the session`, async () => {
+			const { session, peer } = connect();
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+
+			peer.send(frame);
+			await expectSessionFailure(session);
+			await waitFor(() => sentCloseCode(peer) === code);
+		});
+	}
+
+	test("a peer advertising more than 2^60 streams is refused", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamsUni: (1n << 60n) + 1n }) });
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
 	test("a late STREAM frame on a bidi stream we opened and stopped reading is dropped", async () => {
@@ -1352,11 +1525,12 @@ describe("Session integration (scripted peer)", () => {
 					},
 				);
 
-				// Exactly at the deadline the session is still open; one tick past it closes.
-				await clock.advance(Duration.millis(150));
+				// Just short of the deadline the session is still open; the deadline closes it, as
+				// in Rust.
+				await clock.advance(Duration.millis(149));
 				await settle();
 				expect(settled).toBe(false);
-				await clock.advance(Duration.millis(50));
+				await clock.advance(Duration.millis(1));
 
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
@@ -1383,6 +1557,30 @@ describe("Session integration (scripted peer)", () => {
 			}
 		});
 
+		test("the idle deadline starts when the socket opens", async () => {
+			// A WebSocket that takes longer to open than the idle timeout still gets the whole
+			// window to exchange parameters.
+			const clock = new Manual();
+			const installed = clock.install();
+			FakePeer.deferOpen = true;
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				FakePeer.deferOpen = false;
+				await clock.advance(Duration.millis(200));
+				peer.open();
+				await started(peer);
+
+				await clock.advance(Duration.millis(119));
+				peer.send({ type: "transport_parameters", params: peerParams() });
+				await session.ready;
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				FakePeer.deferOpen = false;
+				installed.close();
+			}
+		});
+
 		test("outbound frame activity resets the idle timeout", async () => {
 			const clock = new Manual();
 			const installed = clock.install();
@@ -1405,6 +1603,84 @@ describe("Session integration (scripted peer)", () => {
 
 				// More than two idle windows elapsed with only occasional inbound frames,
 				// but the successful STREAM writes kept resetting the shared deadline.
+				expect(peer.has("connection_close")).toBe(false);
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				installed.close();
+			}
+		});
+
+		test("a one-way sender draws answers before its idle timeout", async () => {
+			// We send steadily and the peer never speaks unprompted, as a receiver with
+			// nothing to say does: only our keep-alive draws proof of life from it.
+			const clock = new Manual();
+			const installed = clock.install();
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				peer.send({ type: "transport_parameters", params: peerParams() });
+				await session.ready;
+
+				const writable = await session.createUnidirectionalStream();
+				const writer = writable.getWriter();
+				let answered = 0;
+				for (let i = 0; i < 12; i++) {
+					await clock.advance(Duration.millis(45));
+					await writer.write(new Uint8Array([i]));
+					await settle();
+					const pings = peer.received().flatMap((f) => (f.type === "ping_request" ? [f.sequence] : []));
+					for (const sequence of pings.slice(answered)) {
+						peer.send({ type: "ping_response", sequence });
+					}
+					answered = pings.length;
+					await settle();
+				}
+
+				expect(answered).toBeGreaterThan(0);
+				expect(peer.has("connection_close")).toBe(false);
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				installed.close();
+			}
+		});
+
+		test("a short negotiated idle timeout is probed in time for a slow answer", async () => {
+			// The peer negotiates 30ms and says nothing unprompted, answering each probe 22ms
+			// late. Our one write, the first send after the peer's last frame, comes 4ms in and
+			// sets the deadline to 34ms: only a probe sent right at a third of the timeout gets
+			// its answer back by then.
+			const clock = new Manual();
+			const installed = clock.install();
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				peer.send({ type: "transport_parameters", params: peerParams({ maxIdleTimeout: 30n }) });
+				await session.ready;
+				const writer = (await session.createUnidirectionalStream()).getWriter();
+				await settle();
+				peer.send({ type: "max_data", max: 2_000_000n });
+				await settle();
+
+				const delay = 22;
+				const due: { sequence: bigint; at: number }[] = [];
+				let seen = 0;
+				let answered = 0;
+				for (let ms = 1; ms <= 200; ms++) {
+					await clock.advance(Duration.millis(1));
+					if (ms === 4) await writer.write(new Uint8Array([1]));
+					await settle();
+					const pings = peer.received().flatMap((f) => (f.type === "ping_request" ? [f.sequence] : []));
+					for (const sequence of pings.slice(seen)) due.push({ sequence, at: ms + delay });
+					seen = pings.length;
+					while (due.length > 0 && due[0].at <= ms) {
+						peer.send({ type: "ping_response", sequence: due[0].sequence });
+						due.shift();
+						answered++;
+					}
+					await settle();
+				}
+
+				expect(answered).toBeGreaterThan(0);
 				expect(peer.has("connection_close")).toBe(false);
 				session.close();
 				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
@@ -1466,14 +1742,14 @@ describe("Session integration (scripted peer)", () => {
 		});
 	});
 
-	test("a text frame rejects closed and tells the peer why (1003)", async () => {
+	test("a text frame rejects closed and tells the peer why (PROTOCOL_VIOLATION)", async () => {
 		const { session, peer } = connect();
 		await started(peer);
 		peer.sendText("not binary");
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("text frames are not valid for QMux");
-		await waitFor(() => sentCloseCode(peer) === 1003);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 		// A violation we detect is a CONNECTION_CLOSE (0x1c), so the peer rejects too.
 		expect(sentClose(peer)?.type).toBe("connection_close");
 	});
@@ -1489,7 +1765,7 @@ describe("Session integration (scripted peer)", () => {
 
 		await waitFor(() => peer.has("connection_close"));
 		await expectSessionFailure(session);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("draft-01 rejects max_record_size below the default minimum", async () => {
@@ -1503,10 +1779,10 @@ describe("Session integration (scripted peer)", () => {
 
 		await waitFor(() => peer.has("connection_close"));
 		await expectSessionFailure(session);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
-	test("an unnegotiated RESET_STREAM_AT rejects closed and tells the peer why (1002)", async () => {
+	test("an unnegotiated RESET_STREAM_AT rejects closed and tells the peer why (FRAME_ENCODING_ERROR)", async () => {
 		// The peer negotiates qmux-01, which never advertises `reset_stream_at`, so
 		// a RESET_STREAM_AT (0x24) frame is a protocol violation. Hand-built bytes:
 		// type=0x24, id=3, code=0, final_size=0, reliable_size=0.
@@ -1517,7 +1793,7 @@ describe("Session integration (scripted peer)", () => {
 		const err = await expectSessionFailure(session);
 		// The decode failure itself is carried as the cause, not flattened away.
 		expect(err.cause).toBeInstanceOf(Error);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FRAME_ENCODING_ERROR);
 		expect(sentClose(peer)?.type).toBe("connection_close");
 	});
 
@@ -1728,7 +2004,7 @@ describe("Session integration (scripted peer)", () => {
 
 		peer.send({ type: "datagram", data: new Uint8Array(10) });
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("datagrams: a DATAGRAM we never advertised support for is fatal", async () => {
@@ -1740,7 +2016,7 @@ describe("Session integration (scripted peer)", () => {
 
 		peer.send({ type: "datagram", data: new Uint8Array([1, 2, 3]) });
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("datagrams: a no-length (0x30) DATAGRAM is sized without a length varint", async () => {
@@ -1846,7 +2122,7 @@ describe("Session integration (scripted peer)", () => {
 		// immediately observable. This is the reproduction from issue #299: the peer
 		// sends a full stream plus FIN while the application never reads the acceptor.
 		const { session, peer } = connect({
-			maxStreamsUni: 1n,
+			maxStreams: 1n,
 			receiveWindow: 100n,
 			streamReceiveWindow: 100n,
 		});
@@ -1884,7 +2160,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("accepted active streams do not recycle stream-count credit", async () => {
-		const { session, peer } = connect({ maxStreamsUni: 1n });
+		const { session, peer } = connect({ maxStreams: 1n });
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
 
@@ -1909,7 +2185,7 @@ describe("Session integration (scripted peer)", () => {
 		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
 
 		async function accept() {
-			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: false });
@@ -2021,7 +2297,7 @@ describe("Session integration (scripted peer)", () => {
 	// slot returns as soon as both halves are done on the wire.
 	describe("a refused peer stream returns its stream-count credit", () => {
 		test("uni, once the peer finishes it", async () => {
-			const { session, peer } = connect({ maxStreamsUni: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			await session.incomingUnidirectionalStreams.cancel();
@@ -2033,7 +2309,7 @@ describe("Session integration (scripted peer)", () => {
 		});
 
 		test("bidi, resetting our send half, once the peer finishes its own", async () => {
-			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			await session.incomingBidirectionalStreams.cancel();
@@ -2227,11 +2503,68 @@ describe("Session integration (scripted peer)", () => {
 			const { session, peer } = accept({ protocol });
 			await started(peer);
 			peer.sendRaw(new Uint8Array());
-			await peer.barrier();
+			// qmux-00 has no QX_PING to fence with, so the parameters behind it are the fence.
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
 			expect(peer.has("connection_close")).toBe(false);
 			session.close();
 		});
+
+		test(`a repeated QX_TRANSPORT_PARAMETERS is a PROTOCOL_VIOLATION on ${protocol}`, async () => {
+			const { session, peer } = accept({ protocol });
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await expectSessionFailure(session);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
+		});
 	}
+
+	test("a QX_PING on qmux-00 is a FRAME_ENCODING_ERROR", async () => {
+		const { session, peer } = accept({ protocol: "qmux-00" });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		peer.send({ type: "ping_request", sequence: 0n });
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FRAME_ENCODING_ERROR);
+		expect(peer.has("ping_response")).toBe(false);
+	});
+
+	test("an older QX_PING request never replaces the answer to a newer one on qmux-01", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		await waitFor(() => peer.has("transport_parameters"));
+
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 5n });
+		peer.send({ type: "ping_request", sequence: 3n });
+		await settle();
+		peer.unblockWrites();
+		await waitFor(() => peer.has("ping_response"));
+		await settle();
+		const answered = peer
+			.received()
+			.filter((f): f is Frame.PingResponse => f.type === "ping_response")
+			.map((f) => f.sequence);
+		expect(answered).not.toContain(3n);
+		expect(answered).toContain(5n);
+		expect(peer.has("connection_close")).toBe(false);
+		session.close();
+	});
+
+	test("a close followed by trailing garbage still reports the peer's close", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		const close = Frame.encode({ type: "application_close", code: VarInt.from(42), reason: "bye" }, "qmux-01");
+		const record = new Uint8Array(close.byteLength + 1);
+		record.set(close);
+		// 0x40 starts a two-byte frame type the record cuts short.
+		record[close.byteLength] = 0x40;
+		peer.sendRaw(record);
+		expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
+	});
 
 	// Regression: a STREAM frame delivered by the read loop after the session has
 	// closed used to hit the already-closed incoming-stream controllers, and the
@@ -2291,14 +2624,14 @@ describe("Session integration (scripted peer)", () => {
 			expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
 		});
 
-		test("a STREAM frame on a send-only stream ID fails the session with 1002", async () => {
+		test("a STREAM frame on a send-only stream ID fails the session with STREAM_STATE_ERROR", async () => {
 			const { session, peer } = connect();
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 
 			// A client-initiated uni stream is send-only from our (client) perspective;
 			// the peer writing to it is a protocol violation. Now that #handleStreamFrame
-			// is synchronous, the throw propagates to #onData and closes with 1002 -
+			// is synchronous, the throw propagates to #onData and closes with STREAM_STATE_ERROR -
 			// previously it leaked as a rejection while the session limped on.
 			peer.send({
 				type: "stream",
@@ -2308,7 +2641,7 @@ describe("Session integration (scripted peer)", () => {
 			});
 
 			await expectSessionFailure(session);
-			await waitFor(() => sentCloseCode(peer) === 1002);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.STREAM_STATE_ERROR);
 			await settle();
 			expect(rejections).toEqual([]);
 		});
@@ -2372,7 +2705,7 @@ describe("Session integration (scripted peer)", () => {
 			// Tight connection window (300B). Each refused stream's bytes advance the
 			// connection recv offset; if they aren't also counted as consumed, the
 			// advertised window never replenishes and the peer is wrongly starved /
-			// eventually tripped into a 1002 flow-control close.
+			// eventually tripped into a FLOW_CONTROL_ERROR close.
 			const { session, peer } = connect({ receiveWindow: 300n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
@@ -2650,7 +2983,7 @@ describe("Session.accept (server role)", () => {
 		});
 
 		await waitFor(() => peer.has("connection_close"));
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.STREAM_STATE_ERROR);
 		await expectSessionFailure(session);
 	});
 
@@ -2812,7 +3145,7 @@ describe("STREAM frame size", () => {
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("max_frame_size");
 		await waitFor(() => sentCloseCode(peer) !== undefined);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("a record over max_record_size closes the session", async () => {
@@ -2828,7 +3161,7 @@ describe("STREAM frame size", () => {
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("max_record_size");
 		await waitFor(() => sentCloseCode(peer) !== undefined);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("we keep STREAM payloads within the released-receiver ceiling", async () => {
@@ -2878,15 +3211,9 @@ describe("STREAM frame size", () => {
 	});
 });
 
-/** Encode a RESET_STREAM_AT (0x24) frame, which our own encoder never emits. */
+/** Encode a RESET_STREAM_AT (0x24) frame. */
 function resetStreamAt(id: Stream.Id, code: number, finalSize: bigint, reliableSize: bigint): Uint8Array {
-	let buffer = new Uint8Array(new ArrayBuffer(1 + 8 * 4), 0, 1);
-	buffer[0] = 0x24;
-	buffer = id.value.encode(buffer);
-	buffer = VarInt.from(code).encode(buffer);
-	buffer = VarInt.from(finalSize).encode(buffer);
-	buffer = VarInt.from(reliableSize).encode(buffer);
-	return buffer;
+	return Frame.encode({ type: "reset_stream", id, code: VarInt.from(code), finalSize, reliableSize }, "qmux-02");
 }
 
 describe("RESET_STREAM_AT (qmux-02)", () => {
@@ -2981,6 +3308,62 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 		session.close();
 	});
 
+	/** A server session negotiating `protocol` whose peer advertised `reset_stream_at` or not,
+	 *  with a uni stream of its own that already sent `data`. */
+	async function sending(protocol: string, advertised: boolean, data: number[]) {
+		const { session, peer } = accept({ protocol });
+		peer.send({ type: "transport_parameters", params: peerParams({ resetStreamAt: advertised }) });
+		await session.ready;
+		const writable = await session.createUnidirectionalStream();
+		const writer = writable.getWriter();
+		await writer.write(new Uint8Array(data));
+		return { session, peer, writable, writer };
+	}
+
+	// Only a qmux-02 peer that advertised the parameter accepts a RESET_STREAM_AT; any other still
+	// gets the prefix, ahead of a plain RESET_STREAM.
+	for (const [protocol, advertised, reliable] of [
+		["qmux-02", true, true],
+		["qmux-02", false, false],
+		["qmux-01", true, false],
+	] as const) {
+		test(`resetAt on ${protocol} ${advertised ? "with" : "without"} reset_stream_at sends ${reliable ? "RESET_STREAM_AT" : "RESET_STREAM"} after the prefix`, async () => {
+			const { session, peer, writable, writer } = await sending(protocol, advertised, [1, 2, 3, 4]);
+			expect(writable.reliableReset).toBe(reliable);
+			const reason = new StreamError(7, "reset");
+			writable.resetAt(2, reason);
+			expect(await settleTo(writer.closed)).toBe(reason);
+
+			await waitFor(() => peer.has("reset_stream"));
+			const frames = peer.received().filter((f) => f.type === "stream" || f.type === "reset_stream");
+			expect(frames.map((f) => f.type)).toEqual(["stream", "reset_stream"]);
+			expect((frames[0] as Frame.Data).data).toEqual(new Uint8Array([1, 2, 3, 4]));
+			const reset = frames[1] as Frame.ResetStream;
+			expect(reset.code.value).toBe(7n);
+			expect(reset.finalSize).toBe(4n);
+			expect(reset.reliableSize).toBe(reliable ? 2n : undefined);
+			session.close();
+		});
+	}
+
+	test("resetAt leaves a stream the peer stopped as it is", async () => {
+		const { session, peer, writable, writer } = await sending("qmux-02", true, [1, 2, 3]);
+		peer.send({ type: "stop_sending", id: await firstStreamId(peer), code: VarInt.from(9) });
+		expect(await settleTo(writer.closed)).toBeInstanceOf(StreamError);
+
+		writable.resetAt(3, new StreamError(7, "reset"));
+		await settle();
+		const resets = peer.received().filter((f) => f.type === "reset_stream") as Frame.ResetStream[];
+		expect(resets.map((f) => [f.code.value, f.reliableSize])).toEqual([[9n, undefined]]);
+		session.close();
+	});
+
+	test("resetAt refuses an offset past the bytes sent", async () => {
+		const { session, writable } = await sending("qmux-02", true, [1, 2, 3]);
+		expect(() => writable.resetAt(4)).toThrow(RangeError);
+		session.close();
+	});
+
 	test("a reliable prefix beyond the bytes received is a protocol violation", async () => {
 		const { session, peer, id } = await open([[1, 2]]);
 		// The transport is ordered, so bytes 2..4 can never arrive after the reset.
@@ -2988,6 +3371,6 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("reliable_size");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 });

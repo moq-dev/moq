@@ -26,7 +26,7 @@ pub fn now() -> moq_net::time::Instant {
 /// the benches.
 pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	match kio::clock::sim::is_running() {
-		true => drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
+		true => drop(super::schedule::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),
@@ -85,11 +85,13 @@ pub struct MockConnectOptions {
 	/// What the client may make the server's session hold, when not the default.
 	pub server_limits: Option<moq_net::session::Limits>,
 	/// The extensions the client offers.
-	pub client_extensions: moq_net::setup::Extensions,
+	pub client_extensions: Extensions,
 	/// The extensions the server offers.
-	pub server_extensions: moq_net::setup::Extensions,
+	pub server_extensions: Extensions,
 	/// The price the client puts on the link, when not the default.
 	pub cost: Option<u64>,
+	/// The price the server puts on the link, when not the default.
+	pub server_cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
 	/// Whether both transports have a sender that probes up to a target.
@@ -126,6 +128,7 @@ impl MockConnectOptions {
 			client_extensions: Default::default(),
 			server_extensions: Default::default(),
 			cost: None,
+			server_cost: None,
 			stats: MockStats::default(),
 			probe: false,
 			server_stats: Default::default(),
@@ -134,6 +137,24 @@ impl MockConnectOptions {
 			server_gate: None,
 			client_implementation: None,
 			server_implementation: None,
+		}
+	}
+}
+
+/// The SETUP extensions a side offers, which moq-net sets only through hidden doors.
+#[derive(Clone, Copy, Debug)]
+pub struct Extensions {
+	/// MoQ Solicit, which every session offers: off acts as a moq-transport peer without it.
+	pub solicit: bool,
+	/// The `ietf` extension, which only moq-relay offers.
+	pub ietf: bool,
+}
+
+impl Default for Extensions {
+	fn default() -> Self {
+		Self {
+			solicit: true,
+			ietf: false,
 		}
 	}
 }
@@ -174,7 +195,8 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 
 	let mut client = Client::new()
 		.with_versions(opts.version.into())
-		.with_extensions(opts.client_extensions);
+		.with_solicit(opts.client_extensions.solicit)
+		.with_ietf(opts.client_extensions.ietf);
 	if let Some(cost) = opts.cost {
 		client = client.with_cost(cost);
 	}
@@ -196,7 +218,8 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let mut server = Server::new()
 		.with_stats(opts.server_stats)
 		.with_versions(opts.version.into())
-		.with_extensions(opts.server_extensions);
+		.with_solicit(opts.server_extensions.solicit)
+		.with_ietf(opts.server_extensions.ietf);
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish.clone());
 	}
@@ -208,6 +231,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(implementation) = opts.server_implementation {
 		server = server.with_implementation(implementation);
+	}
+	if let Some(cost) = opts.server_cost {
+		server = server.with_cost(cost);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver

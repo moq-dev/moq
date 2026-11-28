@@ -121,7 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
-	media: Option<hang::catalog::Media>,
+	sync: Option<hang::catalog::Timeline>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
@@ -132,8 +132,8 @@ struct State {
 	waiting: BTreeMap<Key, (Held, Owner)>,
 }
 
-/// Where a rendition's media track is: its broadcast, instance, and track name.
-type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
+/// Where a rendition's media track is: its broadcast and track name.
+type Held = (Option<moq_net::path::Relative>, String);
 
 /// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
@@ -175,6 +175,9 @@ impl kio::Task for Hold {
 			let Ok(track) = broadcast.track(&self.track) else {
 				return Poll::Ready(());
 			};
+			// Demand the export makes for itself rather than for a client, so a metered source
+			// counts no viewer for it.
+			let track = track.unmetered();
 			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
 			self.state = Holding::Subscribing {
 				_broadcast: broadcast,
@@ -293,7 +296,7 @@ impl Producer {
 	#[cfg(feature = "server")]
 	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
 		match self.state.poll_ref(waiter, |state| {
-			if state.media.is_some() {
+			if state.sync.is_some() {
 				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
 			} else {
 				Poll::Pending
@@ -359,6 +362,7 @@ impl Producer {
 		if let Ok(mut current) = self.state.write() {
 			current.renditions.clear();
 			current.audio.clear();
+			current.waiting.clear();
 		}
 	}
 
@@ -381,6 +385,8 @@ impl Producer {
 			});
 		}
 		state.finished = Some(result);
+		// No catalog follows to declare an interval, so nothing measures one from the held media.
+		state.waiting.clear();
 		drop(state);
 		self.close();
 	}
@@ -394,6 +400,7 @@ impl Producer {
 	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.finished.get_or_insert(Ok(()));
+			state.waiting.clear();
 		}
 		self.close();
 		self.fanout.cut();
@@ -514,12 +521,13 @@ impl Producer {
 			.map(|_| ())
 	}
 
-	/// Resolve once an enabled video rendition is [advertised](Rendition::is_advertised), or, while
-	/// none is left that listings do not refuse, once any enabled rendition is, so a master playlist
-	/// can list it.
+	/// Resolve once every enabled video rendition that listings do not refuse is
+	/// [advertised](Rendition::is_advertised), or, while none is left, once any enabled rendition
+	/// is, so a master playlist can list them.
 	///
-	/// A player keeps the variants of the first master it loads, and audio lists a segment before
-	/// video finishes its first GOP, so a master answered on audio alone would never play video.
+	/// A player keeps the variants of the first master it loads. Audio lists a segment before video
+	/// finishes its first GOP, and one rung of a ladder before another, so a master answered on
+	/// audio or one rung alone would never switch to the rest.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
@@ -536,7 +544,7 @@ impl Producer {
 					})
 					.peekable();
 				let ready = if video.peek().is_some() {
-					video.any(advertised)
+					video.all(advertised)
 				} else {
 					current.renditions.values().any(advertised)
 				};
@@ -550,7 +558,7 @@ impl Producer {
 	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
-				if current.media.is_some() {
+				if current.sync.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -669,10 +677,10 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// Renditions join the set only once the catalog declares `sync.interval`, which a
 	/// publisher measures over its first second or group when it knows no GOP: without that grid
 	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
-	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// interval is fixed for a broadcast identity; should it change anyway, every rendition is
 	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
@@ -686,19 +694,11 @@ impl Producer {
 	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, (Held, Owner)>) {
 		use hang::catalog::Reference;
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
-			let reference = (
-				config.broadcast.clone(),
-				config.instance.clone(),
-				config.track(name).to_string(),
-			);
+			let reference = (config.broadcast.clone(), config.track(name).to_string());
 			((Kind::Video, name.clone()), reference)
 		});
 		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
-			let reference = (
-				config.broadcast.clone(),
-				config.instance.clone(),
-				config.track(name).to_string(),
-			);
+			let reference = (config.broadcast.clone(), config.track(name).to_string());
 			((Kind::Audio, name.clone()), reference)
 		});
 		let listed: BTreeMap<Key, Held> = video.chain(audio).collect();
@@ -708,8 +708,8 @@ impl Producer {
 			if waiting.contains_key(&key) {
 				continue;
 			}
-			let (broadcast, instance, track) = &held;
-			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+			let (broadcast, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref()) else {
 				continue;
 			};
 			let owner = self.fanout.spawn(Hold {
@@ -722,13 +722,13 @@ impl Producer {
 	}
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		let clock = catalog.media.clock;
-		let interval = catalog.media.interval();
+		let clock = catalog.sync.clock;
+		let interval = catalog.sync.interval;
 
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
-		current.media = Some(catalog.media);
+		current.sync = Some(catalog.sync);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -954,6 +954,73 @@ mod tests {
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+	}
+
+	/// The tracks held subscribed while a catalog has no join interval are released once the set
+	/// ends, however it ends, rather than staying subscribed while a consumer holds the set.
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_set_releases_its_held_tracks() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let ends: [fn(&Producer); 3] = [|set| set.finish(Ok(())), |set| set.cut(), |set| set.clear()];
+		for end in ends {
+			let producer = Producer::spawned(Duration::from_secs(30));
+			let _cursor = producer.subscribe();
+			producer.sync(&source, &catalog);
+			assert_eq!(producer.state.read().waiting.len(), 1, "the track was not held");
+			end(&producer);
+			assert!(producer.state.read().waiting.is_empty(), "the hold outlived the set");
+		}
+	}
+
+	/// A track held while the catalog has no join interval is the export's own demand, so a
+	/// metered source counts no subscription, and no viewer, for it.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_track_counts_no_viewer() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let route = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let track = route
+			.broadcast()
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let consumer = origin.consume().with_stats(
+			registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
+		);
+		let resolved = consumer.request("live", None).await.expect("the broadcast resolves");
+		let source = moq_mux::Source::new(consumer, resolved);
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let _cursor = producer.subscribe();
+		producer.sync(&source, &catalog);
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!(track.subscription().is_some(), "the track was not held");
+		let subscriptions: u64 = registry
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.map(|(_, _, traffic)| traffic.subscriptions_started + traffic.broadcasts_started)
+			.sum();
+		assert_eq!(subscriptions, 0, "the hold counted a viewer");
 	}
 
 	#[test]

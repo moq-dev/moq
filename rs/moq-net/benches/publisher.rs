@@ -7,23 +7,23 @@
 //! up as a slope over `skipped`. `adjacent` gives up the groups of one range instead, each
 //! with a different error from its neighbor, so the record holds one entry per group.
 //!
-//! `publisher_paused_frames` holds `paused` unfinished paused groups and writes `frames`
-//! frames to them per wake, one group each in turn, before the run checks its paused groups
-//! for one the budget or the cache gave up. A wake re-polls only the groups written to, so
-//! the cost per frame stays flat over `paused`.
+//! `publisher_update` feeds a lite-07 subscription of `ranges` one-group ranges a stream of
+//! SUBSCRIBE_UPDATEs, each retiring the `edited` oldest ranges and adding as many, then serving
+//! until parked; `steer` moves only the priority, and `routed_edit` edits on a relay's front,
+//! which mirrors each update into its route's copy. A cost that grows with the live ranges
+//! rather than the edit shows up as a slope over `ranges`.
+//!
+//! `publisher_drop` gives up `drops` ranges of a subscription to `ranges` ranges, plus one
+//! left open, timing each drop and every wake it causes. Each drop starts the range it gives
+//! up, so a drop costing every range shows as a slope over `ranges`, and one costing every
+//! drop before it as a slope over `drops`.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench publisher`.
 
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
+use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::time::{Duration, Instant};
-
-use moq_net::fuzz::{CoverageBench, PausedBench};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use moq_net::fuzz::{CoverageBench, UpdateBench};
 
 /// Ranges the source gave up before the wake.
 const SKIPPED: [u64; 4] = [1, 32, 1024, 8192];
@@ -51,42 +51,68 @@ fn bench_covered_before_start(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Paused groups the run holds.
-const PAUSED: [u64; 4] = [1, 32, 1024, 8192];
+/// Live ranges in the subscription, up to about the most one-group ranges a SUBSCRIBE fits.
+const LIVE: [u64; 3] = [16, 512, 8192];
 
-/// Frames written to paused groups per wake.
-const FRAMES: [usize; 3] = [1, 16, 256];
+/// Ranges each update retires, and adds.
+const EDITED: [u64; 2] = [1, 16];
 
-/// Wakes per fixture: each frame stays in its group, so the fixture is rebuilt, untimed,
-/// before it holds too many.
-const WAKES: u64 = 1024;
-
-fn bench_paused_frames(c: &mut Criterion) {
-	let mut group = c.benchmark_group("publisher_paused_frames");
-	for paused in PAUSED {
-		for frames in FRAMES {
-			group.throughput(Throughput::Elements(frames as u64));
-			group.bench_function(BenchmarkId::new(format!("paused={paused}"), frames), |b| {
-				b.iter_custom(|iters| {
-					let mut total = Duration::ZERO;
-					let mut left = iters;
-					while left > 0 {
-						let mut run = PausedBench::new(paused);
-						let wakes = left.min(WAKES);
-						let start = Instant::now();
-						for _ in 0..wakes {
-							run.wake(frames);
-						}
-						total += start.elapsed();
-						left -= wakes;
-					}
-					total
-				});
+fn bench_update(c: &mut Criterion) {
+	let mut group = c.benchmark_group("publisher_update");
+	group.throughput(Throughput::Elements(1));
+	for ranges in LIVE {
+		for edited in EDITED {
+			let mut run = None;
+			group.bench_function(BenchmarkId::new(format!("edit{edited}"), ranges), |b| {
+				let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
+				b.iter(|| run.edit(edited));
+			});
+		}
+		let mut run = None;
+		group.bench_function(BenchmarkId::new("steer", ranges), |b| {
+			let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
+			b.iter(|| run.steer());
+		});
+		// The same on a relay's front, which mirrors each update into its route's copy.
+		for edited in EDITED {
+			let mut run = None;
+			group.bench_function(BenchmarkId::new(format!("routed_edit{edited}"), ranges), |b| {
+				let run = run.get_or_insert_with(|| UpdateBench::routed(ranges));
+				b.iter(|| run.edit(edited));
 			});
 		}
 	}
 	group.finish();
 }
 
-criterion_group!(benches, bench_covered_before_start, bench_paused_frames);
+/// Ranges given up per measurement, and ranges subscribed besides the open one.
+const SWEEP: [u64; 4] = [1, 32, 1024, 8192];
+
+fn bench_drop(c: &mut Criterion) {
+	let mut group = c.benchmark_group("publisher_drop");
+	// The largest cell gives up 8192 ranges per sample.
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(2));
+	for ranges in SWEEP {
+		for drops in SWEEP.into_iter().filter(|drops| *drops <= ranges) {
+			group.throughput(Throughput::Elements(drops));
+			group.bench_function(
+				BenchmarkId::new(format!("ranges={ranges}"), format!("drops={drops}")),
+				|b| {
+					b.iter_batched(
+						|| CoverageBench::spread(ranges + 1, drops),
+						|mut run| {
+							run.give_up(drops);
+							run
+						},
+						BatchSize::PerIteration,
+					)
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_covered_before_start, bench_update, bench_drop);
 criterion_main!(benches);

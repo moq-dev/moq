@@ -26,8 +26,8 @@ test("a transport offset costs no frame storage and proves no group start", asyn
 		expect(hooks.groupStarted(reader)).toBe(true);
 		expect(hooks.groupTimestamp(reader)).toBeUndefined();
 		for (let i = 0; i < 9000; i++) {
-			const frame = await reader.readFrameSequence();
-			expect(frame?.sequence).toBe(offset + i);
+			const frame = await reader.readFrameIndex();
+			expect(frame?.index).toBe(offset + i);
 			expect(frame?.payload[0]).toBe(i % 256);
 		}
 		reader.close();
@@ -87,14 +87,18 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 
 		const reader = plain.consume();
 		expect(reader.tryReadFrame()?.arrived).toEqual(first);
-		expect((await reader.readFrameSequence())?.arrived).toEqual(second);
+		expect((await reader.readFrameIndex())?.arrived).toEqual(second);
 		const stored = compressed.consume();
 		expect((await hooks.readGroupFrame(stored, true))?.frame.arrived).toEqual(first);
 		expect((await stored.readFrame())?.arrived).toEqual(second);
 
 		// A frame written in with a stamp of its own still gets this node's.
 		const forwarded = new Producer(0n);
-		forwarded.writeFrame({ payload: new Uint8Array([1]), arrived: first });
+		forwarded.writeFrame({
+			payload: new Uint8Array([1]),
+			arrived: first,
+			timestamp: Timestamp.unscaled(forwarded.start),
+		});
 		expect(forwarded.consume().tryReadFrame()?.arrived).toEqual(clock.now());
 
 		// A resumed read takes the stamp the replacement copy holds, not when it was adopted.
@@ -106,7 +110,7 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -151,7 +155,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -173,15 +177,16 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 	}
 });
 
-test("zero group PTS keeps its scale and untimed groups stay unstamped", () => {
+test("zero group PTS keeps its scale and scale-less groups stay unstamped", () => {
 	const installed = new Manual().install();
 	try {
-		for (const timestamp of [undefined, Timestamp.fromMicros(0)]) {
+		for (const timestamp of [Timestamp.unscaled(0n), Timestamp.fromMicros(0)]) {
 			const producer = new Producer(0n);
 			const consumer = producer.consume();
 			expect(hooks.groupLatest(consumer)).toBeUndefined();
 			producer.writeFrame({ payload: new Uint8Array(), timestamp });
-			expect(hooks.groupLatest(consumer)).toBe(timestamp);
+			// A group key is no presentation time.
+			expect(hooks.groupLatest(consumer)).toBe(timestamp.scale === undefined ? undefined : timestamp);
 			consumer.close();
 			producer.finish();
 		}
@@ -212,8 +217,8 @@ test("wanted reflects mirror demand until the last reader leaves", async () => {
 	expect(wanted.peek()).toBe(false);
 });
 
-function pair(sequence: bigint) {
-	const producer = new Producer(sequence);
+function pair(key: bigint) {
+	const producer = new Producer(key);
 	return { producer, consumer: producer.consume() };
 }
 
@@ -242,14 +247,14 @@ test("closing a consumer ends its own parked reads", async () => {
 	consumer.close();
 	expect(await reading).toBeUndefined();
 	await waiting;
-	expect(consumer.isClosed).toBe(true);
+	expect(consumer.closed.peek()).toBeNull();
 	expect(consumer.done).toBe(true);
 
 	// The other reader is still parked on the open group, and reads the next frame.
 	const next = other.readFrame();
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 	expect((await next)?.payload[0]).toBe(1);
-	expect(other.isClosed).toBe(false);
+	expect(other.closed.peek()).toBeUndefined();
 
 	// A later write never reaches the released handle, so it takes nothing from the other reader.
 	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
@@ -275,10 +280,10 @@ test("a live group retains its tail, while fast readers keep up and lagging read
 	const fast = producer.consume();
 	const slow = producer.consume();
 	const payload = new Uint8Array(1024 * 1024);
-	for (let sequence = 0; sequence < 128; sequence++) {
-		producer.writeFrame({ payload });
-		const frame = await fast.readFrameSequence();
-		expect(frame?.sequence).toBe(sequence);
+	for (let key = 0; key < 128; key++) {
+		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.start) });
+		const frame = await fast.readFrameIndex();
+		expect(frame?.index).toBe(key);
 		expect(frame?.payload).toBe(payload);
 		expect(hooks.groupCacheBytes(producer)).toBeLessThanOrEqual(32 * 1024 * 1024);
 	}
@@ -294,7 +299,8 @@ test("empty frames consume tail storage without a frame count ceiling", async ()
 	const producer = new Producer(0n);
 	const slow = producer.consume();
 	const payload = new Uint8Array();
-	for (let index = 0; index < 600_000; index++) producer.writeFrame({ payload });
+	for (let index = 0; index < 600_000; index++)
+		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.start) });
 	expect(hooks.groupFrameCount(producer)).toBe(600_000);
 	expect(hooks.groupCacheBytes(producer)).toBeLessThanOrEqual(32 * 1024 * 1024);
 	await expect(slow.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
@@ -333,11 +339,11 @@ test("a read that starts later skips frames below it instead of returning them",
 		producer.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.now() });
 	}
 
-	expect(await consumer.readFrameSequence({ from: 5 })).toMatchObject({
-		sequence: 5,
+	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({
+		index: 5,
 		payload: new Uint8Array([5]),
 	});
-	expect(await consumer.readFrameSequence({ from: 5 })).toMatchObject({ sequence: 6 });
+	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({ index: 6 });
 });
 
 test("a group with no eviction reads every frame without error", async () => {
@@ -362,23 +368,23 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 	expect(consumer.tryReadFrame()).toBeUndefined();
 });
 
-test("tryReadFrameSequence reports per-frame sequence numbers", () => {
+test("tryReadFrameIndex reports per-frame indexes", () => {
 	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
-	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
-	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
-	expect(consumer.tryReadFrameSequence()).toBeUndefined();
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 0, payload: new TextEncoder().encode("a") });
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 1, payload: new TextEncoder().encode("b") });
+	expect(consumer.tryReadFrameIndex()).toBeUndefined();
 });
 
-test("readFrameSequence reports per-frame sequence numbers", async () => {
+test("readFrameIndex reports per-frame indexes", async () => {
 	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
-	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
-	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
+	expect(await consumer.readFrameIndex()).toMatchObject({ index: 0, payload: new TextEncoder().encode("a") });
+	expect(await consumer.readFrameIndex()).toMatchObject({ index: 1, payload: new TextEncoder().encode("b") });
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
@@ -470,7 +476,7 @@ test("readable waits past replayed frames after adopting an open replacement", a
 
 	replacement.writeFrame(textFrame("one"));
 	await readable;
-	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, payload: textFrame("one").payload });
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 1, payload: textFrame("one").payload });
 	consumer.close();
 	producer.finish();
 	replacement.finish();
@@ -524,14 +530,24 @@ test("buffered frames are still readable after the group closes", async () => {
 
 test("a plain frame has no size cap, while a compressed one keeps its whole-frame guard", () => {
 	const producer = new Producer(0n);
-	producer.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1) });
+	producer.writeFrame({
+		payload: new Uint8Array(32 * 1024 * 1024 + 1),
+		timestamp: Timestamp.unscaled(producer.start),
+	});
 	expect(hooks.groupFrameCount(producer)).toBe(1);
 	producer.finish();
 
 	const compressed = new Producer(1n);
 	hooks.bindGroupCompression(compressed, true);
-	expect(() => compressed.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1) })).toThrow(FrameTooLarge);
-	expect(() => compressed.createFrame({ size: 32 * 1024 * 1024 + 1 })).toThrow(FrameTooLarge);
+	expect(() =>
+		compressed.writeFrame({
+			payload: new Uint8Array(32 * 1024 * 1024 + 1),
+			timestamp: Timestamp.unscaled(compressed.start),
+		}),
+	).toThrow(FrameTooLarge);
+	expect(() =>
+		compressed.createFrame({ size: 32 * 1024 * 1024 + 1, timestamp: Timestamp.unscaled(compressed.start) }),
+	).toThrow(FrameTooLarge);
 	expect(hooks.groupFrameCount(compressed)).toBe(0);
 	compressed.finish();
 });
@@ -546,16 +562,23 @@ test("a compressed frame is refused unless its worst-case slice fits a peer's fr
 	hooks.bindGroupCompression(compressed, true);
 	const reader = compressed.consume();
 	// Refused by size alone, even though zeros would compress far below the cap.
-	expect(() => compressed.writeFrame({ payload: new Uint8Array(largest + 1) })).toThrow(FrameTooLarge);
-	expect(() => compressed.createFrame({ size: largest + 1 })).toThrow(FrameTooLarge);
-	compressed.writeFrame({ payload: new Uint8Array(largest) });
+	expect(() =>
+		compressed.writeFrame({
+			payload: new Uint8Array(largest + 1),
+			timestamp: Timestamp.unscaled(compressed.start),
+		}),
+	).toThrow(FrameTooLarge);
+	expect(() =>
+		compressed.createFrame({ size: largest + 1, timestamp: Timestamp.unscaled(compressed.start) }),
+	).toThrow(FrameTooLarge);
+	compressed.writeFrame({ payload: new Uint8Array(largest), timestamp: Timestamp.unscaled(compressed.start) });
 	const read = await hooks.readGroupFrame(reader, true);
 	expect(read?.frame.payload.byteLength).toBeLessThanOrEqual(MAX);
 	compressed.finish();
 
 	// A frame written before the track chose compression is held to the same cap.
 	const early = new Producer(1n);
-	early.writeFrame({ payload: new Uint8Array(largest + 1) });
+	early.writeFrame({ payload: new Uint8Array(largest + 1), timestamp: Timestamp.unscaled(early.start) });
 	expect(() => hooks.bindGroupCompression(early, true)).toThrow(FrameTooLarge);
 });
 
@@ -563,7 +586,7 @@ test("closing a reader ends a whole read of a stalled frame", async () => {
 	const producer = new Producer(0n);
 	const aborted = producer.consume();
 	const closed = producer.consume();
-	const open = producer.createFrame({ size: 10 });
+	const open = producer.createFrame({ size: 10, timestamp: Timestamp.unscaled(producer.start) });
 	open.write(new Uint8Array(4));
 	const failing = aborted.readFrame();
 	const ending = closed.readFrame();
@@ -592,9 +615,9 @@ test("a frame many times the tail streams through a reader that keeps up", async
 	const size = 96 * MiB + 123;
 	const producer = new Producer(0n);
 	const reader = producer.consume();
-	const open = producer.createFrame({ size });
+	const open = producer.createFrame({ size, timestamp: Timestamp.unscaled(producer.start) });
 	const frame = await reader.nextFrame();
-	expect(frame?.sequence).toBe(0);
+	expect(frame?.index).toBe(0);
 	expect(frame?.size).toBe(size);
 
 	let read = 0;
@@ -625,7 +648,7 @@ test("a reader that falls a tail behind inside a frame is evicted there", async 
 	const producer = new Producer(0n);
 	const slow = producer.consume();
 	const waiting = producer.consume();
-	const open = producer.createFrame({ size: 64 * MiB });
+	const open = producer.createFrame({ size: 64 * MiB, timestamp: Timestamp.unscaled(producer.start) });
 	const frame = await slow.nextFrame();
 	for (let written = 0; written < 40 * MiB; written += MiB) open.write(pattern(written, MiB));
 	// A reader that had not taken the frame can no longer start it.
@@ -639,7 +662,7 @@ test("a whole read of a frame being written collects it as it streams", async ()
 	const size = 40 * MiB;
 	const producer = new Producer(0n);
 	const reader = producer.consume();
-	const open = producer.createFrame({ size });
+	const open = producer.createFrame({ size, timestamp: Timestamp.unscaled(producer.start) });
 	expect(reader.tryReadFrame()).toBeUndefined();
 	const whole = reader.readFrame();
 	for (let written = 0; written < size; written += MiB) {
@@ -657,7 +680,7 @@ test("a small frame written in pieces reads whole once it completes", async () =
 	const producer = new Producer(0n);
 	const reader = producer.consume();
 	const readable = reader.readable();
-	const open = producer.createFrame({ size: 6 });
+	const open = producer.createFrame({ size: 6, timestamp: Timestamp.unscaled(producer.start) });
 	expect(() => producer.writeFrame(textFrame("x"))).toThrow("a frame is still being written");
 	open.write(new TextEncoder().encode("abc"));
 	expect(reader.tryReadFrame()).toBeUndefined();
@@ -675,7 +698,7 @@ test("a small frame written in pieces reads whole once it completes", async () =
 test("a whole read grows with the bytes that arrive, never with the declared size", async () => {
 	const producer = new Producer(0n);
 	const reader = producer.consume();
-	const open = producer.createFrame({ size: 2 ** 50 });
+	const open = producer.createFrame({ size: 2 ** 50, timestamp: Timestamp.unscaled(producer.start) });
 	open.write(new Uint8Array(1));
 	const whole = reader.readFrame();
 	await yieldNow();
@@ -688,7 +711,7 @@ test("a whole read of a frame stalled partway fails with Old when its budget giv
 	const reader = producer.consume();
 	const expired = new Signal(false);
 	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
-	const open = producer.createFrame({ size: 10 });
+	const open = producer.createFrame({ size: 10, timestamp: Timestamp.unscaled(producer.start) });
 	open.write(new Uint8Array(4));
 	const whole = reader.readFrame();
 	await yieldNow();
@@ -701,7 +724,7 @@ test("a frame written whole in one piece stays the writer's buffer", async () =>
 	const producer = new Producer(0n);
 	const reader = producer.consume();
 	const payload = new Uint8Array(3 * 1024 * 1024);
-	const open = producer.createFrame({ size: payload.byteLength });
+	const open = producer.createFrame({ size: payload.byteLength, timestamp: Timestamp.unscaled(producer.start) });
 	open.write(payload);
 	open.finish();
 	const frame = await reader.nextFrame();
@@ -712,7 +735,7 @@ test("a frame written whole in one piece stays the writer's buffer", async () =>
 test("ending a group mid-frame fails the frame and its readers", async () => {
 	const producer = new Producer(0n);
 	const reader = producer.consume();
-	const open = producer.createFrame({ size: 10 });
+	const open = producer.createFrame({ size: 10, timestamp: Timestamp.unscaled(producer.start) });
 	open.write(new Uint8Array(4));
 	const frame = await reader.nextFrame();
 	expect((await frame?.readChunk())?.byteLength).toBe(4);
@@ -741,13 +764,13 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	hooks.recoverGroup(consumer, {
 		changed: route,
 		// A stall looks past the copy once the route moved.
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: (_index, _failed, abort) => {
 			signal = abort;
 			return new Promise(() => {});
 		},
 	});
-	producer.writeFrame({ payload: new Uint8Array([0]) });
+	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(producer.start) });
 	await consumer.readFrame();
 
 	route.set(1);
@@ -755,7 +778,8 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	await yieldNow();
 	expect(signal?.aborted).toBe(false);
 
-	producer.finish();
+	// Whole, so no other route holds more of it.
+	producer.finishAt(1n);
 	expect(await read).toBeUndefined();
 	expect(signal?.aborted).toBe(true);
 });
@@ -775,14 +799,14 @@ test.each([false, true])("a group ending beside its replacement discards it (con
 		close: () => {
 			released++;
 		},
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: () =>
 			new Promise((r) => {
 				resolve = r;
 				requested.resolve();
 			}),
 	});
-	producer.writeFrame({ payload: new Uint8Array([0]) });
+	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(producer.start) });
 	await consumer.readFrame();
 
 	route.set(1);
@@ -804,7 +828,7 @@ test.each([false, true])("a group ending beside its replacement discards it (con
 		consumer.close();
 		expect(released).toBe(1);
 	} else {
-		producer.finish();
+		producer.finishAt(1n);
 	}
 	expect(await read).toBeUndefined();
 	expect(adopted).toBe(false);
@@ -819,7 +843,7 @@ test("a group recovered twice reads on and settles", async () => {
 	let next = 0;
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined,
+		wants: (cause) => cause.kind === "failed",
 		replace: async () => ({
 			group: replacements[next++].mirror(),
 			expiry: { expired: () => false, changed: [] },
@@ -828,20 +852,67 @@ test("a group recovered twice reads on and settles", async () => {
 		}),
 	});
 	void consumer.closed;
-	producer.writeFrame({ payload: new Uint8Array([0]) });
+	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(producer.start) });
 	await consumer.readFrame();
 
 	// Two failures in a row: each moves the group to the next copy.
 	producer.abort(new Error("route failed"));
-	replacements[0].writeFrame({ payload: new Uint8Array([0]) });
-	replacements[0].writeFrame({ payload: new Uint8Array([1]) });
+	replacements[0].writeFrame({
+		payload: new Uint8Array([0]),
+		timestamp: Timestamp.unscaled(replacements[0].start),
+	});
+	replacements[0].writeFrame({
+		payload: new Uint8Array([1]),
+		timestamp: Timestamp.unscaled(replacements[0].start),
+	});
 	expect((await consumer.readFrame())?.payload[0]).toBe(1);
 	replacements[0].abort(new Error("route failed"));
-	for (const payload of [0, 1, 2]) replacements[1].writeFrame({ payload: new Uint8Array([payload]) });
+	for (const payload of [0, 1, 2])
+		replacements[1].writeFrame({
+			payload: new Uint8Array([payload]),
+			timestamp: Timestamp.unscaled(replacements[1].start),
+		});
 	replacements[1].finish();
 	expect((await consumer.readFrame())?.payload[0]).toBe(2);
 	expect(await consumer.readFrame()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
+});
+
+// A metadata Group Stream reads headers alone, so a copy that fails partway through a frame
+// leaves no payload torn, and the group reads on from the route that replaced it.
+test("a header read takes a frame cut short without tearing it", async () => {
+	const producer = new Producer(0n);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0n);
+	hooks.recoverGroup(consumer, {
+		changed: new Signal(0),
+		wants: (cause) => cause.kind === "failed",
+		replace: async () => ({
+			group: replacement.mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {},
+			discard: () => {},
+		}),
+	});
+	// A publisher races its writes against `closed`, so it exists before any read.
+	const closed = consumer.closed;
+	const at = Timestamp.unscaled(producer.start);
+	producer.writeFrame(textFrame("a", at));
+	producer.createFrame({ size: 10, timestamp: at }).write(new Uint8Array(4));
+	producer.abort(new Error("route failed"));
+
+	const header = () => hooks.readGroupFrame(consumer, false, 0, true);
+	expect((await header())?.index).toBe(0);
+	const cut = await header();
+	expect(cut?.index).toBe(1);
+	expect(cut?.chunks?.size).toBe(10);
+	expect(closed.peek()).toBeUndefined();
+
+	for (const text of ["a", "0123456789", "c"]) replacement.writeFrame(textFrame(text, at));
+	replacement.finish();
+	expect((await header())?.index).toBe(2);
+	expect(await header()).toBeUndefined();
+	expect(await closed).toBeNull();
 });
 
 test("a stalled group whose copy then fails asks again with the failure", async () => {
@@ -851,11 +922,11 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 	const verdict = new Error("refused");
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		// A stall waits for the route; a failure gets the route's verdict.
-		replace: (_index, failed) => (failed ? Promise.reject(verdict) : new Promise(() => {})),
+		replace: (_index, cause) => (cause.kind === "failed" ? Promise.reject(verdict) : new Promise(() => {})),
 	});
-	producer.writeFrame({ payload: new Uint8Array([0]) });
+	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(producer.start) });
 	await consumer.readFrame();
 
 	route.set(1);
@@ -885,35 +956,4 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	await expect(consumer.readFrame()).rejects.toBe(err);
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
-});
-
-// Rust's `GroupState::shed` keeps an open group's newest committed frame even while a newer
-// frame is still being written, since that partial frame is not readable yet.
-test("a debt shed keeps the newest committed frame behind one being written", async () => {
-	const producer = new Producer(0n);
-	producer.writeFrame({ payload: new Uint8Array(1024) });
-	const reader = producer.consume();
-	producer.createFrame({ size: 10 }).write(new Uint8Array(5));
-
-	expect(hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [])).toBe(0);
-	expect((await reader.readFrame())?.payload.byteLength).toBe(1024);
-});
-
-// A finished group no longer tees into its copies, so shedding it ends the copies its track
-// holds that had not taken the shed frames, rather than crediting bytes they still hold.
-test("a debt shed of a finished group ends the copies that lost a frame", async () => {
-	const producer = new Producer(0n);
-	producer.writeFrame({ payload: new Uint8Array(1024) });
-	producer.writeFrame({ payload: new Uint8Array(1024) });
-	producer.finish();
-	const behind = producer.consume();
-	const drained = producer.consume();
-	await drained.readFrame();
-	await drained.readFrame();
-
-	expect(
-		hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [behind, drained]),
-	).toBeGreaterThan(0);
-	await expect(behind.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
-	expect(await drained.readFrame()).toBeUndefined();
 });

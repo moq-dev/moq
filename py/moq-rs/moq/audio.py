@@ -22,7 +22,7 @@ from ._read import End, Gap, _end, _gap
 from ._records import Delay, Timestamp
 from ._stream import _Stream
 from .media import Audio, AudioInit, CatalogProducer, DecodeStart
-from .publish import TrackDemand
+from .publish import TrackDemand, TrackRequest
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
@@ -86,7 +86,8 @@ class DecoderOutput:
     ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
     cold join starts; with ``estimate`` (the default) it floors the delay measured
     from arrival timing instead. ``delay.max`` only bounds how stale a group may
-    get before it is skipped, and adds no buffering. Both default to zero.
+    get before it is skipped, and adds no buffering. ``min`` defaults to unstated, which the
+    decoder starts as zero, and ``max`` to zero.
     ``start`` picks where to begin on a track that already holds groups, ``None``
     for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
     decoder skips the cached backlog.
@@ -136,6 +137,38 @@ class Producer:
                 bandwidth=None if bandwidth is None else bandwidth._inner,
             ),
         )
+
+    @classmethod
+    def requested(
+        cls,
+        catalog: CatalogProducer,
+        request: TrackRequest,
+        input: EncoderInput,
+        output: EncoderOutput,
+        *,
+        bandwidth: Allocator | None = None,
+    ) -> Producer:
+        """Open an audio track on the track a subscriber's ``request`` asks for, which names it.
+
+        This is how an on-demand publisher serves a track asked for again after its producer was
+        released while read: pass the settings it was first published with. Settings that change
+        the track info its readers hold end the track with ``MalformedTrack`` and raise here; nothing
+        checks the codec settings, which its readers decode with, so keep those too. The request
+        must belong to the catalog's broadcast, and a config that can't be encoded rejects it
+        with ``NotFound``.
+        """
+        producer = cls.__new__(cls)
+        producer._inner = MoqAudioProducer.requested(
+            catalog._inner,
+            request._inner,
+            MoqAudioProducerOptions(
+                input=input,
+                output=output._ffi(),
+                track=None,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+            ),
+        )
+        return producer
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this audio track has subscribers."""

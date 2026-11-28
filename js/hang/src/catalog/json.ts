@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
-import { ModeSchema } from "./mode";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { renditions } from "./section";
+import { u53Schema } from "./integers.ts";
+import { ModeSchema } from "./mode.ts";
+import { RelativeBroadcastSchema } from "./path.ts";
+import { renditions } from "./section.ts";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.
@@ -18,11 +18,6 @@ export const JsonConfigSchema = z.looseObject({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The instance of the stream the reference names, when known. Absent accepts whichever stream
-	// resolves first. A route of another instance fails the entry; a route over a wire that
-	// carries no instance has one its session minted, which proves nothing, so there it is best
-	// effort. Without `broadcast`, it names the catalog's own stream.
-	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -37,8 +32,8 @@ export const JsonConfigSchema = z.looseObject({
 	// The maximum bitrate of the track in bits per second, if known.
 	bitrate: z.optional(u53Schema),
 
-	// The maximum delay between a payload being ready and the publisher flushing it, in whole
-	// milliseconds rounded up, with the same meaning as a video rendition's `jitter`.
+	// The largest media span the publisher hands to the transport behind a payload's timestamp, in
+	// whole milliseconds rounded up, with the same meaning as a video rendition's `jitter`.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -46,9 +41,9 @@ export const JsonConfigSchema = z.looseObject({
 		),
 	),
 
-	// How far this track's payloads reach the transport behind the broadcast's earliest rendition,
-	// with the same meaning and encoding as a video rendition's `delay`. Only measured for payloads
-	// that carry a capture time.
+	// How far this track's payloads persistently trail what the broadcast's other tracks already
+	// wrote, with the same meaning and encoding as a video rendition's `delay`. Only measured for
+	// payloads that carry a capture time.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,

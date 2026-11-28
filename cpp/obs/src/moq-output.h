@@ -26,7 +26,7 @@ public:
 	void Stop(bool signal = true);
 	void Data(struct encoder_packet *packet);
 
-	inline size_t GetTotalBytes() { return total_bytes_sent; }
+	inline uint64_t GetTotalBytes() { return total_bytes_sent.load(std::memory_order_relaxed); }
 
 	inline int GetConnectTime() { return connect_time_ms; }
 
@@ -59,8 +59,8 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
-	// The route's instance for this Start(), kept through session reconnects; empty when stopped.
-	std::string GetInstance();
+	// The route's identity for this Start(), kept through session reconnects; empty when stopped.
+	std::string GetIdentity();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
@@ -130,6 +130,11 @@ private:
 		// weak ref so Reset() can hand the configured bitrate back.
 		std::shared_ptr<moq::RateControl> rate;
 		OBSWeakEncoder encoder;
+		// The encoder setting that holds its peak, which following the grant retunes.
+		const char *rate_key = "bitrate";
+		// The average NVENC's plain VBR holds beside its peak, or 0: following lowers it
+		// with the peak and Reset() restores it.
+		long long average_kbps = 0;
 		// The bitrate the encoder was last told, which Reset() restores when it moved.
 		uint64_t applied_bps = 0;
 		// Whether the last target enabled this rendition.
@@ -139,6 +144,8 @@ private:
 		// Whether a frame was written. Until one is, the importer still holds the
 		// init's parameter sets, which a discontinuity would discard.
 		bool started = false;
+		// Audio only: where the open group starts, in microseconds, while one is open.
+		std::optional<int64_t> group_start_us;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);
@@ -192,7 +199,7 @@ private:
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	Link link = Link::kPending;
 	std::string url;
-	std::string instance;
+	std::string identity;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 	std::string token_refusal;
@@ -219,7 +226,9 @@ private:
 
 	std::string path;
 
-	size_t total_bytes_sent;
+	// Bytes handed to MoQ since the last Start. Written by the encoder thread,
+	// read by OBS's stats.
+	std::atomic<uint64_t> total_bytes_sent;
 };
 
 void register_moq_output();

@@ -42,74 +42,74 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START names its origin node, seqno, metric, flags, and hops",
+		"name": "a ROUTE carries a path of hops, each a Node ID, its Marked, and a session, then flags, priority, and cost",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "06089234030501020709",
+		"hex": "070a02070000090003018005",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START's 0x2 flag carries an RTT in milliseconds",
+		"name": "a ROUTE's 0x2 flag marks a path through a draining node",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060792340305031900",
+		"hex": "070701090000027f03",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START's RTT flag without its RTT is refused",
+		"name": "a ROUTE flag no version defines is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "06059234030502",
+		"hex": "070701090000088003",
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START flag no version defines is withdrawn",
+		"name": "a ROUTE with more than 32 hops is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "06059234030504",
-		"expect": "withdrawn"
-	},
-	{
-		"name": "a ROUTE_START with more than 32 hops is withdrawn",
-		"version": "moq-lite-07-wip",
-		"message": "announce",
-		"hex": "0606923403050121",
-		"expect": "withdrawn"
-	},
-	{
-		"name": "a ROUTE_START missing a hop it counts is refused",
-		"version": "moq-lite-07-wip",
-		"message": "announce",
-		"hex": "060792340305010207",
+		"hex": "074067210100000200000300000400000500000600000700000800000900000a00000b00000c00000d00000e00000f00001000001100001200001300001400001500001600001700001800001900001a00001b00001c00001d00001e00001f0000200000210000008001",
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START naming Node ID 0 is withdrawn",
+		"name": "a ROUTE with no hops is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "06050003050100",
-		"expect": "withdrawn"
+		"hex": "070400008001",
+		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START advertising the last seqno is withdrawn",
+		"name": "a ROUTE missing a hop it counts is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060d01ffffffffffffffffff000000",
-		"expect": "withdrawn"
+		"hex": "070703070000008003",
+		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_UPDATE references its Route ID",
+		"name": "a ROUTE hop naming Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07050103050100",
+		"hex": "070701000000008001",
+		"expect": "refused"
+	},
+	{
+		"name": "a ROUTE's first hop may name a marked Node ID, the node's own identity with its Marked set",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "070a02070100070000017f00",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_HOLD references its Route ID",
+		"name": "a ROUTE naming a marked Node ID past its first hop is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0b0101",
-		"expect": "decoded"
+		"hex": "070a02070000090103008005",
+		"expect": "refused"
+	},
+	{
+		"name": "a Node ID whose Marked is neither 0 nor 1 is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "070701090200008003",
+		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE_END references its Route ID",
@@ -119,46 +119,158 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "an ANNOUNCE_FLOOR carries its Revision plus one",
+		"name": "a DEAD names the hop whose session closed and the node at its far end",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "09020105",
+		"hex": "09050700020900",
 		"expect": "decoded"
 	},
 	{
-		"name": "an ANNOUNCE_FLOOR of 0 certifies nothing",
+		"name": "a DEAD naming Far Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "09020100",
+		"hex": "09050700020000",
+		"expect": "refused"
+	},
+	{
+		"name": "a DEAD naming a marked Node ID, which holds no session, is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "09050700020901",
+		"expect": "refused"
+	},
+	{
+		"name": "a DRAIN names the node that sent GOAWAY",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0a020700",
 		"expect": "decoded"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START names its Route ID in place of a hop chain",
+		"name": "a DRAIN naming Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "000a00000178020161000100",
+		"hex": "0a020000",
+		"expect": "refused"
+	},
+	{
+		"name": "a DRAIN naming a marked Node ID is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0a020701",
+		"expect": "refused"
+	},
+	{
+		"name": "an ANNOUNCE_REQUEST continues its edit, removes Prefix IDs, and adds prefixes, each with its Hidden",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "050d010200070204726f6f6d010000",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_UPDATE flag no version defines is withdrawn",
+		"name": "an ANNOUNCE_REQUEST ending its edit may be empty",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0705010305802a",
-		"expect": "withdrawn"
+		"hex": "0503000000",
+		"expect": "decoded"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START with an invalid path is withdrawn",
+		"name": "an ANNOUNCE_REQUEST whose More is neither 0 nor 1 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "000c0000032f2f78020161000100",
-		"expect": "withdrawn"
+		"hex": "0503020000",
+		"expect": "refused"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START with an invalid instance is withdrawn",
+		"name": "an ANNOUNCE_REQUEST whose Hidden is neither 0 nor 1 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0009000001780200000100",
-		"expect": "withdrawn"
+		"hex": "05050000010002",
+		"expect": "refused"
+	},
+	{
+		"name": "an ANNOUNCE_OK is empty",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0600",
+		"expect": "decoded"
+	},
+	{
+		"name": "a SYNCED names its Prefix ID",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "040103",
+		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_FLOOR names its Route ID and the Revision its batch is complete as of",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "03020105",
+		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START names its identity, epoch, cost, how far above it was claimed, flags, priority, and the relays it crossed",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000f000001780161000103000080020709",
+		"expect": "decoded"
+	},
+	{
+		"name": "a claim's 0x1 flag says no route reaches it, and its 0x2 flag that a node on the way is draining",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000d00000178016100010300038000",
+		"expect": "decoded"
+	},
+	{
+		"name": "a claim's 0x4 flag says a marked session lies on the way to it",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000d00000178016100010300078000",
+		"expect": "decoded"
+	},
+	{
+		"name": "a claim flag no version defines is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000d00000178016100010300088000",
+		"expect": "refused"
+	},
+	{
+		"name": "a claim whose chain names Node ID 0 is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000e0000017801610001030000800100",
+		"expect": "refused"
+	},
+	{
+		"name": "a claim whose chain names a relay twice decodes: a routing node only declines to take it",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000f000001780161000103000080020707",
+		"expect": "decoded"
+	},
+	{
+		"name": "a claim whose chain names more than 32 relays is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "002e00000178016100010300008021070707070707070707070707070707070707070707070707070707070707070707",
+		"expect": "refused"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START with an invalid path is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000f0000032f2f78016100010300008000",
+		"expect": "refused"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START with an invalid identity is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000c000001780000010300008000",
+		"expect": "refused"
 	},
 	{
 		"name": "a lite-07 ANNOUNCE_START cut short is refused",
@@ -168,31 +280,31 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_REQUEST names an origin node and seqno",
+		"name": "a lite-07 ANNOUNCE_UPDATE references its announce id and carries the claim as it now stands",
 		"version": "moq-lite-07-wip",
-		"message": "announce_reply",
-		"hex": "0a020702",
+		"message": "announce",
+		"hex": "020701020500018000",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_REQUEST naming Node ID 0 is refused",
+		"name": "a lite-07 ANNOUNCE_END says its publisher withdrew the claim",
 		"version": "moq-lite-07-wip",
-		"message": "announce_reply",
-		"hex": "0a020002",
-		"expect": "refused"
-	},
-	{
-		"name": "a ROUTE_END echo names the Route ID it retired",
-		"version": "moq-lite-07-wip",
-		"message": "announce_reply",
-		"hex": "080103",
+		"message": "announce",
+		"hex": "01020100",
 		"expect": "decoded"
 	},
 	{
-		"name": "an announce reply other than ROUTE_REQUEST or ROUTE_END is refused",
+		"name": "a lite-07 ANNOUNCE_END with Lost says only the sender's way to the claim is gone",
 		"version": "moq-lite-07-wip",
-		"message": "announce_reply",
-		"hex": "0000",
+		"message": "announce",
+		"hex": "01020101",
+		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_END whose Lost is neither 0 nor 1 is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "01020102",
 		"expect": "refused"
 	},
 	{
@@ -233,6 +345,13 @@
 		"expect": "decoded"
 	},
 	{
+		"name": "a lite-07 group starting partway through, at a Frame Start",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "03010704",
+		"expect": "decoded"
+	},
+	{
 		"name": "a server pinned to a version the client offered selects it",
 		"version": "moq-lite-02",
 		"message": "client_setup",
@@ -246,6 +365,20 @@
 		"message": "client_setup",
 		"server": "moq-lite-05",
 		"hex": "20001202c0000000ff0dad07c0000000ff0dad0600",
+		"expect": "refused"
+	},
+	{
+		"name": "a metadata SUBSCRIBE ends with a Meta of 1 after its ranges",
+		"version": "moq-lite-07-wip",
+		"message": "subscribe",
+		"hex": "190104726f6f6d00000005766964656f830001020700020a0001",
+		"expect": "decoded"
+	},
+	{
+		"name": "a SUBSCRIBE whose Meta is neither 0 nor 1 is malformed",
+		"version": "moq-lite-07-wip",
+		"message": "subscribe",
+		"hex": "190104726f6f6d00000005766964656f830001020700020a0002",
 		"expect": "refused"
 	}
 ]

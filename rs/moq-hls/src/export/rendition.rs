@@ -33,7 +33,7 @@ const MIN_SEGMENT_GROUPS: u64 = 1024;
 
 /// The most groups one segment request ever fetches, whatever interval the catalog declares: see
 /// [`Rendition::max_groups`]. 20 ms audio groups fill it in about 22 minutes.
-const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
+pub(crate) const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
 
 /// DASH timelines are in milliseconds.
 const TIMESCALE: u32 = 1000;
@@ -107,7 +107,9 @@ struct Run {
 	epoch: u64,
 }
 
-/// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+/// The rendition's normalized catalog config: what its [tag](segments::tag) hashes and every
+/// [`Muxer`] it builds reads, so a segment URL names the same bytes on every edge, whenever the
+/// edge built the rendition. The publisher's live estimates never reach the bytes.
 #[allow(
 	clippy::large_enum_variant,
 	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
@@ -139,7 +141,7 @@ impl Handle {
 		if self.track.is_none()
 			&& let Ok(track) = broadcast.track(name)
 		{
-			// The lookup is lazy: the query installs the instance, and reads pin to it through
+			// The lookup is lazy: the query installs the identity, and reads pin to it through
 			// the query, since End may refuse any lookup made after this one.
 			self.track = Some(track.info().into_inner());
 		}
@@ -155,7 +157,7 @@ impl Media {
 	) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
-			binding: Arc::new(source.bind(rel, reference.instance())?),
+			binding: Arc::new(source.bind(rel)?),
 			track: None,
 		};
 		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
@@ -190,7 +192,7 @@ impl Media {
 				handle.capture(&broadcast, &self.track);
 			}
 			if self.sibling && broadcast.poll_closed(waiter).is_ready() {
-				// End and Restart both drain only the pinned instance. Looking its path up again
+				// End and Restart both drain only the pinned identity. Looking its path up again
 				// could serve a replacement under the old track's rows.
 				window.end();
 			}
@@ -220,7 +222,7 @@ impl Media {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>>> {
 		let track = ready!(self.poll_track(binding, waiter));
-		// The bind can be refused while this read waits. Preserve that exact instance's
+		// The bind can be refused while this read waits. Preserve that exact identity's
 		// authorization error; other failed or disconnected references stay missing.
 		if track.is_none()
 			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
@@ -291,12 +293,24 @@ fn target_duration(length: Duration) -> u64 {
 	(twice.as_secs() + u64::from(twice.subsec_nanos() > 0)).max(1)
 }
 
-/// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` and muxed under
-/// the normalized `config`, hashing its catalog JSON, which every edge encodes alike.
+/// Refuse a container whose groups have no defined place on the segment grid.
+///
+/// A CTS group could land by its successor's decode time or by a decoded frame's presentation
+/// time, so where it went would depend on which arrived first.
+fn gridded(container: &hang::catalog::Container) -> moq_mux::Result<()> {
+	match container {
+		hang::catalog::Container::Cts => Err(moq_mux::Error::UnsupportedContainer("cts".to_string())),
+		_ => Ok(()),
+	}
+}
+
+/// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` by the grid's
+/// [rules](grid::RULES) and muxed under the normalized `config`, hashing its catalog JSON, which
+/// every edge encodes alike.
 fn tag<T: serde::Serialize>(track: &str, interval: Duration, config: &T) -> Arc<str> {
 	// It was parsed from catalog JSON, so it encodes back.
 	let config = serde_json::to_vec(config).expect("a catalog config encodes as JSON");
-	let track = format!("{track}@{}", interval.as_nanos());
+	let track = format!("{track}@{}#{}", interval.as_nanos(), grid::RULES);
 	Arc::from(segments::tag(&track, &config))
 }
 
@@ -307,32 +321,32 @@ pub(crate) struct Handoff {
 	next: u64,
 	/// Its `EXT-X-TARGETDURATION`, which a replacement serving the same playlist URI keeps.
 	target_duration: u64,
-	/// The retired instance, while it lists or still waits to list a segment: the replacement
+	/// The retired identity, while it lists or still waits to list a segment: the replacement
 	/// keeps listing those (see [`Rendition::after`]).
 	previous: Option<Arc<Rendition>>,
 }
 
 /// Which segments a rendition lists, shared by its media watcher and [`Rendition::retire`] so a
-/// replacement starts exactly where a retired instance stops.
+/// replacement starts exactly where a retired identity stops.
 #[derive(Default)]
 struct Claim {
 	/// Segments numbered below this are a predecessor's (see [`Rendition::after`]).
 	start: u64,
-	/// The first segment this instance will not list: the one after its open segment, else the
-	/// one after the newest it listed. Final once a retired instance's window closes.
+	/// The first segment this identity will not list: the one after its open segment, else the
+	/// one after the newest it listed. Final once a retired identity's window closes.
 	next: u64,
 	/// Set by [`Rendition::retire`]: only the groups it had already read are listed.
 	retired: bool,
 	/// A segment waits on a later one to start before it is listed.
 	pending: bool,
-	/// The newest group this instance read from its track.
+	/// The newest group this identity read from its track.
 	seen: Option<u64>,
 	/// Set by [`Rendition::retire`] to [`seen`](Self::seen), or to the group before a
-	/// [`handover`](Rendition::handover): the groups this instance still lists are those up to it,
+	/// [`handover`](Rendition::handover): the groups this identity still lists are those up to it,
 	/// and a replacement on the same track lists only groups past it.
 	boundary: Option<u64>,
-	/// Retired, where the replacement's media starts: the first group past the boundary.
-	theirs_at: Option<moq_net::Timestamp>,
+	/// Retired, where the replacement starts: the first group past the boundary.
+	theirs_at: Option<At>,
 	/// The oldest group no completed segment holds, and the open segment if one is: what a retire
 	/// can still hand over.
 	unplaced: Option<(u64, Option<u64>)>,
@@ -347,8 +361,16 @@ struct Claim {
 #[derive(Clone, Copy)]
 struct Resize {
 	group: u64,
-	pts: moq_net::Timestamp,
+	at: At,
 	size: (u32, u32),
+}
+
+/// Where a group goes on the grid, and where its first frame's media starts: they differ when its
+/// start is below its keyframe.
+#[derive(Clone, Copy, Debug)]
+struct At {
+	place: moq_net::Timestamp,
+	media: moq_net::Timestamp,
 }
 
 /// A single HLS rendition: master-playlist metadata, its window over its media track's groups
@@ -379,7 +401,7 @@ pub struct Rendition {
 	config: Config,
 	/// The container its media track carries, to decode a group's first frame.
 	container: Arc<moq_mux::catalog::hang::Container>,
-	/// The catalog's `media.join.interval`, which fixes [`segment`](Self::segment).
+	/// The catalog's `sync.interval`, which fixes [`segment`](Self::segment).
 	interval: Duration,
 	/// The segment length the grid numbers this rendition's segments on (see
 	/// [`grid::segment_length`]).
@@ -393,7 +415,7 @@ pub struct Rendition {
 	target_duration: u64,
 	/// Segments listed past the target duration, counted to rate-limit their warning.
 	overruns: AtomicU64,
-	/// The catalog's `media.clock`: the wall anchor segment times map through. Absent when the
+	/// The catalog's `sync.clock`: the wall anchor segment times map through. Absent when the
 	/// publisher exposes none.
 	clock: Option<Clock>,
 	/// This rendition's window over its segments.
@@ -402,10 +424,10 @@ pub struct Rendition {
 	fanout: renditions::Fanout,
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
 	watcher: Mutex<Watcher>,
-	/// Which segments this instance lists. A channel so the media watcher wakes once a
+	/// Which segments this identity lists. A channel so the media watcher wakes once a
 	/// [`retire`](Self::retire) leaves no segment pending.
 	claim: kio::Producer<Claim>,
-	/// The retired instance this one replaced under the same playlist URI, whose segments its playlist
+	/// The retired identity this one replaced under the same playlist URI, whose segments its playlist
 	/// still lists ahead of its own until the window slides past them (see [`after`](Self::after)).
 	/// Released once none is listed, or by a restart.
 	previous: Mutex<Option<Arc<Rendition>>>,
@@ -573,12 +595,12 @@ impl Rendition {
 	}
 
 	/// Whether this rendition follows `previous` onto the same media track: the same track name in
-	/// the same broadcast and instance, whose group sequences continue across the two.
+	/// the same broadcast, whose group sequences continue across the two.
 	fn continues(&self, previous: &Rendition) -> bool {
 		use hang::catalog::Reference;
 		let source = |rendition: &Rendition| match &rendition.config {
-			Config::Video(config) => (config.broadcast().cloned(), config.instance().cloned()),
-			Config::Audio(config) => (config.broadcast().cloned(), config.instance().cloned()),
+			Config::Video(config) => config.broadcast().cloned(),
+			Config::Audio(config) => config.broadcast().cloned(),
 		};
 		self.track() == previous.track() && source(self) == source(previous)
 	}
@@ -588,7 +610,7 @@ impl Rendition {
 		&self.media.track
 	}
 
-	/// The catalog's `media.join.interval`, which fixes the [segment length](Self::segment_length).
+	/// The catalog's `sync.interval`, which fixes the [segment length](Self::segment_length).
 	pub(super) fn interval(&self) -> Duration {
 		self.interval
 	}
@@ -634,7 +656,7 @@ impl Rendition {
 		self.enabled.load(Ordering::Relaxed)
 	}
 
-	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
+	/// The latest catalog bitrate, preserving `None` for the per-kind default.
 	fn bitrate(&self) -> Option<u64> {
 		*self.bitrate.read().expect("bitrate lock poisoned")
 	}
@@ -645,11 +667,11 @@ impl Rendition {
 	}
 
 	/// Build a video rendition numbering its media track's groups on a grid of `interval`, timed
-	/// by the catalog's `media.clock`.
+	/// by the catalog's `sync.clock`.
 	///
 	/// Fails when the config's `broadcast` reference escapes above the origin root, so it names no
-	/// broadcast, or its container is unknown or malformed, so its media can't be read: either way
-	/// there would be no media to serve.
+	/// broadcast, or its container is unknown, malformed, or has no grid placement (CTS), so its
+	/// media can't be served.
 	pub(crate) fn video(
 		name: String,
 		config: &VideoConfig,
@@ -659,10 +681,12 @@ impl Rendition {
 		fanout: renditions::Fanout,
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
+		gridded(&config.container)?;
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_video(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_video(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Video,
@@ -672,7 +696,7 @@ impl Rendition {
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
-			config: Config::Video(config.clone()),
+			config: Config::Video(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -701,10 +725,12 @@ impl Rendition {
 		fanout: renditions::Fanout,
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
+		gridded(&config.container)?;
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_audio(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_audio(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Audio,
@@ -714,7 +740,7 @@ impl Rendition {
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
-			config: Config::Audio(config.clone()),
+			config: Config::Audio(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -763,7 +789,7 @@ impl Rendition {
 	///
 	/// The playlist URI keeps listing the predecessor's segments, under the
 	/// init they were muxed for, until the window slides past them: a server never removes a
-	/// segment from the middle or end of a live playlist (RFC 8216 6.2.2). This instance lists its
+	/// segment from the middle or end of a live playlist (RFC 8216 6.2.2). This identity lists its
 	/// own behind a discontinuity, once the predecessor has listed all it will, so the two never
 	/// interleave.
 	pub(crate) fn after(mut self, handoff: Option<&Handoff>) -> Self {
@@ -799,8 +825,8 @@ impl Rendition {
 			claim.boundary = claim.seen;
 			if let Some(resized) = self.handover(&claim, successor) {
 				claim.boundary = resized.group.checked_sub(1);
-				claim.theirs_at = Some(resized.pts);
-				// No group of the open segment is this instance's, so it lists nothing more.
+				claim.theirs_at = Some(resized.at);
+				// No group of the open segment is this identity's, so it lists nothing more.
 				if let Some((first, open)) = claim.unplaced
 					&& first == resized.group
 				{
@@ -811,7 +837,7 @@ impl Rendition {
 			(claim.next, claim.pending)
 		};
 		// Once retired, one that neither lists nor waits to list a segment never will, so the
-		// replacement keeps only what this one was keeping: churn can't stack empty instances.
+		// replacement keeps only what this one was keeping: churn can't stack empty identities.
 		let lists = pending || !self.live.window().segments.is_empty();
 		Handoff {
 			next,
@@ -823,7 +849,7 @@ impl Rendition {
 		}
 	}
 
-	/// The group `successor`'s first on this track, when this instance read it but has not listed it:
+	/// The group `successor`'s first on this track, when this identity read it but has not listed it:
 	/// the newest in-band resize, to the picture size `successor` declares in place of this config's.
 	///
 	/// A track keeps its decoder identity, so the picture size is the only decoder change it carries,
@@ -833,9 +859,7 @@ impl Rendition {
 			return None;
 		};
 		let size = |config: &VideoConfig| config.coded_width.zip(config.coded_height);
-		let same_track = successor.track(&self.name) == self.track()
-			&& successor.broadcast() == current.broadcast()
-			&& successor.instance() == current.instance();
+		let same_track = successor.track(&self.name) == self.track() && successor.broadcast() == current.broadcast();
 		let resized = claim.resized?;
 		let (unplaced, _) = claim.unplaced?;
 		let resizes = size(successor).is_some_and(|size| size == resized.size) && size(successor) != size(current);
@@ -852,7 +876,7 @@ impl Rendition {
 		self.previous.lock().expect("previous lock poisoned").clone()
 	}
 
-	/// The retired instances whose segments this one's playlist still lists, oldest first.
+	/// The retired identities whose segments this one's playlist still lists, oldest first.
 	fn lineage(&self) -> Vec<Arc<Rendition>> {
 		let mut lineage = Vec::new();
 		let mut next = self.previous();
@@ -864,10 +888,10 @@ impl Rendition {
 		lineage
 	}
 
-	/// The predecessors' rows listed ahead of `own`, oldest first, each with its instance.
+	/// The predecessors' rows listed ahead of `own`, oldest first, each with its identity.
 	///
-	/// They are trimmed as one window with `own`, as if one instance had listed them all. Rows
-	/// before a jump in the numbering are dropped, as a skip clears one instance's window. A
+	/// They are trimmed as one window with `own`, as if one identity had listed them all. Rows
+	/// before a jump in the numbering are dropped, as a skip clears one identity's window. A
 	/// predecessor none of whose rows is left is released, along with every older one, once none
 	/// of them can list another.
 	fn inherited(&self, own: &[segments::Row]) -> Vec<(Arc<Rendition>, segments::Row)> {
@@ -897,7 +921,12 @@ impl Rendition {
 		let window = self.fanout.window();
 		while trimmed < inherited {
 			let rest = match rows.get(1) {
-				Some((_, second)) => rows.back().expect("two rows").1.end.saturating_sub(second.pts.into()),
+				Some((_, second)) => rows
+					.back()
+					.expect("two rows")
+					.1
+					.end
+					.saturating_sub(super::span(second.pts)),
 				None => Duration::ZERO,
 			};
 			if !segments::evicts(window, rows.len(), rest) {
@@ -911,7 +940,7 @@ impl Rendition {
 			.take(inherited - trimmed)
 			.map(|(rendition, row)| (rendition.expect("an inherited row"), row))
 			.collect();
-		// Nothing lists anything older than the oldest instance left, whose rows followed every
+		// Nothing lists anything older than the oldest identity left, whose rows followed every
 		// older one's last.
 		match rows.first() {
 			Some((oldest, _)) => *oldest.previous.lock().expect("previous lock poisoned") = None,
@@ -1084,7 +1113,7 @@ impl Rendition {
 
 	/// Ready once the DASH [representation](Self::representation) lists a segment or this
 	/// rendition fails, as [`poll_playable`](Self::poll_playable) does for the media playlist:
-	/// this instance lists a segment of its own (or its media track ended), its media is denied,
+	/// this identity lists a segment of its own (or its media track ended), its media is denied,
 	/// or its window failed. A predecessor's segments don't count: the DASH manifest lists none of
 	/// them.
 	#[cfg_attr(test, kio::wrapper)]
@@ -1135,7 +1164,7 @@ impl Rendition {
 		if snapshot.segments.iter().any(|s| s.map.as_deref() == Some("")) {
 			return Ok(None);
 		}
-		// Nothing maps this instance's init until it lists a segment of its own, and an inline
+		// Nothing maps this identity's init until it lists a segment of its own, and an inline
 		// codec builds it only from that segment.
 		let mapped = snapshot.segments.is_empty() || snapshot.segments.iter().any(|s| s.map.is_none());
 		let init = match mapped {
@@ -1214,7 +1243,7 @@ impl Rendition {
 		self.fanout.failure().is_none() && self.check().is_err()
 	}
 
-	/// Whether a track query pins this rendition's media instance.
+	/// Whether a track query pins this rendition's media identity.
 	#[cfg(all(test, feature = "server"))]
 	pub(crate) fn pinned(&self) -> bool {
 		self.media.handle.lock().expect("media lock poisoned").track.is_some()
@@ -1250,7 +1279,7 @@ impl Rendition {
 
 	/// The snapshot listing `inherited` (see [`inherited`](Self::inherited)), then `window`.
 	///
-	/// An inherited segment maps its instance's init, or `""` while that is not built, which
+	/// An inherited segment maps its identity's init, or `""` while that is not built, which
 	/// [`media_playlist`](Self::media_playlist) refuses to render.
 	fn snapshot_from_window(
 		&self,
@@ -1282,7 +1311,7 @@ impl Rendition {
 					duration: s.duration,
 					gap: s.stop,
 					discontinuity,
-					program_date_time: self.wall_clock(s.pts),
+					program_date_time: self.wall_clock(s.media),
 				}
 			})
 			.collect();
@@ -1334,9 +1363,11 @@ impl Rendition {
 			.iter()
 			.filter(|row| !row.stop)
 			.map(|row| {
-				let t = row.pts.as_millis() as u64;
-				let d = row.end.saturating_sub(row.pts.into()).as_millis() as u64;
-				(t, d)
+				// Timed by its media, as its `tfdt` is, from its first sample to where its content
+				// ends: each end in whole milliseconds, so a contiguous next segment's `t` meets it.
+				let t = super::span(row.media).as_millis() as u64;
+				let end = row.content.unwrap_or(row.end).as_millis() as u64;
+				(t, end.saturating_sub(t))
 			})
 			// A zero-duration segment cannot be requested by DASH timing.
 			.filter(|(_, d)| *d > 0)
@@ -1385,23 +1416,16 @@ impl Rendition {
 		clock.wall_clock(pts).ok()
 	}
 
-	/// A muxer at the timescale this rendition's config chose, with the latest bitrate.
+	/// A muxer for this rendition's normalized config.
 	///
-	/// Each segment times its last sample from its own row, so no catalog estimate changes
-	/// the media bytes.
+	/// No catalog estimate reaches it: an estimated framerate would pick the timescale and an
+	/// estimated bitrate the AAC descriptor, so edges that built the rendition before and after
+	/// an estimate would serve different bytes under one URL. Each segment times its last sample
+	/// from its own row instead.
 	pub(crate) fn muxer(&self) -> Result<Muxer> {
-		let bitrate = self.bitrate();
 		Ok(match &self.config {
-			Config::Video(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::video(&config)?
-			}
-			Config::Audio(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::audio(&config)?
-			}
+			Config::Video(config) => Muxer::video(config)?,
+			Config::Audio(config) => Muxer::audio(config)?,
 		})
 	}
 
@@ -1412,8 +1436,12 @@ impl Rendition {
 		waiter: &kio::Waiter,
 	) -> Poll<Option<moq_net::track::Subscribing>> {
 		let track = std::task::ready!(self.media.poll_track(binding, waiter));
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(FEED_MAX_DELAY),
+				max: Some(FEED_MAX_DELAY),
+			},
+		)]);
 		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 
@@ -1428,9 +1456,9 @@ impl Rendition {
 	/// read.
 	pub async fn init(&self, hash: &str) -> Result<Option<Bytes>> {
 		// A predecessor's segments still listed map its init, which was built before any playlist
-		// listed them (see `media_playlist`), so it is served without building this instance's.
-		// Only the instance supplying the bytes is authorized: a denied one leaves them to this
-		// instance, which may have the same config.
+		// listed them (see `media_playlist`), so it is served without building this identity's.
+		// Only the identity supplying the bytes is authorized: a denied one leaves them to this
+		// identity, which may have the same config.
 		for rendition in self.lineage() {
 			if let Some(init) = rendition.built_init(&rendition.run()).filter(|init| init.hash == hash)
 				&& rendition.authorize().is_ok()
@@ -1526,7 +1554,7 @@ impl Rendition {
 	/// Fetches every group the segment holds on this rendition (an audio segment packs many
 	/// short groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
 	/// the playlist window, is a gap, or its groups already
-	/// left the relay cache. After End or Restart, only the bound instance's retained media
+	/// left the relay cache. After End or Restart, only the bound identity's retained media
 	/// drains; a replacement's media is never read under these rows. A denied referenced
 	/// broadcast returns its authorization error even when the requested row is absent.
 	///
@@ -1534,12 +1562,12 @@ impl Rendition {
 	/// [generation](super::Broadcaster::set_generation), since a restart reuses segment numbers
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
-		// A predecessor's segments still listed are muxed under its config. A config that returns
-		// gets its tag back, but the instances' segment numbers never overlap.
+		// A predecessor's segments still listed, its cut among them, are muxed under its config. A
+		// config that returns gets its tag back, but the identities' segment numbers never overlap.
 		let owner = self
 			.lineage()
 			.into_iter()
-			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at));
+			.find(|rendition| rendition.live.holds(&id.tag, id.at));
 		let owner = owner.as_deref().unwrap_or(self);
 		let Some(mut fetch) = owner.fetch_own(id)? else {
 			return Ok(None);
@@ -1549,7 +1577,7 @@ impl Rendition {
 		Ok(segment.filter(|_| owner.generation().as_deref() == id.generation.as_deref()))
 	}
 
-	/// The fetch of the segment `id` names among this instance's own rows; see
+	/// The fetch of the segment `id` names among this identity's own rows; see
 	/// [`segment`](Self::segment).
 	fn fetch_own(&self, id: &segments::Id) -> Result<Option<Fetch>> {
 		self.authorize()?;
@@ -1597,16 +1625,20 @@ enum Fetching {
 		_binding: Arc<moq_mux::Binding>,
 		epoch: u64,
 		broadcast: moq_net::broadcast::Consumer,
-		track: moq_net::track::Consumer,
+		_track: moq_net::track::Consumer,
 		muxer: Muxer,
 		/// Every group's frames, accumulated into ONE fragment, so duration inference sees each
 		/// frame's true successor. A per-group fragment would mis-time the trailing sample of
 		/// every group (its real successor lives in the next group), audible on audio segments
 		/// that span many groups.
 		frames: Vec<moq_mux::container::Frame>,
-		/// The group being read, and the ones after it.
-		groups: std::ops::Range<u64>,
+		/// One subscription to the row's span, its groups delivered oldest first.
+		span: Span,
+		/// The groups still to read, by start.
+		groups: std::iter::Peekable<std::vec::IntoIter<u64>>,
 		group: Option<GroupRead>,
+		/// Where the newest group read ends, as its GROUP_END says.
+		declared: Option<moq_net::Timestamp>,
 	},
 	Done,
 }
@@ -1663,7 +1695,11 @@ impl Fetch {
 		}
 		let row = &self.row;
 		let Fetching::Groups {
-			epoch, muxer, frames, ..
+			epoch,
+			muxer,
+			frames,
+			declared,
+			..
 		} = &mut self.state
 		else {
 			unreachable!("read every group above");
@@ -1671,11 +1707,14 @@ impl Fetch {
 		if frames.is_empty() {
 			return Poll::Ready(Ok(None));
 		}
-		// The last presented sample has no successor to time it, so the fragment ends where the
-		// next group starts, unless its codec or a duration marker times it.
-		let end = row
+		// The last presented sample has no successor to time it, so the fragment ends where its
+		// last group's GROUP_END says, else where the next group starts, unless its codec or a
+		// duration marker times it. Read from the group itself, the end is the same on every edge
+		// whether it arrived before or after the next group.
+		let content = row
 			.content
 			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
+		let end = declared.or(content);
 		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
 		// Inline codec metadata was already decoded from these completed groups.
 		// Reuse it instead of fetching a newer, possibly unfinished group.
@@ -1703,7 +1742,7 @@ impl Fetch {
 					// publisher grouping far finer than its interval), 404 rather than silently
 					// truncating it to a segment shorter than its advertised duration. The live window
 					// lists such a segment as a gap instead, so only a row from elsewhere reaches this.
-					if row.groups.end.saturating_sub(row.groups.start) > rendition.max_groups() {
+					if row.groups.len() as u64 > rendition.max_groups() {
 						tracing::warn!(
 							groups = ?row.groups,
 							"segment spans more groups than one request fetches; refusing to truncate"
@@ -1717,32 +1756,63 @@ impl Fetch {
 					else {
 						return Poll::Ready(Ok(false));
 					};
+					// One request for the whole row, rather than a round trip per group.
+					let (Some(first), Some(last)) = (row.groups.first(), row.groups.last()) else {
+						return Poll::Ready(Ok(false));
+					};
+					let range = moq_net::track::Range {
+						start: moq_net::track::Start::Time(first),
+						end: Some(last),
+					};
+					let subscription = moq_net::track::Subscription::default()
+						.with_ranges([range])
+						.with_order(moq_net::track::Order::Ascending);
+					let span = Span::Subscribing(track.subscribe(subscription).into_inner());
 					self.state = Fetching::Groups {
 						_binding: binding.clone(),
 						epoch: *epoch,
 						broadcast,
-						track,
+						_track: track,
 						muxer: rendition.muxer()?,
 						frames: Vec::new(),
-						groups: row.groups.clone(),
+						span,
+						groups: row.groups.starts().peekable(),
 						group: None,
+						declared: None,
 					};
 				}
 				Fetching::Groups {
 					broadcast,
-					track,
 					muxer,
 					frames,
+					span,
 					groups,
 					group,
+					declared,
 					..
 				} => {
 					let read = match group {
 						Some(read) => read,
-						None => match groups.next() {
-							Some(sequence) => group.insert(GroupRead::new(track, sequence)),
-							None => break,
-						},
+						None => {
+							let Some(&sequence) = groups.peek() else {
+								break;
+							};
+							match ready!(span.poll_group(waiter, sequence, broadcast))? {
+								Ok(next) => {
+									groups.next();
+									group.insert(GroupRead::read(next))
+								}
+								Err(miss) => {
+									tracing::warn!(
+										segment = row.segment,
+										group = sequence,
+										err = %miss,
+										"abandoning an advertised segment: a group is unavailable"
+									);
+									return Poll::Ready(Ok(false));
+								}
+							}
+						}
 					};
 					let sequence = read.sequence;
 					let read = match &mut self.sizing {
@@ -1751,7 +1821,7 @@ impl Fetch {
 					};
 					let miss = match read {
 						Ok(()) => {
-							*group = None;
+							*declared = group.take().and_then(|read| read.declared());
 							continue;
 						}
 						Err(miss) => miss,
@@ -1857,14 +1927,14 @@ impl Loading {
 enum Playlist {
 	Start,
 	Playable,
-	/// Building the init of each inherited instance in turn, then this instance's own.
+	/// Building the init of each inherited identity in turn, then this identity's own.
 	Inits {
 		inherited: Vec<Arc<Rendition>>,
-		/// This instance's own init is mapped only once it lists a segment (see `media_playlist`).
+		/// This identity's own init is mapped only once it lists a segment (see `media_playlist`).
 		mapped: bool,
 		load: LoadInit,
 	},
-	/// Building this instance's own init, which it mapped since the render was checked.
+	/// Building this identity's own init, which it mapped since the render was checked.
 	Again(LoadInit),
 	Done,
 }
@@ -1936,7 +2006,7 @@ impl Playlist {
 					}
 					*load = LoadInit::default();
 					if inherited.pop().is_none() {
-						// This instance's own init, which it maps.
+						// This identity's own init, which it maps.
 						return Poll::Ready(rendition.media_playlist(query));
 					}
 				}
@@ -1983,6 +2053,11 @@ impl kio::Task for InitBuild {
 
 #[cfg(test)]
 impl Rendition {
+	/// The rows this identity lists itself, oldest first.
+	pub(crate) fn rows(&self) -> Vec<segments::Row> {
+		self.live.window().segments
+	}
+
 	/// The current CMAF init segment, whatever its hash, built on first request and cached.
 	pub(crate) async fn latest_init(&self) -> Result<Option<Bytes>> {
 		let mut load = LoadInit::default();
@@ -2045,10 +2120,12 @@ fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> 
 /// Follows a rendition's media track into its window, numbering its groups on the grid, until the
 /// track ends or fails.
 ///
-/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
-/// the track ends. A watcher joining mid-segment can't know the groups before its first, so it
-/// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
-/// lists that segment whole, and the same URL must name the same bytes everywhere.
+/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, once its
+/// newest group's GROUP_END reaches the next line, or once the track ends. A later one starts with
+/// the group after it, as soon as a frame of that group passes the next line, so the newest group's
+/// frames are read as they arrive. A watcher joining mid-segment can't know the groups before its
+/// first, so it lists nothing before the first segment it knows whole (see [`grid::Slot::Media`]):
+/// another edge lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
 	rendition: Weak<Rendition>,
 	claim: kio::Consumer<Claim>,
@@ -2076,7 +2153,7 @@ enum Step {
 		_track: moq_net::track::Consumer,
 		subscribing: moq_net::track::Subscribing,
 	},
-	/// Waiting for the next group.
+	/// Waiting for the next group, reading the newest one's frames as they arrive.
 	Next,
 	/// Reading a group's first frame, which places it.
 	First(moq_net::group::Consumer),
@@ -2084,8 +2161,8 @@ enum Step {
 	End(moq_net::group::Consumer, Option<Reach>),
 }
 
-/// A group read, and its first pts unless it is a marker.
-type Read = (u64, Option<moq_net::Timestamp>);
+/// A group read, and where it starts unless it is a marker.
+type Read = (u64, Option<At>);
 
 /// What a [`WatchMedia`] numbers its groups with, and how far it got.
 struct Follow {
@@ -2096,15 +2173,27 @@ struct Follow {
 	probe: Option<Muxer>,
 	/// The next segment listed starts a new discontinuity.
 	broken: bool,
-	/// The last group a predecessor on the same track read: only later ones are this instance's.
+	/// The last group a predecessor on the same track read: only later ones are this identity's.
 	after: Option<u64>,
 	grid: grid::Grid,
-	/// The newest group, its first pts, and what its first frame reached, read again for its
+	/// The newest group, its first frame's pts, and what that frame reached, read again for its
 	/// content's end if the track ends after it, and the gap from the group before it.
 	latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)>,
+	/// The newest group again, with the timescale its GROUP_END counts in, waiting for it to end;
+	/// `None` once it did, or on a track without a timescale.
+	ending: Option<(moq_net::group::Consumer, moq_net::Timescale)>,
+	/// Where the newest group ends, once it ended declaring it.
+	end: Option<moq_net::Timestamp>,
+	/// The picture size the newest group declared in band, from the catalog's until one does, and
+	/// the newest group declaring another.
+	size: Option<(u32, u32)>,
+	resized: Option<u64>,
 	spacing: Option<Duration>,
 	/// Nothing is listed before the first segment this watcher saw start.
 	whole: bool,
+	/// Whether the newest group's frames are still read as they arrive, which may place it before
+	/// its successor starts.
+	reading: bool,
 }
 
 impl Follow {
@@ -2118,22 +2207,31 @@ impl Follow {
 			after: None,
 			grid: grid::Grid::new(rendition.segment, segments::MAX_SEGMENTS),
 			latest: None,
+			ending: None,
+			end: None,
+			size: match &rendition.config {
+				Config::Video(config) => config.coded_width.zip(config.coded_height),
+				_ => None,
+			},
+			resized: None,
 			spacing: None,
 			whole: false,
+			reading: false,
 		}
 	}
 
-	/// Place a group by its first frame and list what that places; `Some` once the watch is done.
+	/// Place a group by its start and list what that places; `Some` once the watch is done.
 	fn first(
 		&mut self,
 		rendition: &Weak<Rendition>,
 		group: moq_net::group::Consumer,
 		first: Option<moq_net::frame::Frame>,
 	) -> Option<Result<()>> {
-		// A group's place is its first frame's pts: the transport's stamp, or the container's own
-		// where the session carries none.
-		let Some(first) = first.and_then(|frame| first_frame(&self.container, frame, self.probe.as_mut())) else {
-			tracing::warn!(track = %self.track, group = group.sequence, "skipping a group without a timed first frame");
+		// A group's place is its start, or its first frame's container pts where the session
+		// carries no timeline.
+		let Some(first) = first.and_then(|frame| first_frame(&self.container, group.start, frame, self.probe.as_mut()))
+		else {
+			tracing::warn!(track = %self.track, group = group.start, "skipping a group without a timed first frame");
 			return None;
 		};
 		let (slots, read, size) = match first {
@@ -2141,18 +2239,63 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
-				(self.grid.stop(at), (group.sequence, None), None)
+				self.ending = None;
+				self.end = None;
+				self.reading = false;
+				(self.grid.stop(at), (group.start, None), None)
 			}
-			First::Media(pts, reach, declared) => {
-				let sequence = group.sequence;
+			First::Media(pts, media, reach, declared, scale) => {
+				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
-					self.spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(self.spacing);
+					self.spacing = media.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
-				self.latest = Some((group, pts, reach));
-				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
+				let mut slots = self.grid.group(sequence, pts, media);
+				// A fragment carrying the whole group may already pass the next line.
+				if let Some(newest) = reach.newest() {
+					slots.extend(self.grid.reach(newest));
+				}
+				if let Some(size) = declared
+					&& self.size != Some(size)
+				{
+					self.size = Some(size);
+					self.resized = Some(sequence);
+				}
+				self.ending = scale.map(|scale| (group.clone(), scale));
+				self.end = None;
+				self.latest = Some((group, media, reach));
+				self.reading = true;
+				(slots, (sequence, Some(At { place: pts, media })), declared)
 			}
 		};
 		self.list(rendition, slots, Some(read), size, false)
+	}
+
+	/// Wait for the newest group to end, so its GROUP_END may complete its segment before its
+	/// successor starts; the segments that completes. A group that failed or declared no end leaves
+	/// its segment to its successor. The fragment's bytes take its end from the group itself when
+	/// fetched (see [`Fetch`]), so they never depend on which arrived first.
+	///
+	/// So does a segment holding an in-band resize: the catalog update declaring it may still
+	/// follow, and a retire hands over only groups no listed segment holds (see
+	/// [`Rendition::handover`]).
+	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Vec<grid::Slot>> {
+		let Some((group, scale)) = &mut self.ending else {
+			return Poll::Ready(Vec::new());
+		};
+		let _ = ready!(group.poll_finished(waiter));
+		let end = group.end().and_then(|end| moq_net::Timestamp::new(end, *scale).ok());
+		self.ending = None;
+		self.end = end;
+		let unplaced = self.grid.unplaced();
+		let resizing = self
+			.resized
+			.zip(unplaced)
+			.is_some_and(|(resized, first)| resized >= first);
+		let slots = match (end, resizing) {
+			(Some(end), false) => self.grid.end(end),
+			_ => Vec::new(),
+		};
+		Poll::Ready(slots)
 	}
 
 	/// List what `slots` place, after reading the group `read` whose keyframe declares `size`;
@@ -2177,18 +2320,18 @@ impl Follow {
 		let Some(rendition) = rendition.upgrade() else {
 			return Some(Ok(()));
 		};
-		// Held while listing, so a retire sees exactly what this instance lists.
+		// Held while listing, so a retire sees exactly what this identity lists.
 		let mut claim = rendition.claim();
-		// Retired, a group past the last it had read is the replacement's: this instance lists
+		// Retired, a group past the last it had read is the replacement's: this identity lists
 		// the segments and gaps before the first holding one, and its own part of that one, then
 		// stops there.
 		let boundary = claim.boundary;
-		let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
+		let theirs = |last: Option<u64>| boundary.is_none_or(|boundary| last.is_some_and(|last| last > boundary));
 		if claim.retired
-			&& let Some((sequence, Some(pts))) = read
-			&& theirs(&(sequence..sequence + 1))
+			&& let Some((sequence, Some(at))) = read
+			&& theirs(Some(sequence))
 		{
-			claim.theirs_at = claim.theirs_at.or(Some(pts));
+			claim.theirs_at = claim.theirs_at.or(Some(at));
 		}
 		let theirs_at = claim.theirs_at;
 		for slot in slots {
@@ -2207,19 +2350,24 @@ impl Follow {
 					segment,
 					groups,
 					pts,
+					media,
 					start,
+					whole,
 					..
-				} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
-					// The replacement can't list this segment's number again, so this instance
-					// lists the groups it had read, ending where the replacement's media starts.
-					(Some(boundary), Some(at)) if groups.start <= boundary => {
+				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
+					// The replacement can't list this segment's number again, so this identity
+					// lists the groups it had read, ending where the replacement's group starts, with
+					// its last sample running to the replacement's first frame.
+					(Some(boundary), Some(at)) if groups.first().is_some_and(|first| first <= boundary) => {
 						let slot = grid::Slot::Media {
 							segment,
-							groups: groups.start..boundary + 1,
+							groups: groups.through(boundary),
 							pts,
+							media,
 							start,
-							end: at,
-							content: Some(at),
+							end: at.place,
+							content: Some(at.media),
+							whole,
 						};
 						(slot, true)
 					}
@@ -2228,12 +2376,14 @@ impl Follow {
 				slot => (slot, false),
 			};
 			if !*whole {
-				// The first segment listed holds only this instance's groups, and starts whole.
+				// The first segment listed holds only this identity's groups, and every group of its slot.
 				let own = match &slot {
-					grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
+					grid::Slot::Media { groups, whole, .. } => {
+						*whole && after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
+					}
 					_ => false,
 				};
-				if !own || !grid.starts(&slot) {
+				if !own {
 					if last {
 						return Some(Ok(()));
 					}
@@ -2242,27 +2392,28 @@ impl Follow {
 				*whole = true;
 			}
 			claim.next = segment + 1;
-			rendition.push(row(&rendition, slot, *broken));
+			let mut row = row(&rendition, slot, *broken);
+			if last {
+				// Where it stopped reading is this edge's own, so the cut gets a URL of its own.
+				row.tag = segments::cut(&row.tag, row.groups.last(), row.end).into();
+			}
+			rendition.push(row);
 			*broken = false;
 			if last {
 				return Some(Ok(()));
 			}
 		}
-		if claim.retired
-			&& grid
-				.open_groups()
-				.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
-		{
+		if claim.retired && grid.open_groups().is_some_and(|groups| theirs(groups.first())) {
 			return Some(Ok(()));
 		}
 		if let Some((sequence, _)) = read {
 			claim.seen = Some(sequence);
 		}
-		if let (Some((group, Some(pts))), Some(size)) = (read, size)
+		if let (Some((group, Some(at))), Some(size)) = (read, size)
 			&& claim.size != Some(size)
 		{
 			claim.size = Some(size);
-			claim.resized = Some(Resize { group, pts, size });
+			claim.resized = Some(Resize { group, at, size });
 		}
 		claim.unplaced = grid.unplaced().map(|first| (first, grid.open()));
 		if !claim.retired
@@ -2346,8 +2497,13 @@ impl WatchMedia {
 					let Some((_, track)) = ready!(media.poll_track_or_refusal(binding, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
-					let subscription = moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+					let subscription =
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(FEED_MAX_DELAY),
+								max: Some(FEED_MAX_DELAY),
+							},
+						)]);
 					// The index is the export's own bookkeeping, not delivery to a client, so a
 					// metered source counts only the segments and inits clients fetch.
 					let track = track.unmetered();
@@ -2369,7 +2525,43 @@ impl WatchMedia {
 					if retired() {
 						return Poll::Ready(Ok(()));
 					}
+					// The newest group's frames that are in may place it before its successor starts.
+					while follow.reading && follow.grid.pending() {
+						let Some((group, _, reach)) = follow.latest.as_mut() else {
+							break;
+						};
+						match group.poll_read_frame(waiter) {
+							Poll::Pending => break,
+							Poll::Ready(Ok(Some(frame))) => {
+								// The container says what a frame holds, as `Step::End` reads it.
+								if let Ok(decoded) = moq_mux::container::Container::decode(&*follow.container, frame) {
+									reach.add(decoded);
+								}
+							}
+							// Ended or failed: its successor places it, and an ended track reads it
+							// again for its end, failing there if it failed.
+							Poll::Ready(Ok(None) | Err(_)) => {
+								follow.reading = false;
+								break;
+							}
+						}
+						let Some(newest) = reach.newest() else {
+							continue;
+						};
+						let slots = follow.grid.reach(newest);
+						if let Some(done) = follow.list(&self.rendition, slots, None, None, false) {
+							return Poll::Ready(done);
+						}
+					}
+					// Its end may complete its segment before any later group starts.
+					if let Poll::Ready(slots) = follow.poll_end(waiter)
+						&& !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
 					let groups = self.groups.as_mut().expect("subscribed above");
+					// A segment is listed from the groups that arrive, so one given up on is read past.
 					match ready!(groups.poll_next_group(waiter))? {
 						Some(group) => self.step = Step::First(group),
 						None => match follow.latest.take() {
@@ -2387,6 +2579,14 @@ impl WatchMedia {
 						return Poll::Ready(Ok(()));
 					}
 					let first = ready!(group.poll_read_frame(waiter))?;
+					// The group before it is placed by this group's start whether or not its own end
+					// arrived: one left open may never end. Its end only completes a segment early.
+					if let Poll::Ready(slots) = follow.poll_end(waiter)
+						&& !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
 					let Step::First(group) = std::mem::replace(&mut self.step, Step::Next) else {
 						unreachable!("reading the first frame");
 					};
@@ -2395,6 +2595,22 @@ impl WatchMedia {
 					}
 				}
 				Step::End(group, reach) => {
+					let slots = ready!(follow.poll_end(waiter));
+					if !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
+					// A declared end says where its content ends without decoding its frames, once
+					// the group is placed: one off the grid is placed by its last frame, as on an edge
+					// without GROUP_END, and its content still stops at the declared end.
+					if let Some(end) = follow.end
+						&& !follow.grid.pending()
+					{
+						let slots = follow.grid.finish(None, Some(end));
+						let done = follow.list(&self.rendition, slots, None, None, true);
+						return Poll::Ready(done.expect("an ended track ends the watch"));
+					}
 					// Read once the track has ended so every frame is in. Fails when the group does:
 					// its last segment would otherwise be listed complete but truncated.
 					let reach_mut = reach.as_mut().expect("read to its end once");
@@ -2457,8 +2673,10 @@ impl kio::Task for WatchMedia {
 /// discontinuity marker, read as they are decoded.
 #[derive(Default)]
 struct Reach {
-	/// Each sample's pts, in nanoseconds.
+	/// The newest samples' pts, in nanoseconds, at most twice [`Reach::KEEP`].
 	stamps: Vec<u128>,
+	/// The shortest spacing between the samples folded out of `stamps`.
+	step: Option<u128>,
 	/// The latest end a sample states with its own duration, in nanoseconds.
 	ends: Option<u128>,
 	/// A frame with no payload: where the publisher says the content stops.
@@ -2466,19 +2684,48 @@ struct Reach {
 }
 
 impl Reach {
+	/// The newest distinct stamps kept when folding, well past any reordering a codec does, so a
+	/// group read as its frames arrive costs bounded memory however long it runs.
+	const KEEP: usize = 64;
+
 	/// Count every sample `frames` decodes to.
 	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
 		for frame in frames {
+			// A sample with no time can't reach anywhere on the grid.
+			let Ok(pts) = frame.timestamp.as_nanos() else {
+				continue;
+			};
 			if frame.payload.is_empty() {
 				self.marker = Some(frame.timestamp);
 				continue;
 			}
-			let pts = frame.timestamp.as_nanos();
 			self.stamps.push(pts);
-			if let Some(duration) = frame.duration {
-				self.ends = self.ends.max(Some(pts + duration.as_nanos()));
+			if let Some(Ok(duration)) = frame.duration.map(moq_net::Timestamp::as_nanos) {
+				self.ends = self.ends.max(Some(pts + duration));
 			}
 		}
+		if self.stamps.len() > 2 * Self::KEEP {
+			self.fold();
+		}
+	}
+
+	/// Fold all but the newest [`Reach::KEEP`] distinct stamps into the shortest spacing.
+	fn fold(&mut self) {
+		self.stamps.sort_unstable();
+		self.stamps.dedup();
+		let older = self.stamps.len().saturating_sub(Self::KEEP);
+		let step = self.stamps[..(older + 1).min(self.stamps.len())]
+			.windows(2)
+			.map(|pair| pair[1] - pair[0])
+			.min();
+		self.step = self.step.into_iter().chain(step).min();
+		self.stamps.drain(..older);
+	}
+
+	/// The newest sample's pts, which places a pending group once it passes the next line.
+	fn newest(&self) -> Option<moq_net::Timestamp> {
+		let newest = self.stamps.iter().max()?;
+		moq_net::Timestamp::from_nanos(u64::try_from(*newest).ok()?).ok()
 	}
 
 	/// Where the last sample starts, which places the group on the grid, and where the content
@@ -2505,6 +2752,7 @@ impl Reach {
 			.stamps
 			.windows(2)
 			.map(|pair| pair[1] - pair[0])
+			.chain(self.step)
 			.min()
 			.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
 		let end = self
@@ -2517,37 +2765,54 @@ impl Reach {
 
 /// What a group's first frame holds.
 enum First {
-	/// Media: its pts, the transport's stamp or else its first sample's, with what its samples reach
-	/// and the picture size its keyframe declares.
-	Media(moq_net::Timestamp, Reach, Option<(u32, u32)>),
+	/// Media: its place, the group's start or else its first sample's pts, then its first sample's
+	/// pts, with what its samples reach, the picture size its keyframe declares, and the timescale
+	/// its start and end count in, which a scale-less session has none of.
+	Media(
+		moq_net::Timestamp,
+		moq_net::Timestamp,
+		Reach,
+		Option<(u32, u32)>,
+		Option<moq_net::Timescale>,
+	),
 	/// A discontinuity marker, a frame with no payload: the content stops at its timestamp.
 	Marker(moq_net::Timestamp),
 }
 
-/// The first frame of a group, or `None` when it can't be read. `probe` reads its picture size; one
-/// it can't parse declares none, leaving the hand-over to arrival order.
+/// The first frame of the group keyed `start`, or `None` when it can't be read. `probe` reads its
+/// picture size; one it can't parse declares none, leaving the hand-over to arrival order.
 fn first_frame(
 	container: &moq_mux::catalog::hang::Container,
+	start: u64,
 	frame: moq_net::frame::Frame,
 	probe: Option<&mut Muxer>,
 ) -> Option<First> {
 	use moq_mux::container::Container as _;
+	let scale = frame.timestamp.scale();
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
 	let first = decoded.first()?;
-	let pts = stamp.unwrap_or(first.timestamp);
+	// A scale-less session carries the group key, not a time, so the container's own is used.
+	let pts = if scale.is_some() { stamp } else { first.timestamp };
+	// The grid places only times.
+	pts.scale()?;
 	if first.payload.is_empty() {
 		return Some(First::Marker(pts));
 	}
+	// A timed track keys each group by its start, which may sit below its first frame.
+	let place = match scale {
+		Some(scale) => moq_net::Timestamp::new(start, scale).ok()?,
+		None => pts,
+	};
 	let size = probe.and_then(|probe| probe.picture_size(first).ok().flatten());
 	let mut reach = Reach::default();
 	reach.add(decoded);
-	Some(First::Media(pts, reach, size))
+	Some(First::Media(place, pts, reach, size, scale))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
 fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
-	let (segment, groups, pts, end, content, stop) = match slot {
+	let (segment, groups, pts, media, end, content, stop) = match slot {
 		// Listed as a gap rather than as a segment every request for would refuse.
 		grid::Slot::Media {
 			segment,
@@ -2555,29 +2820,30 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 			start,
 			end,
 			..
-		} if groups.end.saturating_sub(groups.start) > rendition.max_groups() => {
+		} if groups.len() as u64 > rendition.max_groups() => {
 			tracing::warn!(
 				rendition = rendition.name,
 				segment,
 				?groups,
 				"a segment holds more groups than one request fetches; listing it as a gap"
 			);
-			(segment, 0..0, start, end, None, true)
+			(segment, Default::default(), start, start, end, None, true)
 		}
 		// Timed from where its EXTINF starts, which a group resuming past its line puts at the line.
 		grid::Slot::Media {
 			segment,
 			groups,
+			media,
 			start,
 			end,
 			content,
 			..
-		} => (segment, groups, start, end, content, false),
-		grid::Slot::Gap { segment, pts, end } => (segment, 0..0, pts, end, None, true),
+		} => (segment, groups, start, media, end, content, false),
+		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};
-	let start = Duration::from(pts);
-	let end = Duration::from(end).max(start);
+	let start = super::span(pts);
+	let end = super::span(end).max(start);
 	let duration = end - start;
 	// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
 	// duration. A group overrunning the interval is listed anyway: refusing it loses content, and
@@ -2593,12 +2859,13 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		groups,
 		duration,
 		pts,
+		media,
 		end,
 		discontinuity: rendition.fanout.stamp(&rendition.key(), broken, end),
 		stop,
 		// Listed once a later segment started or the track ended, so its groups are all complete.
 		complete: !stop,
-		content: content.map(Duration::from),
+		content: content.map(super::span),
 	}
 }
 
@@ -2654,6 +2921,56 @@ impl InitRead {
 	}
 }
 
+/// A subscription to a row's span of groups, read oldest first.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per segment request, and the reading variant is the working state"
+)]
+enum Span {
+	Subscribing(moq_net::track::Subscribing),
+	Reading(moq_net::track::Ordered),
+}
+
+impl Span {
+	/// The group starting at `sequence`, passing any older one the span starts at, or the error
+	/// saying it is unservable, as [`GroupRead::poll`] does.
+	fn poll_group(
+		&mut self,
+		waiter: &kio::Waiter,
+		sequence: u64,
+		broadcast: &moq_net::broadcast::Consumer,
+	) -> Poll<Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>>> {
+		let unservable = |err: moq_net::Error| match is_unservable(&err, broadcast) {
+			true => Ok(Err(err)),
+			false => Err(err.into()),
+		};
+		if let Self::Subscribing(subscribing) = self {
+			match ready!(subscribing.poll_ok(waiter)) {
+				Ok(subscriber) => *self = Self::Reading(subscriber.ordered()),
+				Err(err) => return Poll::Ready(unservable(err)),
+			}
+		}
+		let Self::Reading(ordered) = self else {
+			unreachable!("subscribed above");
+		};
+		loop {
+			let item = match ready!(ordered.poll_next_item(waiter)) {
+				Ok(item) => item,
+				Err(err) => return Poll::Ready(unservable(err)),
+			};
+			return Poll::Ready(match item {
+				// The group containing the span's start, when the one starting there is gone.
+				Some(moq_net::track::Item::Group(group)) if group.start < sequence => continue,
+				Some(moq_net::track::Item::Group(group)) if group.start == sequence => Ok(Ok(group)),
+				Some(moq_net::track::Item::Gap { range, .. }) if range.end <= sequence => continue,
+				Some(moq_net::track::Item::Gap { range, error, .. }) if range.contains(&sequence) => unservable(error),
+				// Past it, or the span ended without it: it is gone.
+				_ => Ok(Err(moq_net::Error::NotFound)),
+			});
+		}
+	}
+}
+
 /// Fetches one group, then reads its frames through a muxer.
 struct GroupRead {
 	sequence: u64,
@@ -2671,6 +2988,23 @@ impl GroupRead {
 			sequence,
 			state: GroupReading::Fetching(track.fetch_group(sequence, None).into_inner()),
 		}
+	}
+
+	/// Read `group`, already delivered.
+	fn read(group: moq_net::group::Consumer) -> Self {
+		Self {
+			sequence: group.start,
+			state: GroupReading::Reading(group, Vec::new()),
+		}
+	}
+
+	/// Where the group ends, once read to its end, when its GROUP_END says.
+	fn declared(&self) -> Option<moq_net::Timestamp> {
+		let GroupReading::Reading(group, _) = &self.state else {
+			return None;
+		};
+		let end = moq_net::Timestamp::new(group.end()?, group.timescale()?).ok()?;
+		moq_net::Timestamp::from_micros(end.as_micros().ok()? as u64).ok()
 	}
 
 	/// Count the group's frames and their bytes into `size` as they are read, keeping none; an
@@ -2739,7 +3073,7 @@ impl GroupRead {
 	}
 }
 
-/// True if a FETCH failure means the segment can never be served: a 404, not a 500.
+/// True if a fetch failure means the segment can never be served: a 404, not a 500.
 fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	is_cache_miss(err) || is_gone_publisher(err, broadcast)
 }
@@ -2885,9 +3219,10 @@ mod tests {
 			index: 0,
 			segment: 0,
 			tag: rendition.tag.clone(),
-			groups: 0..1,
+			groups: grid::Groups::one(0),
 			duration: Duration::from_secs(1),
 			pts: moq_net::Timestamp::ZERO,
+			media: moq_net::Timestamp::ZERO,
 			end: Duration::from_secs(1),
 			discontinuity: 0,
 			stop: false,
@@ -2916,7 +3251,7 @@ mod tests {
 	}
 
 	// End may land while capture's query installs a dynamically served track. The handle must
-	// stay on that instance rather than repeat a lookup End refuses, or its retained media is lost.
+	// stay on that identity rather than repeat a lookup End refuses, or its retained media is lost.
 	#[test]
 	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
 		struct Serve {
@@ -2941,8 +3276,12 @@ mod tests {
 				let Poll::Ready(Ok(request)) = self.poll() else {
 					return;
 				};
-				let mut track = request.accept(moq_net::track::Info::default());
-				track.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				let track = request.accept(moq_net::track::Info::default());
+				let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
+					.unwrap();
+				group.finish().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}
@@ -3074,7 +3413,10 @@ mod tests {
 	}
 
 	fn millis(reach: (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>)) -> (Option<u128>, Option<u128>) {
-		(reach.0.map(|t| t.as_millis()), reach.1.map(|t| t.as_millis()))
+		(
+			reach.0.map(|t| t.as_millis().unwrap()),
+			reach.1.map(|t| t.as_millis().unwrap()),
+		)
 	}
 
 	// A fragment carrying all its samples in one frame reaches as far as its samples say, however
@@ -3108,6 +3450,26 @@ mod tests {
 		assert_eq!(
 			millis(reach.finish(None, Duration::from_secs(2))),
 			(Some(500), Some(500))
+		);
+
+		// A long group read as it arrives keeps a bounded tail, yet times its end as if whole,
+		// however its samples are reordered or repeated.
+		let mut reach = Reach::default();
+		for ms in (0..10_000u64).step_by(40) {
+			let reordered = if ms % 120 == 40 {
+				ms + 40
+			} else if ms % 120 == 80 {
+				ms - 40
+			} else {
+				ms
+			};
+			reach.add(vec![sample(reordered, None, b"x"), sample(reordered, None, b"x")]);
+			assert!(reach.stamps.len() <= 2 * Reach::KEEP + 2);
+		}
+		assert_eq!(reach.newest().map(|t| t.as_millis().unwrap()), Some(9_960));
+		assert_eq!(
+			millis(reach.finish(None, Duration::from_secs(2))),
+			(Some(9_960), Some(10_000))
 		);
 	}
 

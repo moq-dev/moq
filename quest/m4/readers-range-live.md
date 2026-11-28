@@ -1,20 +1,24 @@
-# [S] Latest readers subscribe with a relative range
+# [S] Latest readers join live by their Min Age
 
 ## Goal
 
 The readers that wait for the largest group and raise their floor to
 start near it (moq-audio, moq-video, and `@moq/room` chat)
-subscribe with a relative range instead, with no change in what they play:
-`Range::live()` for a start at the newest group, and a relative start for a
-reader that looks back, such as moq-video's warmup lane, which keeps its
-one-group lookback so the preceding intra-refresh group still decodes.
+join live by their Min Age instead (`Delay::min`, with no start anchor), with
+no change in what they play. A reader that looks back states a larger Min Age,
+such as moq-video's warmup lane, which keeps its one-group lookback so the
+preceding intra-refresh group still decodes.
 `moq play` drops its floor entirely and starts where its consumers' `Delay`
 puts them.
 
 ## Plan
 
-Since [moq-dev/moq#6278](https://github.com/moq-dev/moq/pull/6278),
-`Range::live()` starts at the live edge on a warm relay copy too.
+Changed 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the lite-07
+and hang-04 wire changes): lite-07 has no relative anchors, and a live join is
+no start anchor plus a stated Min Age, filled from upstream when a copy can't
+prove its start ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)).
+This quest's relative ranges became that join. `Range::live()`'s callers move
+with the anchor's removal; these readers never used it.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
 /quest-afk run): `moq play` drops its one-group `lookback` range floor and
@@ -27,7 +31,7 @@ does. That start already decides where each decoder reads from, so the
 `largest().await` plus `with_range(largest.group.saturating_sub(lookback)..)`
 floor (and its copy in `play/video.rs`'s test helper `join`) is a second
 start rule; #7311 kept it only to bound how long the refresh decoder's
-start reach waits. Delete it rather than convert it to a relative range.
+start reach waits. Delete it rather than convert it to a live join.
 Check that the reason in its comment still holds without it (a warm relay
 copy waiting on its source must not replay its backlog), and that the
 refresh decoder still starts on the group below the live edge.

@@ -75,10 +75,9 @@ impl Import {
 	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
 		let data = buf;
 
-		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15. Only the
-		// fixed 4-byte header is read here, so don't gate on a larger size or a short
+		// Only the fixed 4-byte header is read here, so don't gate on a larger size or a short
 		// out-of-band record falls through to raw-OBU scanning and leaves the config unset.
-		if data.len() >= 4 && data[0] == 0x81 {
+		if super::is_av1c(data) {
 			self.init_from_av1c(data)?;
 			return Ok(());
 		}
@@ -197,10 +196,14 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
+		self.track.finish()
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -227,9 +230,9 @@ impl Import {
 		self.catalog.set_enabled(&mut self.track, enabled)
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 

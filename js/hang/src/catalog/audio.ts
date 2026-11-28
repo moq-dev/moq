@@ -1,10 +1,10 @@
 import * as z from "zod/mini";
-import { compareName, compareNumber } from "./compare";
-import { ContainerSchema } from "./container";
-import { hexSchema } from "./hex";
-import { u53Schema } from "./integers";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { codecNumber, countSchema, renditions } from "./section";
+import { compareName, compareNumber } from "./compare.ts";
+import { ContainerSchema } from "./container.ts";
+import { hexSchema } from "./hex.ts";
+import { u53Schema } from "./integers.ts";
+import { RelativeBroadcastSchema } from "./path.ts";
+import { codecNumber, countSchema, renditions } from "./section.ts";
 
 /**
  * Whether `codec` parses: an AAC string names its object type, while any other string is carried
@@ -20,11 +20,6 @@ const AudioConfigFields = z.object({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The instance of the stream the reference names, when known. Absent accepts whichever stream
-	// resolves first. A route of another instance fails the entry; a route over a wire that
-	// carries no instance has one its session minted, which proves nothing, so there it is best
-	// effort. Without `broadcast`, it names the catalog's own stream.
-	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -64,15 +59,14 @@ const AudioConfigFields = z.object({
 	// must not select it. Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
-	// The maximum delay between a frame being ready and the publisher flushing it, in whole
-	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
-	// If not provided, the player should assume each frame is flushed immediately.
+	// The largest media span the publisher hands to the transport behind a frame's presentation
+	// timestamp, in whole milliseconds rounded up: the reorder delay of a frame presented after
+	// frames decoded behind it, or the span of a batch written together. The player's jitter buffer
+	// should be at least this large. Absent when the publisher measured none.
 	//
-	// This is measured at the publisher (encoder latency, packet packing, reordering),
-	// never on the network a consumer sees. It only ever grows over the life of a stream.
-	//
-	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
+	// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	// whatever the frame rate; encoder latency and the network don't count. It only ever grows over
+	// the life of a stream.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -84,10 +78,11 @@ const AudioConfigFields = z.object({
 	// and join that many milliseconds earlier.
 	warmup: z.optional(u53Schema),
 
-	// How far this rendition's frames reach the transport behind the broadcast's earliest
-	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
-	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
-	// ever grows over the life of a stream.
+	// How far this rendition's frames persistently trail what the broadcast's other renditions
+	// already wrote: the least any frame trails within a window of a second or more, and the
+	// largest of those windows, in whole milliseconds rounded up. A player holds `delay + jitter`
+	// for it and never subtracts one rendition's `delay` from another's. Absent on a rendition that
+	// trails nothing. It only ever grows over the life of a stream.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,
@@ -119,8 +114,6 @@ export const AudioSchema = z.object({
 	renditions: renditions(AudioConfigSchema),
 });
 
-/** The catalog audio section: renditions keyed by track name. */
-export type Audio = z.infer<typeof AudioSchema>;
 /** Decoder config for a single audio rendition. */
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
 

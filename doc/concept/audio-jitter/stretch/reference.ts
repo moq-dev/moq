@@ -11,10 +11,10 @@
 // the same way.
 
 /** The most the stretch speeds up or slows down, as a fraction of real time. */
-export const CAP = 0.1;
+const CAP = 0.1;
 
 /** The rate is the lag over this many milliseconds, so it reaches the cap at 50 ms. */
-export const GAIN = 500;
+const GAIN = 500;
 
 /** What a hop boundary decides on, in frames. */
 export interface Inputs {
@@ -35,7 +35,7 @@ export interface Decision {
 export const HOLD: Decision = { pace: 0, low: 0, high: 0, urgent: false };
 
 /** 10 ms of frames, at least one. */
-export function hop(rate: number): number {
+function hop(rate: number): number {
 	return Math.max(1, Math.floor((rate * 10) / 1000));
 }
 
@@ -87,7 +87,8 @@ export function play(
 		allowance = Math.min(allowance + CAP * h, span);
 		let shift = 0;
 		const sign = Math.sign(decision.pace);
-		if (sign !== direction) {
+		// A hold keeps the pace owed, so a lag flickering across half a hop still adds up to a splice.
+		if (sign !== 0 && sign !== direction) {
 			direction = sign;
 			owed = 0;
 		}

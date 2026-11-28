@@ -1,29 +1,37 @@
 //! The union of every subscriber's ranges, kept current per change rather than refolded.
 //!
-//! Absolute ranges become signed boundaries over groups, +1 where one starts and -1
-//! where it ends, so a group is covered while the running sum stays above zero. A treap
-//! keeps each subtree's sum and lowest running sum, so a change touches two boundaries and
-//! asks one range-minimum question, whatever else the audience holds. Ranges anchored to
-//! the latest group or to a time can't be placed on that line and are counted by value
-//! instead.
+//! Time ranges become signed boundaries over group starts, +1 where one starts and -1
+//! past where it ends, so a start is covered while the running sum stays above zero. A
+//! start between groups stands for the group containing it, which a range starting at or
+//! before it covers too, so spans merge as they do over starts. A treap keeps each
+//! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
+//! range-minimum question, whatever else the audience holds. Ranges with no time start can't
+//! be placed on that line and are counted by value instead: live joins by lag and end under
+//! the largest `max` among them, since where a join lands doesn't depend on it, and ranges
+//! from the oldest group under the furthest end, which takes in the rest.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 
-use super::super::{Anchor, Range};
+use std::time::Duration;
+
+use super::super::{Range, Start};
 use super::{add, remove};
+use crate::model::subscription::max_of;
 
 /// Every subscriber's ranges, counted so that one change costs O(log n).
 #[derive(Default)]
 pub(super) struct Ranges {
-	/// Holders of [`Range::oldest`], which covers every other range.
-	oldest: usize,
-	absolute: Coverage,
-	/// Open relative ranges by how far back they start: only the farthest matters.
-	relative: BTreeMap<u64, usize>,
-	/// Ranges with one relative end, or a bounded relative span, kept as they are.
-	mixed: BTreeMap<Range, usize>,
+	/// Holders of a range from the oldest group following the live edge, which covers every
+	/// other range.
+	open: usize,
+	/// Ranges with a time start, as spans of starts.
+	time: Coverage,
+	/// Ranges from the oldest group with an end, by end: the furthest takes in the rest.
+	oldest: BTreeMap<u64, usize>,
+	/// Live joins by lag and end, each with the budgets its holders ask under.
+	joins: BTreeMap<(Option<Duration>, Option<u64>), BTreeMap<Duration, usize>>,
 	/// The last union read, until a change moves it.
 	union: OnceCell<Vec<Range>>,
 }
@@ -31,21 +39,25 @@ pub(super) struct Ranges {
 /// How [`Ranges`] counts one range.
 enum Shape {
 	Empty,
-	Oldest,
-	Absolute(u64, Option<u64>),
-	Relative(u64),
-	Mixed,
+	Open,
+	/// A range with a time start, as the exclusive span of starts it covers.
+	Time(u64, Option<u64>),
+	/// A live join, by lag and end, and its budget.
+	Join((Option<Duration>, Option<u64>), Duration),
+	/// A range from the oldest group, by its end.
+	Oldest(u64),
 }
 
 impl Shape {
 	fn of(range: &Range) -> Self {
 		match (range.start, range.end) {
 			_ if range.is_empty() => Self::Empty,
-			(Anchor::Oldest, None) => Self::Oldest,
-			(Anchor::Absolute(start), None) => Self::Absolute(start, None),
-			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => Self::Absolute(start, Some(end)),
-			(Anchor::Relative(back), None) => Self::Relative(back),
-			_ => Self::Mixed,
+			(Start::Oldest, None) => Self::Open,
+			(Start::Time(start), None) => Self::Time(start, None),
+			// An end at the last start covers every group, as an open one does.
+			(Start::Time(start), Some(end)) => Self::Time(start, end.checked_add(1)),
+			(Start::Live { min, .. }, end) => Self::Join((min, end), range.budget()),
+			(Start::Oldest, Some(end)) => Self::Oldest(end),
 		}
 	}
 }
@@ -53,54 +65,64 @@ impl Shape {
 impl Ranges {
 	/// Count `range`, returning whether the union changed.
 	pub(super) fn add(&mut self, range: Range) -> bool {
+		let hidden = self.open > 0;
 		let changed = match Shape::of(&range) {
-			Shape::Empty => false,
-			Shape::Oldest => {
-				self.oldest += 1;
-				self.oldest == 1
+			Shape::Empty => return false,
+			Shape::Open => {
+				self.open += 1;
+				self.open == 1
 			}
-			Shape::Absolute(start, end) => {
-				let uncovered = self.absolute.min(start, end) == 0;
-				self.absolute.add(start, end, 1);
-				uncovered && self.oldest == 0
+			Shape::Time(start, end) => {
+				let uncovered = self.time.min(start, end) == 0;
+				self.time.add(start, end, 1);
+				uncovered && !hidden
 			}
-			Shape::Relative(back) => {
-				let farthest = self.farthest();
-				add(&mut self.relative, back);
-				self.oldest == 0 && self.farthest() != farthest
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.entry(join).or_default();
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				add(budgets, budget);
+				widest.is_none_or(|widest| budget > widest) && !hidden
 			}
-			Shape::Mixed => add(&mut self.mixed, range) && self.oldest == 0 && !self.covered(&range),
+			Shape::Oldest(end) => {
+				let furthest = self.oldest.last_key_value().map(|(furthest, _)| *furthest);
+				add(&mut self.oldest, end);
+				furthest.is_none_or(|furthest| end > furthest) && !hidden
+			}
 		};
-		self.moved(changed)
+		self.union.take();
+		changed
 	}
 
 	/// Uncount `range`, returning whether the union changed.
 	pub(super) fn remove(&mut self, range: Range) -> bool {
+		let hidden = |ranges: &Self| ranges.open > 0;
 		let changed = match Shape::of(&range) {
-			Shape::Empty => false,
-			Shape::Oldest => {
-				self.oldest -= 1;
-				self.oldest == 0
+			Shape::Empty => return false,
+			Shape::Open => {
+				self.open -= 1;
+				self.open == 0
 			}
-			Shape::Absolute(start, end) => {
-				self.absolute.add(start, end, -1);
-				self.oldest == 0 && self.absolute.min(start, end) == 0
+			Shape::Time(start, end) => {
+				self.time.add(start, end, -1);
+				!hidden(self) && self.time.min(start, end) == 0
 			}
-			Shape::Relative(back) => {
-				let farthest = self.farthest();
-				remove(&mut self.relative, back);
-				self.oldest == 0 && self.farthest() != farthest
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.get_mut(&join).expect("registered join");
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				remove(budgets, budget);
+				let moved = budgets.last_key_value().map(|(widest, _)| *widest) != widest;
+				if budgets.is_empty() {
+					self.joins.remove(&join);
+				}
+				moved && !hidden(self)
 			}
-			Shape::Mixed => remove(&mut self.mixed, range) && self.oldest == 0 && !self.covered(&range),
+			Shape::Oldest(end) => {
+				let furthest = self.oldest.last_key_value().map(|(furthest, _)| *furthest);
+				remove(&mut self.oldest, end);
+				self.oldest.last_key_value().map(|(furthest, _)| *furthest) != furthest && !hidden(self)
+			}
 		};
-		self.moved(changed)
-	}
-
-	/// Drop the cached union when `changed`, passing it through.
-	fn moved(&mut self, changed: bool) -> bool {
-		if changed {
-			self.union.take();
-		}
+		self.union.take();
 		changed
 	}
 
@@ -110,45 +132,39 @@ impl Ranges {
 	}
 
 	fn fold(&self) -> Vec<Range> {
-		if self.oldest > 0 {
-			return vec![Range::oldest()];
+		if self.open > 0 {
+			return vec![Range::ALL];
 		}
 		let mut union: Vec<Range> = self
-			.absolute
+			.time
 			.runs()
 			.into_iter()
 			.map(|(start, end)| Range {
-				start: Anchor::Absolute(start),
-				end: end.map(Anchor::Absolute),
+				start: Start::Time(start),
+				// A run past its start ends at or past one more.
+				end: end.map(|end| end - 1),
 			})
 			.collect();
-		union.extend(self.mixed.keys().filter(|range| !self.covered(range)));
-		union.extend(self.farthest().map(|back| Range {
-			start: Anchor::Relative(back),
-			end: None,
+		union.extend(self.oldest.last_key_value().map(|(&end, _)| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		}));
+		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
+			let budget = *budgets.last_key_value()?.0;
+			Some(Range {
+				start: Start::Live {
+					min,
+					max: max_of(budget),
+				},
+				end,
+			})
 		}));
 		union.sort_unstable();
 		union
 	}
-
-	fn farthest(&self) -> Option<u64> {
-		self.relative.last_key_value().map(|(back, _)| *back)
-	}
-
-	/// Whether an open range already delivers everything a mixed `range` could.
-	fn covered(&self, range: &Range) -> bool {
-		match range.start {
-			Anchor::Absolute(start) => self.absolute.tail().is_some_and(|tail| tail <= start),
-			Anchor::Relative(back) => self.farthest().is_some_and(|farthest| back <= farthest),
-			// Only the open oldest range, which hides every other, covers the oldest group.
-			Anchor::Oldest => false,
-			// Where a time falls among the groups is the serving hop's to say.
-			Anchor::Time(_) => false,
-		}
-	}
 }
 
-/// Signed boundary counts over groups: the coverage of the absolute ranges.
+/// Signed boundary counts over group starts: the coverage of the time ranges.
 #[derive(Default)]
 struct Coverage {
 	root: Link,
@@ -205,17 +221,6 @@ impl Coverage {
 		let mut runs = Vec::new();
 		walk(&self.root, 0, &mut runs);
 		runs
-	}
-
-	/// Where the open span starts, if an open range remains.
-	fn tail(&self) -> Option<u64> {
-		if sum(&self.root) <= 0 {
-			return None;
-		}
-		match last_zero(&self.root, 0) {
-			Some(zero) => successor(&self.root, &zero),
-			None => first(&self.root),
-		}
 	}
 }
 
@@ -283,28 +288,6 @@ fn merge(left: Link, right: Link) -> Link {
 	}
 }
 
-fn first(link: &Link) -> Option<u64> {
-	let mut node = link.as_ref()?;
-	while let Some(left) = &node.left {
-		node = left;
-	}
-	Some(node.key)
-}
-
-/// The first key above `after`.
-fn successor(mut link: &Link, after: &u64) -> Option<u64> {
-	let mut found = None;
-	while let Some(node) = link {
-		if node.key > *after {
-			found = Some(node.key);
-			link = &node.left;
-		} else {
-			link = &node.right;
-		}
-	}
-	found
-}
-
 /// Append the covered spans under `link`, entered with `offset` ranges open.
 ///
 /// A subtree entered covered whose running sum never reaches zero holds no boundary of the
@@ -327,37 +310,45 @@ fn walk(link: &Link, offset: i64, runs: &mut Vec<(u64, Option<u64>)>) {
 	walk(&node.right, at, runs);
 }
 
-/// The last key where the running sum, starting at `offset`, is zero.
-fn last_zero(link: &Link, offset: i64) -> Option<u64> {
-	let node = link.as_ref()?;
-	if offset.saturating_add(node.low) > 0 {
-		return None;
-	}
-	let at = offset + sum(&node.left) + node.delta;
-	if let Some(key) = last_zero(&node.right, at) {
-		return Some(key);
-	}
-	if at <= 0 {
-		return Some(node.key);
-	}
-	last_zero(&node.left, offset)
-}
-
 #[cfg(test)]
 mod tests {
 	use super::super::super::super::subscription::union;
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 
+	/// A range from the oldest group with an end takes in every one ending before it, so only
+	/// the furthest end moves the union.
+	#[test]
+	fn ranges_from_the_oldest_keep_only_the_furthest_end() {
+		let oldest = |end| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		};
+		let mut ranges = Ranges::default();
+		assert!(ranges.add(oldest(3)));
+		assert!(ranges.add(oldest(5)), "a further end moves the union");
+		assert!(!ranges.add(oldest(4)), "a nearer one does not");
+		assert!(!ranges.add(oldest(5)));
+		assert_eq!(ranges.union(), [oldest(5)]);
+		assert!(!ranges.remove(oldest(5)), "another holds the furthest end");
+		assert!(!ranges.remove(oldest(3)));
+		assert!(ranges.remove(oldest(5)), "the furthest end left");
+		assert_eq!(ranges.union(), [oldest(4)]);
+	}
+
 	/// Each change reports exactly whether the union moved, and the union matches a full fold
 	/// of what is held.
 	#[test]
 	fn incremental_union_matches_a_full_fold() {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x72616e676573);
-		let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..6) {
-			0 => Anchor::Relative(rng.random_range(0..4)),
-			1 => Anchor::Oldest,
-			_ => Anchor::Absolute(rng.random_range(0..12)),
+		let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..10) {
+			0 => Start::Oldest,
+			1 => Start::Live {
+				// One in four with no lag limit.
+				min: [None, Some(0), Some(1), Some(2)][rng.random_range(0..4)].map(Duration::from_millis),
+				max: [None, Some(Duration::ZERO), Some(Duration::from_millis(5))][rng.random_range(0..3)],
+			},
+			_ => Start::Time(rng.random_range(0..12)),
 		};
 		let mut ranges = Ranges::default();
 		let mut held: Vec<Range> = Vec::new();
@@ -366,8 +357,8 @@ mod tests {
 			let before = union(held.iter().copied());
 			let changed = if held.is_empty() || rng.random_bool(grow) {
 				let range = Range {
-					start: anchor(&mut rng),
-					end: rng.random_bool(0.6).then(|| anchor(&mut rng)),
+					start: start(&mut rng),
+					end: rng.random_bool(0.6).then(|| rng.random_range(0..12)),
 				};
 				held.push(range);
 				ranges.add(range)

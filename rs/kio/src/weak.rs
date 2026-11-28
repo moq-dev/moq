@@ -11,7 +11,8 @@ use crate::{
 	waiter::*,
 };
 
-/// A handle that owns nothing at all ([`Producer::downgrade`](crate::Producer::downgrade)).
+/// A handle that keeps neither the channel open nor its state alive
+/// ([`Producer::downgrade`](crate::Producer::downgrade)).
 ///
 /// Unlike [`ProducerWeak`], which keeps the state allocated so it stays readable after
 /// the channel closes, this drops with the last real handle. That makes it the one
@@ -168,6 +169,14 @@ impl<T> ProducerWeak<T> {
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
 		crate::consumer::poll_wanted_changed(&self.state, &self.counts, waiter, last)
+	}
+
+	/// Poll for [`Self::wanted`] to differ from `last`, whether or not the channel closed:
+	/// a closed channel's consumers may still be draining its final value. `Ready` with the
+	/// new value once it does, else `Pending`.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_held_changed(&self, waiter: &Waiter, last: bool) -> Poll<bool> {
+		crate::consumer::poll_held_changed(&self.state, &self.counts, waiter, last)
 	}
 
 	/// Returns `true` if both handles share the same underlying state.
@@ -395,6 +404,38 @@ mod test {
 
 		drop(upgraded);
 		assert!(consumer.is_closed(), "dropping the last one closes it");
+	}
+
+	/// A weak consumer waits on the value without counting as a reader, so the producer
+	/// never sees demand from it.
+	#[test]
+	fn consumer_weak_polls_without_demand() {
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let producer = Producer::new(0u32);
+		let weak = producer.consume().weak();
+		assert!(!producer.wanted());
+
+		let count = Arc::new(Count(Default::default()));
+		let waiter = Waiter::new(std::task::Waker::from(count.clone()));
+		let changed = |value: &Ref<'_, u32>| {
+			if **value > 0 {
+				Poll::Ready(**value)
+			} else {
+				Poll::Pending
+			}
+		};
+		assert!(weak.poll(&waiter, changed).is_pending());
+		assert!(!producer.wanted(), "a weak poll counted as a reader");
+
+		*producer.write().ok().expect("open") = 3;
+		assert_eq!(count.0.load(Ordering::Relaxed), 1, "the write missed the weak waiter");
+		assert!(matches!(weak.poll(&waiter, changed), Poll::Ready(Ok(3))));
 	}
 
 	#[tokio::test]

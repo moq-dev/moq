@@ -1,5 +1,5 @@
 //! A change of source, its clock stepping onto another timeline or its PAT naming another
-//! program, ends the import's instance.
+//! program, ends the import's identity.
 //!
 //! The stimulus is a real capture played twice, the second pass on another clock: the whole
 //! multiplex steps at one packet, with every continuity counter broken once and no
@@ -14,11 +14,11 @@ const CLIP: &[u8] = include_bytes!("test_data/scte35/bbb5s.ts");
 const HZ: i64 = 90_000;
 const WRAP: i64 = 1 << 33;
 /// The step the issue's contribution took: two encoders started about 4 h 40 m apart.
-const SWITCH: i64 = 16_844 * HZ + HZ / 2;
+pub(super) const SWITCH: i64 = 16_844 * HZ + HZ / 2;
 
 /// Which clock a timestamp belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Clock {
+pub(super) enum Clock {
 	Pcr,
 	Pes(u16),
 }
@@ -76,7 +76,7 @@ fn write_timestamp(field: &mut [u8], t: i64) {
 }
 
 /// `ts` with each PCR and PES timestamp moved by `by(clock)` 90 kHz ticks, modulo the wrap.
-fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
+pub(super) fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
 	let mut out = ts.to_vec();
 	for pkt in out.as_chunks_mut::<188>().0 {
 		let pid = pid(pkt);
@@ -116,30 +116,91 @@ fn replay(gap: i64, by: impl Fn(Clock) -> i64) -> (Vec<u8>, usize) {
 	(data, CLIP.len())
 }
 
-/// The importer, its catalog kept alive, fed `data` in `chunk`-byte pieces until it fails.
-/// Returns the failure, if any, and the input it did not take: a restart's remainder followed
-/// by the pieces never fed.
-fn feed(data: &[u8], chunk: usize) -> (Option<anyhow::Error>, Vec<u8>) {
+/// The importer, its catalog kept alive, fed `data` in `chunk`-byte pieces until it restarts or
+/// fails. A restart comes with the input the importer did not take: its remainder followed by
+/// the pieces never fed.
+fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::Error> {
+	let (_catalog, mut import) = open();
+	for (index, piece) in data.chunks(chunk).enumerate() {
+		if let Some(restart) = import.decode_or_restart(piece)? {
+			let mut rest = restart.remainder.to_vec();
+			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
+			// The identity before the step ends cleanly.
+			let _finished = import.finish().unwrap();
+			return Ok(Some((restart, rest)));
+		}
+	}
+	let _finished = import.finish()?;
+	Ok(None)
+}
+
+/// An importer onto a fresh broadcast, with the catalog it must outlive.
+fn open() -> (crate::catalog::Producer<Ext>, Import<Ext>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(
 		&mut broadcast,
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
 	)
 	.unwrap();
-	let mut import = Import::new(broadcast, catalog.reserve());
-	for (index, piece) in data.chunks(chunk).enumerate() {
-		if let Err(err) = import.decode(piece) {
-			let Some(restart) = err.downcast_ref::<Restart>() else {
-				return (Some(err), Vec::new());
-			};
-			let mut rest = restart.remainder.to_vec();
-			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
-			// The instance before the step ends cleanly.
-			let _finished = import.finish().unwrap();
-			return (Some(err), rest);
+	let import = Import::new(broadcast, catalog.reserve());
+	(catalog, import)
+}
+
+/// Edit the one PSI section `pkt` starts behind its pointer_field, then mend its CRC.
+fn mend(pkt: &mut [u8; 188], edit: impl FnOnce(&mut [u8])) {
+	assert_eq!(pkt[1] & 0x40, 0x40, "a section starts here");
+	let payload = if pkt[3] & 0x20 != 0 { 5 + usize::from(pkt[4]) } else { 4 };
+	let section = payload + 1 + usize::from(pkt[payload]);
+	let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
+	edit(&mut pkt[section..section + len - 4]);
+	let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
+	pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
+}
+
+/// The clip with its PAT naming `transport_stream_id` 7.
+fn retagged(ts: &[u8]) -> Vec<u8> {
+	let mut out = ts.to_vec();
+	for pkt in out.as_chunks_mut::<188>().0.iter_mut().filter(|pkt| pid(&pkt[..]) == 0) {
+		mend(pkt, |section| section[3..5].copy_from_slice(&7u16.to_be_bytes()));
+	}
+	out
+}
+
+/// The clip, then a `discontinuity_indicator` on its clock PID, then the clip again as another
+/// source: its PAT names `transport_stream_id` 7 and its streams and clock sit on other PIDs.
+/// The old PIDs never speak again, so the flagged break stays judged until the input ends.
+pub(super) fn flagged_switch() -> Vec<u8> {
+	const PCR_PID: u16 = 0x100;
+	const PMT_PID: u16 = 0x1000;
+	let moved = |pid: u16| if matches!(pid, 0x100 | 0x101) { pid + 0x100 } else { pid };
+	let mut second = retagged(CLIP);
+	for pkt in second.as_chunks_mut::<188>().0 {
+		let pid = moved(pid(&pkt[..]));
+		pkt[1] = (pkt[1] & 0xe0) | (pid >> 8) as u8;
+		pkt[2] = pid as u8;
+		if pid == PMT_PID && pkt[1] & 0x40 != 0 {
+			mend(pkt, |section| {
+				let write = |section: &mut [u8], at: usize| {
+					let pid = moved(u16::from_be_bytes([section[at], section[at + 1]]) & 0x1fff);
+					section[at] = (section[at] & 0xe0) | (pid >> 8) as u8;
+					section[at + 1] = pid as u8;
+				};
+				write(section, 8);
+				let mut at = 12 + (usize::from(section[10] & 0x0f) << 8 | usize::from(section[11]));
+				while at < section.len() {
+					write(section, at + 1);
+					at += 5 + (usize::from(section[at + 3] & 0x0f) << 8 | usize::from(section[at + 4]));
+				}
+			});
 		}
 	}
-	(import.finish().err(), Vec::new())
+	let mut data = CLIP.to_vec();
+	// An adaptation field alone, flagging the break.
+	let mut flagged = [0xff; 188];
+	flagged[..6].copy_from_slice(&[0x47, (PCR_PID >> 8) as u8, PCR_PID as u8, 0x20, 183, 0x80]);
+	data.extend_from_slice(&flagged);
+	data.extend_from_slice(&second);
+	data
 }
 
 /// The input from the first packet of `pass` that carries a timestamp.
@@ -160,9 +221,7 @@ fn an_unflagged_switch_restarts_either_way() {
 	for (gap, expected) in [(-SWITCH, "rewind"), (SWITCH, "leap")] {
 		let (data, second) = replay(gap, |_| 0);
 		for chunk in [data.len(), 188 * 7, 1_000] {
-			let (err, rest) = feed(&data, chunk);
-			let err = err.expect("the switch ends the instance");
-			let restart = err.downcast_ref::<Restart>().expect("a restart");
+			let (restart, rest) = feed(&data, chunk).unwrap().expect("the switch ends the identity");
 			let by = match (restart.step, expected) {
 				(Step::Rewind { by, flagged: false }, "rewind") | (Step::Leap { by }, "leap") => by,
 				(step, _) => panic!("{expected}: {step:?}"),
@@ -170,36 +229,54 @@ fn an_unflagged_switch_restarts_either_way() {
 			let switch = Duration::from_micros((SWITCH * 1_000_000 / HZ) as u64);
 			assert!(by.abs_diff(switch) < Duration::from_secs(1), "{expected} by {by:?}");
 
-			// The new instance takes everything from the second pass's first timestamp, which
+			// The new identity takes everything from the second pass's first timestamp, which
 			// is where the old one stopped reading: none of it is published twice or lost.
 			assert!(data[second..].ends_with(&rest), "{expected} {chunk}");
 			assert!(rest.len() >= first_timed(&data[second..]).len(), "{expected} {chunk}");
 
 			// What follows imports as a broadcast of its own.
-			let (err, _) = feed(&rest, chunk);
-			assert!(err.is_none(), "{expected}: {err:?}");
+			let fed = feed(&rest, chunk);
+			assert!(matches!(fed, Ok(None)), "{expected}: {fed:?}");
 		}
 	}
 }
 
+/// A raw import has no next identity to carry on into, so a switch fails `decode`, and every
+/// later call, while `finish` still ends the identity cleanly before the step.
+#[test]
+fn a_switch_fails_a_raw_import() {
+	let (data, _) = replay(SWITCH, |_| 0);
+	let (_catalog, mut import) = open();
+	let err = import.decode(&data).unwrap_err();
+	assert!(matches!(err, super::Error::Restarted(Step::Leap { .. })), "{err:?}");
+	let again = import.decode(&[]).unwrap_err();
+	assert!(matches!(again, super::Error::Restarted(Step::Leap { .. })), "{again:?}");
+	let _finished = import.finish().unwrap();
+}
+
+/// A switch the input ends while judging is found by `finish`, which fails as `decode` would
+/// have rather than drop the broadcast after the step.
+#[test]
+fn a_switch_found_at_the_end_fails_a_raw_finish() {
+	let (_catalog, mut import) = open();
+	import.decode(&flagged_switch()).unwrap();
+	let err = import.finish().err().expect("the switch fails the finish");
+	let identity = Step::Identity {
+		transport_stream_id: 7,
+		program_number: 1,
+	};
+	assert!(
+		matches!(&err, super::Error::Restarted(step) if *step == identity),
+		"{err:?}"
+	);
+}
+
 /// A source switch whose PAT names another `transport_stream_id` before its first clock
 /// reading restarts at that PAT, where the old program's identity check would otherwise fail
-/// the whole import. The new instance reads the PAT itself, however the input is split.
+/// the whole import. The new identity reads the PAT itself, however the input is split.
 #[test]
 fn another_identity_restarts_at_its_pat() {
-	let mut second = shift(CLIP, |_| -SWITCH);
-	for pkt in second.as_chunks_mut::<188>().0 {
-		if pid(pkt) != 0 {
-			continue;
-		}
-		// A single-section PAT behind a zero pointer_field: retag its transport_stream_id.
-		assert_eq!(pkt[1] & 0x40, 0x40);
-		let section = 5 + usize::from(pkt[4]);
-		let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
-		pkt[section + 3..section + 5].copy_from_slice(&7u16.to_be_bytes());
-		let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
-		pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
-	}
+	let second = retagged(&shift(CLIP, |_| -SWITCH));
 	let pat = second
 		.as_chunks::<188>()
 		.0
@@ -214,11 +291,9 @@ fn another_identity_restarts_at_its_pat() {
 	let mut data = CLIP.to_vec();
 	data.extend_from_slice(&second);
 	for chunk in [data.len(), 188 * 7, 1_000] {
-		let (err, rest) = feed(&data, chunk);
-		let err = err.expect("the switch ends the instance");
-		let restart = err
-			.downcast_ref::<Restart>()
-			.unwrap_or_else(|| panic!("{chunk}: {err:#}"));
+		let (restart, rest) = feed(&data, chunk)
+			.unwrap()
+			.unwrap_or_else(|| panic!("{chunk}: the switch ends the identity"));
 		assert_eq!(
 			restart.step,
 			Step::Identity {
@@ -227,30 +302,30 @@ fn another_identity_restarts_at_its_pat() {
 			},
 			"{chunk}"
 		);
-		assert_eq!(rest, second[pat..], "{chunk}: the new instance starts at its PAT");
-		let (err, _) = feed(&rest, chunk);
-		assert!(err.is_none(), "{chunk}: {err:?}");
+		assert_eq!(rest, second[pat..], "{chunk}: the new identity starts at its PAT");
+		let fed = feed(&rest, chunk);
+		assert!(matches!(fed, Ok(None)), "{chunk}: {fed:?}");
 	}
 }
 
 /// A clock that steps forward by less than the bound, such as across lost packets, carries
-/// the same instance on.
+/// the same identity on.
 #[test]
 fn a_step_under_the_bound_carries_on() {
 	let (data, _) = replay(9 * HZ, |_| 0);
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.is_none(), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 
 	// Two seconds of the clip lost in the middle.
 	let packets = CLIP.len() / 188;
 	let mut lossy = CLIP[..packets / 3 * 188].to_vec();
 	lossy.extend_from_slice(&CLIP[packets * 2 / 3 * 188..]);
-	let (err, _) = feed(&lossy, 188 * 7);
-	assert!(err.is_none(), "{err:?}");
+	let fed = feed(&lossy, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 }
 
 /// A stream the new source does not carry is waited for only as long as a cadenced stream may
-/// stay silent: the clocks that stepped decide, and the instance does not stall.
+/// stay silent: the clocks that stepped decide, and the identity does not stall.
 #[test]
 fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	let (mut data, second) = replay(-SWITCH, |_| 0);
@@ -266,9 +341,7 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	data.truncate(second);
 	data.extend(&without);
 
-	let (err, rest) = feed(&data, 188 * 7);
-	let err = err.expect("the switch ends the instance");
-	let restart = err.downcast_ref::<Restart>().expect("a restart");
+	let (restart, rest) = feed(&data, 188 * 7).unwrap().expect("the switch ends the identity");
 	assert!(
 		matches!(restart.step, Step::Rewind { flagged: false, .. }),
 		"{restart:?}"
@@ -281,8 +354,8 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 #[test]
 fn a_clock_stepping_alone_is_no_switch() {
 	let (data, _) = replay(HZ, |clock| if clock == Clock::Pcr { -SWITCH } else { 0 });
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.as_ref().is_none_or(|err| !err.is::<Restart>()), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 
 	// The audio carries on a second after the first pass while the rest rewinds.
 	let audio = audio_pid(CLIP);
@@ -290,8 +363,8 @@ fn a_clock_stepping_alone_is_no_switch() {
 		-SWITCH,
 		|clock| if clock == Clock::Pes(audio) { SWITCH + HZ } else { 0 },
 	);
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.as_ref().is_none_or(|err| !err.is::<Restart>()), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 }
 
 /// The PID of the clip's audio: the PES that are not video.

@@ -4,7 +4,6 @@
 //! and returns an SDP answer. The request path becomes the broadcast name on
 //! the upstream publish origin.
 
-use crate::vendor::str0m;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -77,7 +76,7 @@ async fn handle(
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
 #[cfg(feature = "server")]
 async fn accept_offer(state: &RouterState, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
-	if !is_sdp(headers) {
+	if !crate::server::is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
@@ -93,7 +92,7 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 }
 
 /// A WHIP publish for [`accept`]: the raw SDP offer, the producer and broadcast its media
-/// goes to, how it is published, and an optional bitrate cap.
+/// goes to, and how it is published.
 #[non_exhaustive]
 pub struct Request<'a> {
 	/// The producer the media is published into.
@@ -102,10 +101,9 @@ pub struct Request<'a> {
 	pub broadcast: moq_net::Path,
 	/// The raw SDP offer.
 	pub offer: &'a str,
-	/// How the ingested broadcast is published.
+	/// How the ingested broadcast is published, including the [cap](moq_mux::Ingest::rate)
+	/// on the session's media (see [`accept`]).
 	pub ingest: moq_mux::Ingest,
-	/// A live cap on the session's media (see [`accept`]), or `None` to never cap it.
-	pub rate: Option<moq_net::bandwidth::Limit>,
 }
 
 impl<'a> Request<'a> {
@@ -117,7 +115,6 @@ impl<'a> Request<'a> {
 			broadcast: broadcast.into(),
 			offer,
 			ingest: moq_mux::Ingest::default(),
-			rate: None,
 		}
 	}
 }
@@ -133,7 +130,7 @@ impl<'a> Request<'a> {
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
-/// broadcast under a fresh instance once negotiation succeeds (so a fast subscriber
+/// broadcast under a fresh identity once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
 /// encoder replaces a stale session's broadcast at once), and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
@@ -145,7 +142,7 @@ impl<'a> Request<'a> {
 /// [`moq_net::Error::Unauthorized`] if the broadcast is
 /// outside the producer's scope.
 ///
-/// [`Request::rate`] caps the session's media; a request is uncapped by default. The answer
+/// The ingest's [rate](moq_mux::Ingest::rate) caps the session's media; it is uncapped by default. The answer
 /// carries a `b=TIAS` line at the cap it holds when the offer is accepted, and the session
 /// repeats a REMB on every video line that negotiated one, following
 /// [`Limit::set`](moq_net::bandwidth::Limit::set) at once. Both steer to nine tenths of the
@@ -162,10 +159,9 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		publisher,
 		broadcast,
 		offer,
-		ingest,
-		rate,
+		mut ingest,
 	} = request;
-	let offer = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer, sdp::Lines::Every)?;
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
@@ -176,7 +172,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
 	// and a guard the session task holds for its lifetime (unregisters on exit).
-	let mux = server.mux().await?;
+	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config()?
 		.set_local_ice_credentials(creds)
@@ -191,16 +187,16 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Announce only once negotiation succeeded, so a failed offer leaves a live
 	// session's broadcast alone, but before returning the answer, so a fast
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
-	// offer is its own route under a fresh instance, so a reconnect replaces a
+	// offer is its own route under a fresh identity, so a reconnect replaces a
 	// stale session's broadcast instead of resuming into it.
 	route.announce()?;
-	let instance = route.instance();
+	let identity = route.identity();
 
 	let resource_id = sdp::new_resource_id();
 	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let mut session = session::Session::ingest(rtc, socket, sink)?;
 	let mut cap = None;
-	if let Some(mut rate) = rate {
+	if let Some(mut rate) = ingest.rate.take() {
 		cap = rate.get();
 		session = session.with_rate(rate);
 	}
@@ -208,9 +204,9 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
+	tracing::info!(%broadcast, %identity, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
-	let mut answer = sdp::render_answer(&answer);
+	let mut answer = sdp::render_answer(&answer, &refused);
 	if let Some(cap) = cap {
 		answer = sdp::cap_answer(&answer, rate::steer(cap));
 	}
@@ -227,15 +223,6 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 			role: "whip server",
 		},
 	})
-}
-
-#[cfg(feature = "server")]
-fn is_sdp(headers: &HeaderMap) -> bool {
-	headers
-		.get(header::CONTENT_TYPE)
-		.and_then(|v| v.to_str().ok())
-		.map(|v| v.eq_ignore_ascii_case("application/sdp"))
-		.unwrap_or(false)
 }
 
 #[cfg(feature = "server")]
@@ -270,13 +257,15 @@ mod tests {
 	/// a description str0m still parses, and an uncapped one carries no bandwidth line.
 	#[tokio::test]
 	async fn a_capped_answer_carries_tias() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let cap = moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
 		let offer = offer();
 		let path = moq_net::Path::from_static("live/capped");
 		let mut capped = Request::new(&origin, path, &offer);
-		capped.rate = Some(moq_net::bandwidth::Limit::new(cap));
+		capped.ingest.rate = Some(moq_net::bandwidth::Limit::new(cap));
 		let capped = accept(&server, capped).await.unwrap();
 		assert!(capped.answer.contains("\r\nb=TIAS:900000\r\n"), "{}", capped.answer);
 		str0m::change::SdpAnswer::from_sdp_string(&capped.answer).expect("str0m parses the capped answer");
@@ -286,12 +275,37 @@ mod tests {
 		assert!(!uncapped.answer.contains("\r\nb="), "{}", uncapped.answer);
 	}
 
+	/// An advertised address reaches the answer as given, its port included, so a NAT can
+	/// forward another public port to the bound one; a port of 0 takes the bound port.
+	#[tokio::test]
+	async fn an_advertised_candidate_keeps_its_port() {
+		let config = crate::server::Config {
+			ice_candidates: vec!["203.0.113.1:5000".parse().unwrap(), "[2001:db8::1]:0".parse().unwrap()],
+		};
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), config).await.unwrap();
+		let bound = server.local_addr().port();
+		let origin = moq_tokio::origin::spawn();
+		let offer = offer();
+		let path = moq_net::Path::from_static("live/nat");
+		let response = accept(&server, Request::new(&origin, path, &offer)).await.unwrap();
+
+		let hosts: Vec<_> = response
+			.answer
+			.lines()
+			.filter(|line| line.starts_with("a=candidate:"))
+			.map(|line| line.split(' ').skip(4).take(2).collect::<Vec<_>>().join(" "))
+			.collect();
+		assert_eq!(hosts, ["203.0.113.1 5000".to_string(), format!("2001:db8::1 {bound}")]);
+	}
+
 	/// A session that ends without a DELETE, here one that never connects, ends its tracks
 	/// with the transport cause, so a reader sees the publisher go rather than a producer
 	/// dropped unfinished.
 	#[tokio::test(start_paused = true)]
 	async fn a_session_ending_without_a_delete_ends_its_tracks() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let session = accept(
@@ -320,12 +334,14 @@ mod tests {
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still
-	/// open restarts the broadcast at once: each offer is its own instance, so a fresh
+	/// open restarts the broadcast at once: each offer is its own identity, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until
 	/// it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_session() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let _stale_session = accept(

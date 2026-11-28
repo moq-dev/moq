@@ -1,6 +1,6 @@
 //! The moq-transport error code registries, per negotiated draft.
 //!
-//! This module holds the stream reset registry and the session close encoder; [`request`]
+//! This module holds the stream reset registry and the session close codes; [`request`]
 //! holds the one for rejecting a request. The reset and request registries are disjoint, so
 //! the same integer means different things in each.
 //!
@@ -95,14 +95,53 @@ pub fn from_stream_code(code: u32) -> StreamError {
 	}
 }
 
+/// Session close codes only moq-transport defines.
+///
+/// moq-lite assigns none of them, so each is a [`SessionError::Unknown`] carrying its number:
+/// this layer sends them, and one a peer sends decodes back to the same value.
+pub(crate) mod session {
+	use crate::SessionError;
+
+	/// A request ID was reused or broke the negotiated draft's order or parity rules.
+	pub(crate) const INVALID_REQUEST_ID: SessionError = SessionError::Unknown(0x4);
+
+	/// A key-value pair was malformed or repeated more than allowed.
+	pub(crate) const KEY_VALUE_FORMATTING: SessionError = SessionError::Unknown(0x6);
+
+	/// The peer sent a PATH it may not send, such as a server sending one at all.
+	pub(crate) const INVALID_PATH: SessionError = SessionError::Unknown(0x8);
+
+	/// A token registration would exceed the advertised `MAX_AUTH_TOKEN_CACHE_SIZE`, which is
+	/// 0 when unadvertised.
+	pub(crate) const AUTH_TOKEN_CACHE_OVERFLOW: SessionError = SessionError::Unknown(0x13);
+
+	/// A token named an alias that was never registered.
+	pub(crate) const UNKNOWN_AUTH_TOKEN_ALIAS: SessionError = SessionError::Unknown(0x17);
+
+	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
+	pub(crate) const INVALID_AUTHORITY: SessionError = SessionError::Unknown(0x19);
+
+	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
+	pub(crate) const TOO_MANY_REQUEST_UPDATES: SessionError = SessionError::Unknown(0x1b);
+}
+
 /// The code to close the session with.
 ///
-/// The shared session registry, except moq-lite's own 0x30-0x3f range: a bridge must not
-/// carry those codes onto this wire, so an unknown one closes as unspecified instead.
+/// moq-lite's session registry, minus its own 0x30-0x3f range: moq-transport assigns nothing
+/// there, so NOT_SUPPORTED and any unknown code from that range close as unspecified instead.
 pub(crate) fn to_session_code(error: &SessionError) -> u32 {
 	match error {
-		SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
+		SessionError::Unsupported | SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
 		error => error.to_code(),
+	}
+}
+
+/// Read a session close code, keeping moq-lite's own 0x30-0x3f range unknown.
+pub(crate) fn from_session_code(code: u32) -> SessionError {
+	match code {
+		0x30..=0x3f => SessionError::Unknown(code),
+		code => SessionError::from_code(code),
 	}
 }
 
@@ -287,7 +326,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+		const ALL: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,
@@ -451,14 +490,22 @@ pub(crate) mod request {
 		/// Every code we put in a rejection has to be one the negotiated draft registers for
 		/// that request. The table is transcribed from the drafts (draft-18 section 15.11.2
 		/// on), not derived from the mapping, so a mistake in the mapping cannot talk the
-		/// assertion into agreeing with it.
+		/// assertion into agreeing with it. Draft-23's is its own (section 16.12.2): it adds
+		/// UNAVAILABLE (0xA) and no longer has PREFIX_OVERLAP (0x30), nor the 0x19 and 0x32
+		/// that earlier drafts retired.
 		#[test]
 		fn only_registered_codes_reach_the_wire() {
-			fn registered() -> &'static [u64] {
-				&[
-					0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34,
-					0x35, 0x36,
-				]
+			fn registered(version: Version) -> &'static [u64] {
+				match version {
+					Version::Draft18 | Version::Draft20 | Version::Draft22 => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33,
+						0x34, 0x35, 0x36,
+					],
+					_ => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0xA, 0x10, 0x11, 0x12, 0x20, 0x31, 0x33, 0x34, 0x35,
+						0x36,
+					],
+				}
 			}
 
 			// Sent but never read back as itself: a peer's MALFORMED_AUTH_TOKEN stays remote.
@@ -468,9 +515,29 @@ pub(crate) mod request {
 					for err in EVERY_ERROR.iter().chain([&malformed]) {
 						let code = to_code(err, kind, version);
 						assert!(
-							registered().contains(&code),
+							registered(version).contains(&code),
 							"{err:?} sends {code:#x}, which {version} does not register for {kind:?}"
 						);
+					}
+				}
+			}
+		}
+
+		/// UNAVAILABLE (0xA) is new in draft-23 (section 12.3): a responder that cannot fulfill
+		/// the request now, such as a relay without stream credit to forward it. We never send
+		/// it, and no local error means it, so a peer's stays the remote code it was; the Retry
+		/// Interval rides beside it in REQUEST_ERROR.
+		#[test]
+		fn unavailable_stays_the_peers_code() {
+			const UNAVAILABLE: u64 = 0xA;
+			for version in ALL {
+				for kind in KINDS {
+					assert!(
+						matches!(from_code(UNAVAILABLE, kind, version), Error::Remote(0xA)),
+						"{version:?} {kind:?}"
+					);
+					for err in &EVERY_ERROR {
+						assert_ne!(to_code(err, kind, version), UNAVAILABLE, "{version:?} {kind:?} {err:?}");
 					}
 				}
 			}
@@ -529,18 +596,40 @@ mod tests {
 	fn the_lite_session_range_is_not_sent() {
 		for code in 0x30..=0x3f {
 			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
+			assert_eq!(from_session_code(code), SessionError::Unknown(code));
 			assert_eq!(
 				SessionError::Unknown(code).to_code(),
 				code,
 				"the shared encoder is unchanged"
 			);
 		}
+		assert_eq!(to_session_code(&SessionError::Unsupported), 0x1);
 		assert_eq!(to_session_code(&SessionError::Unknown(0x20)), 0x20);
 		assert_eq!(
 			to_session_code(&SessionError::Unauthorized),
 			SessionError::Unauthorized.to_code()
 		);
 		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
+	}
+
+	/// The codes only moq-transport defines go out on their draft values and come back as the
+	/// same number, a session close like any other.
+	#[test]
+	fn moq_transport_session_codes_keep_their_number() {
+		for (err, code) in [
+			(session::INVALID_REQUEST_ID, 0x4),
+			(session::KEY_VALUE_FORMATTING, 0x6),
+			(session::INVALID_PATH, 0x8),
+			(session::AUTH_TOKEN_CACHE_OVERFLOW, 0x13),
+			(session::UNKNOWN_AUTH_TOKEN_ALIAS, 0x17),
+			(session::INVALID_AUTHORITY, 0x19),
+			(session::TOO_MANY_REQUEST_UPDATES, 0x1b),
+		] {
+			assert_eq!(to_session_code(&err), code);
+			assert_eq!(from_session_code(code), err);
+			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
+			assert_eq!(Error::from(err).retry(), crate::Retry::Same, "{code:#x}");
+		}
 	}
 
 	/// Every code we send must decode back to what we meant, or two moq-net peers disagree
@@ -590,7 +679,7 @@ mod tests {
 			StreamError::GroupTooLarge,
 			StreamError::TimestampMismatch,
 			StreamError::Unauthorized,
-			StreamError::Yielded,
+			StreamError::Skip,
 			StreamError::ControlTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),
@@ -631,7 +720,7 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 19] = [
+	const EVERY_ERROR: [StreamError; 20] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
@@ -649,6 +738,7 @@ mod tests {
 		StreamError::GroupTooLarge,
 		StreamError::TimestampMismatch,
 		StreamError::Unauthorized,
+		StreamError::Skip,
 		StreamError::App(7),
 		StreamError::Unknown(0x22),
 	];

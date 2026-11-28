@@ -1,11 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
 import { Producer as Broadcast } from "./broadcast.ts";
 import { randomHop } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import * as Instance from "./instance.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
@@ -104,6 +104,48 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 	},
 );
 
+test("a cancelled lite subscribe leaves the held request unwanted", async () => {
+	const pair = createMockTransportPair();
+	const origin = new Producer();
+	const claim = origin.claim(Path.from("room"));
+	const requests = claim.requested();
+	const publisher = new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
+	let input!: ReadableStreamDefaultController<Uint8Array>;
+	const stream = new Stream({
+		version: LiteVersion.DRAFT_06,
+		readable: new ReadableStream({
+			start(c) {
+				input = c;
+			},
+		}),
+		writable: new WritableStream(),
+	});
+	const task = publisher.runSubscribe(
+		new LiteSubscribe({ id: 0n, broadcast: path, track: "video", priority: 0 }),
+		stream,
+	);
+	try {
+		const held = (await requests.next()).value;
+		if (!held) throw new Error("expected a pending request");
+		let unwanted = false;
+		void held.unwanted().then(() => {
+			unwanted = true;
+		});
+		await settle();
+		expect(unwanted).toBe(false);
+
+		input.error(new Error("request cancelled"));
+		await settle();
+		expect(unwanted).toBe(true);
+	} finally {
+		origin.close();
+		await task.catch(() => undefined);
+		publisher.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
 test("last cancellation finishes the internal wait and discards a late consumer", async () => {
 	const origin = new Producer();
 	const dynamic = origin.claim(Path.from("room"));
@@ -134,7 +176,7 @@ test("last cancellation finishes the internal wait and discards a late consumer"
 		expect(source.closed.peek()).toBeUndefined();
 		fresh.serve(source);
 		await settle();
-		expect(next.active.peek()?.instance).toBe(dynamic.instance);
+		expect(next.active.peek()?.identity).toBe(dynamic.identity);
 		next.close();
 		keeper.close();
 		source.close();
@@ -212,7 +254,7 @@ test.each([
 		request.serve(source);
 		await settle();
 		if (other === "peer") expect((await second)?.closed).toBe(source.closed);
-		else expect(local?.active.peek()?.instance).toBe(dynamics[routes > 1 ? 1 : 0].instance);
+		else expect(local?.active.peek()?.identity).toBe(dynamics[routes > 1 ? 1 : 0].identity);
 	} finally {
 		local?.close();
 		origin.close();
@@ -299,7 +341,7 @@ test("a pending local request changing routes withdraws the old route's work", a
 		expect(close).toHaveBeenCalledTimes(1);
 		fresh.serve(source);
 		await settle();
-		expect(local.active.peek()?.instance).toBe(second.instance);
+		expect(local.active.peek()?.identity).toBe(second.identity);
 	} finally {
 		close.mockRestore();
 		local.close();
@@ -311,18 +353,18 @@ test("a pending local request changing routes withdraws the old route's work", a
 	}
 });
 
-test("cancelling an old instance waiter does not decrement a new instance's demand", async () => {
+test("cancelling an old identity waiter does not decrement a new identity's demand", async () => {
 	const origin = new Producer();
-	const instance = Instance.random();
-	const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
+	const identity = Identity.random();
+	const dynamic = origin.claim(Path.from("room"), { identity: { id: identity, epoch: 0n } });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
-	const before = wire.demand(path, instance, hold.signal).catch(() => undefined);
+	const before = wire.demand(path, identity, hold.signal).catch(() => undefined);
 	const old = (await requests.next()).value;
 	if (!old) throw new Error("expected old request");
-	const next = Instance.random();
-	wireOf(dynamic).update({ instance: next });
+	const next = Identity.random();
+	wireOf(dynamic).update({ identity: next });
 	const after = wire.demand(path, next);
 	hold.abort();
 	await before;
@@ -341,30 +383,30 @@ test("cancelling an old instance waiter does not decrement a new instance's dema
 });
 
 test.each(["answer", "release"] as const)(
-	"a detached same-instance failover survives peer cancellation until %s",
+	"a detached same-identity failover survives peer cancellation until %s",
 	async (action) => {
 		const origin = new Producer();
-		const instance = Instance.random();
+		const identity = Identity.random();
 		const prefix = Path.from("room");
-		const a = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 1n });
-		const b = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 5n });
+		const a = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: 1n });
+		const b = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: 5n });
 		const ar = a.requested();
 		const br = b.requested();
 		const held = origin.request(path);
 		const source = new Broadcast();
 		(await ar.next()).value.serve(source);
 		await settle();
-		// Another instance wins new requests. The old handle stays on its own instance.
-		const c = origin.claim(prefix, { instance: { id: Instance.random(), epoch: 0n }, cost: 0n });
+		// Another identity wins new requests. The old handle stays on its own identity.
+		const c = origin.claim(prefix, { identity: { id: Identity.random(), epoch: 0n }, cost: 0n });
 		a.close();
 		await settle();
 		const pending = (await br.next()).value;
 		if (!pending) throw new Error("expected failover request");
-		// Remove the winning instance so a wire waiter also chooses b.
+		// Remove the winning identity so a wire waiter also chooses b.
 		c.close();
 		const hold = new AbortController();
 		const wait = wireOf(origin.consume())
-			.demand(path, instance, hold.signal)
+			.demand(path, identity, hold.signal)
 			.catch(() => {});
 		hold.abort();
 		await wait;
@@ -397,18 +439,18 @@ test.each(["answer", "release"] as const)(
 );
 
 test.each([0, 1])(
-	"failover cleanup excludes released slot %s without withdrawing another instance",
+	"failover cleanup excludes released slot %s without withdrawing another identity",
 	async (released) => {
 		const origin = new Producer();
 		const prefix = Path.from("room");
 		const entries = [];
 		const sources: Broadcast[] = [];
 		for (let i = 0; i < 2; i++) {
-			// Each instance undercuts the last, so it wins the path for the request made now.
-			const instance = Instance.parse(`instance-${i + 1}`);
+			// Each identity undercuts the last, so it wins the path for the request made now.
+			const identity = Identity.parse(`identity-${i + 1}`);
 			const cost = BigInt(4 - 2 * i);
-			const primary = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost });
-			const standby = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: cost + 1n });
+			const primary = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost });
+			const standby = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: cost + 1n });
 			const ar = primary.requested();
 			const br = standby.requested();
 			const held = origin.request(path);
@@ -418,12 +460,12 @@ test.each([0, 1])(
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
-		origin.claim(prefix, { instance: { id: Instance.parse("instance-3"), epoch: 0n }, cost: 0n });
+		origin.claim(prefix, { identity: { id: Identity.parse("identity-3"), epoch: 0n }, cost: 0n });
 		const pending = [];
 		for (const entry of entries) {
 			entry.primary.close();
 			const request = (await entry.br.next()).value;
-			if (!request) throw new Error("expected same-instance failover");
+			if (!request) throw new Error("expected same-identity failover");
 			pending.push(request);
 		}
 		const hold = new AbortController();
@@ -592,7 +634,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 		expect(close).toHaveBeenCalledTimes(rejoin ? 0 : 1);
 		if (replacement) {
 			await settle();
-			expect(replacement.active.peek()?.instance).toBe(dynamic.instance);
+			expect(replacement.active.peek()?.identity).toBe(dynamic.identity);
 		} else {
 			const fresh = origin.request(path);
 			const next = (await requests.next()).value;
@@ -600,7 +642,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 			if (!next) throw new Error("expected fresh request");
 			next.serve(source);
 			await settle();
-			expect(fresh.active.peek()?.instance).toBe(dynamic.instance);
+			expect(fresh.active.peek()?.identity).toBe(dynamic.identity);
 			fresh.close();
 		}
 	} finally {
@@ -639,24 +681,24 @@ test("queued cancellation preserves order, replacement identity, and empty-queue
 	}
 });
 
-test("reset clears queued work while a handler is suspended and admits the new instance", async () => {
+test("reset clears queued work while a handler is suspended and admits the new identity", async () => {
 	const origin = new Producer();
-	const instance = Instance.random();
-	const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
+	const identity = Identity.random();
+	const dynamic = origin.claim(Path.from("room"), { identity: { id: identity, epoch: 0n } });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
-	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, instance).catch(() => {}));
+	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, identity).catch(() => {}));
 	try {
 		const old = (await requests.next()).value;
 		expect(old?.path).toBe(path);
-		const next = Instance.random();
-		wireOf(dynamic).update({ instance: next });
+		const next = Identity.random();
+		wireOf(dynamic).update({ identity: next });
 		waits.push(wire.demand(path, next).catch(() => {}));
 		const fresh = (await requests.next()).value;
 		expect(fresh?.path).toBe(path);
 		expect(fresh).not.toBe(old);
 		old?.reject(new Error("obsolete"));
-		fresh?.reject(new Error("new instance refused"));
+		fresh?.reject(new Error("new identity refused"));
 	} finally {
 		origin.close();
 		await Promise.all(waits);

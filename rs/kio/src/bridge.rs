@@ -226,6 +226,31 @@ mod tests {
 		assert!(bridge.poll(&waiters[0], Handle::poll_ready).is_ready());
 	}
 
+	/// The handle's waker fires from outside the bridge, as its driver task does, and
+	/// wakes every parked waiter once.
+	#[test]
+	fn an_outside_wake_reaches_every_parked_waiter() {
+		let bridge = Bridge::new(Handle::default());
+		let counts: Vec<_> = (0..3).map(|_| Arc::new(Count::default())).collect();
+		let waiters: Vec<_> = counts
+			.iter()
+			.map(|count| Waiter::new(Waker::from(count.clone())))
+			.collect();
+		for waiter in &waiters {
+			assert!(bridge.poll(waiter, Handle::poll_ready).is_pending());
+		}
+
+		let stored = bridge.lock().waker.clone().expect("the poll stored a waker");
+		stored.wake_by_ref();
+		for count in &counts {
+			assert_eq!(count.0.load(Ordering::Relaxed), 1, "a parked waiter missed the wake");
+		}
+		stored.wake();
+		for count in &counts {
+			assert_eq!(count.0.load(Ordering::Relaxed), 1, "a drained waiter woke again");
+		}
+	}
+
 	#[test]
 	fn an_abandoned_waiter_leaves_nothing() {
 		let bridge = Bridge::new(Handle::default());
@@ -275,5 +300,12 @@ mod tests {
 		assert!(bridge.poll(&waiter, Handle::poll_ready).is_pending());
 		bridge.lock().fire();
 		assert_eq!(reenter.polled.load(Ordering::Relaxed), 2, "the deferred wake was lost");
+
+		// Woken from outside the bridge, which wakes after releasing its own lock.
+		bridge.lock().ready = false;
+		assert!(bridge.poll(&waiter, Handle::poll_ready).is_pending());
+		let stored = bridge.lock().waker.take().expect("the poll stored a waker");
+		stored.wake();
+		assert_eq!(reenter.polled.load(Ordering::Relaxed), 3, "the outside wake was lost");
 	}
 }

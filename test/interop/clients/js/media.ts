@@ -62,12 +62,14 @@ import { type Capabilities, capturePath, missing, probe, type Role } from "./src
 import {
 	ALT_AUDIO,
 	AUDIBLE_RMS,
+	audioPlays,
 	CHANGED_SAMPLE_RATE,
 	FAULTS,
 	KEYFRAME_INTERVAL_MS,
 	LONG_FRAMES,
 	type LongFrame,
 	leakedPlayerStarted,
+	type Resources,
 	reachesLive,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -129,11 +131,12 @@ const native = values.publisher === "native";
 const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
 const requestedPublisher = values["publisher-engine"] ?? "chromium";
 const requestedPlayer = values["player-engine"] ?? "chromium";
+const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"];
 const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES.filter((name) => requestedPlayer !== "firefox" || name !== "replacement")
+			: CASES
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,11 +164,6 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && values.cases === undefined && playerEngine === "firefox") {
-	console.error(
-		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
-	);
-}
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;
@@ -194,8 +192,9 @@ const REPLACEMENT_DELAY_MS = 50;
 
 /**
  * How long a following player may take to present a replacement or fallback once the new route is
- * ready or the old one withdrawn. Routing: the relay holds a route change for its update hold
- * (moq-net's `origin::DEFAULT_UPDATE_HOLD`; the JS origin holds none), and the announcement plus
+ * ready or the old one withdrawn. Routing: the relay holds a route change that arrived over a hop
+ * chain (lite-06 and older, or moq-transport) for its update hold (moq-net's
+ * `origin::DEFAULT_UPDATE_HOLD`; lite-07 and the JS origin hold none), and the announcement plus
  * the catalog and track subscriptions take five loopback round trips, each charged at QUIC's 1 ms
  * timer granularity. Presentation: a keyframe interval of codec cadence, one frame to decode, and
  * the player's delay. Observation: one page sample and one driver poll.
@@ -327,12 +326,21 @@ async function waitForLive(
 	assertion: string,
 	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
-	let since = Date.now();
+	const entered = Date.now();
+	let since = entered;
 	let started = !resumed;
 	const startup = since + timeoutMs;
+	// Watched from the catch-up window's start, so a failure can tell a starved host from a stuck page.
+	// `top` exits on its own after a window, so a throw from a check below leaves nothing running long.
+	let host = started ? watchHost(assertion) : undefined;
+	// When the player's latest sample arrived: a page whose main thread stopped stops sampling, and its
+	// last sample then reads as a player stuck behind live.
+	let sampled: { seq: number; at: number } | undefined;
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
+	// Samples carry the page's clock, so their trace lines count from the first one read.
+	let origin: number | undefined;
 	let moved = false;
 	// Live needs audio playing too, so a failure says whether audio or the picture held it back.
 	let audio = "unread";
@@ -342,26 +350,29 @@ async function waitForLive(
 		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
 			() => [],
 		);
+		if (state && state.seq !== sampled?.seq) sampled = { seq: state.seq, at: Date.now() };
 		if (fixture && state?.frameId !== undefined) {
+			origin ??= state.at;
+			const start = origin;
 			if (resumed) {
 				const skew = resumeSkew(state, frame);
 				if (skew !== undefined)
 					check(
 						Math.abs(skew) <= MAX_SKEW_STEPS * Pattern.STEP_MS,
 						"resume audio/video sync",
-						() => `${assertion}: offset ${skew}ms; ${traceLine(state, since)}`,
+						() => `${assertion}: offset ${skew}ms; ${traceLine(state, start)}`,
 					);
 			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
-			audio =
-				state.audioContext === "running" && !state.audioStalled
-					? "playing"
-					: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}`;
+			audio = audioPlays(state)
+				? "playing"
+				: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}${state.audioTimestamp ? "" : " with nothing anchored"}`;
 			moved = frame !== undefined && state.frameId !== frame;
 			if (moved && !started) {
 				started = true;
 				since = Date.now();
+				host = watchHost(assertion);
 			}
 			const live = reachesLive({
 				previous: frame,
@@ -370,17 +381,23 @@ async function waitForLive(
 				bound: LIVE_LAG_FRAMES,
 			});
 			frame = state.frameId;
-			if (live) return { first, lag, after: Date.now() - since };
+			if (live) {
+				host?.process.kill();
+				return { first, lag, after: Date.now() - since };
+			}
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throwPageErrors(publisherErrors);
 	throwPageErrors(playerErrors);
-	throw new Failure(
+	const failure = new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}; ` +
+			`the player's latest sample arrived ${sampled ? Date.now() - sampled.at : "?"}ms ago`,
 	);
+	await explainStalls(player, { start: entered, end: Date.now() }, assertion, host);
+	throw failure;
 }
 
 /**
@@ -388,17 +405,30 @@ async function waitForLive(
  *
  * A player shows its first frame as soon as it decodes, then holds that frame silent while it buffers
  * up to its sync delay, which rises past 400ms under load. A window opened on that held frame counts
- * the buffering as missing tone. Only the ring filling opens the window, never a tone, so silence
- * still fails {@link assertMedia} rather than this wait.
+ * the buffering as missing tone. A resume onto the fixture's on-demand audio first reads the epoch
+ * its encoder ended while unwatched, a declared silence rather than a stall, until the retained audio
+ * it encodes again arrives. Only the ring playing anchored audio opens the window, never a tone, so
+ * silence still fails {@link assertMedia} rather than this wait.
  */
 async function measurePlayback(player: Page, playerErrors: BrowserErrors, label: string): Promise<void> {
 	await waitForState(player, playerErrors, {
 		deadline: Date.now() + SETTLE_MS,
 		assertion: "playback starts",
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
-		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
+		predicate: audioPlays,
 	});
 	await (await observe(player, playerErrors, label)).grade();
+}
+
+/** Detach the player and wait until it releases every session, audio graph, and worker it `held`. */
+async function detach(player: Page, playerErrors: BrowserErrors, held: Resources): Promise<void> {
+	await command(player, "detach");
+	await waitForResources(player, playerErrors, {
+		deadline: Date.now() + SETTLE_MS,
+		assertion: "resource baseline",
+		description: `every session, audio graph, and worker to be released (held ${JSON.stringify(held)} while playing)`,
+		predicate: (r) => r.transports === 0 && r.sockets === 0 && r.audioContexts === 0 && r.workers === 0,
+	});
 }
 
 /**
@@ -410,8 +440,8 @@ async function observe(
 	playerErrors: BrowserErrors,
 	label: string,
 ): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
-	const host = watchHost(label);
 	const start = Date.now();
+	const host = watchHost(label);
 	const samples = await collect(player, playerErrors, WINDOW_MS);
 	const bounds = { start, end: Date.now() };
 	const grade = async (checks?: () => void) => {
@@ -445,16 +475,17 @@ const HOST_INTERVAL_S = 0.5;
  */
 function watchHost(
 	label: string,
-): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string>; started: number } | undefined {
 	if (process.platform !== "linux") return undefined;
 	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
 	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
 	try {
+		const started = Date.now();
 		const top = Bun.spawn(
 			["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)],
 			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
 		);
-		return { process: top, output: new Response(top.stdout).text() };
+		return { process: top, output: new Response(top.stdout).text(), started };
 	} catch (err) {
 		console.error(`  ${label}: host processes unavailable: ${err}`);
 		return undefined;
@@ -526,7 +557,10 @@ async function explainStalls(
 	if (!host) return;
 	host.process.kill();
 	const snapshots = (await host.output).split(/^top - /m).slice(1);
-	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s from the window's start`);
+	// `top` may start after the window does, as a resumed wait's does once playback moves, so its
+	// snapshots count from the same start as the frames above.
+	const offset = (host.started - start) / 1000;
+	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s`);
 	for (const [index, snapshot] of snapshots.entries()) {
 		const lines = snapshot.split("\n");
 		const idle = lines.find((line) => line.startsWith("%Cpu"))?.match(/([\d.]+) id/)?.[1];
@@ -536,7 +570,9 @@ async function explainStalls(
 			.map((line) => line.trim().split(/\s+/))
 			.filter((fields) => fields.length >= 12)
 			.map((fields) => `${processName(fields.slice(11).join(" "))} ${fields[8]}%`);
-		console.error(`    +${(index * HOST_INTERVAL_S).toFixed(1)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`);
+		console.error(
+			`    +${(offset + index * HOST_INTERVAL_S).toFixed(2)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`,
+		);
 	}
 }
 
@@ -854,7 +890,7 @@ type SubscriberProps = {
 	trace?: boolean;
 	/** The player's `delay` attribute, when not its adaptive default. */
 	delay?: string;
-	/** Pin the reader independently of the instance-aware publishers. */
+	/** Pin the reader independently of the identity-aware publishers. */
 	versions?: string;
 };
 
@@ -911,18 +947,23 @@ async function captureDenial(broadcast: string): Promise<void> {
 		() => `denied capture exposed media: ${JSON.stringify(denied)}`,
 	);
 
+	// A viewer reports "connecting" until its session could have seen an announcement, which says
+	// nothing about whether the broadcast is absent, so the window opens once it can tell.
+	await waitForState(viewer, viewerErrors, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture denial holds publication",
+		description: "the capture viewer's session to connect",
+		predicate: (state) => state.broadcastStatus !== "connecting",
+	});
 	const absent = await collect(viewer, viewerErrors, 1000);
+	const seen = absent.find(
+		(state) =>
+			state.broadcastActive || state.broadcastStatus !== "offline" || state.hasAudio || state.videoFrames > 0,
+	);
 	check(
-		absent.length > 0 &&
-			absent.every(
-				(state) =>
-					!state.broadcastActive &&
-					state.broadcastStatus === "offline" &&
-					!state.hasAudio &&
-					state.videoFrames === 0,
-			),
+		absent.length > 0 && seen === undefined,
 		"capture denial holds publication",
-		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(absent.at(-1))}`,
+		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(seen ?? absent.at(-1))}`,
 	);
 
 	await publisher.context().grantPermissions(["camera"]);
@@ -1070,11 +1111,11 @@ try {
 	if (!native) {
 		const interval = await player
 			.locator(SELECTORS.watch)
-			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.sync?.interval);
 		check(
 			interval === KEYFRAME_INTERVAL_MS,
 			"declared join interval",
-			() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+			() => `the catalog declares sync.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
 		);
 	}
 
@@ -1272,13 +1313,7 @@ try {
 				predicate: (r) => leakedPlayerStarted(busy.resources, r),
 			});
 		}
-		await command(player, "detach");
-		await waitForResources(player, playerErrors, {
-			deadline: Date.now() + SETTLE_MS,
-			assertion: "resource baseline",
-			description: `every session, audio graph, and worker to be released (held ${JSON.stringify(busy.resources)} while playing)`,
-			predicate: (r) => r.transports === 0 && r.sockets === 0 && r.audioContexts === 0 && r.workers === 0,
-		});
+		await detach(player, playerErrors, busy.resources);
 		console.error("  detach released every session, audio graph, and worker");
 
 		await command(player, "reattach");
@@ -1289,8 +1324,20 @@ try {
 	// These publishers overlap: neither a successful new picture nor fallback
 	// can be explained by the incumbent timing out or closing its session.
 	if (wants("replacement")) {
+		// The section runs three media pages of its own, so the lifecycle pair idles through it: a
+		// 4-vCPU runner decoding in software starved all five past the switch bound at once. The
+		// fixture's video encodes with or without a subscriber, so detaching the player is not enough.
+		const busy = await readPlayerState(player);
+		await detach(player, playerErrors, busy.resources);
+		await command(publisher, "disableVideo");
+		await waitForFixture(publisher, publisherErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "lifecycle fixture idles",
+			description: "the lifecycle fixture to stop encoding video for the replacement section",
+			predicate: (state) => !state.videoActive,
+		});
 		const sourceBrowser = await browserFor("publisher");
-		for (const version of ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"]) {
+		for (const version of replacementVersions) {
 			console.error(`=== live replacement and fallback: ${version} ===`);
 			const name = `replacement-${version}-${process.pid}.hang`;
 			const [old, oldErrors] = await open(
@@ -1325,9 +1372,9 @@ try {
 					description: "the incumbent's marked pixels",
 					predicate: (s) => s.generation === 0 && !s.audioStalled,
 				});
-				// Every route carries an instance: lite-07 names the publisher's, and an older wire's
+				// Every route carries an identity: lite-07 names the publisher's, and an older wire's
 				// session mints one for the announcement.
-				check(first.broadcastInstance !== undefined, "the route carries an instance", () =>
+				check(first.broadcastIdentity !== undefined, "the route carries an identity", () =>
 					JSON.stringify(first),
 				);
 				const before = await readFixtureState(old);
@@ -1358,7 +1405,7 @@ try {
 					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
 				});
 				const replacementMs = Date.now() - ready;
-				check(switched.broadcastInstance !== first.broadcastInstance, "replacement has a fresh instance", () =>
+				check(switched.broadcastIdentity !== first.broadcastIdentity, "replacement has a fresh identity", () =>
 					JSON.stringify(switched),
 				);
 				const during = await collect(watch, watchErrors, WINDOW_MS);
@@ -1379,15 +1426,15 @@ try {
 					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
 				});
 				const fallbackMs = Date.now() - withdrawn;
-				// Only lite-07 carries the incumbent's instance back; an older wire's session mints a
+				// Only lite-07 carries the incumbent's identity back; an older wire's session mints a
 				// fresh one for the incumbent's new announcement.
 				if (version === "moq-lite-07-wip")
-					check(back.broadcastInstance === first.broadcastInstance, "fallback keeps incumbent instance", () =>
+					check(back.broadcastIdentity === first.broadcastIdentity, "fallback keeps incumbent identity", () =>
 						JSON.stringify(back),
 					);
 				else
 					check(
-						back.broadcastInstance !== switched.broadcastInstance,
+						back.broadcastIdentity !== switched.broadcastIdentity,
 						"fallback leaves the replacement",
 						() => JSON.stringify(back),
 					);
@@ -1401,6 +1448,9 @@ try {
 				await old.context().close();
 			}
 		}
+		await command(publisher, "enableVideo");
+		await command(player, "reattach");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "lifecycle player returns", true);
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────

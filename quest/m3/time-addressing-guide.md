@@ -19,8 +19,12 @@ pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 Moved to m1 2026-11-12 (maintainer, /quest-audit): a docs page breaks nothing, so the cut does not wait on it.
 
 Decided 2026-10-25 (maintainer): a separate page, not only inline doc
-updates. Write it against the design [the model](/quest/m2/time-addressing/model.md)
-and [lite-07](/quest/m2/time-addressing/lite07.md) quests record, including
+updates. Write it against the finalized lite-07 design (incorporating
+[lite-07 subscribe redesign](/quest/m2/lite07-subscribe/README.md):
+`GROUP_END` and `SUBSCRIBE_DROP(SKIP)` gap accounting, `FETCH` removal in
+favor of bounded `SUBSCRIBE` with `Anchor::Position`, and per-range priority
+and order, on top of [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md)
+and [lite-07](https://github.com/moq-dev/moq/pull/8908)), including
 that a released relay fills a hole with one FETCH per ID, so a mixed-version
 deployment upgrades its relays together. Link it from
 `doc/concept/moq-lite.md` and from the identity and recovery guide
@@ -28,4 +32,4 @@ deployment upgrades its relays together. Link it from
 
 ## Required
 
-- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - the wire this page describes
+- [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - lite-07 subscription and time-addressing semantics freeze before the guide is written

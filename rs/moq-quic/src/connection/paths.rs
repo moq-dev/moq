@@ -8,7 +8,6 @@ use super::{
 };
 use crate::{Duration, Instant, TIMER_GRANULARITY, congestion, packet::SpaceId, transport};
 
-#[cfg(feature = "qlog")]
 use qlog::events::{ExData, quic::RecoveryMetricsUpdated};
 
 /// An unanswered PATH_CHALLENGE
@@ -18,11 +17,18 @@ pub(super) struct Challenge {
 	/// A packet of its own is still due for it; after that, it only rides along with the path's
 	/// other frames
 	pub(super) pending: bool,
+	/// A datagram carrying it was shorter than `min_mtu`, so its response validates the address
+	/// but not the path's MTU
+	pub(super) short: bool,
 }
 
 impl Challenge {
 	pub(super) fn new(token: u64) -> Self {
-		Self { token, pending: true }
+		Self {
+			token,
+			pending: true,
+			short: false,
+		}
 	}
 }
 
@@ -59,7 +65,6 @@ pub(super) struct PathData {
 	first_packet: Option<u64>,
 
 	/// Snapshot of the qlog recovery metrics
-	#[cfg(feature = "qlog")]
 	recovery_metrics: RecoveryMetrics,
 
 	/// Tag uniquely identifying a path in a connection
@@ -110,7 +115,6 @@ impl PathData {
 			first_packet_after_rtt_sample: None,
 			in_flight: InFlight::new(),
 			first_packet: None,
-			#[cfg(feature = "qlog")]
 			recovery_metrics: RecoveryMetrics::default(),
 			generation,
 		}
@@ -126,11 +130,10 @@ impl PathData {
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
-			mtud: prev.mtud.clone(),
+			mtud: prev.mtud.fork(),
 			first_packet_after_rtt_sample: prev.first_packet_after_rtt_sample,
 			in_flight: InFlight::new(),
 			first_packet: None,
-			#[cfg(feature = "qlog")]
 			recovery_metrics: prev.recovery_metrics.clone(),
 			generation,
 		}
@@ -149,7 +152,13 @@ impl PathData {
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't
 	/// received enough data from the peer to permit sending `bytes_to_send` additional bytes
 	pub(super) fn anti_amplification_blocked(&self, bytes_to_send: u64) -> bool {
-		!self.validated && self.total_recvd * 3 < self.total_sent + bytes_to_send
+		self.anti_amplification_budget()
+			.is_some_and(|budget| budget < bytes_to_send)
+	}
+
+	/// What the anti-amplification limit still lets this path send, or `None` once it is validated
+	pub(super) fn anti_amplification_budget(&self) -> Option<u64> {
+		(!self.validated).then(|| (self.total_recvd * 3).saturating_sub(self.total_sent))
 	}
 
 	/// Returns the path's current MTU
@@ -178,7 +187,6 @@ impl PathData {
 		true
 	}
 
-	#[cfg(feature = "qlog")]
 	pub(super) fn qlog_recovery_metrics(&mut self, pto_count: u32) -> Option<RecoveryMetricsUpdated> {
 		let controller_metrics = self.congestion.metrics();
 
@@ -210,7 +218,6 @@ impl PathData {
 /// Congestion metrics as described in [`recovery_metrics_updated`].
 ///
 /// [`recovery_metrics_updated`]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-quic-events.html#name-recovery_metrics_updated
-#[cfg(feature = "qlog")]
 #[derive(Default, Clone, PartialEq)]
 #[non_exhaustive]
 struct RecoveryMetrics {
@@ -226,7 +233,6 @@ struct RecoveryMetrics {
 	pub pacing_rate: Option<u64>,
 }
 
-#[cfg(feature = "qlog")]
 impl RecoveryMetrics {
 	/// Retain only values that have been updated since the last snapshot.
 	fn retain_updated(&self, previous: &Self) -> Self {
@@ -352,13 +358,20 @@ pub(crate) struct PathResponses {
 }
 
 impl PathResponses {
-	pub(crate) fn push(&mut self, packet: u64, token: u64, remote: SocketAddr) {
+	/// Queue the answer to a PATH_CHALLENGE received from `remote` while the current path is to
+	/// `path`
+	///
+	/// RFC 9000 section 8.2.2 answers every challenge, and a peer validating a path may send
+	/// several before we transmit, so each one on the current path is queued. Off it, each answer
+	/// is padded to a full datagram toward an address not yet shown to receive, so only the newest
+	/// per address is kept and a burst of challenges cannot multiply what goes back.
+	pub(crate) fn push(&mut self, packet: u64, token: u64, remote: SocketAddr, path: SocketAddr) {
 		/// Arbitrary permissive limit to prevent abuse
 		const MAX_PATH_RESPONSES: usize = 16;
 		let response = PathResponse { packet, token, remote };
-		let existing = self.pending.iter_mut().find(|x| x.remote == remote);
-		if let Some(existing) = existing {
-			// Update a queued response
+		if remote != path
+			&& let Some(existing) = self.pending.iter_mut().find(|x| x.remote == remote)
+		{
 			if existing.packet <= packet {
 				*existing = response;
 			}
@@ -373,26 +386,27 @@ impl PathResponses {
 		}
 	}
 
+	/// Take the newest queued answer to a challenge from the first address other than `remote`,
+	/// dropping that address's other answers
+	///
+	/// Challenges queued while that address was the current path were all kept, so a migration
+	/// before we transmit would otherwise send each as its own padded datagram.
 	pub(crate) fn pop_off_path(&mut self, remote: SocketAddr) -> Option<(u64, SocketAddr)> {
-		let response = *self.pending.last()?;
-		if response.remote == remote {
-			// We don't bother searching further because we expect that the on-path response will
-			// get drained in the immediate future by a call to `pop_on_path`
-			return None;
-		}
-		self.pending.pop();
-		Some((response.token, response.remote))
+		let off = self.pending.iter().find(|x| x.remote != remote)?.remote;
+		let newest = self
+			.pending
+			.iter()
+			.filter(|x| x.remote == off)
+			.max_by_key(|x| x.packet)?
+			.token;
+		self.pending.retain(|x| x.remote != off);
+		Some((newest, off))
 	}
 
+	/// Take the oldest queued answer to a challenge from `remote`
 	pub(crate) fn pop_on_path(&mut self, remote: SocketAddr) -> Option<u64> {
-		let response = *self.pending.last()?;
-		if response.remote != remote {
-			// We don't bother searching further because we expect that the off-path response will
-			// get drained in the immediate future by a call to `pop_off_path`
-			return None;
-		}
-		self.pending.pop();
-		Some(response.token)
+		let index = self.pending.iter().position(|x| x.remote == remote)?;
+		Some(self.pending.remove(index).token)
 	}
 
 	pub(crate) fn is_empty(&self) -> bool {
@@ -442,5 +456,78 @@ impl InFlight {
 	fn remove(&mut self, packet: &SentPacket) {
 		self.bytes -= u64::from(packet.size);
 		self.ack_eliciting -= u64::from(packet.ack_eliciting);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const PATH: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 443);
+	const OTHER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4433);
+
+	/// Two challenges on the current path before we transmit, as ngtcp2 sends when validating a
+	/// rebound client, are both answered, oldest first.
+	#[test]
+	fn answers_every_challenge_on_the_path() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, PATH, PATH);
+		assert_eq!(responses.pop_off_path(PATH), None);
+		assert_eq!(responses.pop_on_path(PATH), Some(0xa));
+		assert_eq!(responses.pop_on_path(PATH), Some(0xb));
+		assert!(responses.is_empty());
+	}
+
+	/// Off the path, only the newest challenge per address is answered, however they arrive.
+	#[test]
+	fn answers_the_newest_challenge_off_the_path() {
+		let mut responses = PathResponses::default();
+		responses.push(2, 0xb, OTHER, PATH);
+		responses.push(1, 0xa, OTHER, PATH);
+		responses.push(3, 0xc, OTHER, PATH);
+		assert_eq!(responses.pop_on_path(PATH), None);
+		assert_eq!(responses.pop_off_path(PATH), Some((0xc, OTHER)));
+		assert!(responses.is_empty());
+	}
+
+	/// Challenges queued on a path that is no longer current go out as one answer, the newest.
+	#[test]
+	fn answers_once_after_migrating() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, PATH, PATH);
+		responses.push(3, 0xc, OTHER, OTHER);
+		assert_eq!(responses.pop_off_path(OTHER), Some((0xb, PATH)));
+		assert_eq!(responses.pop_off_path(OTHER), None);
+		assert_eq!(responses.pop_on_path(OTHER), Some(0xc));
+		assert!(responses.is_empty());
+	}
+
+	/// Each kind drains whatever the other left queued ahead of it.
+	#[test]
+	fn drains_both_kinds_in_any_order() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, OTHER, PATH);
+		responses.push(3, 0xc, PATH, PATH);
+		assert_eq!(responses.pop_on_path(PATH), Some(0xa));
+		assert_eq!(responses.pop_on_path(PATH), Some(0xc));
+		assert_eq!(responses.pop_off_path(PATH), Some((0xb, OTHER)));
+		assert!(responses.is_empty());
+	}
+
+	/// A flood of challenges queues no more than the bound.
+	#[test]
+	fn bounds_the_queue() {
+		let mut responses = PathResponses::default();
+		for n in 0..100 {
+			responses.push(n, n, PATH, PATH);
+		}
+		let mut answered = 0;
+		while responses.pop_on_path(PATH).is_some() {
+			answered += 1;
+		}
+		assert_eq!(answered, 16);
 	}
 }

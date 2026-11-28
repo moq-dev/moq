@@ -3,10 +3,9 @@
 Drive simulated trucks from a browser over MoQ. Trucks share one
 [CARLA](https://carla.org) world and drive themselves until someone takes
 control. Each truck publishes its cameras and a status track; a web player
-watches them on a map, and a driver steers one by dialing the truck's
-[socket](../../doc/concept/socket.md) endpoint: its controls and the truck's
-acknowledgements travel on a session only the two of them read, while what
-every viewer shows stays on `status`.
+watches them on a map, and a driver steers one by publishing a **control**
+track back. The truck follows every driver's broadcast and echoes what it
+accepted on `status`, which every viewer reads.
 
 ```text
 ├── web/      # the player: the <moq-carla> element, with map, video, keyboard and steering-wheel input (@moq/demo-carla)
@@ -45,7 +44,7 @@ The player alone runs against any relay with `just carla web <url>`. Append
 `?preview` to the local URL for a fixture-driven layout review that opens no
 connection; it is removed from production builds.
 
-## Broadcasts and sessions
+## Broadcasts
 
 ```text
 carla/{truck}/{camera}.hang       <- one media broadcast per camera (hang catalog)
@@ -53,21 +52,16 @@ carla/{truck}/{camera}.hang       <- one media broadcast per camera (hang catalo
   hd                                 720p H.264, for the focused view
   status                             JSON Snapshot telemetry
 
-carla/.server/{truck}             <- the truck's server socket endpoint, which drivers dial
-carla/.client/{id}                <- one client endpoint per driver lease
+viewer/carla/{truck}/{driverId}   <- one broadcast per driver lease
+  control                            one JSON command per group
 ```
 
-Each truck accepts `track` sessions on its server endpoint. A driver dials from
-a client endpoint of its own, one session per lease, and sends one control per message;
-the truck answers each control it accepted from the lease holder on the same
-session. Cameras are sibling broadcasts, so switching views never creates a
-second claim on the same wheel.
+The worker follows the announcements under `viewer/carla/{truck}/` for each
+truck and fans every driver's `control` track into that truck's gate. Cameras
+are sibling broadcasts, so switching views never creates a second claim on the
+same wheel, and the driver scope is disjoint from every media path.
 
-Sockets need moq-lite-07 or moq-transport on every hop, so the worker and the
-player offer only `moq-lite-07-wip` and `moq-transport-22`; a relay must
-accept one of them.
-
-### Control (player to truck, on the driver's session)
+### Control (player to truck)
 
 ```json
 { "type": "drive", "sequence": 42, "steering": -1.0..1.0,
@@ -78,27 +72,18 @@ accept one of them.
 { "type": "respawn", "sequence": 45, "timestamps": [...] }
 ```
 
-The truck reads them oldest first, skipping one that falls a heartbeat (250 ms)
-behind the newest, so a late control never holds up a newer one, while a burst,
-such as a reset right before a drive, still arrives whole.
-
-### Acknowledgement (truck to player, on the driver's session)
-
-```json
-{ "sequence": 44, "media_pipeline": [ { "label": "received→decoded", "ms": 12 } ] }
-```
-
-Sent for each `drive`, `estop`, and `reset_estop` the truck accepted from the
-lease holder, so the player measures its round trip and its own media pipeline.
-A bystander's e-stop, a command the gate refused, or an accepted `respawn`
-(confirmed from `status` instead) gets none.
+Each command is a group of its own, and a superseded one stays fresh for a
+heartbeat (250 ms, the track's max age). The truck reads them oldest first with
+the same delay budget, so a late control never holds up a newer one, while a
+burst, such as a reset right before a drive, still arrives whole.
 
 ### Status (truck to every viewer)
 
 ```json
 { "accepted": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
   "autonomy": "autonomous|manual", "estopped": true,
-  "driver": "driver-3eb1bd43", "estop_by": "driver-9c0a7f12",
+  "driver": "3eb1bd43c0a7", "estop_by": "safety-9c0a7f12e4d1", "sequence": 44,
+  "media_pipeline": { "3eb1bd43c0a7": [ { "label": "received→decoded", "ms": 12 } ] },
   "map": "Town10HD_Opt",
   "pose": { "x": 12.35, "y": -78.9, "yaw": 180.1, "speed": 9.88 },
   "measured": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
@@ -110,6 +95,11 @@ Status republishes every 100 ms whether or not anyone is driving, since an
 autonomous truck changes no accepted state as it moves. `pose` is in CARLA
 world metres (x east, y south, yaw clockwise from +x), which is what the
 player's baked road maps use.
+
+`sequence` and `media_pipeline` acknowledge the lease holder: the newest
+`drive`, `estop`, or `reset_estop` the truck accepted from it, which the player
+times its round trip by, and the media pipeline stages it reported. A
+bystander's e-stop or a refused command changes neither.
 
 `accepted` is the gate repeating what it let through. `measured`, `motion`, and
 `collision` come from the vehicle itself, so the player can draw requested
@@ -124,15 +114,17 @@ collision.
 The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 
 - **One driver at a time.** The first driver to send a command holds the
-  lease until its session ends or its 1 s watchdog expires; the player
-  heartbeats every 250 ms. The lease is bound to the driver's session, so a
-  driver that redials, even from the same endpoint id, is a new claimant
-  rather than a continuation.
+  lease until its broadcast ends or its 1 s watchdog expires; the player
+  heartbeats every 250 ms, and lets go once `status` stops naming it. The
+  lease is bound to the driver's path and the publisher identity serving it,
+  so a driver that republishes at the same path is a new claimant rather than
+  a continuation.
 - **E-stop latches** until an explicit reset, from any viewer. The lease
-  holder sends it on its session; any other viewer dials a short-lived session
-  of its own, so a bystander's stop neither takes the lease nor waits behind
-  the holder's controls. A latched truck is also cleared when it respawns as
-  stopped, below.
+  holder sends it on its control track; any other viewer publishes a
+  short-lived `safety-{id}` broadcast of its own until `status` echoes it, so
+  a bystander's stop neither takes the lease nor waits behind the holder's
+  controls. A latched truck is also cleared when it respawns as stopped,
+  below.
 - **Gear changes are interlocked**: the gate keeps the current gear unless the
   command releases throttle and applies some brake.
 - **Takeover starts braking**: the player keeps measured steering and gear,
@@ -148,20 +140,15 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **A stopped truck respawns**: any truck that has not moved 2 m in 2 minutes
   of a running world, whether autonomous, e-stopped, or parked under a driver,
   returns to a free spawn point under autonomy, its e-stop cleared. The worker
-  ends the holder's driving session, so the player lets go instead of
+  ignores the rest of the holder's run, so the player lets go instead of
   reclaiming the fresh spawn.
 
-The lease is cooperative. Anonymous drivers share one grant to publish
-`carla/.client/*`, so an endpoint id is all it takes to announce in a driver's
-place and win the relay's route to its next session. Each driver's id is
-therefore 128 random bits, and `status` names the holder and the e-stop's
-sender by a handle instead: `driver-` and 8 hex digits of the SHA-256 of the
-session's secret id, which the driver derives the same way to recognize its
-own lease. The grant covers only client endpoints, so no driver can announce a
-truck's server endpoint, whatever its name. Anyone may still claim a free truck
-or press its e-stop, so the lease stops two honest drivers fighting over a
-truck, not a deliberate disruption. Anything beyond a simulator needs
-per-driver tokens scoped to the driver's own endpoint.
+The lease is cooperative. Anonymous drivers share one grant to publish under
+`viewer/**`, and `status` names the holder, so anyone can announce at the
+holder's path under another identity, which ends the holder's run and frees
+the lease. It stops two honest drivers fighting over a truck, not a deliberate
+takeover. Anything beyond a simulator needs per-driver tokens scoped to the
+driver's own path.
 
 ## The simulator
 
@@ -223,10 +210,9 @@ checkout.
 just carla venv
 just carla service-install
 
-# The units read this. MOQ_URL carries a token allowed to publish `carla/**`,
-# which covers the trucks' server endpoints, and subscribe `carla/.client/**`,
-# the endpoints drivers dial from; keeping it here keeps it off the command
-# line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
+# The units read this. MOQ_URL carries a token allowed to publish `carla`
+# and subscribe `viewer/carla`, where drivers publish; keeping it here keeps
+# it off the command line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
 # refuses a stock simulator.
 cat >~/.config/moq/carla.env <<'EOF'
 MOQ_URL=https://cdn.moq.dev/demo?jwt=...

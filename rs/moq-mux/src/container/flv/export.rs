@@ -16,7 +16,10 @@
 //! the stream yields are muxed and the rest are ignored. Each pick follows the
 //! catalog until the stream header goes out, then stays, following that rendition to another
 //! track when the catalog moves it (under a new sequence-header tag when its codec config
-//! record changes; a move back in time fails the export). With
+//! record changes; a move back in time fails the export). A pick whose track fails ends alone
+//! while another track still reads, and continues on the best rendition of its kind and codec
+//! that the catalog lists and no track reads, as a publisher that loses a microphone lists the
+//! reopened one under a new name. With
 //! [`with_multitrack`](Export::with_multitrack) every rendition the stream yields
 //! is muxed instead, each as an enhanced-RTMP multitrack track addressed by its own
 //! track id (use this only for a player that advertised the `Multitrack` capability).
@@ -37,6 +40,7 @@ use crate::catalog::Stream;
 use crate::container::consumer::Event;
 use crate::container::declared::DeclaredClock;
 use crate::container::{ExportSource, Frame};
+use moq_net::stats::Bill;
 
 /// Before the header, unbind every track the catalog no longer lists (removed, or disabled) or
 /// moved to another track, so the header declares only what the snapshot offers. A single-track
@@ -133,9 +137,9 @@ impl Flavor {
 /// tag for one media frame. Returns `None` when the broadcast ends. Narrow the
 /// renditions first with [`Stream::select`](crate::catalog::Stream::select).
 ///
-/// ## Avc3 sources
+/// ## Annex-B sources
 ///
-/// Annex-B H.264 (`H264 { inline: true }`, empty `description`) is accepted: an
+/// Annex-B H.264 (an empty `description`, whatever the codec string) is accepted: an
 /// [`Avc1`](crate::codec::h264::Avc1) transform caches the inline SPS/PPS, builds
 /// the avcC for the sequence-header tag, and length-prefixes each sample. The
 /// header is deferred until that codec config is available (typically the first
@@ -144,7 +148,7 @@ impl Flavor {
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	/// Frames as tags, encoded only once released.
 	jitter: crate::jitter::Buffer<(u8, usize), Tag>,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
@@ -156,6 +160,11 @@ pub struct Export<S: Stream> {
 
 	/// True once the file header and sequence headers have been emitted.
 	header_emitted: bool,
+	/// The latest catalog, where a track that failed after the header finds a rendition to
+	/// continue on.
+	listed: Catalog,
+	/// Renditions a track left after theirs failed, never picked again while still listed.
+	replaced: std::collections::HashSet<String>,
 	/// Milliseconds added to every tag's timestamps, so the decode times a declared reorder
 	/// depth puts before a group's earliest presentation still fit FLV's unsigned clock.
 	shift: u32,
@@ -171,7 +180,13 @@ struct Tag {
 	/// The codec config record the frame was read under, which a sequence-header tag must
 	/// have announced before it.
 	record: Option<Bytes>,
+	/// Counts its payload once it goes out.
+	bill: Bill,
 }
+
+/// A frame read, with the config record it was read under and the bill of
+/// the source it was read from.
+type Held = (crate::jitter::Arrival<Frame>, Option<Bytes>, Bill);
 
 /// A subscribed rendition feeding the muxer.
 struct FlvTrack {
@@ -180,10 +195,11 @@ struct FlvTrack {
 	/// used when muxing multitrack; a single-track FLV stream carries no id.
 	track_id: u8,
 	source: ExportSource,
-	pending: Option<crate::jitter::Arrival<Frame>>,
+	/// A frame read before the header went out, with the bill of the source it was read from.
+	pending: Option<(crate::jitter::Arrival<Frame>, Bill)>,
 	/// When the source was last empty, bounding the next frame's arrival.
 	empty: kio::clock::Instant,
-	finished: bool,
+	read: Read,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
 	flavor: Flavor,
@@ -194,8 +210,8 @@ struct FlvTrack {
 	/// The video rendition's catalog entry as last listed.
 	config: Option<hang::catalog::VideoConfig>,
 	/// The current group's clock, when its rendition declared `reorder` at the group's start,
-	/// holding each frame with the config record it was read under.
-	declared: Option<DeclaredClock<(crate::jitter::Arrival<Frame>, Option<Bytes>)>>,
+	/// holding each frame with the config record it was read under and its source's bill.
+	declared: Option<DeclaredClock<Held>>,
 	/// How far to run the authored decode clock behind the PTS, in FLV milliseconds.
 	dts_reserve: u32,
 	/// Last authored video DTS, in FLV milliseconds.
@@ -204,12 +220,38 @@ struct FlvTrack {
 	announced: Option<Bytes>,
 }
 
+/// Whether a track still reads its source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+	Live,
+	/// The track ended, cleanly or as a sibling identity went.
+	Finished,
+	/// The track itself failed. Another rendition of its kind and codec may continue it.
+	Lost,
+	/// The track ended before its codec config, so the header left it out: nothing may continue
+	/// it, or the file would carry media its header never declared.
+	Omitted,
+}
+
 impl FlvTrack {
 	/// Read `source`, the track the catalog moved this rendition to.
 	fn rebind(&mut self, source: ExportSource) {
 		self.source = source.continuing(&self.source);
-		self.finished = false;
+		self.read = Read::Live;
 		self.empty = kio::clock::now();
+	}
+
+	/// Continue this failed track on rendition `name`, read from `source`, returning the
+	/// rendition it read before.
+	fn replace(&mut self, name: String, source: ExportSource) -> String {
+		tracing::info!(track = %name, replaces = %self.name, "continuing a failed rendition");
+		self.rebind(source);
+		std::mem::replace(&mut self.name, name)
+	}
+
+	/// Nothing more is read: the track ended or failed.
+	fn finished(&self) -> bool {
+		self.read != Read::Live
 	}
 
 	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
@@ -253,12 +295,16 @@ impl FlvTrack {
 			return Ok(());
 		};
 		let released = (|| {
-			while let Some(((mut arrival, record), dts)) = clock.pop(flush)? {
+			while let Some(((mut arrival, record, bill), dts, pts)) = clock.pop(flush)? {
+				// A tie the clock moved presents on the tick it moved to.
+				if arrival.item.timestamp.as_millis()? != u128::from(pts) {
+					arrival.item.timestamp = moq_net::Timestamp::from_millis(pts)?;
+				}
 				if let Some(settled) = settled {
 					arrival.arrived = arrival.arrived.max(settled);
 				}
 				let timestamp = u32::try_from(dts + i128::from(shift)).map_err(|_| Error::TimestampRange)?;
-				self.queue(key, arrival, record, timestamp, shift, jitter)?;
+				self.queue(key, (arrival, record, bill), timestamp, shift, jitter)?;
 			}
 			Ok::<_, crate::Error>(())
 		})();
@@ -266,12 +312,12 @@ impl FlvTrack {
 		released
 	}
 
-	/// Queue `arrival` as a tag decoding at `timestamp`, under the config `record` it was read with.
+	/// Queue `arrival` as a tag decoding at `timestamp`, under the config `record` it was read with,
+	/// counted on the `bill` of the source it was read from.
 	fn queue(
 		&mut self,
 		key: (u8, usize),
-		arrival: crate::jitter::Arrival<Frame>,
-		record: Option<Bytes>,
+		(arrival, record, bill): Held,
 		timestamp: u32,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
@@ -295,7 +341,7 @@ impl FlvTrack {
 			crate::jitter::Arrival {
 				arrived,
 				read,
-				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
+				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.try_into()?,
 				restart,
 				sync,
 				leading,
@@ -305,6 +351,7 @@ impl FlvTrack {
 					timestamp,
 					presentation,
 					record,
+					bill,
 				},
 			},
 		)?;
@@ -341,29 +388,33 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(source: crate::Source, catalog: S) -> Self {
+	pub fn new(mut source: crate::Source, catalog: S) -> Self {
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		Self {
 			source,
 			catalog: Some(catalog),
-			delay: moq_net::track::Delay::default(),
+			delay: crate::container::Delay::default(),
 			jitter: crate::jitter::Buffer::new(std::time::Duration::ZERO),
 			multitrack: false,
 			video: Vec::new(),
 			audio: Vec::new(),
 			header_emitted: false,
+			listed: Catalog::default(),
+			replaced: Default::default(),
 			shift: 0,
 		}
 	}
 
 	/// Set how far behind the live edge the export plays.
 	///
-	/// [`Delay::min`](moq_net::track::Delay::min) releases each frame that long after its decode
+	/// [`Delay::min`](crate::container::Delay::min) releases each frame that long after its decode
 	/// time, dropping frames that arrive later, and is where each per-track source starts. A source
 	/// whose clock runs further off ours than the output's may follow fails the export once it has
-	/// used half of it. [`Delay::max`](moq_net::track::Delay::max) is how late a source's group may
+	/// used half of it. [`Delay::max`](crate::container::Delay::max) is how late a source's group may
 	/// fall before it is skipped. Zero for both (the default) releases each frame as soon as it is
 	/// read and drops none as late, but a stalled group is still skipped once a newer one is ready.
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.delay = delay;
 		self.jitter = crate::jitter::Buffer::new(delay.min.unwrap_or_default());
 		self
@@ -407,7 +458,7 @@ impl<S: Stream> Export<S> {
 			}
 			// The catalog closed and nothing more can resolve a codec config (no
 			// tracks arrived, or every bound track ended first): there's no header.
-			if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(|t| t.finished)) {
+			if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(FlvTrack::finished)) {
 				return Poll::Ready(Ok(None));
 			}
 			return Poll::Pending;
@@ -422,7 +473,7 @@ impl<S: Stream> Export<S> {
 		}
 
 		// 5. End-of-stream once every subscribed track is drained.
-		if self.has_tracks() && self.tracks().all(|t| t.finished && t.pending.is_none()) {
+		if self.has_tracks() && self.tracks().all(|t| t.finished() && t.pending.is_none()) {
 			if self.catalog.is_none() {
 				return Poll::Ready(Ok(None));
 			}
@@ -461,6 +512,7 @@ impl<S: Stream> Export<S> {
 
 	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
+		let mut lost = Vec::new();
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
@@ -477,13 +529,21 @@ impl<S: Stream> Export<S> {
 					if !self.header_emitted && track.pending.is_some() {
 						break;
 					}
-					let arrival = if let Some(pending) = track.pending.take() {
+					let (arrival, bill) = if let Some(pending) = track.pending.take() {
 						pending
 					} else {
-						if track.finished {
+						if track.finished() {
 							break;
 						}
-						let frame = match track.source.poll_event(waiter)? {
+						let event = match track.source.poll_event(waiter) {
+							Poll::Ready(Err(err)) if track.source.lost() => {
+								track.read = Read::Lost;
+								lost.push((track.name.clone(), err));
+								break;
+							}
+							event => event?,
+						};
+						let frame = match event {
 							Poll::Ready(Some(Event::Frame { frame, .. })) => frame,
 							// A group that ended or was cut short holds frames no later one can precede.
 							Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
@@ -492,7 +552,7 @@ impl<S: Stream> Export<S> {
 							}
 							Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 							Poll::Ready(None) => {
-								track.finished = true;
+								track.read = Read::Finished;
 								break;
 							}
 							Poll::Pending => {
@@ -504,19 +564,20 @@ impl<S: Stream> Export<S> {
 						if !track.source.header_ready() {
 							continue;
 						}
-						crate::jitter::Arrival {
+						let arrival = crate::jitter::Arrival {
 							arrived: track.empty,
 							read: kio::clock::now(),
-							decode: frame.timestamp.into(),
+							decode: frame.timestamp.try_into()?,
 							restart: track.source.markers(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
 							bytes: frame.payload.len(),
 							item: frame,
-						}
+						};
+						(arrival, track.source.bill())
 					};
 					if !self.header_emitted {
-						track.pending = Some(arrival);
+						track.pending = Some((arrival, bill));
 						break;
 					}
 					let key = (kind, index);
@@ -527,14 +588,14 @@ impl<S: Stream> Export<S> {
 					match &mut track.declared {
 						Some(clock) => {
 							// Clocked in FLV's milliseconds, so the leading frames step a tag tick apart.
-							let pts = arrival.item.timestamp.as_millis() as u64;
+							let source = arrival.item.timestamp;
 							let arrived = arrival.arrived;
-							clock.push((arrival, record), pts)?;
+							clock.push((arrival, record, bill), source.as_millis()? as u64, source)?;
 							track.release(key, Some(arrived), self.shift, false, &mut self.jitter)?;
 						}
 						None => {
 							let timestamp = track.tag_timestamp(frame_timestamp_ms(&arrival.item, self.shift)?)?;
-							track.queue(key, arrival, record, timestamp, self.shift, &mut self.jitter)?;
+							track.queue(key, (arrival, record, bill), timestamp, self.shift, &mut self.jitter)?;
 						}
 					}
 				}
@@ -544,12 +605,115 @@ impl<S: Stream> Export<S> {
 					&mut self.audio[index]
 				};
 				// Nothing settles the frames held when a track ends, so they keep their own arrival.
-				if track.finished && self.header_emitted {
+				if track.finished() && self.header_emitted {
 					track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
 				}
 			}
 		}
+		let mut continued = false;
+		for (name, err) in lost {
+			continued |= self.survive(&name, err)?;
+		}
+		// A continued track's new source is read now, since nothing else would wake the export for it.
+		if continued {
+			return self.fill(waiter);
+		}
 		Ok(())
+	}
+
+	/// Whether the export outlives the failure of track `name`, which [`Self::fill`] ended.
+	///
+	/// A listed rendition of its kind and codec continues it at once. Otherwise, while another
+	/// track still reads, only that rendition ends: a publisher that loses a source, such as a
+	/// microphone, may list a replacement, which continues it then. With nothing left reading,
+	/// the failure is the export's, as before. Returns whether a track continued on another rendition.
+	fn survive(&mut self, name: &str, err: crate::Error) -> crate::Result<bool> {
+		let continued = self.replace_lost()?;
+		if self.tracks().all(FlvTrack::finished) {
+			return Err(err);
+		}
+		if self
+			.tracks()
+			.any(|track| track.name == name && track.read == Read::Lost)
+		{
+			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
+		}
+		Ok(continued)
+	}
+
+	/// Continue each track that failed after the header on a listed rendition no track reads,
+	/// of its kind and codec, best first: the header fixed the tag shape, so a rendition of
+	/// another codec cannot continue it. Returns whether a track continued, whose new source has
+	/// yet to be polled.
+	fn replace_lost(&mut self) -> crate::Result<bool> {
+		if !self.header_emitted {
+			return Ok(false);
+		}
+		let mut continued = false;
+		for index in 0..self.video.len() {
+			let track = &self.video[index];
+			if track.read != Read::Lost {
+				continue;
+			}
+			let Some((name, config)) = self
+				.listed
+				.video
+				.ranked()
+				.find(|(name, config)| {
+					video_flavor(config).ok() == Some(track.flavor) && self.unread(&self.video, name, &config.container)
+				})
+				.map(|(name, config)| (name.clone(), config.clone()))
+			else {
+				continue;
+			};
+			let Some(source) = ExportSource::for_video(&self.source, &name, &config, self.delay)? else {
+				continue;
+			};
+			let track = &mut self.video[index];
+			// The replacement's declared depth deepens the shift before its first DTS, as a depth
+			// declared after the header does ([`Self::update_catalog`]).
+			if track.flavor.has_composition_time() {
+				self.shift = self.shift.max(config.reorder.map_or(0, u32::from));
+			}
+			track.fallback_description = fallback_description(&config);
+			track.dts_reserve = dts_reserve(&config);
+			track.config = Some(config);
+			self.replaced.insert(track.replace(name, source));
+			continued = true;
+		}
+		for index in 0..self.audio.len() {
+			let track = &self.audio[index];
+			if track.read != Read::Lost {
+				continue;
+			}
+			let Some((name, config)) = self
+				.listed
+				.audio
+				.ranked()
+				.find(|(name, config)| {
+					audio_flavor(config).ok() == Some(track.flavor) && self.unread(&self.audio, name, &config.container)
+				})
+				.map(|(name, config)| (name.clone(), config.clone()))
+			else {
+				continue;
+			};
+			let Some(source) = ExportSource::for_audio(&self.source, &name, &config, self.delay)? else {
+				continue;
+			};
+			self.replaced.insert(self.audio[index].replace(name, source));
+			continued = true;
+		}
+		Ok(continued)
+	}
+
+	/// Whether rendition `name`, carried in `container`, is free to continue a failed track among
+	/// `tracks`: none reads it, and none left it after it failed.
+	fn unread(&self, tracks: &[FlvTrack], name: &str, container: &Container) -> bool {
+		matches!(
+			container,
+			Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+		) && !self.replaced.contains(name)
+			&& !tracks.iter().any(|track| track.name == name)
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> crate::Result<()> {
@@ -573,11 +737,15 @@ impl<S: Stream> Export<S> {
 				track.config = Some(config.clone());
 			}
 		}
+		self.replaced
+			.retain(|name| catalog.video.renditions.contains_key(name) || catalog.audio.renditions.contains_key(name));
+		self.listed = catalog.clone();
 		if !self.header_emitted {
 			self.bind_video(&catalog)?;
 			self.bind_audio(&catalog)?;
 		} else {
 			self.rebind(&catalog)?;
+			self.replace_lost()?;
 			if self.multitrack
 				&& (catalog.video.renditions.len() > self.video.len()
 					|| catalog.audio.renditions.len() > self.audio.len())
@@ -606,7 +774,7 @@ impl<S: Stream> Export<S> {
 			let Some(config) = catalog.video.renditions.get(&track.name) else {
 				continue;
 			};
-			if track.source.reads(&self.source, &track.name, config) {
+			if track.read == Read::Omitted || track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
 			if video_flavor(config)? != track.flavor {
@@ -623,7 +791,7 @@ impl<S: Stream> Export<S> {
 			let Some(config) = catalog.audio.renditions.get(&track.name) else {
 				continue;
 			};
-			if track.source.reads(&self.source, &track.name, config) {
+			if track.read == Read::Omitted || track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
 			if audio_flavor(config)? != track.flavor {
@@ -646,7 +814,11 @@ impl<S: Stream> Export<S> {
 			// rank order so a catalog with nothing FLV carries fails on its best one.
 			let mut ranked: Vec<_> = catalog.video.ranked().collect();
 			ranked.sort_by_key(|(_, config)| {
-				video_flavor(config).is_err() || !matches!(config.container, Container::Legacy | Container::Loc)
+				video_flavor(config).is_err()
+					|| !matches!(
+						config.container,
+						Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+					)
 			});
 			ranked
 		};
@@ -673,7 +845,7 @@ impl<S: Stream> Export<S> {
 				source,
 				pending: None,
 				empty: kio::clock::now(),
-				finished: false,
+				read: Read::Live,
 				flavor,
 				fallback_description,
 				config: Some(config.clone()),
@@ -695,7 +867,11 @@ impl<S: Stream> Export<S> {
 			// rank order so a catalog with nothing FLV carries fails on its best one.
 			let mut ranked: Vec<_> = catalog.audio.ranked().collect();
 			ranked.sort_by_key(|(_, config)| {
-				audio_flavor(config).is_err() || !matches!(config.container, Container::Legacy | Container::Loc)
+				audio_flavor(config).is_err()
+					|| !matches!(
+						config.container,
+						Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+					)
 			});
 			ranked
 		};
@@ -722,7 +898,7 @@ impl<S: Stream> Export<S> {
 				source,
 				pending: None,
 				empty: kio::clock::now(),
-				finished: false,
+				read: Read::Live,
 				flavor,
 				fallback_description: None,
 				config: None,
@@ -735,11 +911,12 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 
-	/// Header is ready once at least one track is bound and every bound track's
-	/// [`ExportSource`] has resolved its codec config (from the catalog
-	/// `description` or synthesized by the Avc3 transform).
+	/// Header is ready once a bound track and every bound track still reading has resolved its
+	/// codec config through its [`ExportSource`] (from the catalog `description` or synthesized by
+	/// the Avc3 transform).
 	fn header_ready(&self) -> bool {
-		self.has_tracks() && self.tracks().all(|t| t.source.header_ready())
+		// A track that ended before its codec config has no sequence header, and holds nothing back.
+		self.tracks().any(|t| t.source.header_ready()) && self.tracks().all(|t| t.finished() || t.source.header_ready())
 	}
 
 	/// Build the FLV file header plus every bound track's sequence-header tag.
@@ -749,11 +926,13 @@ impl<S: Stream> Export<S> {
 		// FLV file header: signature, version 1, type flags, data offset = 9.
 		out.put_slice(b"FLV");
 		out.put_u8(1);
+		// A track that ended before its codec config is left out: it has nothing to announce.
+		let declared = |track: &FlvTrack| !track.finished() || track.source.header_ready();
 		let mut flags = 0u8;
-		if !self.video.is_empty() {
+		if self.video.iter().any(declared) {
 			flags |= 0x01;
 		}
-		if !self.audio.is_empty() {
+		if self.audio.iter().any(declared) {
 			flags |= 0x04;
 		}
 		out.put_u8(flags);
@@ -761,14 +940,17 @@ impl<S: Stream> Export<S> {
 		// PreviousTagSize0 is always zero.
 		out.put_u32(0);
 
-		for track in self.video.iter().chain(&self.audio) {
+		for track in self.video.iter().chain(&self.audio).filter(|track| declared(track)) {
 			if let Some(config) = track.config_record()? {
 				let (tag_type, body) = self.sequence_header(track, &config);
 				write_tag(&mut out, tag_type, 0, &body)?;
 			}
 		}
 		for track in self.video.iter_mut().chain(&mut self.audio) {
-			track.announced = track.config_record()?;
+			match declared(track) {
+				true => track.announced = track.config_record()?,
+				false => track.read = Read::Omitted,
+			}
 		}
 		// A group decodes its first `reorder` frames a millisecond apart before its earliest
 		// presentation, so the deepest declaration bounds how far before zero a DTS can fall.
@@ -791,6 +973,7 @@ impl<S: Stream> Export<S> {
 			timestamp: timestamp_ms,
 			presentation: pts_ms,
 			record,
+			bill,
 		} = tag;
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		let track = match is_video {
@@ -883,6 +1066,8 @@ impl<S: Stream> Export<S> {
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body)?;
 		}
+		// Only once encoding can no longer fail, so a frame the export errors on counts nothing.
+		bill.deliver(frame.payload.len() as u64);
 		Ok(out.freeze())
 	}
 
@@ -954,7 +1139,7 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 
 fn ensure_legacy(container: &Container, kind: &'static str, name: &str) -> crate::Result<()> {
 	match container {
-		Container::Legacy | Container::Loc => Ok(()),
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => Err(Error::UnsupportedContainer {
 			kind,
 			name: name.to_string(),
@@ -1002,7 +1187,7 @@ fn audio_flavor(config: &hang::catalog::AudioConfig) -> crate::Result<Flavor> {
 
 /// The frame's presentation time on the tag clock, `shift` milliseconds past its own.
 fn frame_timestamp_ms(frame: &Frame, shift: u32) -> crate::Result<u32> {
-	u32::try_from(frame.timestamp.as_millis())
+	u32::try_from(frame.timestamp.as_millis()?)
 		.ok()
 		.and_then(|pts| pts.checked_add(shift))
 		.ok_or_else(|| Error::TimestampRange.into())

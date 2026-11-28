@@ -1,4 +1,4 @@
-//! RTSP import: pull an IP camera's session, reconnecting under a fresh instance per run.
+//! RTSP import: pull an IP camera's session, reconnecting under a fresh identity per run.
 
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ pub struct ImportArgs {
 
 /// Pull `url` into the Origin as `target.name` until a fatal error, reconnecting with backoff.
 ///
-/// Each run is its own broadcast under a fresh instance, with a fresh catalog starting on a
+/// Each run is its own broadcast under a fresh identity, with a fresh catalog starting on a
 /// keyframe: a new session's RTP time restarts, so it never splices onto the old one.
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let client = moq_rtsp::Client::new(url.clone())?;
@@ -46,8 +46,9 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 			Ok(moq_rtsp::End::Jumped) if published => continue,
 			Ok(moq_rtsp::End::Jumped) => tracing::warn!(%url, "RTSP timeline jumped before publishing"),
 			Ok(_) => tracing::info!(%url, "RTSP session ended"),
-			Err(err) if is_fatal(&err) => return Err(err),
-			Err(err) => tracing::warn!(%url, "RTSP session failed: {err:#}"),
+			Err(Failure::Session(err)) if retries(&err) => tracing::warn!(%url, "RTSP session failed: {err}"),
+			Err(Failure::Session(err)) => return Err(err.into()),
+			Err(Failure::Local(err)) => return Err(err),
 		}
 
 		tracing::info!(%url, ?backoff, "RTSP reconnecting");
@@ -56,24 +57,41 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	}
 }
 
-/// Retrying cannot fix these: refused access, nothing publishable, or a local failure (such as
-/// an invalid broadcast name) rather than one from the RTSP session.
-fn is_fatal(err: &anyhow::Error) -> bool {
+/// Why a run failed: its RTSP session, or something local such as an invalid broadcast name, which
+/// a redial cannot fix.
+enum Failure {
+	Session(moq_rtsp::Error),
+	Local(anyhow::Error),
+}
+
+impl std::fmt::Display for Failure {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Session(err) => write!(f, "{err}"),
+			Self::Local(err) => write!(f, "{err:#}"),
+		}
+	}
+}
+
+/// Whether redialing can fix a session failure: anything but refused access or nothing publishable.
+fn retries(err: &moq_rtsp::Error) -> bool {
 	!matches!(
-		err.downcast_ref::<moq_rtsp::Error>(),
-		Some(err) if !matches!(err, moq_rtsp::Error::Unauthorized(_) | moq_rtsp::Error::NoSupportedStream(_))
+		err,
+		moq_rtsp::Error::Unauthorized(_) | moq_rtsp::Error::NoSupportedStream(_)
 	)
 }
 
 /// Publish one session as one broadcast, announced once its catalog names a track, setting
 /// `published` then.
-async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
-	// Each run is a new route under a fresh instance, so a redial replaces the last run.
+async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> Result<moq_rtsp::End, Failure> {
+	// Each run is a new route under a fresh identity, so a redial replaces the last run.
 	let route = target
 		.origin
 		.route(&target.name, moq_net::origin::RouteOptions::hidden())
-		.context("failed to create broadcast")?;
-	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())?;
+		.context("failed to create broadcast")
+		.map_err(Failure::Local)?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())
+		.map_err(|err| Failure::Local(err.into()))?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the
 	// first keyframe to put them in the catalog.
@@ -84,27 +102,27 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 			return std::future::pending().await;
 		}
 		route.announce().context("failed to announce broadcast")?;
-		tracing::info!(name = %target.name, instance = %route.instance(), "publishing RTSP broadcast");
+		tracing::info!(name = %target.name, identity = %route.identity(), "publishing RTSP broadcast");
 		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
 
 	let end = tokio::select! {
-		end = client.pull(route.broadcast(), &catalog) => end.map_err(anyhow::Error::from),
-		err = announce => err,
+		end = client.pull(route.broadcast(), &catalog) => end.map_err(Failure::Session),
+		err = announce => err.map_err(Failure::Local),
 	};
 	// Closed at once even after a clean end: the pull redials and publishes the next run under a
-	// new instance, so a run's end is not the content's, and a retained run's finished catalog
+	// new identity, so a run's end is not the content's, and a retained run's finished catalog
 	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),
 		Err(err) => {
-			catalog.abort(moq_net::Error::Transport(format!("{err:#}")));
+			catalog.abort(moq_net::Error::Transport(err.to_string()));
 			Ok(())
 		}
 	};
 	route.broadcast().close();
-	finished?;
+	finished.map_err(|err| Failure::Local(err.into()))?;
 	end
 }
 
@@ -112,14 +130,13 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 mod tests {
 	use super::*;
 
-	/// Only a failure of the RTSP session itself is worth redialing.
+	/// A session failure is worth redialing unless the server refused access or offers nothing
+	/// publishable.
 	#[test]
-	fn only_session_failures_retry() {
-		let retry = |err: anyhow::Error| !is_fatal(&err);
-		assert!(retry(moq_rtsp::Error::Rtsp("connection reset".into()).into()));
-		assert!(retry(moq_rtsp::Error::Stalled(Duration::from_secs(10)).into()));
-		assert!(!retry(moq_rtsp::Error::Unauthorized("401".into()).into()));
-		assert!(!retry(moq_rtsp::Error::NoSupportedStream("audio/pcmu".into()).into()));
-		assert!(!retry(anyhow::anyhow!("failed to create broadcast")));
+	fn session_failures_retry() {
+		assert!(retries(&moq_rtsp::Error::Rtsp("connection reset".into())));
+		assert!(retries(&moq_rtsp::Error::Stalled(Duration::from_secs(10))));
+		assert!(!retries(&moq_rtsp::Error::Unauthorized("401".into())));
+		assert!(!retries(&moq_rtsp::Error::NoSupportedStream("audio/pcmu".into())));
 	}
 }

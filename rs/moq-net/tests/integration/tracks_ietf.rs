@@ -8,6 +8,7 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -18,7 +19,12 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 3] = ["moq-transport-18", "moq-transport-20", "moq-transport-22"];
+const DRAFTS: [&str; 4] = [
+	"moq-transport-18",
+	"moq-transport-20",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -27,10 +33,11 @@ const SUBSCRIBE: u8 = 0x03;
 const SUBSCRIBE_TRACKS: u8 = 0x51;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
@@ -40,9 +47,10 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		.expect("listing stalled")
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
-		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
-		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
+		Ok(Some(TracksEvent::Removed { name, .. })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name, .. })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
+		Ok(Some(event)) => panic!("unexpected event {event:?}"),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
 	}
@@ -90,7 +98,7 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 		.await
 		.expect("frame timeout")
 		.ok()??;
-	Some((group.sequence, frame.payload.to_vec()))
+	Some((group.start, frame.payload.to_vec()))
 }
 
 /// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it:
@@ -116,8 +124,10 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 			.await
 			.expect("never subscribed")
 			.unwrap();
-		let mut group = video.append_group().unwrap();
-		group.write_frame(None, &b"before"[..]).unwrap();
+		let mut group = video.append_next().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"before"[..])
+			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((0, b"before".to_vec())), "{version}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
@@ -128,8 +138,10 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		assert!(failed.starts_with("error:"), "{version}: {failed}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 1, "{version}");
 
-		let mut group = video.append_group().unwrap();
-		group.write_frame(None, &b"after"[..]).unwrap();
+		let mut group = video.append_next().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"after"[..])
+			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((1, b"after".to_vec())), "{version}");
 		assert_eq!(subscribes(&pair), 1, "{version}");

@@ -39,7 +39,8 @@ impl<'de> DeserializeAs<'de, Duration> for Millis {
 }
 impl SerializeAs<moq_net::Timestamp> for Millis {
 	fn serialize_as<S: serde::Serializer>(value: &moq_net::Timestamp, serializer: S) -> Result<S::Ok, S::Error> {
-		let value = u64::try_from(value.as_millis()).map_err(serde::ser::Error::custom)?;
+		let millis = value.as_millis().map_err(serde::ser::Error::custom)?;
+		let value = u64::try_from(millis).map_err(serde::ser::Error::custom)?;
 		Number::serialize_as(&value, serializer)
 	}
 }
@@ -53,14 +54,14 @@ pub(crate) struct Wall;
 impl SerializeAs<kio::clock::Wall> for Wall {
 	fn serialize_as<S: serde::Serializer>(value: &kio::clock::Wall, serializer: S) -> Result<S::Ok, S::Error> {
 		let duration = value
-			.checked_duration_since(kio::clock::Wall::MOQ_EPOCH)
+			.checked_duration_since(moq_net::time::EPOCH)
 			.ok_or_else(|| serde::ser::Error::custom("snapshot wall is before the MoQ epoch"))?;
 		Millis::serialize_as(&duration, serializer)
 	}
 }
 impl<'de> DeserializeAs<'de, kio::clock::Wall> for Wall {
 	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<kio::clock::Wall, D::Error> {
-		kio::clock::Wall::MOQ_EPOCH
+		moq_net::time::EPOCH
 			.checked_add(Millis::deserialize_as(deserializer)?)
 			.ok_or_else(|| serde::de::Error::custom("snapshot wall clock overflow"))
 	}
@@ -89,7 +90,7 @@ mod tests {
 			#[serde_as(as = "Wall")]
 			wall: kio::clock::Wall,
 		}
-		let epoch_millis = kio::clock::Wall::MOQ_EPOCH
+		let epoch_millis = moq_net::time::EPOCH
 			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.as_millis() as u64;
 		let last_millis = (u64::MAX / 1_000_000) - epoch_millis;
@@ -99,7 +100,7 @@ mod tests {
 		assert!(serde_json::from_str::<Value>(&format!(r#"{{"wall":{}}}"#, last_millis + 1)).is_err());
 		assert!(
 			serde_json::to_string(&Value {
-				wall: kio::clock::Wall::MOQ_EPOCH - Duration::from_nanos(1)
+				wall: moq_net::time::EPOCH - Duration::from_nanos(1)
 			})
 			.is_err()
 		);
@@ -208,10 +209,7 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival
-				.wall
-				.checked_duration_since(kio::clock::Wall::MOQ_EPOCH)
-				.unwrap(),
+			arrival.wall.checked_duration_since(moq_net::time::EPOCH).unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

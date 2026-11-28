@@ -35,14 +35,22 @@ window.subscribe = async (plan) => {
 		websocket: { enabled: false },
 	});
 	const request = origin.request(Moq.Path.from(plan.broadcast));
-	let broadcast = request.active.peek();
-	while (!broadcast) broadcast = await request.active.changed();
-	const active = broadcast;
+	const active = await request.broadcast();
 
-	const subscribers = plan.tracks.map((track) =>
-		active.track(track.name).subscribe({
+	const consumers = plan.tracks.map((track) => active.track(track.name));
+	const subscribers = plan.tracks.map((track, i) =>
+		consumers[i].subscribe({
 			priority: track.priority,
-			delay: { max: Moq.Clock.Duration.millis(track.budget) },
+			ranges: [
+				{
+					start: {
+						live: {
+							min: Moq.Clock.Duration.millis(track.budget),
+							max: Moq.Clock.Duration.millis(track.budget),
+						},
+					},
+				},
+			],
 		}),
 	);
 	// Each subscription is a stream the browser opens; its info arrives once the relay answers.
@@ -50,7 +58,9 @@ window.subscribe = async (plan) => {
 
 	const started = performance.now();
 	reading = (async () => {
-		const tracks = await Promise.all(plan.tracks.map((track, i) => read(track, subscribers[i], started)));
+		const tracks = await Promise.all(
+			plan.tracks.map((track, i) => read(track, consumers[i], subscribers[i], started)),
+		);
 		const closed = connection.closed;
 		await connection.close();
 		return { version: connection.version, tracks, closed: String((await closed) ?? "") || null };
@@ -65,8 +75,16 @@ window.report = () => {
 window.pending = () => progress.filter((received) => received.at === undefined);
 
 // Read every group the subscription hands out until it ends. Frames are read concurrently with
-// the next group, since a group paused for credit must not hold back the groups after it.
-async function read(track: Track, subscriber: Moq.Track.Subscriber, started: number): Promise<Received> {
+// the next group, since a group waiting on its frames must not hold back the groups after it. A
+// group that ends early for any reason but going stale is fetched, as a reader that still wants
+// it would: the relay reset its stream to make room. A lite-06 fetch rides a stream the page opens,
+// while a lite-07 one is a one-shot subscription whose group competes for the same cap.
+async function read(
+	track: Track,
+	consumer: Moq.Track.Consumer,
+	subscriber: Moq.Track.Subscriber,
+	started: number,
+): Promise<Received> {
 	const received: Received = { name: track.name, groups: [], ended: null };
 	progress.push(received);
 	const frames: Promise<void>[] = [];
@@ -74,7 +92,7 @@ async function read(track: Track, subscriber: Moq.Track.Subscriber, started: num
 		for (;;) {
 			const group = await subscriber.recvGroup();
 			if (!group) break;
-			const entry: Received["groups"][number] = { sequence: Number(group.sequence), frames: [] };
+			const entry: Received["groups"][number] = { sequence: Number(group.start), frames: [] };
 			received.groups.push(entry);
 			frames.push(
 				(async () => {
@@ -87,6 +105,8 @@ async function read(track: Track, subscriber: Moq.Track.Subscriber, started: num
 						entry.at = performance.now() - started;
 					} catch (err) {
 						entry.error = String(err);
+						if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.Old) return;
+						entry.fetched = await fetch(consumer, group.start);
 					}
 				})(),
 			);
@@ -97,4 +117,24 @@ async function read(track: Track, subscriber: Moq.Track.Subscriber, started: num
 	await Promise.all(frames);
 	received.at = performance.now() - started;
 	return received;
+}
+
+// Every frame of group `sequence`, fetched whole, or why the fetch failed. A lite-07 fetch's group
+// competes for the same cap, so the relay may reset its stream to make room too (TOO_FAR_BEHIND); a
+// reader that still wants the rest of a preempted group asks again, as the draft says.
+async function fetch(consumer: Moq.Track.Consumer, sequence: bigint): Promise<string[] | string> {
+	for (;;) {
+		const frames: string[] = [];
+		try {
+			const group = await consumer.fetchGroup(sequence);
+			for (;;) {
+				const frame = await group.readString();
+				if (frame === undefined) return frames;
+				frames.push(frame);
+			}
+		} catch (err) {
+			if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.TooFarBehind) continue;
+			return `${frames.length} frames, then ${err}`;
+		}
+	}
 }

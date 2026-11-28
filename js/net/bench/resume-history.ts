@@ -13,23 +13,26 @@
  *
  * Counts come from weak references after full collections, so they are exact only under a precise
  * collector: run it in Chromium with `bench/browser/micro.ts --bench resume-history`, which
- * exposes `gc` and fails once a retired route stays reachable. Bun scans its stack conservatively,
- * so a dead reference there can survive a collection.
+ * exposes `gc`, compiles on the main thread so no queued optimization job pins a closure's context,
+ * and fails once a retired route stays reachable. Bun scans its stack conservatively, so a dead
+ * reference there can survive a collection.
  */
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { defined } from "../src/defined.test-util.ts";
+import { hooks } from "../src/internal.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Front } from "../src/resume.ts";
+import { Timestamp } from "../src/time.ts";
 import { wireOf } from "../src/wire.ts";
 
 const PAYLOAD = 4096;
-const MAX_DELAY = Duration.millis(1000);
 /** Past every cache's age-out, including the 30 s window a closed track's cache drains over. */
 const EXPIRY = Duration.millis(60_000);
 const url = new URL("https://localhost/resume-history");
@@ -116,7 +119,7 @@ async function read(front: Front, tracks: string[], access: Access, payloads: We
 			await track.info();
 			continue;
 		}
-		const subscriber = access === "subscribe" ? track.subscribe({ delay: { max: MAX_DELAY } }) : undefined;
+		const subscriber = access === "subscribe" ? track.subscribe({ ranges: [{}] }) : undefined;
 		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0n);
 		const frame = await group?.readFrame();
 		group?.close();
@@ -213,7 +216,7 @@ async function measure(shape: Case): Promise<Result> {
 }
 
 async function measureOn(clock: Manual, { fronts, names: perRoute, routes, history, access }: Case): Promise<Result> {
-	// One publisher instance per front: every route carries the same broadcasts and tracks.
+	// One publisher identity per front: every route carries the same broadcasts and tracks.
 	const publisher = new OriginProducer();
 	const paths = Array.from({ length: fronts }, (_, index) => Path.from(`room/${index}`));
 	const broadcasts: BroadcastProducer[] = paths.map((path) => {
@@ -224,9 +227,9 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	for (const broadcast of broadcasts) {
 		const all = new Set(Array.from({ length: routes }, (_, route) => names(history, route, perRoute)).flat());
 		for (const name of all) {
-			const track = broadcast.createTrack(name);
-			const group = track.appendGroup();
-			group.writeFrame({ payload });
+			const track = defined(broadcast.createTrack(name));
+			const group = hooks.appendNext(track);
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}
 	}

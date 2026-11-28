@@ -32,6 +32,27 @@ m1 quest on 2026-10-22.
   `unused()` rejecting on close is moot, and
   "`producer.unused()` is `producer.demand().unused()`" should point at
   `demand().wanted`.
+  And `rs/moq-auth/MIGRATE.md`'s "Mesh endpoints use the signing public
+  key" names `moq_crypto::sign`, which
+  [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855) deleted, for
+  `moq_auth::mesh`, which
+  [moq-dev/moq#8756](https://github.com/moq-dev/moq/pull/8756) removed:
+  drop it, or correct it against the published moq-auth. `sh/migrate.sh`
+  refuses that edit outside the cut, so
+  [moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947) left it here.
+  Drop `rs/moq-net/MIGRATE.md`'s "Origins prove a route key" too: no
+  release had `origin::Config::route_key` or
+  `poll::Session::export_keying_material`, and
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) removed
+  them.
+  And both `js/net/MIGRATE.md` and `rs/moq-net/MIGRATE.md` say, under "A
+  timed track refuses a group that rewinds (#5803)", that a track received
+  over moq-transport stays unchecked, which
+  [moq-dev/moq#9028](https://github.com/moq-dev/moq/pull/9028) overturned:
+  a group received over moq-transport is checked too, since its time is its
+  Group ID, and only a moq-lite-05/06 copy keeps its timestamps unchecked,
+  so "serves both on" becomes "serves it on".
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
@@ -66,8 +87,10 @@ m1 quest on 2026-10-22.
 - Known break, a Nix option rather than a Rust API (added 2026-10-31, from
   [moq-dev/moq#7343](https://github.com/moq-dev/moq/pull/7343)): the NixOS
   module option `services.moq-relay.cluster.rootUrl` takes a non-empty
-  list instead of a string. Migrate `rootUrl = "https://root:4443";` to
-  `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
+  list instead of a string, and is renamed `cluster.connect`
+  ([moq-dev/moq#8924](https://github.com/moq-dev/moq/pull/8924)). Migrate
+  `rootUrl = "https://root:4443";` to `connect = [ "https://root:4443" ];`;
+  an empty list fails evaluation, and `rootUrl` fails it naming `connect`.
   Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
   `## Unreleased` section until the cut names the version).
 
@@ -87,7 +110,21 @@ m1 quest on 2026-10-22.
   - moq-gst: the request pad's `encoder` property, shipped in
     `moq-gst-v0.4.24`, was removed with no entry, so a `gst-launch` line
     setting it now fails at runtime.
+  - moq-archive (added 2026-11-20, from the main → release audit):
+    `rs/moq-archive/MIGRATE.md`'s "Recording format version 4 drops the
+    datagram form" and "Recording format version 3 replaces version 1" are
+    wrong since [moq-dev/moq#8932](https://github.com/moq-dev/moq/pull/8932):
+    `VERSION` is 2, the only version written or read, and `Error::Form` is
+    gone. Replace both with #8932's Impact text: format version 2 replaces
+    version 1; start a new recording prefix; main builds' versions 2 to 4 are
+    unsupported; `Info::version` and `Error::Form` are removed and `Info` no
+    longer implements `Serialize`/`Deserialize` (use `Info::encode` and
+    `Info::decode`); keep a release build's reader for retained version 1
+    archives. Keep the `i8` priority and optional timescale notes, and check
+    the "Objects are keyed by timeline segment" entry's `Key::Segments`,
+    `Store::get_segments`, and `Error::Span`, none of which exist on `main`.
 
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - all breaking work and the MIGRATE.md convention have landed
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - removes `UnsupportedCpu` and updates `moq_crypto::provider` signatures before the final migration pass

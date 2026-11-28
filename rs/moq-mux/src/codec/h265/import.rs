@@ -1,14 +1,15 @@
 //! H.265 importer.
 //!
 //! Publishes H.265 frames on a single moq track and resolves the catalog
-//! rendition, in either wire shape: Annex-B with inline VPS/SPS/PPS ("hev1"), or
-//! length-prefixed NALU with an out-of-band hvcC ("hvc1"). A layered stream
+//! rendition, in either framing: Annex-B with inline VPS/SPS/PPS (always hev1), or
+//! length-prefixed NALU with an out-of-band hvcC (hev1 when its first keyframe
+//! carries a parameter set in band, hvc1 otherwise). A layered stream
 //! (MV-HEVC, SHVC) imports as its base layer: only a base-layer SPS configures the
 //! rendition, while every layer's NAL units pass through (VPS is cached but not parsed).
 //!
 //! The codec config comes from exactly one of two places: an hvcC handed to
-//! [`initialize`](Import::initialize) (the hvc1 shape), or the SPS the splitter
-//! packages into the first keyframe (hev1). A keyframe
+//! [`initialize`](Import::initialize), or the SPS the splitter packages into the
+//! first Annex-B keyframe. A keyframe
 //! that can't be configured is an error; non-keyframes before the first config
 //! are written through to the producer, which reports
 //! [`MissingKeyframe`](crate::container::MissingKeyframe) for a mid-stream join.
@@ -28,8 +29,9 @@ use crate::container::Frame;
 /// Build it with [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from, and feed it
 /// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
-/// catalog rendition fills in lazily once the codec config is known (hvcC via
-/// [`initialize`](Self::initialize) for hvc1, the first base-layer SPS for hev1).
+/// catalog rendition fills in lazily once the codec config is known (at the first
+/// keyframe after an hvcC via [`initialize`](Self::initialize), or the first
+/// Annex-B base-layer SPS).
 pub struct Import {
 	/// The NALU length size for the hvc1 shape, whose codec config is out-of-band (hvcC), so
 	/// frame payloads are length-prefixed rather than Annex-B. `None` for Annex-B.
@@ -37,6 +39,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
+	/// The hvcC's config, held until the first keyframe says whether the stream also repeats its
+	/// parameter sets in band (hev1) or keeps them in the record only (hvc1).
+	pending: Option<hang::catalog::VideoConfig>,
 }
 
 impl Import {
@@ -60,6 +65,7 @@ impl Import {
 			track,
 			catalog,
 			last_sps: None,
+			pending: None,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -69,11 +75,12 @@ impl Import {
 
 	/// Resolve the codec config from the codec's leading bytes.
 	///
-	/// - **hvc1** (no leading start code): parsed as an `HEVCDecoderConfigurationRecord`,
+	/// - **hvcC** (no leading start code): parsed as an `HEVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
-	///   for hvc1.
-	/// - **hev1** (leading start code): parsed as Annex-B; the first base-layer SPS resolves the config.
-	///   Optional, since hev1 also self-initializes from the first keyframe.
+	///   for length-prefixed frames. The rendition publishes at the first keyframe, as hev1
+	///   when that keyframe carries a parameter set in band and hvc1 otherwise.
+	/// - **Annex-B** (leading start code): the first base-layer SPS resolves the config, as hev1.
+	///   Optional, since Annex-B also self-initializes from the first keyframe.
 	///
 	/// Takes a read-only slice: the dispatcher-owned [`Split`](super::Split) is what
 	/// consumes the stream (and reads the same hvcC for the NALU length size). The
@@ -90,10 +97,9 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
-		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
-		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
-		self.apply_config(config)?;
+		// A new record waits for its keyframe; the record already published holds nothing back.
+		self.pending = (self.catalog.description() != Some(hvcc_bytes)).then_some(config);
 		Ok(())
 	}
 
@@ -134,10 +140,45 @@ impl Import {
 		self.track.track()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A record no keyframe followed publishes as it stands. A finish that fails ends the track with
+	/// the cause instead, so it can't be retried.
+	pub fn finish(
+		mut self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
+		match self.publish_pending() {
+			Ok(()) => self.track.finish(),
+			Err(err) => {
+				drop(self.track.fail(err.reason()));
+				Err(err)
+			}
+		}
+	}
+
+	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
+	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
+		let published = self.publish_pending();
+		let ended = self.track.end_with(published.as_ref().err().map(crate::Error::reason));
+		published.and(ended)
+	}
+
+	/// End the track unless it already ended, dropping a record no keyframe followed, for an owner
+	/// replacing this importer with a successor.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		self.pending = None;
+		self.track.end()
+	}
+
+	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	/// It starts a coded sequence, so the last one's in-band HDR metadata goes first.
+	fn publish_pending(&mut self) -> crate::Result<()> {
+		let Some(config) = self.pending.take() else {
+			return Ok(());
+		};
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.apply_config(config)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -180,9 +221,9 @@ impl Import {
 		self.track.report_bitrate(bitrate);
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -217,6 +258,11 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
+			// A delta between a new record and its keyframe decodes against neither, so it never
+			// reaches the open group, whose timestamps it is no part of.
+			if self.pending.is_some() && !frame.keyframe {
+				return Err(crate::container::MissingKeyframe.into());
+			}
 			self.configure(&frame)?;
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
@@ -254,8 +300,14 @@ impl Import {
 		};
 		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
 		// first, so a keyframe that also configures publishes once.
-		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		// So does a new record, held for this keyframe.
+		let pending = self.pending.take();
+		let sequence = pending.is_some() || sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
 		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(mut config) = pending {
+			crate::codec::video::detect_in_band(&mut config, &frame.payload)?;
+			self.apply_config(config)?;
+		}
 		if let Some(sps) = sps {
 			self.configure_from_sps(&sps)?;
 		}
@@ -279,6 +331,11 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	}
 	let sps = find_sps(buf)?.ok_or(Error::NotInitialized)?;
 	Ok(super::config_from_sps(&sps, true)?)
+}
+
+/// Whether a NAL unit header names a parameter set (VPS, SPS, or PPS).
+pub(crate) fn is_parameter_set(header: u8) -> bool {
+	matches!(NalType::of(header), NalType::VPS | NalType::SPS | NalType::PPS)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -471,16 +528,65 @@ mod tests {
 		let buf = BytesMut::from(hvcc.as_ref());
 		import.initialize(&buf).expect("initialize hvcC");
 		assert_eq!(buf.len(), hvcc.len(), "initialize must not consume the buffer");
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"the first keyframe decides where the parameter sets live"
+		);
+		import.decode([idr_frame(&[])]).unwrap();
 
 		let snapshot = catalog.snapshot();
 		let cfg = snapshot.video.renditions.get("video").expect("rendition");
 		let hang::catalog::VideoCodec::H265(h265) = &cfg.codec else {
 			panic!("expected H.265 codec")
 		};
-		assert!(!h265.in_band, "hvc1 source should land as in_band=false");
+		assert!(!h265.in_band, "parameter sets only in the hvcC land as hvc1");
 		assert_eq!(cfg.coded_width, Some(1280));
 		assert_eq!(cfg.coded_height, Some(720));
 		assert_eq!(cfg.description.as_deref(), Some(hvcc.as_ref()));
+	}
+
+	/// A length-prefixed IDR access unit, behind `params` (VPS, SPS, PPS NAL units) if any.
+	fn idr_frame(params: &[&[u8]]) -> Frame {
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut au = Vec::new();
+		for nal in params.iter().chain([&idr]) {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		crate::codec::h265::hvc1_frame(au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap()
+	}
+
+	/// An hvcC stream whose keyframes carry any parameter set in band lands as hev1, a VPS alone
+	/// included, or a PPS the record omits; the record still frames it.
+	#[tokio::test(start_paused = true)]
+	async fn hvcc_with_in_band_parameter_sets_lands_as_hev1() {
+		let full = fixtures::hvcc();
+		let no_pps = super::super::build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[Bytes::from_static(fixtures::SPS)],
+			&[],
+		)
+		.unwrap();
+		for (hvcc, in_band) in [
+			(full.clone(), &[fixtures::VPS, fixtures::SPS, fixtures::PPS][..]),
+			(full, &[fixtures::VPS][..]),
+			(no_pps, &[fixtures::PPS][..]),
+		] {
+			let (track, catalog) = setup("video");
+			let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+			import.initialize(&hvcc).unwrap();
+			import.decode([idr_frame(in_band)]).unwrap();
+
+			let snapshot = catalog.snapshot();
+			let cfg = &snapshot.video.renditions["video"];
+			assert_eq!(
+				cfg.codec.to_string().get(..4),
+				Some("hev1"),
+				"{} in band",
+				in_band.len()
+			);
+			assert_eq!(cfg.description.as_deref(), Some(hvcc.as_ref()));
+		}
 	}
 
 	/// An hvc1 payload is never scanned for an inline SPS. A NAL of exactly 322 bytes
@@ -595,6 +701,7 @@ mod tests {
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
 		import.initialize(&hvcc).unwrap();
+		import.decode([idr_frame(&[])]).unwrap();
 		assert_eq!(size(&catalog), (Some(128), Some(64)));
 
 		let (track, catalog) = setup("video");

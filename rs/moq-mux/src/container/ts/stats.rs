@@ -167,7 +167,7 @@ pub struct Stream {
 	/// counted separately from a resync.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub unconfirmed: u64,
-	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
+	/// Damaged packets or PES refused whole on this PID. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub damaged: u64,
 	/// Whole PES or sections, SI included, dropped because the program clock could not place
@@ -181,9 +181,10 @@ pub struct Stream {
 	/// registration, an Opus configuration it cannot map, any undecoded stream without the
 	/// `mpegts` catalog section or in a program with no PCR to place it by), or a whole-PES
 	/// stream with a clock field only the PTS and DTS of are rebased (ESCR, a
-	/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a
-	/// header export refuses, whose track ends and leaves the catalog. Once for each
-	/// TS-scrambled packet on a carried stream, which the raw lane could carry. And once for
+	/// `pack_header_field`, a TREF), an unbounded non-video PES, or a header export refuses,
+	/// whose track ends and leaves the catalog. Once for each TS-scrambled packet on a carried
+	/// stream, which the raw lane could carry, and each PES-scrambled PES on one; the stream
+	/// resumes once it is clear. And once for
 	/// each packet on a PID no table claims ([`Snapshot::streams`]). Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub refused: u64,

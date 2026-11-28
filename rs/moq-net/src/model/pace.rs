@@ -8,7 +8,9 @@
 //!
 //! Ingest's window is the stream receive credit its transport grants, capped at [`AHEAD`]
 //! (see [`window`]), so a hop holds about what its upstream peer can have in flight on
-//! that stream. A local writer, which has no transport, uses [`AHEAD`] itself.
+//! that stream; twice that on a transport that shapes a paced stream's credit to the room
+//! left, which then buffers in the group what the transport no longer does. A local
+//! writer, which has no transport, uses [`AHEAD`] itself.
 //!
 //! Progress is in bytes on one scale per group copy: each frame entering the copy's log
 //! ends where the frames before it, payload and slot, add up to. A frame larger than the
@@ -16,11 +18,12 @@
 //! waiting on the writer.
 
 use std::sync::{
-	Mutex, PoisonError,
+	Mutex, OnceLock, PoisonError,
 	atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::Waker;
 
+use super::cache;
 use super::group::MAX_CACHE_BYTES;
 #[cfg(any(test, feature = "async"))]
 use crate::transport::ReceiveWindow;
@@ -54,8 +57,15 @@ pub(super) struct Pace {
 	front: AtomicU64,
 	// Set while the writer waits on `read`, so a read wakes it without locking otherwise.
 	parked: AtomicBool,
+	// Set once a reader first holds the group, after it counts as one, so a check that reads
+	// this before the count sees the reader in one or the other: until then the group is still
+	// owed to its track's subscribers (see `group::Handle::poll_unowed`).
+	held: AtomicBool,
 	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
 	writer: Mutex<Option<Waker>>,
+	// Told when the fastest reader takes a frame the copy still holds, set only while its
+	// session has a live-edge budget to shed those frames toward.
+	report: OnceLock<cache::Report>,
 }
 
 impl Pace {
@@ -68,6 +78,51 @@ impl Pace {
 		// SeqCst pairs with `park`: either this sees the writer parked, or it sees the read.
 		self.read.fetch_max(end, Ordering::SeqCst);
 		self.wake();
+		if let Some(report) = self.report.get()
+			&& end > self.front.load(Ordering::SeqCst)
+		{
+			report.took();
+		}
+	}
+
+	/// Report reader progress through `report`, so the copy's session, past its live-edge
+	/// budget, visits only the edges with taken frames to shed.
+	pub fn report(&self, report: cache::Report) {
+		let _ = self.report.set(report);
+	}
+
+	/// Report the taken frames the copy still holds again, as a frame read does: a shed that
+	/// had to leave some now may take them.
+	pub fn retake(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes: either that shed sees what made
+		// the frames sheddable, or this sees the track unlisted.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get()
+			&& self.read() > self.front.load(Ordering::SeqCst)
+		{
+			report.took();
+		}
+	}
+
+	/// Report the taken frames the copy holds again, even when every slice they came from is shed:
+	/// a shed that had to leave inflated ones now may take them.
+	pub fn retake_inflated(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes, as [`Self::retake`] does.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get() {
+			report.took();
+		}
+	}
+
+	/// The inflated copy this group shares with its other copies decoded further, which may let
+	/// the live edge shed more of its slices, even when this copy is not the edge: the edge's
+	/// own reads cannot tell.
+	pub fn decoded(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes, as [`Self::retake`] does.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get() {
+			report.decoded();
+		}
 	}
 
 	/// Wake the writer, if parked, since what it waits on changed.
@@ -76,10 +131,24 @@ impl Pace {
 		// SeqCst, to stay in the order `park` pairs with.
 		if self.parked.load(Ordering::SeqCst) && self.parked.swap(false, Ordering::SeqCst) {
 			let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take();
+			// Through kio, so a wake made under a hold (a reclaim's) waits for it.
 			if let Some(writer) = writer {
-				writer.wake();
+				kio::wake(writer);
 			}
 		}
+	}
+
+	/// A reader now holds the group, so its readers all leaving means nobody is owed the rest.
+	pub fn hold(&self) {
+		// SeqCst pairs with the writer's check after it registers for a reader arriving: a
+		// reader that came and left before then still shows here. Called once the reader
+		// counts, so a writer that sees this also sees that count.
+		self.held.store(true, Ordering::SeqCst);
+	}
+
+	/// Whether a reader ever held the group.
+	pub fn held(&self) -> bool {
+		self.held.load(Ordering::SeqCst)
 	}
 
 	/// A reader took every frame committed so far, such as by taking the open one.
@@ -127,6 +196,25 @@ impl Pace {
 	/// Whether the writer is paced, as [`Self::paced`] judges it now.
 	pub fn ahead(&self, partial: u64, window: u64) -> bool {
 		self.paced(self.read.load(Ordering::SeqCst), partial, window)
+	}
+
+	/// How many more bytes a writer `partial` bytes into an uncommitted frame may take
+	/// before it is more than `window` past the fastest reader, or `None` once nothing holds
+	/// it back: that reader fell off, or the writer is past the window with no reader owed
+	/// the group (`owed` false, asked only then), so it reads on and sheds.
+	///
+	/// Measured from where readers got even before one holds the group, since the first to
+	/// arrive starts there.
+	pub fn room(&self, partial: u64, window: u64, owed: impl FnOnce() -> bool) -> Option<u64> {
+		let read = self.read.load(Ordering::SeqCst);
+		if read < self.front.load(Ordering::SeqCst) {
+			return None;
+		}
+		let lead = self.written().saturating_add(partial).saturating_sub(read);
+		match window.checked_sub(lead) {
+			Some(room) => Some(room),
+			None => owed().then_some(0),
+		}
 	}
 
 	/// Register `waiter` for the next read or shed, returning how far readers got, read
@@ -178,10 +266,12 @@ mod tests {
 
 	/// An untimed group with `frames` frames of a megabyte each.
 	fn written(frames: usize) -> group::Producer {
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let payload = Bytes::from(vec![0u8; MB]);
 		for _ in 0..frames {
-			group.write_frame(None, payload.clone()).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), payload.clone())
+				.unwrap();
 		}
 		group
 	}
@@ -189,7 +279,7 @@ mod tests {
 	fn info(size: usize) -> frame::Info {
 		frame::Info {
 			size: size as u64,
-			timestamp: None,
+			timestamp: crate::Timestamp::unscaled(0),
 		}
 	}
 
@@ -213,7 +303,9 @@ mod tests {
 			"within the window"
 		);
 
-		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+			.unwrap();
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending, "past the window");
 		assert!(!flag.woken());
 
@@ -267,14 +359,11 @@ mod tests {
 		frame::Header {
 			info: frame::Info {
 				size: 1,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(0),
 			},
 			fields: Some(Arc::new(Fields {
 				id,
-				properties: Properties {
-					block: Some(block),
-					..Default::default()
-				},
+				properties: Properties { block: Some(block) },
 			})),
 			inflated: None,
 		}
@@ -286,7 +375,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	fn metadata_counts_toward_the_window() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let _reader = group.consume();
 		for id in 0..15 {
 			let mut frame = group.create_object(fielded(id, MB)).unwrap();
@@ -311,7 +400,7 @@ mod tests {
 		let mut frame = group
 			.create_frame(frame::Info {
 				size: 2 * MB as u64,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(0),
 			})
 			.unwrap();
 		assert_eq!(frame.poll_ready(&waiter, AHEAD), Poll::Ready(()));
@@ -355,20 +444,74 @@ mod tests {
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 
+	/// A group its track has not handed out yet is owed to the track's subscribers, so its
+	/// writer keeps to the window until one picks it up, however late. Once that reader
+	/// leaves, or the track's last subscriber does first, nobody is owed the rest.
+	#[test]
+	fn a_group_not_yet_handed_out_waits_for_its_subscribers() {
+		let (flag, waiter) = flag();
+		let window = MB as u64;
+		let track = crate::track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::default(),
+		);
+		let subscriber = track.subscribe(None);
+		let fill = |start| {
+			let mut group = track.create_group(group::Info { start }).unwrap();
+			for _ in 0..2 {
+				group
+					.write_frame(crate::Timestamp::unscaled(start), Bytes::from(vec![0u8; MB]))
+					.unwrap();
+			}
+			group
+		};
+
+		let group = fill(0);
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Pending,
+			"owed, not yet picked up"
+		);
+		assert_eq!(group.room(0, window), Some(0), "owed, so shaped to no room");
+		let reader = group.consume();
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Pending,
+			"a reader that took nothing"
+		);
+		drop(reader);
+		assert!(flag.woken(), "the reader leaving wakes the writer");
+		assert_eq!(group.poll_paced(&waiter, 0, window), Poll::Ready(()), "the reader left");
+		assert_eq!(group.room(0, window), None);
+
+		let group = fill(1);
+		assert_eq!(group.poll_paced(&waiter, 0, window), Poll::Pending);
+		drop(subscriber);
+		assert!(flag.woken(), "the last subscriber leaving wakes the writer");
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Ready(()),
+			"nobody to hand it to"
+		);
+	}
+
 	/// A local writer waits for a reader before it writes, then for room in the window, and
 	/// a reader arriving or reading wakes it.
 	#[test]
 	fn a_local_writer_waits_for_a_reader_and_room() {
 		let (flag, waiter) = flag();
 		let small = info(0);
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "nobody reads yet");
 		let mut reader = group.consume();
 		assert!(flag.woken(), "a reader arriving wakes the writer");
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Ready(()));
 
 		for _ in 0..17 {
-			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "past the window");
 		read(&mut reader);
@@ -392,12 +535,16 @@ mod tests {
 	#[test]
 	fn a_local_writer_waits_for_room_for_its_frame() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let mut reader = group.consume();
-		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+			.unwrap();
 		read(&mut reader);
 		for _ in 0..8 {
-			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(
 			group.poll_ready(&waiter, &info(MB)),
@@ -432,7 +579,7 @@ mod tests {
 		let mut frame = group
 			.create_frame(frame::Info {
 				size: 20 * MB as u64,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(0),
 			})
 			.unwrap();
 		frame.write(Bytes::from(vec![0u8; 18 * MB])).unwrap();
@@ -448,7 +595,9 @@ mod tests {
 		let _reader = group.consume();
 		// A local writer never waits, so it sheds the front past the 32 MB tail.
 		for _ in 0..40 {
-			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
@@ -458,11 +607,13 @@ mod tests {
 	#[test]
 	fn a_reader_ahead_of_the_writer_never_stalls_it() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let mut reader = group.consume().with_range(20..);
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
 		for _ in 0..17 {
-			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		// Each commit wakes the parked reader, which polls again and reports the edge.
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
@@ -492,5 +643,33 @@ mod tests {
 		group.handle().abort(Error::Cancel).unwrap();
 		assert!(flag.woken());
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
+	}
+
+	/// The room a writer has left runs from where its fastest reader got, even before one
+	/// holds the group; it is unbounded once that reader fell off, or past the window with
+	/// nobody reading, since the writer then reads on.
+	#[test]
+	fn room_runs_from_the_fastest_reader() {
+		let window = 4 * MB as u64;
+		let group = written(2);
+		let room = group.room(0, window).expect("within the window");
+		assert!(room < window - 2 * MB as u64, "frames cost more than their payload");
+		assert_eq!(
+			group.room(MB as u64, window),
+			Some(room - MB as u64),
+			"less what is partly in"
+		);
+		assert_eq!(group.room(0, MB as u64), None, "past the window with nobody reading");
+
+		let mut reader = group.consume();
+		assert_eq!(group.room(0, MB as u64), Some(0), "a reader holds it back");
+		read(&mut reader);
+		read(&mut reader);
+		assert_eq!(group.room(0, MB as u64), Some(MB as u64), "the reader caught up");
+
+		let group = written(17);
+		let _reader = group.consume();
+		group.handle().shed(u64::MAX, u64::MAX);
+		assert_eq!(group.room(0, AHEAD), None, "the reader fell off");
 	}
 }

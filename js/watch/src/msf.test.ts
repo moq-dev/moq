@@ -50,6 +50,27 @@ test.each(["mp4a.40.2", "flac", "future-audio"])("keeps MSF decoder warmup absen
 	expect(audio?.warmup).toBeUndefined();
 });
 
+// A raw, cts, or legacy decoder times each packet from the sample rate, so a guessed 48 kHz plays
+// 44.1 kHz AAC fast and leaves gaps.
+test.each(["loc", "legacy", "raw", "cts"])("derives missing %s audio params from initData", (packaging) => {
+	const aac = { name: "aac", packaging, role: "audio", codec: "mp4a.40.2", initData: "EhA=" };
+	// An OpusHead declaring mono.
+	const head = new Uint8Array([...new TextEncoder().encode("OpusHead"), 1, 1, 0x38, 0x01, 0x44, 0xac, 0, 0, 0, 0, 0]);
+	const opus = {
+		name: "opus",
+		packaging,
+		role: "audio",
+		codec: "opus",
+		initData: btoa(String.fromCharCode(...head)),
+	};
+	const hang = toHang({ tracks: [aac, opus, { ...aac, name: "explicit", samplerate: 48000, channelConfig: "1" }] });
+	const audio = hang.audio?.renditions;
+
+	expect(audio?.aac).toMatchObject({ sampleRate: u53(44100), numberOfChannels: u53(2) });
+	expect(audio?.opus).toMatchObject({ sampleRate: u53(48000), numberOfChannels: u53(1) });
+	expect(audio?.explicit).toMatchObject({ sampleRate: u53(48000), numberOfChannels: u53(1) });
+});
+
 test("rounds a fractional MSF delay up, drops zero, and rejects a negative one", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [

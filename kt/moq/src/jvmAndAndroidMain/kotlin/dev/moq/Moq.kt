@@ -27,10 +27,10 @@ internal constructor(
         session.publish().route(path, options)
 
     /**
-     * List the paths matching [config] as each becomes present, absent, or offline, or changes
-     * availability; prefixes stay relative to the origin. Collect `announced(config).updates()` for
-     * a [Flow] of [AnnounceEvent] that cancels the handle when collection ends. A new publisher
-     * instance keeps its path present, so use [follow] to see it.
+     * List the paths matching [config] as each becomes present or absent; prefixes stay relative to
+     * the origin. Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
+     * cancels the handle when collection ends. A new publisher identity keeps its path present, so
+     * use [follow] to see it.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
@@ -40,21 +40,21 @@ internal constructor(
      *
      * Unlike [request] this waits indefinitely for a future announcement, and each later
      * `available()` waits for the next stream, such as a restarted publisher, or returns null once
-     * the path goes offline. Pass an [instance] to follow only that stream; another one taking over
+     * the path goes offline. Pass an [identity] to follow only that stream; another one taking over
      * also returns null. Cancel the returned handle to stop waiting.
      */
-    fun follow(path: String, instance: Instance? = null): Following =
-        session.consume().follow(path, instance)
+    fun follow(path: String, identity: Identity? = null): Following =
+        session.consume().follow(path, identity)
 
     /**
      * Resolve one stream of the broadcast at [path] as soon as it can be served: a local broadcast
      * at the exact path, the best announced route covering it, or a dynamic fallback on the origin.
      *
      * Unlike [follow] this does not wait for a future announcement; it throws when neither can
-     * serve the path. Pass an [instance] to refuse any other stream.
+     * serve the path. Pass an [identity] to refuse any other stream.
      */
-    suspend fun request(path: String, instance: Instance? = null): BroadcastConsumer =
-        session.consume().request(path, instance)
+    suspend fun request(path: String, identity: Identity? = null): BroadcastConsumer =
+        session.consume().request(path, identity)
 
     /**
      * The session's bandwidth allocator.
@@ -88,8 +88,7 @@ internal constructor(
      *
      * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
      * them, and a live session with in-band AUTH presents them at once, withdrawing each replaced
-     * token once its replacements are answered, even when one is refused. After an authorization
-     * refusal the session redials only if they changed. An empty token throws
+     * token once its replacements are answered, even when one is refused. An empty token throws
      * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
      */
     fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }

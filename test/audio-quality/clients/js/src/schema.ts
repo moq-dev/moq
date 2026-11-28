@@ -34,8 +34,8 @@ export type Ms = number;
  * - `publisher`, `relay`: other processes, often other machines. A timestamp taken there is reduced
  *   to `viewer` by an offset measured over the same session, NTP style: the offset at the midpoint of
  *   a round trip, with half the round trip as its uncertainty. A stage whose uncertainty exceeds
- *   {@link identityTolerance} is reported unmeasured rather than guessed. The browser lane carries no
- *   such timestamp yet, so every stage that needs one is null here.
+ *   the identity tolerance (see {@link STAGES}) is reported unmeasured rather than guessed. The
+ *   browser lane carries no such timestamp yet, so every stage that needs one is null here.
  */
 export type Clock = "viewer" | "render" | "media" | "publisher" | "relay";
 
@@ -174,9 +174,6 @@ export const METRICS = {
 	},
 } as const satisfies Record<string, MetricSpec>;
 
-/** One of the {@link METRICS} names. */
-export type Metric = keyof typeof METRICS;
-
 /** Every `<metric>_<aggregation>` key, in schema order, so tables read the same every run. */
 export const METRIC_KEYS: string[] = Object.entries(METRICS).flatMap(([name, spec]) =>
 	spec.aggregations.map((aggregation) => `${name}_${aggregation}`),
@@ -220,7 +217,8 @@ export const MAX_RENDER_DRIFT = 0.01;
  * - `device`: leaving the graph to the speaker (`outputLatency` plus `baseLatency`).
  * - `unaccounted`: end-to-end minus the sum of the rest. Named because a large one is the finding.
  *
- * The identity is `sum(stages) == end-to-end`, within {@link identityTolerance}.
+ * The identity is `sum(stages) == end-to-end`, within the identity tolerance: 2 ms or 2% of the
+ * total, whichever is larger.
  */
 export const STAGES = [
 	"capture",
@@ -244,9 +242,6 @@ export type StageSpan = {
 	/** `measured` on the viewer clock, `declared` by the publisher, or `unmeasured`. */
 	source: "measured" | "declared" | "unmeasured";
 };
-
-/** The tolerance on the sum-to-end-to-end identity: the larger of 2 ms or 2% of the total. */
-export const identityTolerance = (endToEnd: Ms): Ms => Math.max(2, endToEnd * 0.02);
 
 /** What reducing one clock to `viewer` took. */
 export type Drift = {
@@ -316,7 +311,7 @@ export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 3;
+	version: 4;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
@@ -325,6 +320,11 @@ export type Trace = {
 	transport: string;
 	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
+	/**
+	 * The publisher's largest group as the subscription began, which a wire subscriber learns from the
+	 * publisher's answer: the replay's consumer judges a group it skips unread as join backlog against it.
+	 */
+	largest: number;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {
 		codec: string;
@@ -393,8 +393,10 @@ export type Sample = {
 	render?: Ms;
 
 	/**
-	 * `audio.out.timestamp`: the playhead on the `media` clock. Undefined while there is none.
-	 * Natively, projected from the last write into the speaker at the wall rate, held at its end.
+	 * The playhead sounding at the speaker, on the `media` clock. Undefined while there is none. In
+	 * the browser `audio.out.timestamp`, projected at the wall rate from when the player last reported
+	 * it, and held while stalled. Natively, projected from the last write into the speaker at the wall
+	 * rate, held at its end.
 	 */
 	timestamp?: Ms;
 	/**
@@ -465,6 +467,8 @@ export type Environment = {
 	jitter?: Ms;
 	/** The full audio configuration needed to replay a captured live row. */
 	config?: Trace["config"];
+	/** With `--capture`, the publisher's largest group as the observer's subscription began, which a replayed row needs. */
+	largest?: number;
 	/** The AudioContext's rate, Hz, which the render clock counts in. Natively, the output device's. */
 	contextRate?: number;
 };

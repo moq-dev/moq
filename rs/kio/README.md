@@ -4,40 +4,38 @@
 
 [![Documentation](https://docs.rs/kio/badge.svg)](https://docs.rs/kio/)
 [![Crates.io](https://img.shields.io/crates/v/kio.svg)](https://crates.io/crates/kio)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 # kio
 
-Producer/consumer shared state with async waker-based notification.
+Poll-native async shared state, a deterministic clock and simulator, and state-machine
+macros.
 
-This crate provides `Producer` and `Consumer` types that share state through a mutex-protected value.
-Producers can modify the state and consumers are automatically notified via async wakers.
-The channel auto-closes when all producers are dropped.
-
-`Shared` is the role-less sibling for state that both sides mutate, and `Queue` is a
-poll-native FIFO queue (bounded or unbounded) built in the same style. `Park` holds a
-waiter for as long as a poll stays pending, bridging a `std::task::Context` to kio's
-waiter-based polls when implementing `Future` or `poll_*` on top of kio channels.
-`coop::Budget` bounds the passes a loop makes per poll, so one that always finds
-work ready still yields to the rest of its runtime. `log::Writer` is an append-only
-log whose `log::Reader`s read committed entries by index without a lock, paired with
-a channel that parks them; evicted entries are freed by epoch-based reclamation.
-With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
-straight-line code with explicit waits.
-
-`clock` is the time those waits run on: logical instants, wall time, deadlines, and
-timers on tokio (the `runtime` feature). The `sim` feature adds a
-deterministic executor and `#[kio::test]`, which runs an `async fn` test on it:
+Every wait is a `poll_*` method first, so the default build compiles no `async` code;
+the `async` feature adds `async fn` wrappers that await them. Producers and consumers share state and park on predicates over it,
+alongside a FIFO queue, an append-only log readers take entries from without a lock, and
+a poll-driven task set. `clock` is the time those waits run on, and its `sim` feature
+runs a test on a deterministic executor whose time jumps instead of sleeping. The
+`model` feature checks a pure state machine by visiting every state it can reach. For
+example (`cargo add --dev kio --features sim`):
 
 ```rust
-#[kio::test]
-async fn retries_after_a_second() {
+use std::time::Duration;
+
+// `#[kio::test]` runs an `async fn` test body this way.
+kio::clock::sim::run(async {
     let start = kio::clock::now(); // Instant::ZERO
-    kio::clock::sleep(std::time::Duration::from_secs(1)).await; // returns at once
-    assert_eq!(kio::clock::now() - start, std::time::Duration::from_secs(1));
-}
+    kio::clock::sleep(Duration::from_secs(1)).await; // returns at once
+    assert_eq!(kio::clock::now() - start, Duration::from_secs(1));
+});
 ```
+
+The [API documentation](https://docs.rs/kio/) tours each type and cargo feature, and
+[MIGRATE.md](MIGRATE.md) says how to update your code across breaking changes.
 
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 
-See the [API documentation](https://docs.rs/kio/) for details.
+## License
+
+Licensed under either of [Apache License, Version 2.0](https://github.com/moq-dev/moq/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT) at your option.

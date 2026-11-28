@@ -48,70 +48,100 @@ runner-userns:
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
+# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, that every opt-in test has a caller, that every benchmark test Nightly filters on still exists in the Rust sources, and that the gate's Rust scope covers every file the Rust sources read outside rs/.
 check:
-    python3 sh/version.py
-    actionlint
-    zizmor --offline --quiet .github
-    sh/gh/alert.sh check-coverage
-    bun test ./sh/gh/alert.test.ts
-    bun sh/gh/check-runs.ts
-    python3 sh/gh/test-inventory.py
-    python3 bench/relay.test.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
+    pids=()
+    run python3 sh/version.py & pids+=($!)
+    run actionlint & pids+=($!)
+    run zizmor --offline --quiet .github & pids+=($!)
+    run sh/gh/alert.sh check-coverage & pids+=($!)
+    run bun test ./sh/gh/alert.test.ts & pids+=($!)
+    run bun sh/gh/check-runs.ts & pids+=($!)
+    run python3 sh/gh/test-inventory.py & pids+=($!)
+    run python3 bench/relay.test.py & pids+=($!)
+    run python3 sh/gh/nightly.test.py NightlyTest.test_every_nightly_benchmark_test_exists & pids+=($!)
+    run python3 sh/rs/select.test.py SelectTest.test_dispatch_scope_covers_rust_reads & pids+=($!)
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit "$fail"
 
-# Repository tooling tests; run every ordinary test file whole in the merge gate.
+# Repository tooling tests; the merge gate runs every ordinary test file whole when tooling changes.
 test:
-    python3 sh/version.test.py
-    python3 sh/local.test.py
-    python3 test/smoke/runner.test.py
-    python3 sh/coverage.test.py
-    python3 sh/size/report.test.py
-    python3 sh/size/release.test.py
-    python3 sh/size/nightly.test.py
-    python3 bench/compare.test.py
-    python3 bench/summary.test.py
-    python3 bench/profile.test.py
-    python3 bench/fanout.test.py
-    python3 bench/lock.test.py
-    python3 bench/local.test.py
-    python3 sh/gh/gst-formula.test.py
-    python3 sh/changed.test.py
-    python3 sh/large-files.test.py
-    python3 sh/migrate.test.py
-    python3 sh/text.test.py
-    python3 sh/coverage-tables.test.py
-    python3 sh/tlc.test.py
-    python3 sh/dispatch-query.test.py
-    python3 sh/gh/test-inventory.test.py
-    bun test ./sh/gh/remeasure.test.ts
-    bun test ./sh/gh/setup.test.ts
-    bun sh/gh/queue.test.ts
-    python3 sh/gh/install-formula.test.py
-    sh/gh/release.test.sh
-    python3 sh/gh/ffi.test.py
-    bun test ./sh/gh/ffi.test.ts ./sh/gh/cpp.test.ts ./sh/gh/publish.test.ts
-    python3 sh/rs/package-rename.test.py
-    python3 sh/dart/build.test.py
-    python3 sh/kt/gradle.test.py
-    python3 sh/rs/select.test.py
-    python3 sh/rs/config.test.py
-    python3 sh/rs/hakari.test.py
-    python3 sh/rs/test-lints.test.py
-    python3 sh/js/install.test.py
-    python3 sh/js/workspace.test.py
-    python3 sh/js/audit.test.py
-    python3 sh/gh/nightly.test.py
-    python3 sh/gh/pages-clean.test.py
-    python3 sh/gh/bench-report.test.py
-    python3 sh/gh/rustc-cost.test.py
-    python3 sh/gh/ts-paths.test.py
-    sh/go/publish-wrapper.test.sh
-    python3 sh/rs/uring.test.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    max=${CHECK_TOOLING_JOBS:-8}
+    if ! [[ $max =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: CHECK_TOOLING_JOBS must be a positive integer, got '$max'" >&2
+        exit 1
+    fi
+    pids=()
+    fail=0
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
+    slot() {
+        while (( $(jobs -pr | wc -l) >= max )); do
+            wait -n || fail=1
+        done
+    }
+    slot; run python3 sh/version.test.py & pids+=($!)
+    slot; run python3 sh/local.test.py & pids+=($!)
+    slot; run python3 test/smoke/runner.test.py & pids+=($!)
+    slot; run python3 sh/coverage.test.py & pids+=($!)
+    slot; run python3 sh/size/report.test.py & pids+=($!)
+    slot; run python3 sh/size/release.test.py & pids+=($!)
+    slot; run python3 sh/size/nightly.test.py & pids+=($!)
+    slot; run python3 bench/compare.test.py & pids+=($!)
+    slot; run python3 bench/summary.test.py & pids+=($!)
+    slot; run python3 bench/profile.test.py & pids+=($!)
+    slot; run python3 bench/fanout.test.py & pids+=($!)
+    slot; run python3 bench/lock.test.py & pids+=($!)
+    slot; run python3 bench/local.test.py & pids+=($!)
+    slot; run python3 sh/gh/gst-formula.test.py & pids+=($!)
+    slot; run python3 sh/changed.test.py & pids+=($!)
+    slot; run python3 sh/large-files.test.py & pids+=($!)
+    slot; run python3 sh/migrate.test.py & pids+=($!)
+    slot; run python3 sh/text.test.py & pids+=($!)
+    slot; run python3 sh/coverage-tables.test.py & pids+=($!)
+    slot; run python3 sh/tlc.test.py & pids+=($!)
+    slot; run python3 sh/tla.test.py & pids+=($!)
+    slot; run python3 sh/dispatch-query.test.py & pids+=($!)
+    slot; run python3 sh/gh/test-inventory.test.py & pids+=($!)
+    slot; run bun test ./sh/gh/remeasure.test.ts & pids+=($!)
+    slot; run bun test ./sh/gh/setup.test.ts & pids+=($!)
+    slot; run bun sh/gh/queue.test.ts & pids+=($!)
+    slot; run python3 sh/gh/install-formula.test.py & pids+=($!)
+    slot; run sh/gh/release.test.sh & pids+=($!)
+    slot; run python3 sh/gh/ffi.test.py & pids+=($!)
+    slot; run bun test ./sh/gh/ffi.test.ts ./sh/gh/cpp.test.ts ./sh/gh/publish.test.ts & pids+=($!)
+    slot; run python3 sh/rs/package-rename.test.py & pids+=($!)
+    slot; run python3 sh/dart/build.test.py & pids+=($!)
+    slot; run python3 sh/kt/gradle.test.py & pids+=($!)
+    slot; run python3 sh/rs/select.test.py & pids+=($!)
+    slot; run python3 sh/rs/config.test.py & pids+=($!)
+    slot; run python3 sh/rs/hakari.test.py & pids+=($!)
+    slot; run python3 sh/rs/test-lints.test.py & pids+=($!)
+    slot; run python3 sh/js/install.test.py & pids+=($!)
+    slot; run python3 sh/js/workspace.test.py & pids+=($!)
+    slot; run python3 sh/js/audit.test.py & pids+=($!)
+    slot; run python3 sh/gh/nightly.test.py & pids+=($!)
+    slot; run python3 sh/gh/bench-report.test.py & pids+=($!)
+    slot; run python3 sh/gh/ts-paths.test.py & pids+=($!)
+    slot; run sh/go/publish-wrapper.test.sh & pids+=($!)
+    slot; run python3 sh/rs/uring.test.py & pids+=($!)
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit "$fail"
 
 # Tooling integration tests and selector timing, run nightly outside the merge gate.
 test-integration:
     bash sh/local.sh python3 bench/build.slow.test.py
     python3 sh/dispatch-query.test.py --bench
+
+# Have Maven Central's Portal validate a Maven repository with a rust2 checkout's ffi/release/central.sh, then drop it unpublished.
+[positional-arguments]
+central-check rust2 repo:
+    "$1/ffi/release/central.sh" validate "$2"
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
@@ -138,7 +168,7 @@ install-formula *args:
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
 
-# Measure a workflow run's release uploads, the minimal FFI build, and bundled first-load JS entries.
+# Measure a workflow run's release uploads and bundled first-load JS entries.
 size-collect output run="":
     sh/size/collect.sh '{{ output }}' '{{ run }}'
 
@@ -151,6 +181,11 @@ size-report *args:
 size-nightly output run:
     sh/size/nightly.sh '{{ output }}' '{{ run }}'
 
+# Run a command against Ubuntu's GStreamer in the pinned gstreamer-ci image (Linux).
+[positional-arguments]
+gstreamer *args:
+    sh/gh/gstreamer.sh "$@"
+
 # Install the rendered GStreamer formula against the current macOS tarball.
 [positional-arguments]
 gst-formula *args:
@@ -159,10 +194,6 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
-
-# Measure the merge gate's build and test cost, cold and after a moq-net edit, for the benchmark history.
-gate-cost:
-    sh/gh/gate-cost.sh
 
 # Measure selected Criterion targets through the existing benchmark lifecycle.
 [positional-arguments]
@@ -188,9 +219,9 @@ benchmark-publish *args:
 pages-publish directory report site:
     sh/gh/pages-publish.sh {{ quote(directory) }} {{ quote(report) }} {{ quote(site) }}
 
-# Delete this run's Pages artifact before uploading a replacement on a rerun.
-pages-clean:
-    sh/gh/pages-clean.sh
+# Deploy an uploaded Pages artifact by its ID.
+pages-deploy artifact:
+    sh/gh/pages-deploy.sh {{ quote(artifact) }}
 
 # Re-measure stale planned-break pins and prepare their release update PR.
 remeasure:

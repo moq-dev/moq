@@ -77,6 +77,10 @@ pub enum Error {
 	/// Whole bytes follow the AudioSpecificConfig's last field.
 	#[error("{0} bytes after the AudioSpecificConfig")]
 	TrailingBytes(usize),
+
+	/// An ADTS header or frame is invalid, or cannot carry the frame.
+	#[error("adts: {0}")]
+	Adts(#[from] adts::Error),
 }
 
 /// A result using this module's error type.
@@ -116,17 +120,20 @@ impl Config {
 	/// that follows, and a reserved one is refused.
 	///
 	/// Explicit SBR and PS report what the stream plays as, the extension rate and stereo, not
-	/// their AAC-LC core. Implicit SBR, found only in band, reports the core. Any extension bits
-	/// past the core fields are consumed.
+	/// their AAC-LC core, whether signaled hierarchically (audioObjectType 5 or 29) or by a
+	/// backward-compatible sync extension, which then reports profile 5 or 29 too. Implicit SBR,
+	/// found only in band, reports the core, as does a sync extension behind fields this parser
+	/// doesn't follow. The whole buffer is consumed.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
-		let mut reader = BitReader::new(buf);
-		let (config, _) = Self::read(&mut reader)?;
-
-		// AudioSpecificConfig can carry variable-length extensions (SBR, PS, etc.).
-		// We've extracted the essential fields; drain the rest so the buffer is advanced.
-		if buf.remaining() > 0 {
-			buf.advance(buf.remaining());
-		}
+		// The whole buffer is the config, extensions included, so it is consumed.
+		let data = buf.copy_to_bytes(buf.remaining());
+		let mut asc = data.as_ref();
+		let len = asc.len();
+		let mut reader = BitReader::new(&mut asc);
+		let (mut config, fields) = Self::read(&mut reader)?;
+		// Whatever the later fields recognized before one this parser doesn't follow still holds,
+		// so SBR found ahead of an unknown field isn't lost to the core.
+		let _ = Self::read_rest(&mut reader, len, &mut config, fields);
 		Ok(config)
 	}
 
@@ -139,7 +146,19 @@ impl Config {
 	pub(crate) fn parse_exact(mut asc: &[u8]) -> Result<Self> {
 		let len = asc.len();
 		let mut reader = BitReader::new(&mut asc);
-		let (config, fields) = Self::read(&mut reader)?;
+		let (mut config, fields) = Self::read(&mut reader)?;
+		Self::read_rest(&mut reader, len, &mut config, fields)?;
+		match len - reader.position().div_ceil(8) {
+			0 => Ok(config),
+			trailing => Err(Error::TrailingBytes(trailing)),
+		}
+	}
+
+	/// Read the fields after [`read`](Self::read)'s, in a config `len` bytes long: the rest of
+	/// the specific config, then any sync extension, which names what an SBR or PS decoder
+	/// plays the core as: the extension rate, and stereo under PS, as explicit signaling would.
+	/// Each finding updates `config` whole as soon as it is read, so an error after one keeps it.
+	fn read_rest<T: Buf>(reader: &mut BitReader<T>, len: usize, config: &mut Self, fields: Fields) -> Result<()> {
 		let Fields {
 			object_type,
 			core,
@@ -151,7 +170,7 @@ impl Config {
 		// program config element.
 		let extension = match (channel_config, extension) {
 			(0, extension) => extension.expect("a program config follows a GASpecificConfig"),
-			_ if GENERAL_AUDIO.contains(&core) => read_general_audio(&mut reader, core)?,
+			_ if GENERAL_AUDIO.contains(&core) => read_general_audio(reader, core)?,
 			_ => return Err(Error::UnsupportedConfig("specific config of a non-AAC object type")),
 		};
 		let mut read = |n| reader.read(n, Error::IncompleteConfig);
@@ -182,14 +201,17 @@ impl Config {
 			if reader.read(11, Error::IncompleteConfig)? != SYNC_EXTENSION_SBR {
 				return Err(Error::UnsupportedConfig("sync extension"));
 			}
-			let extension = read_object_type(&mut reader)?;
+			let extension = read_object_type(reader)?;
 			if !matches!(extension, OBJECT_TYPE_SBR | 22) {
 				return Err(Error::UnsupportedConfig("sync extension object type"));
 			}
 			// sbrPresentFlag, then the extension rate.
 			let sbr = reader.read(1, Error::IncompleteConfig)? == 1;
 			if sbr {
-				read_sample_rate(&mut reader)?;
+				config.sample_rate = read_sample_rate(reader)?;
+				if extension == OBJECT_TYPE_SBR {
+					config.profile = OBJECT_TYPE_SBR;
+				}
 			}
 			if extension == 22 {
 				// extensionChannelConfiguration.
@@ -199,14 +221,13 @@ impl Config {
 					return Err(Error::UnsupportedConfig("sync extension"));
 				}
 				// psPresentFlag.
-				reader.read(1, Error::IncompleteConfig)?;
+				if reader.read(1, Error::IncompleteConfig)? == 1 {
+					config.profile = OBJECT_TYPE_PS;
+					config.channel_count = 2;
+				}
 			}
 		}
-
-		match len - reader.position().div_ceil(8) {
-			0 => Ok(config),
-			trailing => Err(Error::TrailingBytes(trailing)),
-		}
+		Ok(())
 	}
 
 	/// Read the fields up to a channelConfiguration 0's program config element, which gives the
@@ -299,6 +320,30 @@ const CONFIG_MAX_BITS: usize = 43 + 43 + 17 + 2440 + 23 + 2 + 63;
 /// The longest AudioSpecificConfig [`Config::parse_exact`] accepts, in bytes.
 pub(crate) const CONFIG_MAX_LEN: usize = CONFIG_MAX_BITS.div_ceil(8);
 
+/// The samples each frame of an AAC-LC core codes, 960 or 1024 by its frameLengthFlag, and the
+/// rate it codes them at, which SBR may double on output. `None` for another core, or a config
+/// that doesn't parse.
+pub(crate) fn frame_clock(asc: &[u8]) -> Option<(u32, u32)> {
+	// Refuses what the exact walk below doesn't check, such as a reserved channelConfiguration.
+	Config::parse(&mut &asc[..]).ok()?;
+	let mut asc = asc;
+	let mut reader = BitReader::new(&mut asc);
+	// The leading rate is the core's: explicit SBR and PS name their output rate after it.
+	let (object_type, rate, _) = read_header(&mut reader).ok()?;
+	if !matches!(object_type, OBJECT_TYPE_LC | OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+		return None;
+	}
+	if read_core(&mut reader, object_type, rate).ok()?.0 != OBJECT_TYPE_LC {
+		return None;
+	}
+	// The GASpecificConfig's first field, ahead of any program config element.
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	Some((samples, rate))
+}
+
 /// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
 /// channelConfiguration.
 fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
@@ -333,7 +378,10 @@ fn read_core<T: Buf>(reader: &mut BitReader<T>, object_type: u8, sample_rate: u3
 fn read_sample_rate<T: Buf>(reader: &mut BitReader<T>) -> Result<u32> {
 	let index = reader.read(4, Error::IncompleteConfig)? as u8;
 	if index == 15 {
-		return reader.read(24, Error::ExplicitSampleRateTooShort);
+		return match reader.read(24, Error::ExplicitSampleRateTooShort)? {
+			0 => Err(Error::UnsupportedConfig("an explicit sample rate of zero")),
+			rate => Ok(rate),
+		};
 	}
 	SAMPLE_RATES
 		.get(index as usize)
@@ -366,6 +414,29 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 		reader.read(14, Error::IncompleteConfig)?;
 	}
 	Ok(reader.read(1, Error::IncompleteConfig)? == 1)
+}
+
+/// How long one access unit of the AudioSpecificConfig `asc` plays: 1024 core samples, or 960 by
+/// its frameLengthFlag, at the core's rate, which SBR and PS double along with the samples. `None`
+/// for an object type that codes frames of another length, or a config that doesn't parse.
+pub(crate) fn frame_duration(mut asc: &[u8]) -> Option<moq_net::Timestamp> {
+	let mut reader = BitReader::new(&mut asc);
+	let (object_type, core_rate, _) = read_header(&mut reader).ok()?;
+	let (core, _) = read_core(&mut reader, object_type, core_rate).ok()?;
+	// Main, LC, SSR, and LTP; the GASpecificConfig leads with frameLengthFlag.
+	if !(1..=4).contains(&core) {
+		return None;
+	}
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	moq_net::Timestamp::from_scale(samples, core_rate.into()).ok()
+}
+
+/// Whether the raw data block `block` leads with a program config element.
+pub(crate) fn leads_with_program_config(block: &[u8]) -> bool {
+	block.first().is_some_and(|&byte| u32::from(byte >> 5) == ID_PCE)
 }
 
 /// Build the AudioSpecificConfig for a stream that signals its fields per frame, as ADTS does.
@@ -640,6 +711,21 @@ mod tests {
 	}
 
 	#[test]
+	fn frame_clock_reads_an_aac_lc_cores_frame_length() {
+		// frameLengthFlag lands mid-byte after an explicit 44101 Hz rate.
+		assert_eq!(frame_clock(&[0x17, 0x80, 0x56, 0x22, 0x94]), Some((960, 44_101)));
+		// AAC Main, alone and as an explicit SBR core, codes other frames.
+		assert_eq!(frame_clock(&[0x09, 0x90]), None);
+		assert_eq!(frame_clock(&[0x2b, 0x11, 0x84, 0x00]), None);
+	}
+
+	/// An explicit rate of zero, escape index 15 then 24 zero bits, describes no audio.
+	#[test]
+	fn explicit_zero_sample_rate_is_refused() {
+		assert!(Config::parse(&mut [0x17u8, 0x80, 0x00, 0x00, 0x10].as_slice()).is_err());
+	}
+
+	#[test]
 	fn round_trip_explicit_sample_rate() {
 		// A non-standard rate (no freq_index) forces the explicit 24-bit form, where
 		// channelConfiguration lands mid-byte after the rate. A byte-aligned parser
@@ -790,6 +876,20 @@ mod tests {
 	/// HE-AACv2 is PS over a mono one.
 	const FDKAAC_HE_AAC: [u8; 4] = [0x2B, 0x11, 0x88, 0x00];
 	const FDKAAC_HE_AAC_V2: [u8; 4] = [0xEB, 0x09, 0x88, 0x00];
+
+	#[test]
+	fn frame_duration_counts_core_samples_at_the_core_rate() {
+		let micros = |asc: &[u8]| frame_duration(asc).map(|d| std::time::Duration::try_from(d).unwrap().as_micros());
+		// AAC-LC at 44.1 kHz: 1024 samples.
+		assert_eq!(micros(&[0x12, 0x10]), Some(23_219));
+		// SBR and PS over a 24 kHz core: 2048 samples at 48 kHz.
+		assert_eq!(micros(&FDKAAC_HE_AAC), Some(42_666));
+		assert_eq!(micros(&FDKAAC_HE_AAC_V2), Some(42_666));
+		// The same SBR config with frameLengthFlag set: 960 core samples.
+		assert_eq!(micros(&[0x2B, 0x11, 0x8A, 0x00]), Some(40_000));
+		// ER AAC LD codes 480 or 512 samples.
+		assert_eq!(micros(&[0xB9, 0x90, 0x00]), None);
+	}
 
 	#[test]
 	fn explicit_sbr_and_ps_parse_as_their_output() {
@@ -1083,6 +1183,50 @@ mod tests {
 		out.write(11, SYNC_EXTENSION_PS);
 		out.write(1, 1);
 		out.bytes
+	}
+
+	/// A backward-compatible sync extension names what an SBR or PS decoder plays: a 24 kHz
+	/// mono core plays at 48 kHz, and in stereo under PS, as hierarchical signaling would say.
+	#[test]
+	fn a_sync_extension_reports_the_decoded_output() {
+		for (ps, expected) in [(false, (5, 48_000, 1)), (true, (29, 48_000, 2))] {
+			let mut out = BitWriter::default();
+			out.write(5, 2);
+			out.write(4, 6);
+			out.write(4, 1);
+			out.write(3, 0);
+			out.write(11, SYNC_EXTENSION_SBR);
+			out.write(5, OBJECT_TYPE_SBR.into());
+			out.write(1, 1);
+			out.write(4, 3);
+			if ps {
+				out.write(11, SYNC_EXTENSION_PS);
+				out.write(1, 1);
+			}
+			for config in [
+				Config::parse(&mut out.bytes.as_slice()).unwrap(),
+				Config::parse_exact(&out.bytes).unwrap(),
+			] {
+				assert_eq!(
+					(config.profile, config.sample_rate, config.channel_count),
+					expected,
+					"ps={ps}"
+				);
+			}
+		}
+	}
+
+	/// SBR a sync extension names holds when the bits after it are not the PS sync extension:
+	/// padding there fails `parse_exact`, but `parse` still reports the SBR output.
+	#[test]
+	fn sbr_survives_an_unknown_field_after_it() {
+		let asc = [0x12, 0x10, 0x56, 0xE5, 0x98, 0x00, 0x00];
+		let config = Config::parse(&mut asc.as_slice()).unwrap();
+		assert_eq!(
+			(config.profile, config.sample_rate, config.channel_count),
+			(5, 48_000, 2)
+		);
+		assert!(Config::parse_exact(&asc).is_err());
 	}
 
 	#[test]

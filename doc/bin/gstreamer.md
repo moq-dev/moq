@@ -59,7 +59,7 @@ into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad
 directly. A cue with no duration is dropped rather than left on screen.
 
-Audio packets share groups of at least 20 ms while forwarding as they arrive.
+Audio packets share groups of at least 100 ms, one QUIC stream each, while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
@@ -88,18 +88,20 @@ Caps that only change what the bitstream already carries (a video resolution)
 keep the track live. A run never publishes a track name it ended again: new
 codec config, a pad requested again, or a stream resumed after EOS publishes as
 `<track>/<n>`, which `track` reads back. Element properties:
-`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `connect-tls-insecure`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
-`sessions`. Once connected, the sink reconnects for as long as the pipeline runs and only
-reports `failed` on an answer redialing can't change, such as a rejected token. A first
-connect that reaches no relay reports `failed` and posts an error instead of retrying.
+`sessions`. Once the relay has accepted a session (on moq-lite 03/04, which never answer, once
+one has stayed up for a second), the sink reconnects for as long as
+the pipeline runs, whatever ends each session. Before then it reports `failed` and posts an
+error instead of retrying: a first connect that reaches no relay, or a session the relay
+refuses, such as for a rejected token.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
 or unset keep-alive derives from the idle timeout and reads back as zero.
 Each run from `READY` publishes under a fresh
-[instance](/concept/moq-lite#publisher-instances), so viewers switch to a
+[identity](/concept/moq-lite#publisher-identities), so viewers switch to a
 restarted pipeline at once instead of stalling on the old one; reconnects
 within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its
@@ -170,11 +172,16 @@ gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
 on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A first connect
-that reaches no relay posts an error rather than retrying. A refused
-connection, refused path or catalog, or malformed protocol input or catalog posts
-an error. Properties: `url`,
+that reaches no relay posts an error rather than retrying, as does a first
+connection the relay refuses, or a session it closes before accepting it (on
+moq-lite 03/04, which never answer, before it has stayed up for a second). Once playback has begun, a session the relay closes is
+redialed, whatever its code, and a refused redial is retried like any other
+failure. A refused path or catalog, malformed input or catalog, or a catalog its
+publisher ended with an application code posts an error. A media track its
+publisher ended with an application code logs a warning and leaves its pad idle;
+it posts no error. Properties: `url`,
 `broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
-preferred first; every stable version by default), `tls-disable-verify`,
+preferred first; every stable version by default), `connect-tls-insecure`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
 
 `max-delay` is how many milliseconds (default 1000) a group may trail the live

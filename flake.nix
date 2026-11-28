@@ -22,7 +22,9 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # quest's nixpkgs, so every repository's dev shell gets the same C compiler and mbx
+    # shares build scripts, proc-macros, and the crates built on them across repositories.
+    nixpkgs.follows = "quest/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -31,9 +33,17 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest";
-      inputs.nixpkgs.follows = "nixpkgs";
+      url = "github:kixel-ai/quest";
       inputs.flake-utils.follows = "flake-utils";
+    };
+    # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
+    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind, or the library
+    # rust2-bench preloads into each counted process, starts new Kixel Quest series, since
+    # either can count differently.
+    rust2 = {
+      url = "github:kixel-ai/rust2";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.quest.follows = "quest";
     };
   };
 
@@ -76,7 +86,8 @@
         # string pool 4-byte aligned, which macOS 27's dyld refuses to load, so
         # release-profile proc macros and cdylibs are a coin flip there. The
         # crates still declare their own lower floors (Cargo.toml rust-version).
-        rust-toolchain = pkgs.rust-bin.stable."1.98.1".minimal.override {
+        rust-stable = pkgs.rust-bin.stable."1.98.1".minimal;
+        rust-toolchain = rust-stable.override {
           # `minimal` rather than `default`, which adds 740 MB of offline HTML
           # docs to a closure every CI job downloads.
           extensions = [
@@ -106,24 +117,6 @@
           old:
           pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
             makeFlags = old.makeFlags ++ [ "CXXFLAGS_WARNINGS=" ];
-          }
-        );
-
-        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
-        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
-        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
-          finalAttrs: old: {
-            version = "6.0.0";
-            src = pkgs.fetchFromGitHub {
-              owner = "CodSpeedHQ";
-              repo = "codspeed-rust";
-              tag = "v${finalAttrs.version}";
-              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
-            };
-            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-              inherit (finalAttrs) pname version src;
-              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
-            };
           }
         );
 
@@ -159,7 +152,8 @@
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
             cargo-nextest
-            cargo-codspeed
+            # Mutation testing of the route and resume code (`just rs mutants`).
+            cargo-mutants
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
             release-plz
             # Source-based test coverage (`just rs coverage`).
@@ -167,7 +161,11 @@
             (cargo-llvm-cov.override {
               rustPlatform = makeRustPlatform {
                 cargo = rust-toolchain;
-                rustc = rust-toolchain;
+                # nixpkgs reads the LLVM its tests use from `rustc.llvmPackages`,
+                # which rust-overlay's toolchain lacks.
+                rustc = rust-toolchain // {
+                  llvmPackages = llvmPackages_22;
+                };
               };
             })
           ]
@@ -322,7 +320,7 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.10.0-kixelated.2+v0.32.0 -> uniffi 0.32), and it only
+        # targets (v0.10.0-kixelated.3+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the commit the tag
@@ -336,21 +334,23 @@
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
         # as NordSecurity/uniffi-bindgen-go#96, renders an enum error's
-        # exported Display as its Error(), and destroys an async result whose
-        # context was cancelled as it completed. Move back to NordSecurity once
-        # they tag a 0.32 release carrying all three.
+        # exported Display as its Error(), destroys an async result whose
+        # context was cancelled as it completed, and renders each call binding's
+        # FFI call once, which cuts its own build from about 15 GB of memory to
+        # under 2 GB. Move back to NordSecurity once they tag a 0.32 release
+        # carrying all four.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.10.0-kixelated.2+v0.32.0";
+          version = "0.10.0-kixelated.3+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-1dXQI30UYjIqiSY/yq4OTNxRKuERm1mrLDrff32fty4=";
+            hash = "sha256-+vg+jvYzsdUjOz5qVsfoDmj78fE5zPajvpPREERATDQ=";
           };
 
-          cargoHash = "sha256-Q9746NcD4FkhHVtrvl+2PbqMe7kiiw4Uxt3z/Qbqy7A=";
+          cargoHash = "sha256-VWLi97JMQjBo3RCJI2rbdTqK4956dcvsiLGq1xVNcl4=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
@@ -421,7 +421,7 @@
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
         # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
         # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on, and C
-        # functions for an object's exported traits (`moq_instance_eq`). Its tags
+        # functions for an object's exported traits (`moq_identity_eq`). Its tags
         # add a `-kixelated.N` pre-release so they never collide with upstream's.
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
@@ -563,7 +563,7 @@
             moq-relay
             moq-bench
             moq-boy
-            moq-c
+            libmoq
             moq-gst
             ;
 
@@ -602,11 +602,56 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
-          # Nightly's `just rs send-depth` proves native Send futures on it.
-          # Pinned so a toolchain release alone never fails that job;
+          # Nightly `just test route-proof` type-checks the route rule's convergence
+          # proof. Its own Agda pin, so neither the dev shell nor `nix flake check`
+          # fetches it.
+          route-proof = import ./nix/route-proof.nix { inherit system; };
+
+          # Nightly `just rs verify` proves kio's log with Verus. Its own toolchain
+          # pin (nix/verus.nix), so neither the dev shell nor `nix flake check`
+          # fetches it; Linux only, as Verus's release is.
+          verus = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            let
+              verus = pkgs.callPackage ./nix/verus.nix { inherit (pkgs) rust-bin; };
+            in
+            pkgs.mkShell {
+              packages = [
+                verus
+                verus.toolchain
+                pkgs.just
+              ];
+            }
+          );
+
+          # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
+          # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL
+          # has no config for them), and Compose drives Podman where Docker's plugin is
+          # absent. Kept out of the dev shell, which every CI job downloads.
+          quic-interop = pkgs.buildEnv {
+            name = "quic-interop-tools";
+            paths = [
+              pkgs.docker-compose
+              pkgs.openssl
+              pkgs.wireshark-cli
+            ];
+          };
+
+          # The gate's `just rs send-depth` proves moq-net's Send futures on it.
+          # Pinned so a toolchain release alone never fails that check;
           # bump it on purpose, like the stable toolchain above. Kept out of
           # the dev shell, which every CI job downloads.
           rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
+
+          # The gate's `just rs cross-lint` runs clippy for the macOS and Windows
+          # targets from Linux with it: the dev shell's compiler plus those
+          # targets' std, kept out of the dev shell, which every CI job downloads.
+          rust-cross = rust-stable.override {
+            extensions = [ "clippy" ];
+            targets = [
+              "aarch64-apple-darwin"
+              "x86_64-pc-windows-msvc"
+            ];
+          };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out

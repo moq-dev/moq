@@ -169,14 +169,19 @@ mod tests {
 	/// fixed on the stable toolchain, in the suite CI already runs.
 	#[test]
 	fn regressions() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/regressions");
+		let root =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("fuzz/regressions");
 
 		for (name, target) in TARGETS {
 			// Nothing has failed yet for this target; `fuzz/README.md` says what to drop in here
 			// when something does.
-			let Ok(entries) = std::fs::read_dir(root.join(name)) else {
+			let dir = root.join(name);
+			// Skip only a missing directory, so an unreadable one fails instead of passing empty.
+			if !dir.try_exists().expect("could not check the regression directory") {
 				continue;
-			};
+			}
+			let entries = std::fs::read_dir(&dir).expect("could not read the regression directory");
 			for entry in entries {
 				let path = entry.expect("could not read the regression directory").path();
 				let data = std::fs::read(&path).expect("could not read a regression input");

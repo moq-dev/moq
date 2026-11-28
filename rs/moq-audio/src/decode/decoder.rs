@@ -1,17 +1,17 @@
 //! Audio decoder front end.
 //!
 //! Mirror of [`encode::Encoder`](crate::encode::Encoder): opens a
-//! [`Backend`](super::backend::Backend) for the catalog codec and trims its
+//! [backend](super::backend::Backend) for the catalog codec and trims its
 //! startup delay, producing interleaved `f32` PCM.
 
 use super::Decoded;
-use super::backend::{self, Backend};
+use super::backend;
 use crate::{Error, Layout};
 
 /// Decoder backend selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Kind {
+pub enum Backend {
 	/// Prefer a platform decoder, falling back to software.
 	#[default]
 	Auto,
@@ -24,7 +24,7 @@ pub enum Kind {
 #[non_exhaustive]
 pub struct Config {
 	/// Backend selection policy.
-	pub kind: Kind,
+	pub backend: Backend,
 }
 
 impl Config {
@@ -39,7 +39,7 @@ impl Config {
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
 /// when the packets don't come from a plain track subscription.
 pub struct Decoder {
-	backend: Box<dyn Backend>,
+	backend: Box<dyn backend::Backend>,
 	/// Startup delay in native-rate frames, and how much of it is left to trim.
 	delay: usize,
 	delay_remaining: usize,
@@ -81,7 +81,7 @@ impl Decoder {
 
 	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
 	pub fn reset(&mut self) -> Result<(), Error> {
-		self.reset_prediction()?;
+		self.backend.reset()?;
 		self.reapply_delay();
 		Ok(())
 	}
@@ -91,9 +91,9 @@ impl Decoder {
 		self.delay_remaining = self.delay;
 	}
 
-	/// Reset codec prediction after packet loss without reapplying stream startup delay.
-	pub(super) fn reset_prediction(&mut self) -> Result<(), Error> {
-		self.backend.reset()
+	/// Whether an empty packet now conceals one lost packet.
+	pub(super) fn conceals(&self) -> bool {
+		self.backend.conceals()
 	}
 
 	/// How much startup delay is still to be trimmed, in native-rate frames.
@@ -114,9 +114,9 @@ impl Decoder {
 	///
 	/// An empty Opus packet marks one lost packet and conceals as much audio as the
 	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
-	/// refused with [`Error::Decode`] before any packet has decoded, since there is
-	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
-	/// during active audio remains active.
+	/// refused with [`Error::Decode`] before any packet has decoded since the last
+	/// [`reset`](Self::reset), since there is no length to conceal. Loss during DTX
+	/// remains classified as DTX, while loss during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		self.backend.decode(packet)
 	}
@@ -179,17 +179,14 @@ pub(crate) mod tests {
 	/// then stripping the ADTS header off each frame, since the wire carries raw
 	/// AAC. These are frames 2 to 4, past the encoder's priming. lavfi's sine is
 	/// an eighth of full scale, which is what the volume filter is undoing.
-	#[cfg(feature = "aac")]
 	const AAC_DESCRIPTION: &[u8] = b"\x12\x08";
 
-	#[cfg(feature = "aac")]
 	const AAC_FRAMES: [&[u8]; 3] = [
 		b"\x01\x52\xf2\x8b\x1a\xd7\x8e\x7b\xfd\xa7\xef\xe7\xe3\x55\xd3\x4d\x2f\x55\x2e\x47\x1c\x92\x49\x11\x20\x77\x3f\xbe\x74\xdd\x99\xb3\x7b\xfb\x90\xc9\xf0\x61\x9f\xdc\x0c\x9f\x06\x19\xfd\xe1\x1f\x1f\x00\x67\xf7\x03\x87\xc0\x19\xfd\xc0\xc9\xf0\x07",
 		b"\x01\x1e\x32\x89\xe2\x9d\x6b\x33\xe7\xff\xe2\xfe\xbf\xfa\xff\xe7\x2f\x8b\xd5\xd5\xe7\x5f\x3f\x59\xeb\xf1\xcb\xba\xa5\x5e\x52\x4a\xbd\x8d\x74\x50\x8c\x08\xa8\xa0\xd4\x51\x40\xa1\x86\x5d\x06\xb4\x6c\x32\xe6\x25\x9a\x66\x75\xcd\xf9\xbf\x6f\x83\xb7\x53\x80",
 		b"\x01\x1e\x32\x8a\x22\x7d\x40\x87\x48\xdb\xdf\xff\xf9\x4f\xff\x87\xde\xef\x8b\xeb\x1e\x77\x5d\xfc\x67\x8f\x8c\x77\x8a\xd6\x29\x96\x1f\x29\xe7\x39\xd4\x53\xcf\x3c\xf3\xce\x79\xd4\x27\x9c\xf5\x65\x2a\x9b\xe9\x80\xb7\xba\xa9\xf9\x58\xc7\x3c\x58\x27\x8a\x60\xa1\x57",
 	];
 
-	#[cfg(feature = "aac")]
 	fn aac_catalog() -> hang::catalog::AudioConfig {
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44_100, 1);
 		catalog.description = Some(bytes::Bytes::from_static(AAC_DESCRIPTION));
@@ -207,7 +204,7 @@ pub(crate) mod tests {
 	/// Frames of startup delay [`Pipelined`] declares.
 	const PIPELINED_DELAY: usize = 3;
 
-	impl Backend for Pipelined {
+	impl backend::Backend for Pipelined {
 		fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 			let output = Decoded {
 				samples: packet.iter().map(|&byte| f32::from(byte)).collect(),
@@ -309,7 +306,6 @@ pub(crate) mod tests {
 		assert_unwind_safe::<Decoder>();
 	}
 
-	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_decodes_a_sine() {
 		let mut decoder = Decoder::new(&aac_catalog(), &Config::default()).unwrap();
@@ -335,7 +331,6 @@ pub(crate) mod tests {
 		assert!((0.65..0.8).contains(&rms), "expected a full-scale sine, got {rms} RMS");
 	}
 
-	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_reports_a_truncated_packet_as_decode() {
 		let mut decoder = Decoder::new(&aac_catalog(), &Config::default()).unwrap();
@@ -344,7 +339,6 @@ pub(crate) mod tests {
 		assert!(matches!(decoder.decode(truncated), Err(Error::Decode(_))));
 	}
 
-	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_without_a_description_refuses_raw_packets() {
 		let mut catalog = aac_catalog();
@@ -355,7 +349,6 @@ pub(crate) mod tests {
 		assert!(matches!(decoder.decode(AAC_FRAMES[0]), Err(Error::Decode(_))));
 	}
 
-	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_without_a_description_decodes_adts() {
 		let mut catalog = aac_catalog();
@@ -400,7 +393,6 @@ pub(crate) mod tests {
 		}
 	}
 
-	#[cfg(feature = "aac")]
 	#[test]
 	fn cmaf_aac_samples_remain_raw_without_a_catalog_description() {
 		let mut catalog = aac_catalog();
@@ -496,10 +488,100 @@ pub(crate) mod tests {
 		for packet in &packets {
 			crate::single(decoder.decode_all(packet).unwrap());
 		}
+		assert!(decoder.conceals());
 		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
 
 		// Concealment doesn't change the length: the next loss is the same size.
 		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
+	}
+
+	/// A `Voice` encoder at `bitrate`, and the packets it codes from `frames` of a 440 Hz
+	/// sine at 0.35 RMS followed by `silent` frames of silence.
+	fn voice(bitrate: u64, frames: usize, silent: usize) -> (crate::encode::Encoder, Vec<crate::encode::Encoded>) {
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
+			kind: Some(crate::encode::Kind::Voice),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(bitrate)),
+			..crate::encode::Config::new(48_000, Layout::Mono)
+		})
+		.unwrap();
+		let size = encoder.frame_size();
+		let packets = (0..frames + silent)
+			.map(|frame| {
+				let pcm: Vec<f32> = (frame * size..(frame + 1) * size)
+					.map(|i| match frame < frames {
+						true => (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5,
+						false => 0.0,
+					})
+					.collect();
+				crate::single(encoder.encode_all(&pcm).unwrap())
+			})
+			.collect();
+		(encoder, packets)
+	}
+
+	/// SILK and hybrid conceal a loss by fading the audio before it, as C libopus does,
+	/// rather than at full scale; a reset leaves nothing to conceal from.
+	#[test]
+	fn opus_conceals_silk_and_hybrid() {
+		// RFC 6716 §3.1: TOC configurations 0 to 11 are SILK, 12 to 15 hybrid.
+		for (bitrate, modes) in [(12_000, 0..12), (32_000, 12..16)] {
+			let (encoder, packets) = voice(bitrate, 10, 0);
+			let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
+			let mut last = Vec::new();
+			for packet in &packets {
+				assert!(
+					modes.contains(&(packet.payload[0] >> 3)),
+					"{bitrate}: mode {}",
+					packet.payload[0] >> 3
+				);
+				last = crate::single(decoder.decode_all(&packet.payload).unwrap()).samples;
+			}
+			let level = rms(&last);
+			assert!(decoder.conceals());
+
+			let concealed: Vec<f32> = (0..5)
+				.map(|_| rms(&crate::single(decoder.decode_all(&[]).unwrap()).samples))
+				.collect();
+			// Saturated concealment reads about 1.0 RMS.
+			assert!(
+				concealed.iter().all(|&rms| rms < 1.5 * level),
+				"{bitrate}: {level} then {concealed:?}"
+			);
+			assert!(
+				concealed[0] > 0.2 * level,
+				"{bitrate}: concealed silence, {concealed:?}"
+			);
+			assert!(concealed[4] < 0.5 * concealed[0], "{bitrate}: no fade, {concealed:?}");
+
+			decoder.reset().unwrap();
+			assert!(!decoder.conceals());
+			assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
+		}
+	}
+
+	/// libopus decodes a SILK or hybrid DTX packet as a loss, playing quiet comfort noise
+	/// rather than the full-scale noise a broken concealment would.
+	#[test]
+	fn opus_silk_dtx_is_quiet() {
+		for bitrate in [12_000, 32_000] {
+			let (encoder, packets) = voice(bitrate, 10, 40);
+			let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
+			let mut dtx = 0;
+			for packet in &packets {
+				let decoded = crate::single(decoder.decode_all(&packet.payload).unwrap());
+				if packet.payload.len() <= 2 {
+					dtx += 1;
+					assert!(decoded.activity.is_dtx());
+					let peak = decoded.samples.iter().fold(0f32, |peak, s| peak.max(s.abs()));
+					assert!(
+						peak < 0.05,
+						"{bitrate}: DTX packet {:?} peaks at {peak}",
+						packet.payload
+					);
+				}
+			}
+			assert!(dtx > 10, "{bitrate}: only {dtx} DTX packets");
+		}
 	}
 
 	#[test]

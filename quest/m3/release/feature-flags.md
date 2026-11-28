@@ -1,64 +1,100 @@
-# [M] Cargo feature review before the cut
+# [S] Cargo feature review before the cut: delta pass
 
 ## Goal
 
-Every Cargo feature in the workspace has been judged before the release
-ships. Defaults build nothing expensive or system-dependent. Each feature that
-remains lives in the crate that owns its integration (`s3` in moq-archive,
-forwarded by the binaries that ship it). A feature that only trims compile
-time is removed in favor of always-compiled code. The scope covers the
-defaults and `release` sets of shipped binaries, and the feature lists the
-bindings and packaging builds pass. Each change the maintainer approves is a
-quest that lands before the cut.
+Every Cargo feature m2 added or changed since the first pass (2026-11-14) has
+been judged before the release ships, by the same rules: defaults build
+nothing expensive or system-dependent; each feature that remains is a vendor
+integration or a system dependency and lives in the crate that owns that
+integration, forwarded by dependents under the same name; a feature that only
+trims compile time is removed in favor of always-compiled code. The scope
+covers the defaults and `full` sets of shipped binaries, and the feature lists
+the bindings and packaging builds pass. Each change the maintainer approves is
+a quest that lands before the cut. A feature that matches a reason the Plan's
+Kept list records (the poll-first `async` design, a test or harness hook, an
+optional `serde`, or a layering split) also stays.
 
 ## Plan
 
 Recurs once per API or wire cut (decided 2026-10-26; per breaking cut
 2026-11-09). The [release cut](/quest/m3/release/cut.md) re-creates this quest
 when the maintainer names the next API or wire cut, so the PR finishing this
-run adds no successor.
-Record what this run learned (inventory method, findings, what to check
-first) in the cut's PR notes or a follow-up quest, so the next run starts from
-it. Only `/quest-delete` ends the recurrence.
+run adds no successor. Record what this run learned in the cut's PR notes or a
+follow-up quest. Only `/quest-delete` ends the recurrence.
 
-Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this run
-starts now, on the features `main` has today, with a delta pass after m2
-(rejected: one pass after m2 lands, which puts every approved change behind
-the routes chain instead of beside it). The first pass's PR rewrites this
-quest to the delta pass: features m2 added or changed since, with
-[m2](/quest/m2/README.md) under `Required`. The cut waits for the delta pass. Feature changes break downstream builds, which is why this
-runs before the cut rather than with the post-release audits. Like the [API
-shape review](/quest/m3/release/api-review.md), this run changes no code
-(decided 2026-10-26): it proposes each change with a recommendation, asks the
-maintainer, and files each approved change as a quest in m2, which holds the
-cut until it lands.
+Decided 2026-11-12 (maintainer, /quest-audit): a first pass on `main` as it
+stood, then this delta pass after m2. Like the [API shape
+review](/quest/m3/release/api-review.md), it changes no code: it proposes
+each change with a recommendation and files each approved change as a quest
+in m2.
 
-Judge every feature against the `# Features` rules in `rs/AGENTS.md`, and
-challenge each one's premise: fewer features are better. A feature trims a
-build for a few power users but fragments the code and its test matrix, so
-keep one only for a vendor integration or a system dependency. For each crate,
-inventory the `[features]` table, which crates forward each feature, and what
-it gates. Then check:
+What the first pass ([moq-dev/moq#8765](https://github.com/moq-dev/moq/pull/8765))
+judged, so this pass reads only the difference:
 
-- Defaults: nothing that needs libclang, a system library at build or load
-  time, or a large dependency tree. A shipped binary's `release` set holds
-  every backend its platform loads without a system library.
-- Scope: a vendor feature sits in the crate that integrates the vendor, and
-  dependents forward it under the same name instead of enabling their
-  dependencies' features directly.
-- Fragmentation: features no consumer turns off, or that gate logic rather
-  than a dependency, are candidates to delete.
+- Method: list every `[features]` table (`git ls-files '*Cargo.toml'`), every
+  internal dependency's `features =` and `default-features`, every
+  `--features` in `.github/`, `nix/`, `.cargo/config.toml`, `bench/run.sh`,
+  `rs/justfile`, the binding build hooks (`dart/`, `py/`, `pyproject.toml`,
+  `cpp/`), and count `cfg(feature = ...)` sites per crate. Measure a
+  feature's cost with `cargo tree -e normal --prefix none` with and without
+  it, inside the shipped binary rather than the crate alone: most features
+  that look heavy on their crate add one or two crates to moq-relay or moq-cli.
+  Diff this pass's inventory against the first pass's to find what m2 added.
+- Filed: network stack (landed in
+  [moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)), qlog (landed
+  in [moq-dev/moq#8853](https://github.com/moq-dev/moq/pull/8853)), and the
+  media and gateway trims
+  ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)).
+- Kept, with the reason a new feature has to match:
+  - `async` in moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
+    moq-e2ee, and moq-auth: the poll-first design (decided 2026-11-05 in
+    [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607)), checked
+    by `just rs coroutines`.
+  - Vendor or system: moq-video's `nvidia`, `vaapi`, `mediacodec`, `v4l2`,
+    `openh264` (a vendored C++ build), `vpx` (system libvpx), `pipewire`
+    (libpipewire), and `render` (wgpu); moq-audio's `capture`, `playback`,
+    `pipewire`, and `pulseaudio` (libasound through cpal); `jemalloc` (a C
+    build); moq-cli's `s3`, `gcs`, and `azure`.
+  - Large HTTP stacks a library embedder owns: moq-auth's `client`
+    (reqwest) and `serve` (axum), moq-hls's and moq-webrtc's `server` (axum).
+  - moq-crypto's `endpoint`, `cpu`, and `provider`: they keep moq-net out
+    of moq-quic's graph, a layering need rather than a trim. Corrected
+    2026-11-16: `sign` left in
+    [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
+    left with the crate move
+    ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)).
+  - `serde` in moq-pattern and moq-crypto: an optional dependency, by
+    ecosystem convention.
+  - moq-video's `capture`: device I/O the bindings deliberately leave to the
+    language wrappers, and its platform frameworks would bloat mobile builds.
+  - moq-cli's `capture`, `play`, and `transcode`: [Ship capture and
+    playback](/quest/m3/cli-packaging.md) owns them and the `full` set.
+  - Test and harness hooks, off by default and never in a shipped build:
+    `fuzz` (moq-net, moq-mux, moq-quic, moq-rtmp, moq-sock, moq-uring),
+    `sim` (moq-quic, moq-tokio), `test-support` (moq-relay, moq-rtsp),
+    `testing` (moq-ffi), `test` (moq-shaper), `bench` (moq-json, moq-stats),
+    `_manual` and `_probe` (moq-uring), and uniffi-bindgen's `cli`. Cross-crate
+    tests and fuzz crates are separate packages, so a dev-dependency cannot
+    replace them.
+- Corrected premise: storage features belong in moq-cli, not moq-archive.
+  moq-archive is generic over any `ObjectStore`; moq-cli's `open_store` is the
+  code that integrates S3, GCS, and Azure.
 
-What to check first (seeded 2026-10-26):
+What to check first in this pass:
 
-- moq-cli's `s3`, `gcs`, and `azure` enable `object_store/aws`, `gcp`, and
-  `azure` directly; moq-archive, which owns storage, has no features. Also
-  check moq-cli's other defaults (`cluster-lan`, `quic`, `websocket`, `nvidia`)
-  against the rules. Distributions building with `release` is
-  [Ship capture and playback](/quest/m3/cli-packaging.md)'s work, not this
-  review's.
-- The crates with the most features at seeding: moq-cli (21), moq-tokio (17),
-  moq-relay (14), and moq-video (11).
+- New `[features]` entries and new `default-features = false` consumers since
+  the first pass, especially in crates m2's routes and cluster work touched
+  (moq-net, moq-relay, moq-tokio).
+- Whether [ALSA without a load-time
+  link](/quest/m3/capture-alsa-link.md) landed: if libasound loads at run time,
+  moq-audio's `capture` and `playback` no longer need a system library to
+  build, and their premise needs re-judging.
 
-Related: the [cost audit](/quest/m3/audit-cost.md) owns per-crate build
-cost and which dependencies exist.
+## Required
+
+- [m2](/quest/m2/README.md) - the delta pass judges what m2 added
+
+## Related
+
+- [Cost audit](/quest/m3/audit-cost.md) - owns per-crate build cost and which
+  dependencies exist

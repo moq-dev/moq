@@ -25,9 +25,12 @@ on:
     types:
       - completed
 
+# One run pushes to the tap at a time. `queue: max` holds every other, in
+# order, where the default queue cancels all but one pending run, so a release
+# cut tagging moq-cli, moq-relay, and moq-gst together still renders all three.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -144,7 +147,7 @@ jobs:
           cat "rendered/${CRATE}.rb"
 
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}

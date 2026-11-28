@@ -16,6 +16,13 @@ pub(super) const PCR_HZ: u64 = 27_000_000;
 /// PCR ticks: one second.
 const FALLBACK_TICKS: u64 = PCR_HZ;
 
+/// PCR ticks in a microsecond, the unit of an object's timestamp.
+const TICKS_PER_MICRO: u64 = PCR_HZ / 1_000_000;
+
+/// The longest unflagged step forward taken as elapsed time, in PCR ticks: the media-aware
+/// import's [`LEAP`](super::step::LEAP).
+const LEAP_TICKS: u64 = super::step::LEAP.as_micros() as u64 * TICKS_PER_MICRO;
+
 /// The most bytes a group holds before its next object starts another, so a source with sparse
 /// random access points still gives a joiner a group it can take whole.
 pub(super) const GROUP_BYTES_MAX: u64 = 16 * 1024 * 1024;
@@ -56,10 +63,11 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 
 /// Publishes a transport stream verbatim, as one track of whole 188-byte packets.
 ///
-/// Every packet goes out in input order, on the track the catalog's [`m2ts`](hang::catalog::M2ts)
-/// section names. It reads the PAT and PMT to find the program clock and the video stream, and
-/// reads nothing else past an adaptation field, so a scrambled multiplex groups and paces exactly
-/// like its clear twin.
+/// Every packet goes out in input order, on the track the catalog's `mpegts` section names in
+/// [`passthrough`](super::Mpegts::passthrough), with the multiplex rate in its
+/// [`mux_rate`](super::Mpegts::mux_rate). It reads the PAT and PMT to find the program clock and
+/// the video stream, and reads nothing else past an adaptation field, so a scrambled multiplex
+/// groups and paces exactly like its clear twin.
 ///
 /// # Objects and groups
 ///
@@ -68,8 +76,8 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 ///
 /// - a packet with `random_access_indicator` on the video PID, or on the clock PID when the
 ///   program has no video;
-/// - a PCR with `discontinuity_indicator` that jumps forward, since no group may hold a PCR
-///   discontinuity;
+/// - a PCR that breaks the count (see Timestamps): one with `discontinuity_indicator`, or a
+///   step not taken as elapsed time, since no group may hold a PCR discontinuity;
 /// - the first PCR at least one second after the group's start, for a source that never marks
 ///   random access;
 /// - the first object that would take the group past half of what `moq-net` caches of one group,
@@ -77,7 +85,7 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 ///   split to meet the bound.
 ///
 /// Only the first of these makes a group a random access point, so any other start publishes
-/// [`random_access`](hang::catalog::M2ts::random_access) false from then on, as does any group
+/// [`random_access`](super::PassthroughTrack::random_access) false from then on, as does any group
 /// carried while the layout allows no random access (more than one program or video stream). A
 /// group the PCR discontinuity starts is behind a break even when it is also a random access
 /// point.
@@ -98,15 +106,20 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 /// that object places the clock, and otherwise whatever lands it at now on a clock already in use.
 ///
 /// PCRs are unwrapped into a 64-bit count of 27 MHz ticks that never goes back. A step forward of
-/// at most half the 2^33 * 300 tick period adds to the count, across the wrap included. A PCR with
-/// `discontinuity_indicator` whose step is forward by that measure adds the step too, after the
-/// bytes before it are timed at the rate before it, and starts a group behind a break marker. Any
-/// step back ends the import: [`PcrRewind`](crate::Error::PcrRewind) without the flag,
-/// [`PcrRestart`](crate::Error::PcrRestart) with it, since a signalled restart is new content and
-/// needs a new broadcast. The timeline therefore depends only on the bytes since the importer's
+/// at most half the 2^33 * 300 tick period adds to the count, across the wrap included, unless it
+/// is more than 10 s without `discontinuity_indicator`. A PCR with the flag whose step is forward
+/// adds the step too. Every other step, back with or without the flag or that unflagged leap, is
+/// another timeline, such as a switch between two encoders whose clocks were never locked, and is
+/// spliced: the count carries on from the time the rate before the PCR gives it. Either way the
+/// bytes before it are timed at the rate before it, and the next group starts behind a break
+/// marker. The bytes still go out verbatim, so a decoder downstream sees the step as the source
+/// sent it. The timeline therefore depends only on the bytes since the importer's
 /// first PCR and its shift, and two importers of one feed started at the same packet each placing
 /// its own catalog's clock publish identical objects.
-pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
+///
+/// The catalog's extension must carry the `mpegts` section ([`Catalog`](super::Catalog)), such as
+/// [`Ext`](super::Ext): [`new`](Self::new) refuses one that does not.
+pub struct Passthrough<E: super::Catalog = super::Ext> {
 	catalog: crate::catalog::Producer<E>,
 	/// Held until the first group is written, so the first catalog already names the track with
 	/// its final `randomAccess`.
@@ -158,17 +171,24 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	mux_rate: Meter,
 }
 
-/// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
+/// Owns the passthrough's catalog entry once written, removing it however the track ends, as the
 /// demultiplexed lane's catalog entries are.
-struct Section<E: crate::catalog::hang::CatalogExt> {
+struct Section<E: super::Catalog> {
 	catalog: crate::catalog::Producer<E>,
-	written: hang::catalog::M2ts,
+	written: Written,
+}
+
+/// What a passthrough last wrote into the `mpegts` section.
+#[derive(Clone, PartialEq)]
+struct Written {
+	track: super::PassthroughTrack,
+	mux_rate: Option<u64>,
 }
 
 /// A passthrough that [finished](Passthrough::finish): its track has ended, and it can still be
 /// read or aborted, but it takes no more input.
 ///
-/// Dropping it releases the track and removes the catalog's `m2ts` section.
+/// Dropping it releases the track and removes it from the catalog's `mpegts` section.
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_decode(mut passthrough: moq_mux::container::ts::passthrough::Finished) {
@@ -176,27 +196,34 @@ struct Section<E: crate::catalog::hang::CatalogExt> {
 /// # }
 /// ```
 #[must_use = "dropping it releases the track and its catalog section"]
-pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+pub struct Finished<E: super::Catalog = super::Ext> {
 	passthrough: Passthrough<E>,
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+impl<E: super::Catalog> Finished<E> {
 	/// The name of the track carrying the packets.
 	pub fn track(&self) -> &str {
 		self.passthrough.track()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`Passthrough::abort`].
+	/// Abort the track with `err`; see [`Passthrough::abort`]. Readers still draining get the clean end
+	/// instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.passthrough.abort(err);
 	}
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Drop for Section<E> {
+impl<E: super::Catalog> Drop for Section<E> {
 	fn drop(&mut self) {
-		// A closed catalog has nothing left to remove it from.
-		let _ = self.catalog.mutate(|catalog| catalog.m2ts = None);
+		// A closed catalog has nothing left to remove it from. The rate stays: it is the
+		// multiplex's, which a demultiplexing importer of the same source may also write, and
+		// that importer leaves it in place when it ends too.
+		if let Ok(mut catalog) = self.catalog.edit() {
+			if let Some(mpegts) = catalog.ext.mpegts_mut() {
+				mpegts.passthrough = None;
+			}
+			let _ = catalog.commit();
+		}
 	}
 }
 
@@ -228,7 +255,7 @@ enum Groups {
 	Writing(Group),
 }
 
-/// The PCRs since the importer's first, or since the last flagged jump.
+/// The PCRs since the importer's first, or since the last break.
 struct Timebase {
 	/// The last PCR, raw.
 	raw: u64,
@@ -271,19 +298,30 @@ struct Group {
 	objects: usize,
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
+impl<E: super::Catalog> Passthrough<E> {
 	/// A passthrough importer publishing one track on `broadcast`, listed in the catalog behind
 	/// `reserved`.
+	///
+	/// Fails with [`NoMpegtsSection`](crate::Error::NoMpegtsSection) when the catalog's extension
+	/// carries no `mpegts` section to list the track in.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> crate::Result<Self> {
 		let catalog = reserved.producer();
-		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let mut snapshot = catalog.snapshot();
+		let Some(mpegts) = snapshot.ext.mpegts_mut() else {
+			return Err(crate::Error::NoMpegtsSection);
+		};
+		// A rate the catalog already records measured this multiplex; the meter confirms,
+		// replaces, or clears it.
+		let measured = mpegts.mux_rate;
+		catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
+		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 		let media = catalog.media_raw(
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		)?;
 		Ok(Self {
+			shift: catalog.timebase(),
 			catalog,
-			shift: reserved.timebase(),
 			reservation: Some(reserved),
 			media,
 			section: None,
@@ -306,8 +344,17 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			written: 0,
 			groups: Groups::Waiting(None),
 			all_random_access: true,
-			mux_rate: Meter::default(),
+			mux_rate: Meter::measured(measured),
 		})
+	}
+
+	/// Shift the multiplex's timestamps through `timebase`, a timestamp base of the catalog
+	/// `reserved` belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.shift = timebase;
+		self
 	}
 
 	/// Pace the multiplex on `pid` rather than on the `PCR_PID` of the PAT's first program.
@@ -340,7 +387,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// [`Finished`] passthrough.
 	///
 	/// No later PCR will arrive, so the objects since the last one are timed at the rate of the
-	/// interval before it. The catalog keeps the `m2ts` section until the [`Finished`] passthrough
+	/// interval before it. The catalog keeps listing the track until the [`Finished`] passthrough
 	/// drops.
 	///
 	/// A finish that fails ends the track with an error, so it can't be retried.
@@ -460,7 +507,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			if let Some(raw) = pcr(pkt) {
 				clock = true;
-				start = self.clock(pid, raw, at)?;
+				start = self.clock(raw, at)?;
 				discontinuity = start == Some(Start::Discontinuity);
 			}
 		}
@@ -502,7 +549,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// A PCR at `at` on the clock PID: close the object it ends, time everything waiting on it,
 	/// and say whether its packet starts a group.
-	fn clock(&mut self, pid: u16, raw: u64, at: u64) -> crate::Result<Option<Start>> {
+	fn clock(&mut self, raw: u64, at: u64) -> crate::Result<Option<Start>> {
 		let at = at + PCR_OFFSET;
 		self.close_object();
 		let flagged = std::mem::take(&mut self.pending_break);
@@ -529,20 +576,16 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// A retransmitted break (the same flagged PCR again) declares nothing new.
 		let flagged = flagged && !(timebase.samples.len() == 1 && timebase.raw == raw);
 		let step = (raw + PCR_WRAP - timebase.raw) % PCR_WRAP;
-		if step > PCR_WRAP / 2 {
-			let from = timebase.raw;
-			return Err(match flagged {
-				true => crate::Error::PcrRestart { pid, from, to: raw },
-				false => crate::Error::PcrRewind { pid, from, to: raw },
-			});
-		}
 		let last = timebase.samples.back().expect("a timebase has a sample").ticks;
+		// A step back, or one forward too far to be elapsed time, is another timeline: the
+		// count carries on from where the rate before it puts this PCR, ignoring the step.
+		let spliced = (step > PCR_WRAP / 2 || (!flagged && step > LEAP_TICKS)).then(|| locate(at, &timebase.samples));
 
-		if flagged {
+		if flagged || spliced.is_some() {
 			// No PCR on the old side is coming: what waits on one is timed by the rate before it,
 			// and the new side carries on from there.
 			self.drain_queue()?;
-			let ticks = (last + step).max(self.written);
+			let ticks = spliced.unwrap_or(last + step).max(self.written);
 			// The object before was closed and the queue drained, so both start empty.
 			self.timing = Clock::Seen {
 				timebase: Timebase {
@@ -621,10 +664,21 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	fn write(&mut self, object: Object, ticks: u64) -> crate::Result<()> {
-		// Extrapolating past the last PCR before a small flagged jump can overshoot the jump.
-		let ticks = ticks.max(self.written);
+		// Extrapolating past the last PCR before a break can overshoot where the count resumes.
+		let mut ticks = ticks.max(self.written);
+		if object.discontinuity
+			&& let Groups::Writing(group) = &self.groups
+		{
+			// The break's marker sits on the last object's microsecond, or the one past the newest
+			// group's start when that is later, and the group behind it has to start past the
+			// marker. A splice can resume on either, as after a PCR repeated or a one-PCR timebase,
+			// neither of which gives a rate.
+			let past_object = (self.written / TICKS_PER_MICRO + 1) * TICKS_PER_MICRO;
+			let past_group = (group.ticks / TICKS_PER_MICRO + 2) * TICKS_PER_MICRO;
+			ticks = ticks.max(past_object).max(past_group);
+		}
 		self.written = ticks;
-		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
+		let timestamp = moq_net::Timestamp::from_micros(ticks / TICKS_PER_MICRO)?;
 		// The first object, which starts a group, anchors the shift and is live on arrival.
 		let timestamp = self.shift.shift(timestamp)?;
 		let size = object.payload.len() as u64;
@@ -669,24 +723,42 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		Ok(())
 	}
 
-	/// Write the section to the catalog if it changed. Nothing is written before the first group.
+	/// Write the track and rate to the catalog if they changed. Nothing is written before the first
+	/// group.
 	fn record(&mut self) -> crate::Result<()> {
 		if matches!(self.groups, Groups::Waiting(_)) && self.section.is_none() {
 			return Ok(());
 		}
-		let mut section = hang::catalog::M2ts::new(self.media.name());
-		section.random_access = self.single && self.all_random_access;
-		section.mux_rate = self.mux_rate.published();
-		if self.section.as_ref().is_some_and(|written| written.written == section) {
+		let mut track = super::PassthroughTrack::new(self.media.name());
+		track.random_access = self.single && self.all_random_access;
+		let written = Written {
+			track,
+			mux_rate: self.mux_rate.published(),
+		};
+		if self.section.as_ref().is_some_and(|section| section.written == written) {
 			return Ok(());
 		}
-		self.catalog.mutate(|catalog| catalog.m2ts = Some(section.clone()))?;
+		// The demultiplexing lane of the same source may record the rate too, so write it only
+		// when this meter's own value changes: one that has measured nothing leaves it alone.
+		let rate_changed = self.section.as_ref().and_then(|section| section.written.mux_rate) != written.mux_rate;
+		let update = written.clone();
+		{
+			let mut catalog = self.catalog.edit()?;
+			// `new` checked the section exists, and an extension keeps it for its life.
+			if let Some(mpegts) = catalog.ext.mpegts_mut() {
+				mpegts.passthrough = Some(update.track);
+				if rate_changed {
+					mpegts.mux_rate = update.mux_rate;
+				}
+			}
+			catalog.commit()?;
+		}
 		match &mut self.section {
-			Some(written) => written.written = section,
+			Some(section) => section.written = written,
 			None => {
 				self.section = Some(Section {
 					catalog: self.catalog.clone(),
-					written: section,
+					written,
 				})
 			}
 		}

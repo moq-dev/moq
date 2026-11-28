@@ -9,11 +9,9 @@
 
 use std::time::Duration;
 
-#[cfg(all(feature = "quic", feature = "websocket"))]
 use moq_relay::{Config, Relay};
 use moq_relay::{Connection, auth, cluster, web};
 
-#[cfg(feature = "websocket")]
 use crate::logs::Logs;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -60,9 +58,9 @@ async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> w
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
-	// A public grant of `**` lets any path through.
+	// A public grant of the empty prefix lets any path through.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 	let auth = auth_config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
@@ -86,8 +84,16 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 }
 
 /// Stand up the assembled relay path with `--server-version` restricted.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
+	spawn_public_relay(versions, vec![moq_auth::Prefix::all()]).await
+}
+
+/// Stand up the assembled relay path with `--server-version` restricted, granting anonymous
+/// sessions only `public`.
+async fn spawn_public_relay(
+	versions: Vec<moq_net::Version>,
+	public: Vec<moq_auth::Prefix>,
+) -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
@@ -95,7 +101,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.web.ws = true;
 	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
 
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = public;
 
 	// `load` binds the web listener, so the port is ours before anyone dials it.
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
@@ -116,10 +122,7 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
 	// Zero head start so the WebSocket path runs immediately.
-	#[cfg(feature = "websocket")]
-	{
-		config.websocket.delay = Some((std::time::Duration::ZERO).into());
-	}
+	config.websocket.delay = Some((std::time::Duration::ZERO).into());
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -135,7 +138,6 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
 /// one frame end-to-end, and assert both sides see the newest moq-lite ALPN.
 /// Regression for the `serve_ws` downgrade to Lite02.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_round_trip_uses_newest_version() {
 	let (port, web_handle) = spawn_relay().await;
@@ -151,9 +153,11 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -223,7 +227,6 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 /// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 	let logs = Logs::default();
@@ -262,7 +265,6 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 }
 
 /// Read announcements until `until` shows up, returning every active prefix seen.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !seen.iter().any(|prefix| prefix == until) {
@@ -273,6 +275,7 @@ async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &st
 		if let moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 			announce,
+			..
 		} = event
 		{
 			seen.push(announce.prefix.as_str().to_owned());
@@ -284,7 +287,6 @@ async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &st
 /// A `.`-named broadcast stays out of discovery unless the reader opts in, and
 /// a client that predates the opt-in (moq-lite-06) never discovers it. Subscribing
 /// by exact path needs no opt-in.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	// lite-07 is work-in-progress and off by default, so the relay must enable it.
@@ -298,9 +300,14 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		.route(".x/y", moq_net::origin::RouteOptions::default())
 		.expect("create hidden");
 	let track = hidden.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
+		.write_frame(
+			moq_net::Timestamp::from_millis(group.start).unwrap(),
+			b"hidden".as_ref(),
+		)
 		.expect("write frame");
 	group.finish().expect("finish group");
 	// The relay's announce request carries the opt-in only on lite-07, so the publisher
@@ -379,8 +386,99 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	web_handle.abort();
 }
 
+/// A moq-transport namespace field holding a `/` is one path segment all the way through a
+/// relay: a public grant of `room/a\/b` covers that broadcast, which it could not if the
+/// escaped `/` split the field, and each wire reads back the same broadcast the other published.
+#[tokio::test]
+async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
+	kio::clock::host_time(); // a real relay on real sockets
+	let lite: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let ietf: moq_net::Version = "moq-transport-22".parse().unwrap();
+	let fields = [(ietf, lite), (lite, ietf)];
+	let public = (fields.iter())
+		.map(|(publisher, subscriber)| format!(r"room/{publisher}\/{subscriber}").parse().unwrap())
+		.collect();
+	let (port, web_handle) = spawn_public_relay(vec![lite, ietf], public).await;
+	let url: url::Url = format!("ws://127.0.0.1:{port}/").parse().expect("parse url");
+
+	for (publisher, subscriber) in fields {
+		// The field `<publisher>/<subscriber>`, escaped into one segment.
+		let path = moq_net::Path::new(&format!(r"room/{publisher}\/{subscriber}")).unwrap();
+		assert_eq!(path.parts().count(), 2);
+
+		let pub_origin = moq_tokio::origin::spawn();
+		let route = pub_origin
+			.route(&path, moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = route.broadcast().create_track("video", timed()).expect("create track");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"escaped".as_ref())
+			.expect("write frame");
+		group.finish().expect("finish group");
+		let (_pub_client, pub_connection) = kio::clock::timeout(
+			TIMEOUT,
+			connect_once(client_version(Some(publisher)).with_publisher(&pub_origin), url.clone()),
+		)
+		.await
+		.expect("publisher connect timeout")
+		.expect("publisher connect failed");
+
+		let sub_origin = moq_tokio::origin::spawn();
+		let sub_consumer = sub_origin.consume();
+		let mut announcements = sub_consumer.routes();
+		let (_sub_client, sub_connection) = kio::clock::timeout(
+			TIMEOUT,
+			connect_once(
+				client_version(Some(subscriber)).with_subscriber(sub_origin),
+				url.clone(),
+			),
+		)
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
+			.await
+			.expect("announcement timeout")
+			.expect("origin closed");
+		assert!(active, "{publisher} -> {subscriber}: expected an announcement");
+		assert_eq!(update.prefix, path, "{publisher} -> {subscriber}");
+
+		let broadcast = sub_consumer
+			.request(&path, None)
+			.await
+			.expect("announced broadcast resolves");
+		let mut track_sub = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("track closed prematurely");
+		let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
+			.await
+			.expect("read_frame timeout")
+			.expect("read_frame failed")
+			.expect("group closed prematurely");
+		assert_eq!(&frame.payload[..], b"escaped", "{publisher} -> {subscriber}");
+
+		drop(track);
+		drop(route);
+		drop(pub_connection);
+		drop(sub_connection);
+	}
+
+	web_handle.abort();
+}
+
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {
 	let allowed: moq_net::Version = "moq-transport-18".parse().expect("parse allowed version");
@@ -496,7 +594,6 @@ async fn relay_https_terminates_tls() {
 /// root auth scope (same as the internal listener). Regression for the
 /// `/{*path}`-only route, which left bare-URL clients (e.g.
 /// `moqsink url="https://host:4443"`) with a silently dead WS fallback.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_root_path_upgrades() {
 	let (port, web_handle) = spawn_relay().await;
@@ -512,9 +609,11 @@ async fn relay_websocket_root_path_upgrades() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -573,7 +672,7 @@ async fn relay_websocket_root_path_upgrades() {
 
 /// Run the relay's accept loop over the given server config, the same path
 /// `main.rs` uses. Authenticates through the shared [`Auth`], here with fully
-/// public access (`--auth-public "**"`) so no-JWT clients get the root.
+/// public access (`--auth-public ""`) so no-JWT clients get the root.
 ///
 /// Returns the QUIC and TCP sockets the server bound, when it has them, so a
 /// caller that asked for an ephemeral port can dial it.
@@ -595,7 +694,7 @@ async fn spawn_accept_relay(
 
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let mut server = server.listen().await.expect("listen");
-	let quic = server.local_addr().ok();
+	let quic = server.local_addr();
 	let tcp = server.tcp_local_addr();
 
 	let handle = tokio::spawn(async move {
@@ -622,9 +721,9 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 
-	// Public `**` lets any no-JWT stream client through at the root.
+	// The empty public prefix lets any no-JWT stream client through at the root.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
 	(tcp.expect("relay bound no TCP socket").port(), handle)
@@ -649,9 +748,11 @@ async fn internal_tcp_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -715,7 +816,7 @@ async fn internal_tcp_round_trip() {
 
 /// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
@@ -728,9 +829,9 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let mut config = moq_tokio::listen::Config::default();
 	config.unix.bind = Some(path.clone());
 
-	// Public `**` lets any no-JWT stream client through at the root.
+	// The empty public prefix lets any no-JWT stream client through at the root.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (_, _, handle) = spawn_accept_relay(config, auth_config).await;
 	(path, handle)
@@ -739,7 +840,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 /// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
 /// round-trips. Also asserts both sides land on the newest moq-lite version,
 /// which proves the in-band ALPN negotiation populated the protocol.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 #[tokio::test]
 async fn internal_unix_round_trip() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -756,9 +857,11 @@ async fn internal_unix_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -841,9 +944,11 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.route(broadcast, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
 	let track = bc.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -901,7 +1006,7 @@ async fn internal_tcp_path_reaches_server() {
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
 /// the request path rides in the `?path=` query. Same assertion as TCP, across
 /// every version whose SETUP carries a path.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -925,14 +1030,13 @@ async fn internal_unix_path_reaches_server() {
 /// Stand up the relay listening only on a QUIC `--server-bind` on an ephemeral
 /// loopback port, with fully public auth (no-JWT => whole root). Returns the bound
 /// address and an abort handle.
-#[cfg(feature = "quic")]
 async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (quic, _, handle) = spawn_accept_relay(config, auth_config).await;
 	(quic.expect("relay bound no QUIC socket"), handle)
@@ -941,7 +1045,6 @@ async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
 /// Raw QUIC has no request URI either, so `moqt://host:port/<path>` only reaches the
 /// relay if the client puts it in the SETUP. Same assertion as TCP: the relay scopes
 /// the publisher's grant to that root, across every version whose SETUP carries a path.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn raw_quic_path_reaches_server() {
 	let (addr, handle) = spawn_quic_relay().await;
@@ -1002,10 +1105,13 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }

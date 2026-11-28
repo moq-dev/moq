@@ -32,7 +32,8 @@ fn import(url: &str, fingerprint: &str) -> Child {
 
 /// Start `moq <global> import ts`, publishing `name` from stdin to the relay at `url`.
 fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child {
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	let mut command =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"));
 	// The guard on host timers is for tests, not the binaries they run.
 	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
@@ -68,7 +69,6 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 
 	let mut child = import(fixture.url.as_str(), &fixture.fingerprint);
 	let mut stdin = child.stdin.take().expect("stdin");
-	// A live TS catalog waits for its initial two-second PCR rate measurement.
 	stdin.write_all(BBB).await.expect("write stdin");
 
 	let origin = moq_tokio::origin::spawn();
@@ -128,14 +128,13 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 }
 
 /// About one second of CBR HEVC and Opus: shorter than the two-second mux-rate window, so
-/// the catalog is only released at EOF.
+/// the import ends before it records a rate.
 const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb_cbr.ts")
 	.split_at(256 * 188)
 	.0;
 
 /// A subscriber already waiting when a short import ends still receives its media: the
-/// import announces at the finish, once its catalog lists the tracks, and keeps them servable
-/// for the linger after EOF.
+/// import keeps its tracks servable for the linger after EOF.
 #[tokio::test]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	moq_tokio::crypto::install_default().unwrap();
@@ -184,7 +183,8 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 		.await
 		.expect("no catalog")
 		.expect("catalog read")
-		.expect("the import released its catalog");
+		.expect("the import released its catalog")
+		.value;
 	let name = catalog
 		.video
 		.renditions

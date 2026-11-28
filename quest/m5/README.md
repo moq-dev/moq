@@ -11,10 +11,17 @@ speculative feature or study with no named consumer yet.
 
 Decided 2026-11-13 (maintainer, /quest-plan): this milestone requires the
 [release cut](/quest/m3/release/cut.md), so until it lands spare capacity goes
-to m0 to m3 and then to [m9](/quest/m9/README.md)'s lab work (rejected:
+to m0 to m3 (rejected:
 requiring m0, m1, and m2, which lifts only when they empty, and m0 rarely
 does; also gating m3, which holds the cut). The cut's PR deletes the cut
-quest, which lifts this gate.
+quest and points this gate at the next cycle's wire cut, which keeps it
+every cycle; m5's quests start once the shift brings them into m4.
+
+Current rule: until the `0.22.0` cut, m5 is the deferred bucket, as below.
+That cut moves it, with its `Required`, to m6, and the new m5 starts empty as
+later work of lower priority, requiring the wire cut like m6; each wire
+cut's shift moves m5's quests to m4, and m6 stays the deferred bucket. The
+entries below are history.
 
 A quest gated on the outside world has a condition quest beside it, as the
 root [questline](/quest/README.md) describes. A speculative feature or study
@@ -45,8 +52,8 @@ Parked 2026-11-12 (maintainer, /quest-audit before the cut): 29 quests the
 audit judged not worth their weight (no consumer in this repository or the
 downstream plans, and no bug in shipped code) are kept here instead of
 deleted (rejected: deleting them; leaving them in m3 and m4). Each says so in
-its Plan. The tuning experiments that touch no published surface moved to
-the lab, [m9](/quest/m9/README.md).
+its Plan. Speculative tuning experiments from the deleted `m9` lab milestone
+returned here on 2026-11-26.
 
 ## Required
 

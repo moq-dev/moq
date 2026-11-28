@@ -29,9 +29,18 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
-	/// The stream's acknowledged prefix when it was reset, which drops the handle to it.
-	acked: u64,
+	/// Where the stream stood when it was reset, which drops the handle to it.
+	ended: Ended,
 	id: crate::quic::stream::Id,
+}
+
+/// Where a reset left a stream, which still answers for its acknowledgments.
+#[derive(Debug, Clone, Copy)]
+struct Ended {
+	/// The offset just past the data written.
+	offset: send::Offset,
+	/// How many leading bytes the peer acknowledged, header included.
+	acked: u64,
 }
 
 /// The mutable terminal state required by moq-net's poll trait.
@@ -51,25 +60,19 @@ impl Stream {
 	pub(super) fn new(stream: send::Stream, close: &Rc<Handles>, header: Bytes) -> Self {
 		let mut this = Self {
 			id: stream.id(),
+			ended: Ended {
+				offset: stream.offset(),
+				acked: 0,
+			},
 			state: State::Open(stream),
 			close: close.clone(),
 			unwritten: header,
 			header: None,
-			acked: 0,
 		};
 		// Write the header now when it fits, so the peer can accept the stream before its
 		// first data. Whatever does not fit waits for that data; a failure resurfaces there.
 		let _ = this.poll_header(&kio::Waiter::noop());
 		this
-	}
-
-	/// How many leading bytes the peer acknowledged, header included.
-	fn acked_len(&self) -> u64 {
-		match &self.state {
-			State::Open(stream) => stream.acked_len(),
-			State::Finished(stream) => stream.acked_len(),
-			State::Reset(_) | State::Unsent => self.acked,
-		}
 	}
 
 	fn open(&mut self) -> Result<&mut send::Stream, Error> {
@@ -84,10 +87,21 @@ impl Stream {
 	/// A raw QUIC session sends the code as is. Does nothing once already reset.
 	///
 	/// A WebTransport header already written still reaches the peer, so it can tell which
-	/// session the reset belongs to.
-	fn reset_mut(&mut self, code: u32) {
-		self.acked = self.acked_len();
+	/// session the reset belongs to, and so do the bytes before `offset` when given.
+	fn reset_mut(&mut self, offset: Option<send::Offset>, code: u32) {
+		self.ended = match &self.state {
+			State::Open(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Finished(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Reset(_) | State::Unsent => return,
+		};
 		let code = self.close.encode_stream_code(code);
+		let at = self.reset_offset(offset);
 		// The connection is driven on this thread, so no STOP_SENDING lands between this check
 		// and the reset: what the stream reports now is what the reset settles.
 		let stopped = match &self.state {
@@ -100,15 +114,27 @@ impl Stream {
 			Poll::Pending => Ok(None),
 		};
 		match std::mem::replace(&mut self.state, State::Reset(stopped)) {
-			State::Open(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
+			State::Open(stream) => match at {
+				Some(at) => stream.reset_at(at, code),
 				None => stream.reset(code),
 			},
-			State::Finished(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
+			State::Finished(stream) => match at {
+				Some(at) => stream.reset_at(at, code),
 				None => stream.reset(code),
 			},
 			State::Reset(_) | State::Unsent => unreachable!(),
+		}
+	}
+
+	/// Where a reset delivers everything before: the later of `offset` and the WebTransport
+	/// header, or nothing while the header is only partly written, since data never precedes it.
+	fn reset_offset(&self, offset: Option<send::Offset>) -> Option<send::Offset> {
+		if self.unwritten.has_remaining() {
+			return None;
+		}
+		match (self.header, offset) {
+			(Some(header), Some(offset)) if u64::from(offset) < u64::from(header) => Some(header),
+			(header, offset) => offset.or(header),
 		}
 	}
 
@@ -146,7 +172,16 @@ impl Stream {
 
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(mut self, code: u32) {
-		self.reset_mut(code);
+		self.reset_mut(None, code);
+	}
+
+	/// Reset the stream while still delivering its WebTransport header and the data before
+	/// `offset`. See [`send::Stream::reset_at`].
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub fn reset_at(mut self, offset: send::Offset, code: u32) {
+		self.reset_mut(Some(offset), code);
 	}
 
 	/// Write what is left of the WebTransport header, ready once none is left.
@@ -202,7 +237,7 @@ impl Stream {
 			Poll::Ready(Ok(())) => {}
 			Poll::Ready(Err(err)) => return Err(err),
 			Poll::Pending => {
-				self.reset_mut(0);
+				self.reset_mut(None, 0);
 				self.state = State::Unsent;
 				return Err(Error::Unsent);
 			}
@@ -284,6 +319,32 @@ impl Drop for Stream {
 impl moq_net::transport::poll::SendStream for Stream {
 	type Error = Error;
 	type Group = send::Group;
+	type Offset = send::Offset;
+
+	/// Counts the WebTransport header, which the offsets of the bytes after it include.
+	fn offset(&self) -> send::Offset {
+		match &self.state {
+			State::Open(stream) => stream.offset(),
+			State::Finished(stream) => stream.offset(),
+			State::Reset(_) | State::Unsent => self.ended.offset,
+		}
+	}
+
+	/// Once reset, answers from the prefix acknowledged by then, failing for the bytes after it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<(), Self::Error>> {
+		let acked = match &self.state {
+			State::Open(stream) => stream.poll_acked(waiter, *offset),
+			State::Finished(stream) => stream.poll_acked(waiter, *offset),
+			State::Reset(_) | State::Unsent => match u64::from(*offset) <= self.ended.acked {
+				true => Poll::Ready(Ok(())),
+				false => return Poll::Ready(Err(Error::ClosedStream)),
+			},
+		};
+		match std::task::ready!(acked) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(err) => poll_error(&self.close, waiter, err).map(Err),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.poll_write_buf(waiter, &mut buf)
@@ -301,7 +362,10 @@ impl moq_net::transport::poll::SendStream for Stream {
 		Self::finish_mut(self)
 	}
 	fn reset(&mut self, code: u32) {
-		Self::reset_mut(self, code);
+		Self::reset_mut(self, None, code);
+	}
+	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
+		Self::reset_mut(self, Some(*offset), code);
 	}
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		Self::poll_closed(self, waiter).map(|result| match result {
@@ -309,35 +373,6 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Ok(Some(code)) => Err(Error::Stopped(code)),
 			Err(err) => Err(err),
 		})
-	}
-	fn acknowledged(&self) -> Option<bool> {
-		if self.unwritten.has_remaining() {
-			return Some(false);
-		}
-		Some(match &self.state {
-			State::Open(stream) => stream.acknowledged(),
-			State::Finished(stream) => stream.acknowledged(),
-			State::Reset(_) | State::Unsent => false,
-		})
-	}
-
-	/// The acknowledged bytes past the WebTransport header, none while the header is unwritten,
-	/// and once reset, those acknowledged by the reset.
-	fn delivered(&self) -> Option<u64> {
-		if self.unwritten.has_remaining() {
-			return Some(0);
-		}
-		Some(self.acked_len().saturating_sub(self.header.map_or(0, u64::from)))
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match &self.state {
-			// The header goes first, and a write waits on it.
-			_ if self.unwritten.has_remaining() => Poll::Pending,
-			State::Open(stream) => stream.poll_all_acked(waiter),
-			State::Finished(stream) => stream.poll_all_acked(waiter),
-			State::Reset(_) | State::Unsent => Poll::Pending,
-		}
 	}
 }
 
@@ -362,6 +397,10 @@ impl Finished {
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {
 		self.stream.reset(code);
+	}
+	/// Reset the stream while still delivering the data before `offset`. See [`Stream::reset_at`].
+	pub fn reset_at(self, offset: send::Offset, code: u32) {
+		self.stream.reset_at(offset, code);
 	}
 	/// Set the stream's priority within its send group.
 	pub fn set_priority(&mut self, priority: i64) {

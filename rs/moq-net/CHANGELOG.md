@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `socket`: `Endpoint`, a server, a client, or both, which announces a hidden `<prefix>/.client/<id>` broadcast at its first dial and `<prefix>/.server/<id>` at its first accept, so grants decide its roles, dials servers, and accepts clients' dials in two protocols: `tcp` sessions (`dial_tcp`, `accept_tcp`, `TcpStream`), one group each way as a reliable, ordered byte pipe, and `track` sessions (`dial_track`, `accept_track`, `TrackStream`), a track each way with one message per group. Dials and accepts fail `Unsupported` while the origin has a moq-lite client session before 07 whose publish half doesn't opt into hidden broadcasts, since its peer never hears the endpoint; see `doc/concept/socket.md`.
+- `broadcast::Producer::reserve_unlisted_track`, a reservation no track listing ever names, read only by a subscriber who knows its name.
+- `track::Producer::abort_handle`, a `track::AbortHandle` that aborts the track, unlisting it first, without keeping it open, for an owner that hands the producer out and ends the track on its own shutdown.
 - `transport::SETUP_RECEIVE_WINDOW`, the connection credit a server offers before it admits a session: enough for the SETUP and one in-band AUTH.
+- `Server::with_allocator`, the accepting mirror of `Client::with_allocator`: every session the server accepts reserves into one `bandwidth::Allocator` and probes for the sum, instead of each starting an empty registry.
 
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
 
 ### Fixed
 
+- *(net)* a track's first appended group skips every key below it, so a reader asking from the oldest group of a time-keyed track no longer waits forever on keys below its first group
 - *(net)* widen only frame-bounded starts to the head; pin the peer's own read
 - *(net)* a relay resuming mid-group asks upstream for the group's head
 

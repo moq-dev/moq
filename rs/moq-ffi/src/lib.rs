@@ -10,8 +10,6 @@
 mod alloc;
 #[cfg(target_os = "android")]
 mod android;
-// The native codecs are optional, since they are the heaviest thing in the dependency graph.
-#[cfg(feature = "audio")]
 pub mod audio;
 pub mod auth;
 pub mod bandwidth;
@@ -20,7 +18,7 @@ pub mod datagram;
 pub mod demand;
 pub mod error;
 mod ffi;
-pub mod instance;
+pub mod identity;
 pub mod json;
 mod log;
 pub mod media;
@@ -28,8 +26,6 @@ pub mod origin;
 pub mod producer;
 pub mod server;
 pub mod session;
-pub mod socket;
-#[cfg(feature = "video")]
 pub mod video;
 
 uniffi::setup_scaffolding!("moq");

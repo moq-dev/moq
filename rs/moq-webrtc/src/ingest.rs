@@ -6,12 +6,15 @@
 //! On `MediaAdded`, it inspects the negotiated codec and instantiates the
 //! matching bridge; on each `MediaData`, it forwards into the bridge.
 
-use crate::vendor::str0m;
 use crate::{Error, Result, codec, session};
 
 pub struct IngestSink {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
+	/// Every track's timestamp base, so the session's audio and video shift onto the catalog's
+	/// clock by one offset, fixed at the first frame's arrival. The catalog is not withheld for it:
+	/// a viewer negotiates against the catalog before the publisher's first frame.
+	timebase: moq_mux::catalog::Timebase,
 	bridges: session::Bridges,
 	/// The route announcing the broadcast, when the sink owns it: held for the session's
 	/// life, linger included, and retracted when the session drops it.
@@ -19,23 +22,33 @@ pub struct IngestSink {
 }
 
 impl IngestSink {
-	/// Fill `broadcast`, whose announcement the caller owns.
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, config: moq_mux::catalog::Config) -> Result<Self> {
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-		Ok(Self {
+	/// Fill `broadcast` and its `catalog`, whose announcement the caller owns.
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
+		Self {
 			broadcast,
+			timebase: catalog.timebase(),
 			catalog,
 			bridges: session::Bridges::new(),
 			_route: None,
-		})
+		}
 	}
 
-	/// Fill `route`'s broadcast, keeping the route for the session's life.
+	/// Fill `route`'s broadcast under a catalog minted from `config`, keeping the route for
+	/// the session's life.
 	pub fn routed(route: moq_net::origin::Route, config: moq_mux::catalog::Config) -> Result<Self> {
-		Ok(Self {
-			_route: Some(route.clone()),
-			..Self::new(route.broadcast().clone(), config)?
-		})
+		let mut broadcast = route.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		let mut sink = Self::new(broadcast, catalog);
+		sink._route = Some(route);
+		Ok(sink)
+	}
+}
+
+/// Dropped before the session ends, as when the pull's future is cancelled at shutdown, the sink
+/// aborts its tracks instead of leaving them unfinished. A finished or aborted sink has nothing left.
+impl Drop for IngestSink {
+	fn drop(&mut self) {
+		session::MediaSink::abort(self, moq_net::Error::Cancel);
 	}
 }
 
@@ -78,7 +91,16 @@ impl session::MediaSink for IngestSink {
 		Ok(())
 	}
 
-	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
+	fn on_discontinuity(&mut self, mid: str0m::media::Mid) -> Result<()> {
+		self.bridges.discontinuity(mid)
+	}
+
+	fn on_frame(&mut self, mid: str0m::media::Mid, mut frame: codec::Frame) -> Result<()> {
+		// The first frame places the session at its arrival: no sender report is waited for, which
+		// a publisher sends for audio only every RTCP interval (5 s).
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
+		let shifted = self.timebase.shift(pts)?.as_micros().map_err(moq_mux::Error::from)?;
+		frame.timestamp_us = u64::try_from(shifted).map_err(|_| moq_mux::Error::from(moq_net::TimeOverflow))?;
 		self.bridges.push(mid, frame)
 	}
 
@@ -105,12 +127,10 @@ mod tests {
 	/// bridges mint, not just on the catalog producer it was set on.
 	#[tokio::test]
 	async fn tracks_inherit_the_configured_max_age() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut sink = IngestSink::new(
-			broadcast.clone(),
-			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3)),
-		)
-		.unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3));
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let mut sink = IngestSink::new(broadcast.clone(), catalog);
 
 		sink.on_track(
 			"0".into(),
@@ -128,9 +148,10 @@ mod tests {
 	/// included, so the held sink serves them to a late subscriber for the linger.
 	#[tokio::test]
 	async fn finish_keeps_every_track_for_the_linger() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut sink = IngestSink::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog);
 		let audio = str0m::media::MediaKind::Audio;
 		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
 			.unwrap();
@@ -157,5 +178,128 @@ mod tests {
 		assert!(consumer.track("0.opus").is_ok());
 		drop(linger);
 		assert!(consumer.is_closed());
+	}
+
+	/// A step in the session timeline breaks the track's timeline with a group of its own, which
+	/// is what lets a reader's clock re-anchor instead of read the step as drift.
+	#[tokio::test(start_paused = true)]
+	async fn a_step_publishes_a_marker_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog);
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let frame = |timestamp_us| codec::Frame {
+			timestamp_us,
+			payload: bytes::Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		};
+		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+		let mut groups = 0;
+		let mut read = async |track: &mut moq_net::track::Subscriber| {
+			while let Ok(Ok(Some(_))) = kio::clock::timeout(Duration::from_millis(100), track.recv_group()).await {
+				groups += 1;
+			}
+		};
+		sink.on_frame("0".into(), frame(20_000)).unwrap();
+		read(&mut track).await;
+		sink.on_frame("0".into(), frame(40_000)).unwrap();
+		read(&mut track).await;
+		sink.on_discontinuity("0".into()).unwrap();
+		read(&mut track).await;
+		sink.on_frame("0".into(), frame(400_000)).unwrap();
+		read(&mut track).await;
+		assert_eq!(groups, 3, "the two frames' group, the marker, and the frame after it");
+	}
+
+	/// An Opus encoder entering DTX sends one header-only packet and then goes quiet, so that
+	/// packet closes the group rather than leaving the speech before it open until audio resumes.
+	#[tokio::test(start_paused = true)]
+	async fn a_dtx_packet_closes_its_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog);
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+		let frame = |timestamp_us, payload: &'static [u8]| codec::Frame {
+			timestamp_us,
+			payload: bytes::Bytes::from_static(payload),
+		};
+		sink.on_frame("0".into(), frame(20_000, &[0xfc, 0xff, 0xfe])).unwrap();
+		// Config 31, one frame, and no payload: what the encoder emits on entering DTX.
+		sink.on_frame("0".into(), frame(40_000, &[0xf8])).unwrap();
+
+		let mut group = track.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while kio::clock::timeout(Duration::from_millis(100), group.next_frame())
+			.await
+			.expect("the group closes")
+			.unwrap()
+			.is_some()
+		{
+			frames += 1;
+		}
+		assert_eq!(frames, 2);
+	}
+
+	/// A frame lands at its arrival on the catalog's clock, though the clock was fixed before the
+	/// session and the frame carries the session's own timeline.
+	#[tokio::test(start_paused = true)]
+	async fn a_frame_lands_at_its_arrival_on_a_fixed_clock() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let clock = catalog.clock();
+		tokio::time::advance(Duration::from_secs(5)).await;
+		let mut sink = IngestSink::new(broadcast, catalog.clone());
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let frame = |timestamp_us| codec::Frame {
+			timestamp_us,
+			payload: bytes::Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		};
+
+		let arrived = clock.now();
+		sink.on_frame("0".into(), frame(20_000)).unwrap();
+		let snapshot = catalog.snapshot();
+		let config = snapshot.audio.renditions.get("0.opus").unwrap();
+		let track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+		let mut track = codec::Track::opus(track, config).unwrap();
+		let first = track.next().await.unwrap().unwrap();
+		assert_eq!(
+			first.timestamp_us as u128,
+			arrived.as_micros().unwrap(),
+			"the first frame lands at its arrival"
+		);
+		sink.on_frame("0".into(), frame(40_000)).unwrap();
+		let next = track.next().await.unwrap().unwrap();
+		assert_eq!(
+			next.timestamp_us - first.timestamp_us,
+			20_000,
+			"the next keeps its distance"
+		);
+	}
+
+	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its
+	/// tracks and the catalog rather than leaving them to warn as dropped unfinished.
+	#[tokio::test]
+	async fn a_dropped_sink_aborts_its_tracks() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog.clone());
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+
+		drop(sink);
+		drop(catalog);
+		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));
 	}
 }

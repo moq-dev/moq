@@ -149,7 +149,7 @@ impl Publisher {
 /// any media and a recorder can start first. The two-second GOPs pack two to a segment.
 pub fn catalog_config() -> moq_mux::catalog::Config {
 	let mut catalog = moq_mux::catalog::hang::Catalog::default();
-	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(4));
+	catalog.sync.interval = Some(Duration::from_secs(4));
 	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 
@@ -266,7 +266,7 @@ pub fn numbers(playlist: &str) -> Vec<u64> {
 		.collect()
 }
 
-/// The media playlist URI the master playlist of `path` lists for [`TRACK`], under its instance.
+/// The media playlist URI the master playlist of `path` lists for [`TRACK`], under its identity.
 pub async fn media_uri(app: &axum::Router, path: &str) -> String {
 	let master = listed(app, &format!("/{path}/master.m3u8"), TRACK).await;
 	let line = master

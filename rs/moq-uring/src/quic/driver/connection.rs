@@ -63,7 +63,7 @@ pub(crate) struct State {
 	/// How far the connection's end has reached the handles' `poll_closed`.
 	///
 	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a
-	/// local close as soon as it is asked for. Only the driver knows when the
+	/// close before its CONNECTION_CLOSE is sent. Only the driver knows when the
 	/// CONNECTION_CLOSE is staged on the socket, which moq-quic cannot see, and
 	/// a caller may stop driving the worker the moment `poll_closed` resolves,
 	/// so publishing earlier would leave the packet unsent.
@@ -73,8 +73,8 @@ pub(crate) struct State {
 
 /// The connection's terminal error as its handles see it, set once.
 enum End {
-	/// `poll_closed` pends: the connection is open, or this side closed it and the
-	/// driver has yet to stage the CONNECTION_CLOSE (see `Driver::publish_close`).
+	/// `poll_closed` pends: the connection is open, or it owes the peer a
+	/// CONNECTION_CLOSE the driver has yet to stage (see `Driver::publish_close`).
 	Open,
 	/// moq-quic's reason, published by the driver, which runs out the drain.
 	Closed(Error),
@@ -303,12 +303,6 @@ impl Connection {
 		self.shared.conn.borrow().peer_identity()
 	}
 
-	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
-	/// or `None` before the handshake completes.
-	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.shared.conn.borrow().export_keying_material(label, context)
-	}
-
 	/// The peer's current UDP address, following any migration.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.shared.conn.borrow().remote_address()
@@ -335,6 +329,18 @@ impl Connection {
 		self.shared.conn.borrow_mut().set_limits(limits)
 	}
 
+	/// Start `keep_alive`, replacing any running; see
+	/// [`moq_quic::connection::Connection::set_keep_alive`].
+	pub fn set_keep_alive(&self, keep_alive: crate::quic::KeepAlive) -> Result<(), crate::quic::KeepAliveError> {
+		self.shared.conn.borrow_mut().set_keep_alive(keep_alive)
+	}
+
+	/// Wait until the keep-alive's stale signal differs from `stale`; see
+	/// [`moq_quic::connection::Connection::poll_stale`].
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> std::task::Poll<bool> {
+		self.shared.conn.borrow_mut().poll_stale(waiter, stale)
+	}
+
 	/// The wire counters this connection updates as it sends and receives.
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.shared.wire.clone()
@@ -343,6 +349,12 @@ impl Connection {
 	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.shared.probe.clone()
+	}
+
+	/// Whether a reset still delivers its prefix to the peer's reader: the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_stream_at(&self) -> bool {
+		self.shared.conn.borrow().reset_stream_at()
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
@@ -378,10 +390,8 @@ pub(crate) fn launch(
 	conn: moq_quic::connection::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	// The handshake's first datagrams arrived before this driver existed.
-	let stats = conn.stats();
 	let wire = moq_net::transport::Wire::new();
-	wire.set_sent_bytes(stats.udp_tx.bytes);
-	wire.set_received_bytes(stats.udp_rx.bytes);
+	record(&wire, &conn.stats());
 	let probe = conn.congestion_state().probes().then(moq_net::transport::Probe::new);
 	let shared = Rc::new(Inner {
 		wire,
@@ -514,6 +524,27 @@ impl Connection {
 		options: send::Options<'_>,
 	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
 		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
+	}
+
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it
+	/// has, as [`moq_quic::connection::Connection::poll_quiesce`] does.
+	pub(crate) fn poll_quiesce(
+		&self,
+		waiter: &kio::Waiter,
+		code: VarInt,
+		keep: &[crate::quic::stream::Id],
+	) -> Poll<Result<(), Error>> {
+		let quiesced = self.shared.conn.borrow_mut().poll_quiesce(waiter, code, keep);
+		match ready!(quiesced) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(_) => Poll::Ready(Err(self.shared.lost())),
+		}
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
+	pub(crate) fn abandon_quiesce(&self, code: VarInt, keep: &[crate::quic::stream::Id]) {
+		self.shared.conn.borrow_mut().abandon_quiesce(code, keep);
 	}
 
 	/// Receive the next datagram.
@@ -744,6 +775,9 @@ impl Driver {
 				return Poll::Pending;
 			}
 			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
+			// A timeout accrues a wait or a held receive window, and declares losses, and an
+			// idle one ends the connection with no transmit left to publish them.
+			record(&self.shared.wire, &self.shared.conn.borrow().stats());
 		}
 	}
 
@@ -769,19 +803,20 @@ impl Driver {
 
 	/// Learn whether moq-quic lost the connection, and publish why.
 	///
-	/// The driver publishes a local close once it has staged the
-	/// CONNECTION_CLOSE, so a caller that stops driving the worker the moment
-	/// `poll_closed` resolves has at least handed the packet over.
+	/// A loss that owes the peer a CONNECTION_CLOSE is published once the
+	/// driver has staged it, so a caller that stops driving the worker the
+	/// moment `poll_closed` resolves has at least handed the packet over.
 	fn check_lost(&mut self, waiter: &kio::Waiter) {
-		let lost = self.shared.conn.borrow_mut().poll_closed(waiter);
-		if let Poll::Ready(reason) = lost
-			&& !matches!(reason, moq_quic::connection::Error::LocallyClosed { .. })
+		let mut conn = self.shared.conn.borrow_mut();
+		if let Poll::Ready(reason) = conn.poll_closed(waiter)
+			&& !conn.owes_close()
 		{
+			drop(conn);
 			self.shared.state.borrow_mut().publish(reason.into());
 		}
 	}
 
-	/// Publish the terminal error for a close this side asked for.
+	/// Publish the terminal error for a loss that owed the peer a CONNECTION_CLOSE.
 	///
 	/// Only once the CONNECTION_CLOSE is staged (or the drain is over), since
 	/// an application is free to stop driving the worker the moment
@@ -855,12 +890,14 @@ impl Driver {
 			// Nothing to send registers us until the application queues
 			// something; paced, the timer re-polls us. Either way the buffer
 			// returns to the pool on drop.
+			let owed = conn.owes_close();
 			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
-			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
-			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
-			(transmit, conn.is_closed())
+			// A transmit dates a wait and a held receive window.
+			record(&self.shared.wire, &conn.stats());
+			// This transmit carries the CONNECTION_CLOSE the loss owed.
+			(transmit, owed && !conn.owes_close())
 		};
 		debug_assert_eq!(transmit.size, tx.len());
 
@@ -882,6 +919,18 @@ impl Driver {
 		}
 		Poll::Ready(Ok(()))
 	}
+}
+
+/// Copy the connection's cumulative counters to its wire, which stats read without polling it.
+pub(crate) fn record(wire: &moq_net::transport::Wire, stats: &moq_quic::connection::Stats) {
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
+	wire.set_lost_bytes(stats.path.lost_bytes);
+	let credit = stats.send_credit;
+	wire.set_credit_stalls(credit.stalls, credit.stalled);
+	let held = stats.credit.held;
+	wire.set_credit_held(held.readers, held.evicted);
+	wire.set_congestion_blocked(stats.path.cwnd_blocked, stats.path.pacing_blocked);
 }
 
 #[cfg(test)]

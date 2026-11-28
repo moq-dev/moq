@@ -14,9 +14,11 @@ use bytes::Bytes;
 
 mod consumer;
 mod declared;
+pub use declared::ReorderError;
 mod decode;
 mod group;
 mod input;
+mod join;
 mod producer;
 mod source;
 #[cfg(test)]
@@ -24,17 +26,20 @@ pub(crate) mod test_util;
 mod text;
 mod ttml;
 
+pub mod cts;
 pub mod flv;
 pub mod fmp4;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
 pub mod mp4;
+pub mod raw;
 pub mod ts;
 
-pub use consumer::{Consumer, DELAY_MAX, Playout};
+pub use consumer::{Consumer, DELAY_MAX, Delay, Playout};
 pub use group::GroupConsumer;
 pub(crate) use input::Input;
+pub use join::Join;
 pub use producer::{Finished, Guard, Producer};
 pub(crate) use source::{ExportSource, Resume};
 
@@ -127,12 +132,42 @@ pub struct Frame {
 	pub keyframe: bool,
 }
 
+/// A media timestamp's time since its track's zero, or `None` when [unscaled](moq_net::Timestamp::unscaled).
+///
+/// A [`Consumer`] refuses an unscaled frame as it decodes, so every frame an export reads has a
+/// time; where nothing can return the error, skipping one only has to never panic.
+pub(crate) fn time(timestamp: moq_net::Timestamp) -> Option<std::time::Duration> {
+	std::time::Duration::try_from(timestamp).ok()
+}
+
+/// `timestamp` in microseconds for a message, or its debug form when unscaled.
+fn micros(timestamp: moq_net::Timestamp) -> String {
+	match timestamp.as_micros() {
+		Ok(micros) => format!("{micros} µs"),
+		Err(_) => format!("{timestamp:?}"),
+	}
+}
+
+/// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no
+/// [`Ord`], since an unscaled one orders against no scaled one.
+pub(crate) fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b > a { b } else { a }
+}
+
+/// The earlier of two timestamps, `a` when they don't compare; see [`later`].
+pub(crate) fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b < a { b } else { a }
+}
+
 /// Stamp `frame` with the duration that ends at `bound`, unless it already has one.
 pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 	if frame.duration.is_some() {
 		return;
 	}
-	let Some(delta) = bound.as_micros().checked_sub(frame.timestamp.as_micros()) else {
+	let (Ok(bound), Ok(timestamp)) = (bound.as_micros(), frame.timestamp.as_micros()) else {
+		return;
+	};
+	let Some(delta) = bound.checked_sub(timestamp) else {
 		return;
 	};
 	if delta == 0 {
@@ -156,22 +191,23 @@ pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 #[error("missing keyframe: a group must open on a keyframe")]
 pub struct MissingKeyframe;
 
-/// An explicit endpoint precedes the last frame of an ordered video group.
+/// An explicit endpoint precedes a frame of the group it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("video group endpoint precedes its last frame")]
+#[error("group endpoint precedes a frame of its own")]
 pub struct InvalidEnd;
 
-/// A group starts before the previous group did: the source restarted, which is a new broadcast.
+/// A group starts before the previous group did, or a seek before what the track holds: the source
+/// restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-	"frame timestamp {} µs is below the previous group's start {} µs",
-	.timestamp.as_micros(),
-	.floor.as_micros()
+	"frame timestamp {} is below the previous group's start {}",
+	micros(*.timestamp),
+	micros(*.floor)
 )]
 pub struct TimestampRewind {
 	/// The refused frame's timestamp.
 	pub timestamp: moq_net::Timestamp,
-	/// The lowest allowed timestamp: the previous group's start.
+	/// The lowest allowed timestamp: the previous group's start, or the lowest start a seek allows.
 	pub floor: moq_net::Timestamp,
 }
 
@@ -219,6 +255,22 @@ pub trait Container {
 	/// The media role, when this format represents an audio or video track.
 	fn kind(&self) -> Kind {
 		Kind::Data
+	}
+
+	/// Refuse a format this build can read but not write, before a producer is built for it.
+	///
+	/// A catalog checks this before advertising a rendition, so a consumer never sees one whose
+	/// first write would fail.
+	fn writable(&self) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
+	/// Refuse a frame this format has no encoding for, by default any frame of an unwritable format.
+	///
+	/// A [`Producer`] checks each frame on entry, before it cuts a group or buffers anything, so a
+	/// refused frame leaves the open group and the buffered frames as they were.
+	fn check(&self, _frame: &Frame) -> Result<(), Self::Error> {
+		self.writable()
 	}
 
 	/// Write any format-specific endpoint before the producer closes the group.

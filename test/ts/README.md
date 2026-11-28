@@ -26,6 +26,10 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
   nothing lost.
 - `passthrough.py` places every packet of an `export ts --passthrough` capture
   at its source position and compares the compliance verdicts.
+- `first-byte.py` runs a late export, captures its output, and records how long
+  its first byte took.
+- `splice.py` generates an unflagged encoder switch, the whole multiplex moving
+  onto another clock at one packet, for `--passthrough --splice`.
 
 ## Running
 
@@ -53,7 +57,10 @@ just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
 just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
 just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts --passthrough --splice [forward] # the same across an unflagged encoder switch
+just test ts --passthrough --restart 10 # SIGKILL the import 10 s in, restart it, grade the gap
 just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
+just test ts --mpts --program 2 --join 5 # each program its own broadcast, one exported 5 s in
 ```
 
 `--fragment-pes` shifts generated audio/video PES bursts into their following
@@ -694,7 +701,7 @@ The default queue is twice the export's delay, so a sender that kept it full
 would make every unit late. The delay-based default (BBRv3) does not: it keeps
 about a round trip queued, so the backlog lands at the relay, which ages groups out
 (`Old`), and the queue itself overflows only when it is about a round trip deep.
-The loss-based `MOQ_QUIC_CONGESTION_CONTROL=loss` (CUBIC) fills it, latency
+The loss-based CUBIC (`MOQ_QUIC_CONGESTION_CONTROL=cubic`) fills it, latency
 outgrows the delay, and the export refuses the run as a clock drift.
 
 So the queue's own tail drop runs as a lane of its own: CUBIC behind a 250 ms
@@ -703,7 +710,7 @@ retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
 delay. A loss-based run fails unless the queue overflowed.
 
 ```bash
-MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --headroom --rate 7000000 --queue 250ms
+MOQ_QUIC_CONGESTION_CONTROL=cubic just test ts --headroom --rate 7000000 --queue 250ms
 ```
 
 Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
@@ -727,7 +734,7 @@ Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
 | `--passthrough --rate 7000000`, CUBIC | 250 ms | 120 s | passes; 428 overflowed, 116 gaps, no missing tail; 458 continuity errors reported |
 
 ```bash
-./holes.py capture.ts source.ts [--shed]
+./holes.py capture.ts source.ts [--shed] [--program N [--join S]]
 ```
 
 Without `--shed`, `holes.py` grades a path that should lose nothing: a capture's
@@ -758,7 +765,7 @@ Semantic loss also has paused-clock wire checks in `export_test.rs` and
 |---|---|---|
 | Skipped groups, short or longer than PCR backfill | Padded continuing-clock holes stay unflagged; only the first PCR after skipped slots flags the jump; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
 | Disjoint A/V outages with different decode reserves | Padded continuing-clock holes carry no flag | `disjoint_outages_across_both_tracks_keep_the_clock` |
-| Same-instance route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
+| Same-identity route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_identity_handoff_after_a_gap` |
 
 These run in `just rs test -p moq-mux --lib` and the selected Rust CI gate.
 The raw lane retains the unchanged-packet loss contract below.
@@ -802,6 +809,34 @@ access points, mostly open mid-GOP for program 2. The capture is still the
 source in place: a group boundary promises no immediate decode for every
 program, and passthrough neither inserts tables nor extracts a program.
 
+`--splice` generates the switch a contribution feed makes between two encoders
+whose clocks are not locked (`splice.py`, its controls in `splice.test.py`).
+Halfway through, the whole multiplex moves onto a clock 16,844.5 s back
+(`--splice forward`: ahead) at one packet: every PID breaks its continuity
+counter once, the video and audio are cut mid-PES, the second encode joins
+mid-GOP 0.08 s before its keyframe, the tables are byte-identical either side,
+and no packet sets `discontinuity_indicator`. Either side passes the
+compliance checks alone, so what the whole fails is the switch's: its
+continuity breaks, the clock step, and the cut PES. The import splices the step
+rather than ending (moq-dev/moq#9069), so the capture is still the source in place, and
+the source's continuity breaks are the only ones its verdict carries. Its decoded
+content is not compared: the PES cut at the switch is corrupt by design.
+
+`--restart <s>` plays the source live into a local UDP port, read by
+`tsp -I ip` into the import, and SIGKILLs the import `<s>` seconds in. It
+restarts 0.5 s after it exits, a new publisher identity, while the export
+(`--stitch`) runs on. `passthrough.py --restart` places each import's input in
+the source and allows the capture one gap, no longer in seconds of the clip
+than the import's downtime plus the restarted import's first group. The
+downtime runs from the killed import's last PCR, where the object it held
+began, to the restarted import's first packet. The first group runs from the
+first random access point after the restarted import has seen the PMT and a
+PCR to the next one. The arm reports both, the gap, and whether the export
+resumed without being restarted. TSDuck ends a UDP input only on a receive
+timeout of whole seconds, and the importer holds its last object until its
+input ends, so the export runs at `--delay 2s` unless one is given: delay is
+buffer, not loss, so the bound does not move with it.
+
 A gap fails the run, `--loss` included, since QUIC retransmits what the path
 drops. A path that loses content, as `--rate` does, runs the grader with
 `--loss-ok`: gaps are reported and the checks run on the capture alone, since a
@@ -811,12 +846,26 @@ the source's last packet, which a stall or a growing latency loses.
 
 ```bash
 ./passthrough.py source.ts capture.ts [--loss-ok]
+./passthrough.py source.ts capture.ts --restart import-1.ts import-2.ts
 ```
 
 Release timing is the Rust tests' job
 (`rs/moq-mux/src/container/ts/release_test.rs`, on a paused clock), with the
 packet and schedule oracle in `oracle.rs` and the fixtures it cannot get from a
 capture in `fixture.rs`.
+
+## One program, joined late (`--mpts --program`)
+
+`--mpts --program N --join S` publishes the two-program clip with
+`import ts --program all`, which makes each program its own broadcast
+(`<name>/1.hang`, `<name>/2.hang`), and starts one `export ts` of program N's
+broadcast S seconds into the run (default 5), mid-broadcast. The two programs'
+keyframes rarely line up, so program 2 joins on its own groups, not program
+1's. The export must write its first byte within 3 s of starting
+(`first-byte.py`), and `holes.py --program N --join S` grades the capture: its
+PAT lists program N alone, whose PMT names the source program's PCR PID and
+elementary streams, and its video and audio lose nothing from the group they
+joined on to the source's end. The export may write its own PMT PID.
 
 ## EIT fixtures
 
@@ -955,7 +1004,7 @@ claiming the CBR PCR-accuracy profile.
 ## CI
 
 The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
-publisher and subscribers. Its stream instances allow acquisition to continue
+publisher and subscribers. Its stream identities allow acquisition to continue
 when a session is replaced. Production defaults remain unchanged: Lite-06
 cannot prove publisher identity across session replacement and must refuse a
 pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` covers both
@@ -966,14 +1015,14 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion, MPTS, an encoder switch back and forward, and a restarted import), one program of the MPTS joined late, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
 `just test ts --live --duration 120`, `just test ts --headroom --rate 7000000 --duration 120`,
-the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
+the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=cubic`,
 and `just test ts --passthrough --rate 7000000 --queue 250ms --duration 120`
-with `MOQ_QUIC_CONGESTION_CONTROL=loss`, and `just rs ts-recovery`.
+with `MOQ_QUIC_CONGESTION_CONTROL=cubic`, and `just rs ts-recovery`.
 The pair exercises late-joining subscribers; the live window distinguishes ongoing
 clock drift from initial buffer filling; the congested paths judge what the export
 does when the path cannot carry the media.

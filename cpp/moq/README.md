@@ -31,7 +31,7 @@ Every generated type lives in `namespace moq`. Objects are `std::shared_ptr`; re
 - A fallible call returns `moq::expected<T>`, the bundled `tl::expected` at every standard, so bindings built at C++17 link with code built at C++23. With exceptions off, `value()` on an error aborts with a message.
 - An async call returns `moq::Future<T>`. Block on it with `get()` or `wait_for()`, attach a continuation with `std::move(future).then(executor, callback)`, which returns a `moq::Continuation`, or `co_await` it on C++20.
 - `moq::Error` is a value holding a `std::variant` of its cases, and `to_string()` gives Rust's `Display` message. Nothing throws. A Rust panic inside a call aborts with a message on stderr, and so does reading an invalid future (see [Cancellation](#cancellation)). A panic in owned background work reaches the next call on that object as a task error; other objects keep running.
-- An object Rust compares, hashes, or prints, such as `moq::Instance`, gets `eq()`, `ne()`, `hash()`, and `to_string()`. `==` on its `std::shared_ptr` compares handles, not values.
+- An object Rust compares, hashes, or prints, such as `moq::Identity`, gets `eq()`, `ne()`, `hash()`, and `to_string()`. `==` on its `std::shared_ptr` compares handles, not values.
 - Futures are polled on one process-wide executor thread unless the application installs its own with `moq::set_executor` before the first async call. The executor passed to `then()` dispatches only the continuation. `moq::shutdown()` stops the moq-ffi runtime workers (`moq_ffi_shutdown`), then the executor, before unloading the code a continuation could call into.
 
 ## Cancellation

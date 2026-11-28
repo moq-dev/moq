@@ -104,8 +104,12 @@ impl Pacer {
             self.last_window_inputs = Some(inputs);
         }
 
+        // Capped at the burst budget so that a datagram larger than the whole bucket, such as an
+        // MTU probe on a slow path, still goes once the bucket is full.
+        let target = Ord::min(bytes_to_send, self.capacity);
+
         // if we can already send a packet, there is no need for delay
-        if self.debt == 0 && self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= target {
             return None;
         }
 
@@ -133,18 +137,21 @@ impl Pacer {
         }
 
         // if we can already send a packet, there is no need for delay
-        if self.debt == 0 && self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= target {
             return None;
         }
 
         let unscaled_delay = smoothed_rtt
-            .checked_mul((bytes_to_send.max(self.capacity) - self.tokens + self.debt) as _)
+            .checked_mul((self.capacity - self.tokens + self.debt) as _)
             .unwrap_or(Duration::MAX)
             / window;
 
         // divisions come before multiplications to prevent overflow
         // this is the time at which the pacing window becomes empty
-        Some(now.saturating_add((unscaled_delay / 5) * 4))
+        // At least a nanosecond: a refill too fast to measure would truncate to zero and re-arm
+        // the timer at `now` forever.
+        let delay = ((unscaled_delay / 5) * 4).max(Duration::from_nanos(1));
+        Some(now.saturating_add(delay))
     }
 
     /// Return how long we need to wait before sending `bytes_to_send` when the congestion
@@ -211,7 +218,7 @@ pub(crate) struct Rate {
     /// smoothed RTT, sped up by 5/4.
     pub window: u64,
     /// Bytes per second, which takes precedence over the window when present.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#name-pacing-rate-cpacing_rate>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#name-pacing-rate-cpacing_rate>
     pub pacing_rate: Option<u64>,
 }
 
@@ -365,6 +372,28 @@ mod tests {
         );
     }
 
+    /// A datagram larger than the whole bucket, as an MTU probe on a slow path, goes once the
+    /// bucket is full rather than waiting for a level it never reaches
+    #[test]
+    fn releases_a_datagram_larger_than_the_bucket() {
+        let mtu = 1200;
+        let rtt = Duration::from_millis(500);
+        let window = 12_000;
+        let start = Instant::now();
+        for metrics in [unpaced_metrics(window), paced_metrics(window, 24_000)] {
+            let mut pacer = Pacer::new(rtt, window, mtu, start);
+            assert_eq!(pacer.capacity, u64::from(mtu));
+            assert_eq!(pacer.delay(rtt, 1500, mtu, start, metrics), None);
+
+            pacer.on_transmit(1500);
+            let resume = pacer
+                .delay(rtt, 1500, mtu, start, metrics)
+                .expect("an empty bucket waits");
+            let later = resume.saturating_add(Duration::from_millis(1));
+            assert_eq!(pacer.delay(rtt, 1500, mtu, later, metrics), None);
+        }
+    }
+
     #[test]
     fn pacing_delay_unblocks_once_it_expires() {
         let mtu = 1500;
@@ -402,6 +431,26 @@ mod tests {
         let resume = pacer
             .delay(rtt, u64::from(mtu), mtu, now, metrics)
             .expect("three bytes short must wait");
+        assert!(
+            resume > now,
+            "the pacer re-armed its timer at the current instant"
+        );
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
+    }
+
+    #[test]
+    fn sub_nanosecond_window_refill_still_waits() {
+        let mtu = 1500;
+        // A loopback RTT and the largest window that is still paced: the whole burst budget
+        // refills in under a nanosecond.
+        let rtt = Duration::from_micros(1);
+        let window = u64::from(u32::MAX);
+        let now = Instant::now();
+        let metrics = unpaced_metrics(window);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
+
+        let (resume, _) = burst_until_blocked(&mut pacer, rtt, mtu, now, metrics)
+            .expect("the burst budget runs out at a single instant");
         assert!(
             resume > now,
             "the pacer re-armed its timer at the current instant"

@@ -1,5 +1,5 @@
 //! HLS grid interop: `publish` writes a fixed frame schedule through moq-mux, whose catalog
-//! measures and declares `media.join.interval`, and `read` prints a broadcast's declared interval
+//! measures and declares `sync.interval`, and `read` prints a broadcast's declared interval
 //! and each rendition's groups, the first pts every HLS edge numbers segments from on that grid.
 //! The harness reads this publisher and the native JS one (`js-native/hls.ts`), which publishes
 //! the same schedule through `@moq/hang`, and requires the two readouts identical.
@@ -75,11 +75,15 @@ async fn main() -> anyhow::Result<()> {
 		let route = origin.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let mut broadcast = route.broadcast().clone();
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
-		let track = broadcast.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.context("the track already exists")?;
 		let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		// Each producer owns its catalog entry, so both stay alive until the reader is done.
 		let video_track = write(catalog.video(track, Container::Legacy(Kind::Video), config)?, video())?;
-		let track = broadcast.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+		let track = broadcast
+			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.context("the track already exists")?;
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		let audio_track = write(catalog.audio(track, Container::Legacy(Kind::Audio), config)?, audio())?;
 		catalog.finish()?;
@@ -126,11 +130,11 @@ async fn main() -> anyhow::Result<()> {
 				.await?
 				.context("catalog ended before declaring its join interval")?;
 			let renditions = catalog.video.renditions.len() + catalog.audio.renditions.len();
-			if catalog.media.join.is_some() && renditions == 2 {
+			if catalog.sync.interval.is_some() && renditions == 2 {
 				break catalog;
 			}
 		};
-		let interval = catalog.media.interval().expect("checked above");
+		let interval = catalog.sync.interval.expect("checked above");
 		println!("hls interval={}", interval.as_millis());
 		let mut renditions: Vec<(&str, String, Container)> = Vec::new();
 		for (name, config) in &catalog.video.renditions {
@@ -141,10 +145,10 @@ async fn main() -> anyhow::Result<()> {
 		}
 		for (kind, name, container) in renditions {
 			use moq_mux::container::Container as _;
-			let replay = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+			let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 			let mut groups = broadcast.track(&name)?.subscribe(replay).await?.ordered();
 			let mut out = Vec::new();
+			// A group given up on starts no segment.
 			while let Some(mut group) = groups.next_group().await? {
 				let Some(frame) = group.read_frame().await? else {
 					continue;
@@ -152,7 +156,9 @@ async fn main() -> anyhow::Result<()> {
 				let first = container.decode(frame)?.into_iter().next().context("an empty group")?;
 				// A discontinuity marker has no payload and starts no segment.
 				let mark = if first.payload.is_empty() { ":marker" } else { "" };
-				out.push(format!("{}:{}{mark}", group.sequence, first.timestamp.as_millis()));
+				// Group starts are left out: moq-mux keys groups by start while @moq/hang still
+				// numbers them, and the schedule is what both must agree on.
+				out.push(format!("{}{mark}", first.timestamp.as_millis()?));
 			}
 			ensure!(!out.is_empty(), "{kind} {name} published no groups");
 			println!("hls {kind} {name} groups={}", out.join(","));

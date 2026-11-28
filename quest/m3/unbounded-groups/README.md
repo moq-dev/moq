@@ -1,28 +1,36 @@
-# Unbounded groups and frames
+# Unbounded groups
 
 ## Goal
 
-Groups and frames have no fixed size cap. `MAX_GROUP_FRAMES` is already gone
+Groups have no fixed size cap. `MAX_GROUP_FRAMES` is already gone
 ([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)), and
-`MAX_CACHE_BYTES` (32 MB) stops capping groups and frames and instead bounds
-how much of a group's live tail is held. A group sheds whole frames from its
-front once its tail passes 32 MB, or sooner when the shared cache pool is over
-budget, so one long group never grows without bound even on a relay with no
-cache capacity set. A reader or FETCH that reaches a shed front is served by a
+`MAX_CACHE_BYTES` (32 MB) stops capping groups and instead bounds how much of
+a group's live tail is held. A group sheds whole frames from its front once
+its tail passes 32 MB, or sooner when the shared cache pool is over budget,
+so one long group never grows without bound even on a relay with no cache
+capacity set. A reader or FETCH that reaches a shed front is served by a
 flight, a separate paced copy filled from upstream or the publisher's own
 refill handler; failing that, it asks for a new group (refresh), and otherwise
 it gets `Evicted`. Readers never fail just because a group got big. The
 motivating workloads are long-lived single groups (data/log tracks, audio,
-window timelines), video with very long GOPs, and file transfers where a frame
-is a whole file.
+window timelines) and video with very long GOPs.
 
 The hot write and read path for ordinary groups does not regress.
 
 Non-goals: pinning memory for slow readers, byte-precise refill over
-moq-transport, and starting a reader mid-group at whatever the cache still
-holds (a tail join).
+moq-transport, starting a reader mid-group at whatever the cache still
+holds (a tail join), and frames over 32 MiB in Rust or mid-frame resume.
 
 ## Plan
+
+Decided 2026-11-15 (maintainer, on
+[moq-dev/moq#8837](https://github.com/moq-dev/moq/pull/8837)): ✅ delete Byte
+holes (rejected: keep it parked). No consumer sends frames over 32 MiB, so a
+Rust frame stays capped at `MAX_CACHE_BYTES` and mid-frame resume is out until
+one does. JS byte holes, which only mirrored it for `@moq/net`, went with it. A frame cut off partway on a route failure is
+refetched whole and the reader skips what it read (`frame::Consumer`'s
+`Recover`). The decisions below on byte positions, segment shedding, and the
+byte offset on the lite wip are history until then.
 
 Decided 2026-11-05 (maintainer, /quest-plan), on the open questions of
 [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944), which landed
@@ -132,9 +140,9 @@ Decided 2026-10-16 (maintainer interview):
   tail run, from a base that only advances.
   It landed in [moq-dev/moq#6782](https://github.com/moq-dev/moq/pull/6782)
   (d854bf98b1), ahead of Front eviction, including `log::Writer::evict`
-  advancing the base (`rs/kio/src/log.rs`). A ring buffer was rejected: an
+  advancing the base ([`rs/kio/src/log.rs`](/rs/kio/src/log.rs)). A ring buffer was rejected: an
   uncapped group has no size to give it. Numbers are in #6782 and the
-  [kio contention epic](/quest/m9/kio-channel-contention/README.md).
+  [kio contention epic](/quest/m5/kio-channel-contention/README.md).
   Accepted 2026-11-03 (maintainer), from the lock profiles in
   [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
   lock-contention regression attributable to #6782. The pre-epoch run on
@@ -152,8 +160,7 @@ Decided 2026-10-16 (maintainer interview):
 - The byte offset goes on the current lite wip version (lite-07-wip today);
   the lite-07 cut does not wait on it. Decided 2026-10-27 (maintainer): wire
   quests target whichever wip is current when they land, so
-  [Byte holes](/quest/m3/unbounded-groups/byte-holes.md) waits only on Front
-  eviction and Flights. If lite-07 is cut first, lite-07 peers start flights
+  Byte holes waited only on Front eviction and Flights. If lite-07 is cut first, lite-07 peers start flights
   only at frame boundaries, over lite-07's transport frame offsets, which
   allow a fill to start without the shed prefix (decided 2026-10-25,
   maintainer: the application API stays whole-group).
@@ -162,7 +169,7 @@ Decided 2026-10-16 (maintainer interview):
   draft's 32 MiB interop cap. The
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046) deleted the flate packages. There is no new page.
 
-A flight's fill is the `track::Requests` fill (`track::Fill`). A handler serves a range by writing into a
+A flight's fill is the `track::Requests` fill (`track::FillGroups`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 

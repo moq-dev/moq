@@ -24,6 +24,14 @@ pub trait ConnectionIdGenerator: Send + Sync {
 
 	/// Returns the length of a CID for connections created by this generator
 	fn cid_len(&self) -> usize;
+	/// How many bits of a generated CID differ between CIDs, which bounds how many the endpoint
+	/// can hold at once before [`generate_cid`](Self::generate_cid) cannot find a free one
+	///
+	/// Defaults to every bit of the CID. A generator that spends some on a checksum or a shard
+	/// names the rest.
+	fn entropy_bits(&self) -> u32 {
+		(self.cid_len() * 8) as u32
+	}
 	/// Returns the lifetime of generated Connection IDs
 	///
 	/// Connection IDs will be retired after the returned `Duration`, if any. Assumed to be constant.
@@ -43,6 +51,8 @@ pub struct RandomConnectionIdGenerator {
 	cid_len: usize,
 	lifetime: Option<Duration>,
 	shard: Option<Shard>,
+	/// How many equal generations split the shard's group; see [`Self::set_generations`].
+	generations: u16,
 }
 
 impl Default for RandomConnectionIdGenerator {
@@ -51,6 +61,7 @@ impl Default for RandomConnectionIdGenerator {
 			cid_len: 8,
 			lifetime: None,
 			shard: None,
+			generations: 1,
 		}
 	}
 }
@@ -71,10 +82,12 @@ impl Shard {
 		(stride * count + u32::from(self.index)) as u8
 	}
 
-	/// Whether `cid` carries this shard's prefix and the marker.
-	fn owns(self, cid: &[u8]) -> bool {
+	/// Whether `cid` carries the marker and the prefix of this shard's position in any of
+	/// `generations` equal generations of the group.
+	fn owns(self, cid: &[u8], generations: u16) -> bool {
+		let period = self.count / generations;
 		cid.len() > SHARD_MARKER_BYTE
-			&& u16::from(cid[0]) % self.count == self.index
+			&& u16::from(cid[0]) % period == self.index % period
 			&& cid[SHARD_MARKER_BYTE] & SHARD_MARKER == SHARD_MARKER
 	}
 }
@@ -127,7 +140,35 @@ impl RandomConnectionIdGenerator {
 			"a {}-byte CID cannot carry the shard marker",
 			self.cid_len
 		);
+		assert!(
+			count.is_multiple_of(self.generations),
+			"{count} shards cannot split into {} generations",
+			self.generations
+		);
 		self.shard = Some(Shard { index, count });
+		self
+	}
+
+	/// Also accept the CIDs of the shard at this one's position in each of `generations`
+	/// equal generations of the group, such as the members a predecessor process served.
+	///
+	/// A group shared by successive processes gives each its own generation, so their CIDs
+	/// never collide. A steering filter folds a generation's packets onto the same position of
+	/// the one left once that generation is gone, and [`validate`](ConnectionIdGenerator::validate)
+	/// then accepts them, so the endpoint answers with a stateless reset (verifiable when both
+	/// share a reset key) rather than leaving the client to its idle timeout. Defaults to 1.
+	///
+	/// Panics if `generations` is zero or does not divide the shard count.
+	pub fn set_generations(&mut self, generations: u16) -> &mut Self {
+		assert!(generations > 0, "a group holds at least one generation");
+		if let Some(shard) = self.shard {
+			assert!(
+				shard.count.is_multiple_of(generations),
+				"{} shards cannot split into {generations} generations",
+				shard.count
+			);
+		}
+		self.generations = generations;
 		self
 	}
 }
@@ -146,7 +187,7 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 
 	fn validate(&self, cid: ConnectionId) -> Result<(), InvalidCid> {
 		match self.shard {
-			Some(shard) if !shard.owns(&cid) => Err(InvalidCid),
+			Some(shard) if !shard.owns(&cid, self.generations) => Err(InvalidCid),
 			_ => Ok(()),
 		}
 	}
@@ -158,6 +199,14 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 
 	fn cid_lifetime(&self) -> Option<Duration> {
 		self.lifetime
+	}
+
+	fn entropy_bits(&self) -> u32 {
+		let spent = self.shard.map_or(0, |shard| {
+			// The prefix byte keeps `256 / count` values, and the marker fixes two bits.
+			8 - (256 / u32::from(shard.count)).ilog2() + 2
+		});
+		(self.cid_len * 8) as u32 - spent
 	}
 }
 
@@ -208,6 +257,9 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
 	fn validate(&self, cid: ConnectionId) -> Result<(), InvalidCid> {
 		use std::hash::Hasher;
 
+		if cid.len() != NONCE_LEN + SIGNATURE_LEN {
+			return Err(InvalidCid);
+		}
 		let (nonce, signature) = cid.split_at(NONCE_LEN);
 		let mut hasher = rustc_hash::FxHasher::default();
 		hasher.write_u64(self.key);
@@ -223,12 +275,18 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
 		NONCE_LEN + SIGNATURE_LEN
 	}
 
+	fn entropy_bits(&self) -> u32 {
+		(NONCE_LEN * 8) as u32
+	}
+
 	fn cid_lifetime(&self) -> Option<Duration> {
 		self.lifetime
 	}
 }
 
-const NONCE_LEN: usize = 3; // Good for more than 16 million connections
+// The random part, which bounds the CIDs held at once to about 16 million. Widening it would change
+// the CIDs a restarted endpoint recognizes for stateless resets, which a shared reset secret relies on.
+const NONCE_LEN: usize = 3;
 const SIGNATURE_LEN: usize = 8 - NONCE_LEN; // 8-byte total CID length
 
 #[cfg(test)]
@@ -298,6 +356,36 @@ mod tests {
 		assert_eq!(varying_bits(&cids), 64);
 	}
 
+	/// What a generator reports is what its CIDs vary in, so the endpoint's exhaustion check
+	/// matches the space `generate_cid` draws from.
+	#[test]
+	fn entropy_bits_counts_the_varying_bits() {
+		let mut hashed = HashedConnectionIdGenerator::new();
+		let cids: Vec<_> = (0..4096).map(|_| hashed.generate_cid()).collect();
+		// The signature follows the nonce, so every bit of the CID varies but only the nonce's are free.
+		assert_eq!(hashed.entropy_bits(), 24);
+		assert!(varying_bits(&cids) >= 56);
+
+		for count in [1u16, 4, 64, 256] {
+			let mut generator = sharded(0, count);
+			let cids: Vec<_> = (0..8192).map(|_| generator.generate_cid()).collect();
+			assert_eq!(generator.entropy_bits(), varying_bits(&cids), "{count} shards");
+		}
+		assert_eq!(RandomConnectionIdGenerator::new(4).entropy_bits(), 32);
+	}
+
+	/// A CID of another length cannot have come from this generator, and is refused rather than split.
+	#[test]
+	fn hashed_validate_refuses_other_lengths() {
+		let generator = HashedConnectionIdGenerator::new();
+		for len in [0, 1, 2, 3, 7, 9, 20] {
+			assert!(
+				generator.validate(ConnectionId::new(&vec![0; len])).is_err(),
+				"{len} bytes"
+			);
+		}
+	}
+
 	/// A shard refuses a sibling's CIDs and CIDs without the marker, so a misrouted or foreign
 	/// packet is dropped rather than reset.
 	#[test]
@@ -309,6 +397,35 @@ mod tests {
 		let mut unmarked = sharded(0, 4).generate_cid();
 		unmarked[3] &= !0x18;
 		assert!(first.validate(unmarked).is_err(), "took a CID without the marker");
+	}
+
+	/// Across generations, a shard takes its own position's CIDs from the other generation, which
+	/// reach it only once that generation is gone, and still refuses every other position's.
+	#[test]
+	fn a_generation_takes_its_position_from_the_other() {
+		let mut newer = sharded(5, 8);
+		newer.set_generations(2);
+		for _ in 0..32 {
+			newer.validate(sharded(1, 8).generate_cid()).unwrap();
+			let own = newer.generate_cid();
+			newer.validate(own).unwrap();
+			for other in [0, 2, 3, 4, 6, 7] {
+				assert!(
+					newer.validate(sharded(other, 8).generate_cid()).is_err(),
+					"took position {other}'s CID"
+				);
+			}
+		}
+		// One generation is the default: the same position's CID from the other half is refused.
+		assert!(sharded(5, 8).validate(sharded(1, 8).generate_cid()).is_err());
+	}
+
+	#[test]
+	#[should_panic]
+	fn generations_must_split_the_group_evenly() {
+		RandomConnectionIdGenerator::default()
+			.set_shard(0, 6)
+			.set_generations(4);
 	}
 
 	#[test]

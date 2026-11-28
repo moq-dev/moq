@@ -9,6 +9,8 @@ from moq_ffi import (
     MoqBroadcastConsumer,
     MoqFrame,
     MoqGroupConsumer,
+    MoqMetaConsumer,
+    MoqMetaGroup,
     MoqTrackConsumer,
 )
 
@@ -17,6 +19,7 @@ from ._stream import _Stream
 from .types import (
     FetchGroupOptions,
     Frame,
+    FrameHeader,
     Subscription,
     TrackInfo,
 )
@@ -37,9 +40,9 @@ class GroupConsumer(_Stream[Frame]):
         self._inner = inner
 
     @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
 
     async def _next(self) -> Frame | None:
         return await self.read_frame()
@@ -54,7 +57,7 @@ class GroupConsumer(_Stream[Frame]):
 
 
 class TrackConsumer(_Stream[GroupConsumer]):
-    """Async iterator of groups from a track, in sequence order.
+    """Async iterator of groups from a track, in start order.
 
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
     :meth:`groups_as_arrived`) for arrival order instead.
@@ -71,9 +74,12 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return await self.next_group()
 
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
-        """Iterate groups in arrival order, including out-of-sequence deliveries.
+        """Iterate groups in arrival order, including out-of-order deliveries.
 
-        The default iteration uses sequence order instead. Use this for live
+        Groups already held come in the subscription's order, newest first unless it asks
+        ascending, as :meth:`recv_group` returns them.
+
+        The default iteration uses start order instead. Use this for live
         consumption where latency matters more than order.
         """
         while True:
@@ -85,8 +91,10 @@ class TrackConsumer(_Stream[GroupConsumer]):
     async def recv_group(self) -> GroupConsumer | None:
         """Return the next group in arrival order. Returns `None` when the track ends.
 
-        Groups are returned as they arrive on the wire, which may be out of sequence
-        order. Use this for live consumption where latency matters more than order.
+        Groups are returned as they arrive on the wire, which may be out of start
+        order; those already held come in the subscription's group order, newest
+        first unless it asks ascending. Use this for live consumption where latency
+        matters more than order.
         """
         group = await self._inner.recv_group()
         if group is None:
@@ -94,9 +102,9 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return GroupConsumer(group)
 
     async def next_group(self) -> GroupConsumer | None:
-        """Return the next group in sequence order, skipping forward if behind.
+        """Return the next group in start order, skipping forward if behind.
 
-        Returns `None` when the track ends. Shares the sequence cursor with
+        Returns `None` when the track ends. Shares the ordered cursor with
         :meth:`read_frame`: a group one method has already taken is not
         returned by the other. This is what the default iteration yields; use
         `recv_group` when latency matters more than order.
@@ -123,8 +131,82 @@ class TrackConsumer(_Stream[GroupConsumer]):
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences.
 
-        Raises on a time anchor the track can't serve.
+        Raises on a range time the track can't serve.
         """
+        self._inner.update(subscription._ffi())
+
+    async def refresh(self) -> None:
+        """Ask the publisher for a group newer than the newest held, returning once it is sent.
+
+        Judged by the track's :class:`TrackRefresh`. It is sent once the newest group is old
+        enough, when whatever serves the track reads it: the session forwarding it upstream, or
+        a local publisher waiting in :meth:`TrackDemand.refresh`. Concurrent calls share one
+        request and all return when it is sent. Cancelling the call before then withdraws its
+        request. It returns at once when there is nothing to send: a track that does not
+        refresh, a ratio the newest group is under, a track with no group yet, or a request
+        already sent. It also returns when a newer group lands first. The new group arrives
+        through the normal reads, such as :meth:`next_group`.
+        """
+        await self._inner.refresh()
+
+    def cancel(self) -> None:
+        """Cancel the subscription and stop delivering groups."""
+        self._inner.cancel()
+
+
+class MetaGroup(_Stream[FrameHeader]):
+    """Async iterator of frame headers within a single group of a metadata subscription."""
+
+    def __init__(self, inner: MoqMetaGroup) -> None:
+        self._inner = inner
+
+    @property
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
+
+    async def _next(self) -> FrameHeader | None:
+        return await self.next_header()
+
+    async def next_header(self) -> FrameHeader | None:
+        """Read the next frame's header, without its payload. Returns `None` when the group ends."""
+        header = await self._inner.next_header()
+        return None if header is None else FrameHeader._from_ffi(header)
+
+    def cancel(self) -> None:
+        """Cancel reading this group and stop delivering headers."""
+        self._inner.cancel()
+
+
+class MetaConsumer(_Stream[MetaGroup]):
+    """Async iterator of a metadata subscription's groups, in arrival order.
+
+    Each group is itself an async iterator of frame headers: each frame's declared size and
+    timestamp, without its payload.
+    """
+
+    def __init__(self, inner: MoqMetaConsumer) -> None:
+        self._inner = inner
+
+    async def _next(self) -> MetaGroup | None:
+        return await self.recv_group()
+
+    async def recv_group(self) -> MetaGroup | None:
+        """Return the next group in arrival order, as :meth:`TrackConsumer.recv_group` does.
+
+        Returns `None` when the track ends.
+        """
+        group = await self._inner.recv_group()
+        if group is None:
+            return None
+        return MetaGroup(group)
+
+    def info(self) -> TrackInfo:
+        """Return the publisher-side track properties."""
+        return TrackInfo._from_ffi(self._inner.info())
+
+    def update(self, subscription: Subscription) -> None:
+        """Change this subscriber's delivery preferences, as :meth:`TrackConsumer.update` does."""
         self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
@@ -159,28 +241,34 @@ class BroadcastConsumer:
         """
         return TrackConsumer(await self._inner.subscribe_track(name, _subscription(subscription)))
 
+    async def subscribe_meta(self, name: str, subscription: Subscription | None = None) -> MetaConsumer:
+        """Subscribe to a track's metadata: its groups and each frame's header, without the payload.
+
+        A subscription of its own beside any :meth:`subscribe_track` of the same track. To read
+        the payload after all, subscribe to the track from the group reached.
+        ``subscription`` works as in :meth:`subscribe_track`.
+        """
+        return MetaConsumer(await self._inner.subscribe_meta(name, _subscription(subscription)))
+
     async def fetch_group(
         self,
         name: str,
-        sequence: int,
+        start: int,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
-        """Fetch one complete group by track name and group sequence.
+        """Fetch one complete group by track name and group start.
 
         This does not hold a live subscription. The returned group may still be
         receiving frames, so iterate it until completion.
         """
-        return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
+        return GroupConsumer(await self._inner.fetch_group(name, start, options))
 
     async def resolve(self, id: str, rendition: Video | Audio) -> "BroadcastConsumer":
         """Resolve the catalog rendition ``id`` to the broadcast serving its track.
 
         The rendition's ``broadcast`` reference, ``None`` or empty, names this
         broadcast; anything else names a sibling relative to it (e.g. ``./source``).
-        Its ``instance`` is the stream the reference names: a broadcast proven to
-        serve another one raises instead of resolving, while a route over a wire
-        that carries no instance cannot prove one, so there it is best effort. Call it on a
-        rendition that carries a reference before :meth:`subscribe_track` or
+        Call it on a rendition that carries a reference before :meth:`subscribe_track` or
         :meth:`fetch_group`, which take a track name rather than a rendition: the
         rendition's ``track``, or ``id`` when unset. The rendition-based consumers in
         the media, audio, and video namespaces resolve it themselves.

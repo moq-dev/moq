@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moq_auth::{Grant, Pattern, lease};
+use moq_auth::{Grant, lease};
 use moq_net::origin;
 use moq_relay::{
 	Connection, auth,
@@ -66,24 +66,46 @@ impl Node {
 	/// asks this node to admit the dialer as its upstream.
 	fn dial(&self, upstream: bool, as_upstream: bool) -> Peer {
 		let path = if as_upstream { "upstream" } else { "peer" };
+		self.dial_at(path, upstream)
+	}
+
+	/// Dial this node at `path`, which its decider reads (see [`grant`]).
+	fn dial_at(&self, path: &str, upstream: bool) -> Peer {
 		Peer::new(format!("tls://127.0.0.1:{}/{path}", self.port)).with_upstream(upstream)
 	}
 }
 
 /// What the embedded decider grants a dial at `path`: everything, as a peer,
-/// upstream when asked.
+/// upstream when asked, or only `tenant-a` at `/scoped`.
 fn grant(path: &str) -> Grant {
-	let all: moq_net::Patterns = [Pattern::all()].into_iter().collect();
-	let mut grant = Grant::new(all.clone(), all);
+	let all = moq_net::Prefixes::all();
+	let mut grant = match path {
+		"/scoped" => {
+			let tenant: moq_net::Prefixes = ["tenant-a"]
+				.map(|prefix| prefix.parse().expect("a path"))
+				.into_iter()
+				.collect();
+			Grant::new(tenant.clone(), tenant)
+		}
+		_ => Grant::new(all.clone(), all),
+	};
 	grant.root = Some(String::new());
-	grant.peer = true;
-	grant.upstream = path == "/upstream";
+	grant.link = Some(match path {
+		"/upstream" | "/scoped" => moq_auth::Link::Upstream,
+		_ => moq_auth::Link::Peer,
+	});
 	grant
 }
 
 const LITE_07: &str = "moq-lite-07-wip";
+const LITE_06: &str = "moq-lite-06";
 
 async fn node(connect: Vec<Peer>) -> Node {
+	node_on(connect, &[LITE_07], &[LITE_07]).await
+}
+
+/// A node that accepts the versions `accepts` and dials with `dial`, newest first.
+async fn node_on(connect: Vec<Peer>, accepts: &[&str], dial: &[&str]) -> Node {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
@@ -91,9 +113,9 @@ async fn node(connect: Vec<Peer>) -> Node {
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	listen.tcp.tls = Some(true);
 	listen.tls.generate = vec!["localhost".into()];
-	// Links speak lite-07, which carries each route's instance, so every edge ranks a path's
-	// routes alike: over an older version each edge mints instances of its own.
-	listen.version = vec![LITE_07.parse().expect("lite-07")];
+	// Links speak lite-07, which carries each route's identity, so every edge ranks a path's
+	// routes alike: over an older version each edge mints identities of its own.
+	listen.version = versions(accepts);
 	let mut listener = listen
 		.init(Default::default())
 		.expect("server init")
@@ -104,7 +126,7 @@ async fn node(connect: Vec<Peer>) -> Node {
 
 	let mut client = moq_tokio::connect::Config::default();
 	client.tls.insecure = Some(true);
-	client.version = vec![LITE_07.parse().expect("lite-07")];
+	client.version = versions(dial);
 
 	let mut config = cluster::Config::default();
 	config.connect = connect;
@@ -142,6 +164,13 @@ async fn node(connect: Vec<Peer>) -> Node {
 	}
 }
 
+fn versions(versions: &[&str]) -> Vec<moq_net::Version> {
+	versions
+		.iter()
+		.map(|version| version.parse().expect("a version"))
+		.collect()
+}
+
 /// A broadcast writing a group every 50ms on `origin`, so a subscriber attaching
 /// at any point receives one. Dropping it ends the broadcast.
 struct Publisher {
@@ -160,8 +189,15 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 	let track = route.broadcast().create_track("video", timed()).expect("create track");
 	let writer = tokio::spawn(async move {
 		loop {
-			let Ok(mut group) = track.append_group() else { break };
-			if group.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref()).is_err() || group.finish().is_err() {
+			let Ok(mut group) = track.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			) else {
+				break;
+			};
+			if group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
+				.is_err() || group.finish().is_err()
+			{
 				break;
 			}
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -180,9 +216,13 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	)
 	.await
 	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
-	.expect("the first change is an instance");
-	let subscription = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
+	.expect("the first change is an identity");
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(1)),
+			max: Some(Duration::from_secs(1)),
+		},
+	)]);
 	let mut track = within(
 		&format!("subscribe to {path}"),
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -223,6 +263,7 @@ async fn routes_when(
 				let origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} = event
 				else {
 					panic!("an initial set is only starts: got {event:?}");
@@ -326,6 +367,80 @@ async fn edges_never_transit_between_cores_inner() {
 	read_frame(&c1.origin, "zz/e2").await;
 }
 
+/// Two cores, each the upstream of one edge, and the edges peered on lite-07, where one
+/// core or both speak lite-06, which does not route: an edge adopts what such a core
+/// announces as a claim of its own, and the edge pair never carries it to the other core,
+/// whether that core reads the edge's origin over lite-06 or routes with it over lite-07.
+#[test]
+fn adopted_claims_never_transit_between_cores() {
+	run_cluster_test(adopted_claims_never_transit_between_cores_inner(LITE_06, LITE_06));
+}
+
+/// As [`adopted_claims_never_transit_between_cores`], with the far core routing.
+#[test]
+fn adopted_claims_never_reach_a_routing_core() {
+	run_cluster_test(adopted_claims_never_transit_between_cores_inner(LITE_06, LITE_07));
+}
+
+/// As [`adopted_claims_never_transit_between_cores`], with the near core routing: its
+/// route is marked, and the far core reads it from the edge's origin over lite-06.
+#[test]
+fn marked_routes_never_reach_a_core_over_lite_06() {
+	run_cluster_test(adopted_claims_never_transit_between_cores_inner(LITE_07, LITE_06));
+}
+
+async fn adopted_claims_never_transit_between_cores_inner(near: &'static str, far: &'static str) {
+	let c1 = node_on(vec![], &[near], &[near]).await;
+	let c2 = node_on(vec![], &[far], &[far]).await;
+	let e1 = node_on(vec![c1.dial(true, false)], &[LITE_07], &[LITE_07, LITE_06]).await;
+	let e2 = node_on(
+		vec![c2.dial(true, false), e1.dial(false, false)],
+		&[LITE_07],
+		&[LITE_07, LITE_06],
+	)
+	.await;
+
+	let _c1 = publish(&c1.origin, "live/c1");
+	let _c2 = publish(&c2.origin, "live/c2");
+	routes_when("edge 1 learns core 1", &e1.origin, |routes| has(routes, &["live/c1"])).await;
+	routes_when("edge 2 learns core 2", &e2.origin, |routes| has(routes, &["live/c2"])).await;
+	// Each edge's own broadcast reaches the far core after anything the edge pair would
+	// offer it from the near core, so once both arrive, each core has seen every offer it
+	// will get.
+	let _e1 = publish(&e1.origin, "zz/e1");
+	let _e2 = publish(&e2.origin, "zz/e2");
+	routes_when("edge 2 learns both cores", &e2.origin, |routes| {
+		has(routes, &["live/c1", "live/c2", "zz/e1"])
+	})
+	.await;
+	routes_when("edge 1 learns both cores", &e1.origin, |routes| {
+		has(routes, &["live/c1", "live/c2", "zz/e2"])
+	})
+	.await;
+	let at_c2 = routes_when("core 2 hears both edges", &c2.origin, |routes| {
+		has(routes, &["zz/e1", "zz/e2"])
+	})
+	.await;
+	assert!(
+		!at_c2.contains_key("live/c1"),
+		"core 1's broadcast reached core 2 through the edges: {at_c2:?}"
+	);
+	let at_c1 = routes_when("core 1 hears both edges", &c1.origin, |routes| {
+		has(routes, &["zz/e1", "zz/e2"])
+	})
+	.await;
+	assert!(
+		!at_c1.contains_key("live/c2"),
+		"core 2's broadcast reached core 1 through the edges: {at_c1:?}"
+	);
+	// Each edge still reaches the other core's broadcast through its peer, and each core
+	// the far edge's.
+	read_frame(&e1.origin, "live/c2").await;
+	read_frame(&e2.origin, "live/c1").await;
+	read_frame(&c2.origin, "zz/e1").await;
+	read_frame(&c1.origin, "zz/e2").await;
+}
+
 /// A drone mesh node, a drone with a CDN uplink marked upstream, and a CDN relay
 /// in a line: the mesh reaches the CDN and the CDN reaches the mesh.
 #[test]
@@ -342,4 +457,38 @@ async fn uplink_transits_both_ways_inner() {
 	let _cdn = publish(&cdn.origin, "cdn/cam");
 	read_frame(&cdn.origin, "mesh/cam").await;
 	read_frame(&mesh.origin, "cdn/cam").await;
+}
+
+/// A link whose grant covers only one tenant exchanges claims for it, as it does over
+/// lite-06, instead of the relay that admits the grant declaring a Node ID and closing the
+/// session Unauthorized: the tenant's broadcasts cross both ways and nothing else does.
+#[test]
+fn scoped_link_exchanges_claims() {
+	run_cluster_test(scoped_link_exchanges_claims_inner());
+}
+
+async fn scoped_link_exchanges_claims_inner() {
+	// The listener admits the dial at `/scoped`: link upstream, root "", and the tenant's
+	// prefix alone.
+	let cdn = node(vec![]).await;
+	let edge = node(vec![cdn.dial_at("scoped", true)]).await;
+
+	let _outside = publish(&cdn.origin, "other/cam");
+	let _cdn = publish(&cdn.origin, "tenant-a/cdn");
+	let _edge = publish(&edge.origin, "tenant-a/edge");
+	routes_when("the edge learns the tenant", &edge.origin, |routes| {
+		has(routes, &["tenant-a/cdn"])
+	})
+	.await;
+	routes_when("the cdn learns the tenant", &cdn.origin, |routes| {
+		has(routes, &["tenant-a/edge"])
+	})
+	.await;
+	read_frame(&edge.origin, "tenant-a/cdn").await;
+	read_frame(&cdn.origin, "tenant-a/edge").await;
+	let at_edge = routes_when("the edge settles", &edge.origin, |routes| {
+		has(routes, &["tenant-a/edge"])
+	})
+	.await;
+	assert!(!at_edge.contains_key("other/cam"), "the grant leaked: {at_edge:?}");
 }

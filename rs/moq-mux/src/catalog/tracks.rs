@@ -74,7 +74,7 @@ use super::hang::{Catalog, CatalogExt};
 /// let info = moq_net::track::Info::default()
 ///     .with_timescale(moq_net::Timescale::MILLI)
 ///     .with_compression(moq_net::track::Compression::Deflate);
-/// let track = broadcast.create_track("telemetry", info)?;
+/// let track = broadcast.create_track("telemetry", info).ok_or(moq_net::Error::Duplicate)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
@@ -428,23 +428,23 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 /// snapshot is published atomically with the complete track list, so a one-shot muxer (fMP4,
 /// MPEG-TS) never sees a half-converged catalog.
 ///
-/// It belongs to one [`Timebase`](super::Timebase), whose offset the importer handed it shifts its
-/// timestamps by. Clones share that timebase.
+/// It only gates the catalog: the timestamps written through it land verbatim on the catalog's
+/// clock. A source on a timeline of its own shifts them through a [`Timebase`](super::Timebase).
 pub struct Reserved<E: CatalogExt = ()> {
-	timebase: super::Timebase<E>,
+	catalog: Producer<E>,
 	interval: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
-	pub(super) fn new(timebase: super::Timebase<E>) -> Self {
-		timebase.catalog.add_reserver();
+	pub(super) fn new(catalog: Producer<E>) -> Self {
+		catalog.add_reserver();
 		Self {
-			timebase,
+			catalog,
 			interval: None,
 		}
 	}
 
-	/// Declare the track's longest group (its GOP), which the catalog's `media.join.interval`
+	/// Declare the track's longest group (its GOP), which the catalog's `sync.interval`
 	/// promises. Without one, a video or audio track measures it over its first second or group,
 	/// whichever is longer, before the interval is declared.
 	pub fn with_interval(mut self, interval: impl Into<Option<std::time::Duration>>) -> Self {
@@ -455,7 +455,7 @@ impl<E: CatalogExt> Reserved<E> {
 	/// Track properties for a media track under this catalog, carrying any max age it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
-		self.timebase.catalog.track_info(priority)
+		self.catalog.track_info(priority)
 	}
 
 	/// Reserve a rendition of config type `C` under `name`, returning its internal owner.
@@ -523,14 +523,13 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase
-			.catalog
+		self.catalog
 			.media(track, container, rendition, config.into(), self.interval)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		self.timebase.catalog.timestamp(hint)
+		self.catalog.timestamp(hint)
 	}
 
 	/// The underlying catalog [`Producer`], for edits that outlive this reservation.
@@ -539,26 +538,19 @@ impl<E: CatalogExt> Reserved<E> {
 	/// track removals after its initial set is declared) while the reservation itself is dropped to
 	/// open the gate. The returned handle does not gate: only live `Reserved`s do.
 	pub(crate) fn producer(&self) -> Producer<E> {
-		self.timebase.catalog.clone()
-	}
-
-	/// The timebase this reservation belongs to, which outlives it without gating the catalog.
-	///
-	/// An importer anchors through it on its first frame and shifts every frame by its offset.
-	pub(crate) fn timebase(&self) -> super::Timebase<E> {
-		self.timebase.clone()
+		self.catalog.clone()
 	}
 }
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_interval(self.interval)
+		Self::new(self.catalog.clone()).with_interval(self.interval)
 	}
 }
 
 impl<E: CatalogExt> Drop for Reserved<E> {
 	fn drop(&mut self) {
-		self.timebase.catalog.release_reserver();
+		self.catalog.release_reserver();
 	}
 }
 
@@ -610,7 +602,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		info: moq_net::track::Info,
 		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(&self.name, info)?;
+		let track = self.catalog.fresh_track(&self.name, info);
 		let rendition = self.catalog.rendition(track.name())?;
 		self.catalog.media(track, container, rendition, None, interval)
 	}
@@ -683,7 +675,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		}
 		config.set_estimate(resolved.clone());
 		{
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			write(&mut guard, &self.name, config)?;
 			self.present = true;
 			guard.list::<C>(&self.name);
@@ -760,7 +752,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
 			// catalog has nothing left to release.
-			if let Ok(guard) = self.catalog.modify() {
+			if let Ok(guard) = self.catalog.edit() {
 				guard.commit_estimate(true)?;
 			}
 			return Ok(());
@@ -831,7 +823,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			return Err(self.unpublished());
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
-		let mut guard = self.catalog.modify()?;
+		let mut guard = self.catalog.edit()?;
 		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
@@ -853,7 +845,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 		// The entry and the name it holds are released together under one lock. Removing mutates the
 		// catalog, so the guard publishes it (immediately if live, else it accumulates until the gate
 		// opens). A closed catalog has nothing left to release from.
-		if let Ok(mut catalog) = self.catalog.modify() {
+		if let Ok(mut catalog) = self.catalog.edit() {
 			catalog.release::<C>(&self.name, self.present);
 		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
@@ -1438,7 +1430,7 @@ mod tests {
 	fn an_existing_entry_owns_its_name() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
-		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
+		catalog.edit().unwrap().video.insert("v", config(None, None)).unwrap();
 
 		assert!(
 			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),
@@ -1759,7 +1751,7 @@ mod tests {
 
 			let mut latest = None;
 			while let std::task::Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
-				latest = Some(catalog);
+				latest = Some(catalog.value);
 			}
 			let published = latest.expect("catalog published");
 			assert!(published.video.renditions.contains_key("v"));

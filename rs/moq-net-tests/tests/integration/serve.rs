@@ -7,9 +7,11 @@ use moq_net::{Timestamp, Version, broadcast, origin, track};
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 async fn first_subscribe(version: &str, publish: bool) {
@@ -37,7 +39,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = held_track.append_group().unwrap();
+	let mut group = held_track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
 	group.finish().unwrap();
 	let handler = async {
@@ -55,7 +57,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 					track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 				)
 				.unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 			group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
 			group.finish().unwrap();
 			prepared.announce().unwrap();

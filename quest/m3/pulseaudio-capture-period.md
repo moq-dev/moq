@@ -9,7 +9,7 @@ proves it against the private null sink's monitor source.
 
 ## Plan
 
-Found by the m1 [coverage audit](/quest/m3/audit-test-coverage.md). Playback
+Found by the m1 [coverage audit](/quest/m3/audit-tests.md). Playback
 on that host asked for `BufferSize::Default`, which cpal's PulseAudio host
 maps to the server's default buffer attributes: a 2 s `tlength`, 3.96 s end
 to end. The audit fixed playback (`playback::device::buffer_size` asks for

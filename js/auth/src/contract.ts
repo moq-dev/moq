@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
-import { decodeRoles, encodeRoles, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
+import { paths, UnixSecondsSchema, WireAccessSchema, writtenAccess } from "./wire.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -32,12 +32,20 @@ const TierSchema = z.string().check(z.regex(/^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+
 export const TransportSchema = z.pipe(
 	z.string(),
 	z.catch(
-		z.enum(["quic", "websocket", "tcp", "unix", "http", "rtmp", "srt", "webrtc", "webtransport", "unknown"]),
+		z.enum(["quic", "websocket", "tcp", "tls", "unix", "http", "rtmp", "srt", "webrtc", "webtransport", "unknown"]),
 		"unknown",
 	),
 );
 /** A value parsed by {@link TransportSchema}. */
 export type Transport = z.infer<typeof TransportSchema>;
+
+// TEMPORARY MIGRATION: a grant's role, read through the alias and spelled as a release before 0.22 reads it.
+const WrittenAccessSchema = z.pipe(WireAccessSchema, z.transform(writtenAccess));
+
+/** How a cluster peer (another relay) links to this one. */
+export const LinkSchema = z.enum(["peer", "upstream"]);
+/** A value parsed by {@link LinkSchema}. */
+export type Link = z.infer<typeof LinkSchema>;
 
 /** The single direction a client declared at SETUP. */
 export const RoleSchema = z.enum(["publisher", "subscriber"]);
@@ -96,6 +104,12 @@ const BaseRequestSchema = z.object({
 	id: z.string(),
 	/** The operator's name for the relay asking. */
 	node: z.string(),
+	/**
+	 * The relay software asking, as `name/version` product tokens (`moq-relay/0.22.0`), so a
+	 * server can tell which grant fields it reads before answering. Absent from a relay older
+	 * than 0.22, which also ignores a grant field it does not know.
+	 */
+	relay: z.optional(z.string()),
 	/** How the session reached the relay. */
 	transport: TransportSchema,
 	/** The peer's socket address, absent on a transport without one (a unix socket). */
@@ -120,7 +134,10 @@ const BaseRequestSchema = z.object({
 	path: z.string(),
 	/** The raw query string, without the leading `?`. */
 	query: z.optional(z.string()),
-	/** The credential a moq-transport client presented in its SETUP. */
+	/**
+	 * The credential the client presented: the Token of its SETUP, or on an `attach` (and that
+	 * credential's `revalidate` and `end`) the one it attached in band, with `query` left as dialed.
+	 */
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
@@ -136,6 +153,9 @@ const BaseRequestSchema = z.object({
  * Nothing is parsed on the relay's behalf: the server keys policy on the raw `path`,
  * `query`, and `token`, so no query parameter is special. The same shape carries every event;
  * an `end` adds what the session did.
+ *
+ * An `event` this schema does not know is refused, unlike an unknown `transport`: the grant
+ * answers the question the event asks, and a server that guesses answers a question nobody asked.
  */
 export const RequestSchema = z.discriminatedUnion("event", [
 	z.extend(BaseRequestSchema, {
@@ -173,64 +193,62 @@ export type Request = z.infer<typeof RequestSchema>;
  * nothing is a refusal too, and one that asks to be revalidated must say when it
  * expires, so an outage always has a bound the server chose.
  *
- * A role may be `{"path": [...], "rate": bps}`, which parses into `publish_rate` or
- * `subscribe_rate` beside the patterns. Answer with {@link encodeGrant}, which writes a
- * cap back into its role; a bare `publish_rate` field is ignored by the relay.
+ * The type is the wire shape, so a parsed grant is the JSON to answer with. A field this
+ * schema does not know is refused, as the relay refuses it: a field added later may narrow
+ * the grant, and a reader that skipped it would widen the session. Read the request's
+ * `relay` before sending a field newer than the relay that asks.
+ *
+ * TEMPORARY MIGRATION: parsing spells each prefix as the subtree pattern a relay before 0.22
+ * reads (`foo/**`, `**`), and reads one spelled that way back as its prefix, so answer with
+ * the parsed grant: such a relay reads a bare `foo` as the one path `foo`. Any other wildcard
+ * is refused. Removed with `readPrefix` in `wire.ts` over the next two version migrations.
  */
 export const GrantSchema = z
-	.pipe(
-		z.object({
-			/** Patterns the session may publish, relative to the root, optionally with a bitrate cap. */
-			publish: z.optional(WireRoleSchema),
-			/** Patterns the session may subscribe to, relative to the root, optionally with a bitrate cap. */
-			subscribe: z.optional(WireRoleSchema),
-			/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
-			root: z.optional(z.string()),
-			/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
-			mounts: z.optional(z.record(z.string(), z.string())),
-			/** When the session closes, as whole unix seconds. */
-			expires: z.optional(UnixSecondsSchema),
-			/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
-			revalidate: z.optional(z.int().check(z.positive())),
-			/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
-			tier: z.optional(TierSchema),
-			/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
-			label: z.optional(PathSchema),
-			/**
-			 * The session is a cluster peer (another relay): what it announces entered the cluster elsewhere,
-			 * and it discovers hidden routes without asking, for peers that predate the opt-in.
-			 * A client certificate alone is not.
-			 */
-			peer: z.optional(z.boolean()),
-			/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
-			upstream: z.optional(z.boolean()),
-		}),
-		z.transform(decodeRoles),
-	)
+	.strictObject({
+		/** What the session may publish, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
+		publish: z.optional(WrittenAccessSchema),
+		/** What the session may subscribe to, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
+		subscribe: z.optional(WrittenAccessSchema),
+		/** The path the prefixes are relative to, replacing the dialed one. Absent means the dialed path. */
+		root: z.optional(z.string()),
+		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
+		mounts: z.optional(z.record(z.string(), z.string())),
+		/** When the session closes, as whole unix seconds. */
+		expires: z.optional(UnixSecondsSchema),
+		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
+		revalidate: z.optional(z.int().check(z.positive())),
+		/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
+		tier: z.optional(TierSchema),
+		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
+		label: z.optional(PathSchema),
+		/**
+		 * How the session, another relay, links into the cluster; absent for a client. A `peer`'s
+		 * announcements entered the cluster elsewhere, and it discovers hidden routes without asking;
+		 * an `upstream` is a peer that is never offered a route learned from another upstream.
+		 * A client certificate alone is not a link.
+		 */
+		link: z.optional(LinkSchema),
+		/**
+		 * TEMPORARY(0.22): set it to `true` beside any `link`, since a relay before 0.22 reads it in
+		 * place of `link`, as a plain peer even for an `upstream`: refuse such a relay (a request with
+		 * no `relay`) when that matters. Alone, `true` reads as `link: "peer"`. A grant that names a
+		 * `link` while this is `false` is refused. Removed at the next version migration.
+		 */
+		peer: z.optional(z.boolean()),
+	})
 	.check(
-		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
+		z.refine((grant) => paths(grant.publish).length > 0 || paths(grant.subscribe).length > 0, {
 			message: "a grant must name something",
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {
 			message: "a grant that asks to be revalidated must expire",
 		}),
-		z.refine((grant) => !grant.upstream || grant.peer === true, {
-			message: "an upstream grant must be a peer",
+		z.refine((grant) => grant.link === undefined || grant.peer !== false, {
+			message: "a grant that names a link must not say it is not a peer",
 		}),
 	);
 /** A value parsed by {@link GrantSchema}. */
 export type Grant = z.infer<typeof GrantSchema>;
-
-/**
- * The JSON an auth server answers with for `grant`, writing each capped role as
- * `{"path": [...], "rate": bps}`. Throws on a grant {@link GrantSchema} would refuse.
- */
-export function encodeGrant(grant: Grant): z.input<typeof GrantSchema> {
-	const { publish, publish_rate, subscribe, subscribe_rate, ...rest } = grant;
-	const wire = { ...encodeRoles({ publish, publish_rate, subscribe, subscribe_rate }), ...rest };
-	GrantSchema.parse(wire);
-	return wire;
-}
 
 /** The reason and verified attribution an auth server returns with HTTP 403. */
 export const RefusalSchema = z.object({

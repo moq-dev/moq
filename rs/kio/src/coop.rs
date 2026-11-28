@@ -81,6 +81,12 @@ impl Budget {
 	/// mistake the yield for an answer.
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_yield(&mut self, waiter: &Waiter) -> Poll<()> {
+		// A probe's re-poll is not a pass of the loop: a yield's wake would read as a
+		// lost wakeup, and charging it would shift the run's later yields.
+		#[cfg(feature = "sim")]
+		if crate::clock::sim::probing() {
+			return ready(());
+		}
 		match self.left.checked_sub(1) {
 			Some(left) => {
 				self.left = left;

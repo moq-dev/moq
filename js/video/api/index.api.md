@@ -38,4 +38,12 @@ export type RendererOutput = {
 };
 
 export type RendererProps = Inputs<RendererInput>;
+
+export function rotateDimensions(dimensions: {
+	height: number;
+	width: number;
+}, rotation?: number): {
+	height: number;
+	width: number;
+};
 ```

@@ -1,8 +1,6 @@
 //! A GOAWAY migration closes the old session once nothing flows on it, rather than holding
 //! it to the handover cap.
 
-#![cfg(feature = "tcp")]
-
 use std::time::Duration;
 
 /// The only version whose routes carry the epoch that lets a subscription resume across
@@ -96,10 +94,14 @@ fn publish(origin: &moq_net::origin::Producer, name: &str) {
 	tokio::spawn(async move {
 		let _broadcast = broadcast;
 		loop {
-			let mut group = track.append_group().expect("append group");
-			let payload = group.sequence.to_string().into_bytes();
+			let mut group = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("append group");
+			let payload = group.start.to_string().into_bytes();
 			group
-				.write_frame(moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 				.expect("write frame");
 			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(20)).await;
@@ -122,8 +124,12 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.expect("the broadcast resolves")
 			.unwrap();
 		// A budget, so a group the move delays is late rather than skipped.
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(5)),
+				max: Some(Duration::from_secs(5)),
+			},
+		)]);
 		let mut track = broadcast
 			.track("video")
 			.expect("track")
@@ -132,8 +138,8 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.expect("subscribe");
 		while let Some(mut group) = track.recv_group().await.expect("the subscription failed") {
 			let frame = group.read_frame().await.expect("read frame").expect("an empty group");
-			assert_eq!(frame.payload[..], group.sequence.to_string().into_bytes()[..]);
-			if seen.send(group.sequence).is_err() {
+			assert_eq!(frame.payload[..], group.start.to_string().into_bytes()[..]);
+			if seen.send(group.start).is_err() {
 				return;
 			}
 		}
@@ -187,7 +193,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	// Each broadcast mints an instance the migration carries across sessions.
+	// Each broadcast mints an identity the migration carries across sessions.
 	publish(&local, "up");
 	publish(&origin, "down");
 	let mut upstream = view(&origin, "up");
@@ -196,7 +202,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	read(&mut upstream, GROUPS, &mut up).await;
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -212,7 +218,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	assert!(sessions.try_recv().is_err(), "the client dialed past its replacement");
 }
 
-/// Without an epoch, as with default clients, a subscription stays on the instance it
+/// Without an epoch, as with default clients, a subscription stays on the identity it
 /// started on, so the old session keeps serving it after the replacement is up. It closes
 /// once the application lets that subscription go, not at the handover cap.
 #[tokio::test]
@@ -231,7 +237,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -258,7 +264,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 async fn a_replacement_does_not_check_what_its_predecessor_learned() {
 	let versions = vec![LITE_07.parse().unwrap()];
 	let origin = moq_tokio::origin::spawn();
-	let only: moq_net::Patterns = [moq_net::Pattern::subtree("up").unwrap()].into_iter().collect();
+	let only = moq_net::Prefixes::from(moq_net::Prefix::try_from("up").unwrap());
 	let ingress = origin.scope("", &only).expect("scope");
 	let (port, mut sessions) = relay_into(&origin, ingress, versions.clone()).await;
 	let local = moq_tokio::origin::spawn();
@@ -273,7 +279,7 @@ async fn a_replacement_does_not_check_what_its_predecessor_learned() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never redialed")

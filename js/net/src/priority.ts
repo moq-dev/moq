@@ -6,6 +6,7 @@
  */
 
 import type { Dispose } from "@moq/signals";
+import { hooks } from "./internal.ts";
 import type { Writer } from "./stream.ts";
 import type * as track from "./track.ts";
 
@@ -42,9 +43,9 @@ export interface Rank {
  * The transport send order for a group, where HIGHER values are transmitted first.
  *
  * A higher `priority` always wins. Below it, a group is ranked by its `position` in its own
- * subscription rather than by its sequence, so two tracks at the same priority interleave:
+ * subscription rather than by its key, so two tracks at the same priority interleave:
  * each one's next group ties with the other's, whatever their group numbering. Comparing
- * sequences instead would let a track that had been running longer, or that numbered its
+ * keys instead would let a track that had been running longer, or that numbered its
  * groups from a clock, starve one that started later.
  *
  * @internal
@@ -62,7 +63,7 @@ function clamp(value: number, min: number, max: number): number {
 
 // Where a group stream starts: its group, and its first object in that group.
 interface Start {
-	sequence: bigint;
+	key: bigint;
 	object: number;
 }
 
@@ -110,33 +111,33 @@ export class Priority {
 	constructor(track: track.Subscriber, publisher = 0) {
 		this.#track = track;
 		this.#publisher = publisher;
-		this.#dispose = track.subscription.subscribe(() => this.#rerank());
+		this.#dispose = hooks.preferences(track).revision.subscribe(() => this.#rerank());
 	}
 
 	/** The send order for a stream starting at this group and object, before it opens. */
-	rank(sequence: bigint, object: number): number {
-		const subscription = this.#track.subscription.peek();
+	rank(key: bigint, object: number): number {
+		const subscription = hooks.preferences(this.#track).scalars();
 		return sendOrder({
 			priority: subscription?.priority ?? 0,
 			publisher: this.#publisher,
-			position: this.#position(sequence, object, subscription?.order),
+			position: this.#position(key, object, subscription?.order),
 		});
 	}
 
 	/** Hold a place for a stream starting at this group and object while it waits to open. */
-	reserve(sequence: bigint, object: number): Place {
+	reserve(key: bigint, object: number): Place {
 		const place: Place = {
-			rank: () => this.rank(sequence, object),
+			rank: () => this.rank(key, object),
 			release: () => this.remove(place),
 		};
-		this.#streams.set(place, { sequence, object });
+		this.#streams.set(place, { key: key, object });
 		this.#rerank();
 		return place;
 	}
 
 	/** Rank a stream by its first object now and after ranking changes, until {@link remove}. */
-	add(stream: Writer, sequence: bigint, object: number) {
-		this.#streams.set(stream, { sequence, object });
+	add(stream: Writer, key: bigint, object: number) {
+		this.#streams.set(stream, { key: key, object });
 
 		// Also covers the stream itself: opening one can block on transport capacity, so an
 		// update that landed while it did predates this registration.
@@ -167,8 +168,8 @@ export class Priority {
 	}
 
 	// How many streams go ahead of one starting here.
-	#position(sequence: bigint, object: number, order: track.Order = "descending"): number {
-		const start = { sequence, object };
+	#position(key: bigint, object: number, order: track.Order = "descending"): number {
+		const start = { key: key, object };
 		let ahead = 0;
 		for (const other of this.#streams.values()) {
 			if (compareStarts(other, start, order) < 0) ahead++;
@@ -179,7 +180,7 @@ export class Priority {
 	// Sorted once, so ranking every stream costs one sort rather than a scan per stream: a
 	// stream's position is how many sort strictly ahead of it.
 	#rerank() {
-		const subscription = this.#track.subscription.peek();
+		const subscription = hooks.preferences(this.#track).scalars();
 		const priority = subscription?.priority ?? 0;
 		const order = subscription?.order ?? "descending";
 		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b, order));
@@ -196,6 +197,6 @@ export class Priority {
 // Negative when `a` goes before `b`. Group order dominates, earlier objects win within one
 // group so a fill precedes its live rest, and identical starts tie.
 function compareStarts(a: Start, b: Start, order: track.Order): number {
-	if (a.sequence !== b.sequence) return a.sequence < b.sequence === (order === "ascending") ? -1 : 1;
+	if (a.key !== b.key) return a.key < b.key === (order === "ascending") ? -1 : 1;
 	return a.object - b.object;
 }

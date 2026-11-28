@@ -27,14 +27,7 @@ pub struct Consumer<T> {
 /// Zero-to-one transitions share the state lock with idle teardown. Existing
 /// demand can be incremented without relocking when closed-channel reads are allowed.
 fn mint<T>(state: &Arc<Channel<T>>, counts: &Arc<Counts>, only_open: bool) -> Option<Consumer<T>> {
-	let first = if !only_open
-		&& counts
-			.consumers
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-				(count > 0).then(|| count + 1)
-			})
-			.is_ok()
-	{
+	let first = if !only_open && counts.join_consumers() {
 		// The successful increment keeps the count above zero, so an idle teardown
 		// cannot commit. Callers may already hold the state lock on this path.
 		false
@@ -78,10 +71,28 @@ pub(crate) fn poll_wanted_changed<T>(
 	waiter: &Waiter,
 	last: bool,
 ) -> Poll<Result<bool, Closed>> {
+	poll_consumers(state, counts, waiter, last, true)
+}
+
+/// [`poll_wanted_changed`], counting consumers past closure too: those still draining
+/// the final value.
+#[cfg_attr(feature = "sim", track_caller)]
+pub(crate) fn poll_held_changed<T>(state: &Channel<T>, counts: &Counts, waiter: &Waiter, last: bool) -> Poll<bool> {
+	poll_consumers(state, counts, waiter, last, false).map(|res| res.unwrap_or(last))
+}
+
+#[cfg_attr(feature = "sim", track_caller)]
+fn poll_consumers<T>(
+	state: &Channel<T>,
+	counts: &Counts,
+	waiter: &Waiter,
+	last: bool,
+	until_closed: bool,
+) -> Poll<Result<bool, Closed>> {
 	// Closure is checked first, so a closed channel reports `Closed` from every handle
 	// rather than a consumer count that only dropped because it's dead.
 	let check = || {
-		if state.is_closed() {
+		if until_closed && state.is_closed() {
 			return Some(Err(Closed));
 		}
 		let wanted = counts.consumers.load(Ordering::Relaxed) > 0;

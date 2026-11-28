@@ -3,13 +3,34 @@ use bytes::Bytes;
 use super::{Container, Frame, Kind};
 
 fn add_micros(timestamp: moq_net::Timestamp, extra: moq_net::Timestamp) -> Option<moq_net::Timestamp> {
-	let micros = timestamp.as_micros().saturating_add(extra.as_micros());
+	let micros = timestamp.as_micros().ok()?.saturating_add(extra.as_micros().ok()?);
 	let micros = u64::try_from(micros).ok()?;
 	moq_net::Timestamp::from_micros(micros).ok()
 }
 
+/// Whether `left` is before `right` to the microsecond; false when either is unscaled.
 fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
-	left.as_micros() < right.as_micros()
+	matches!((left.as_micros(), right.as_micros()), (Ok(left), Ok(right)) if left < right)
+}
+
+/// Whether `left` is before `right` at full precision, a tie across scales included as not
+/// before; false when either is unscaled.
+fn timestamp_before(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
+	match (left.scale(), right.scale()) {
+		(Some(lhs), Some(rhs)) => {
+			(left.value() as u128) * (rhs.as_u64() as u128) < (right.value() as u128) * (lhs.as_u64() as u128)
+		}
+		_ => false,
+	}
+}
+
+/// Refuse a frame without a time with [`TimestampMismatch`](moq_net::Error::TimestampMismatch):
+/// media is timed, and a scale-less track's [unscaled](moq_net::Timestamp::unscaled) key is not.
+fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) -> Result<(), moq_net::Error> {
+	match timestamp.scale().is_some() && duration.is_none_or(|duration| duration.scale().is_some()) {
+		true => Ok(()),
+		false => Err(moq_net::Error::TimestampMismatch),
+	}
 }
 
 /// A producer for media tracks that manages group boundaries.
@@ -47,6 +68,9 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container, R = ()> {
+	/// The catalog rendition this media producer owns, when it was created through a catalog.
+	/// Dropped before the track, so a handler asked for the track again finds the name free.
+	rendition: Option<Box<dyn Rendition<R>>>,
 	inner: moq_net::track::Producer,
 	container: C,
 	group: Option<moq_net::group::Producer>,
@@ -54,9 +78,9 @@ pub struct Producer<C: Container, R = ()> {
 
 	buffer_duration: std::time::Duration,
 
-	/// Sequence to use for the next group opened by [`Self::write`].
-	/// Set by [`Self::seek`] and consumed on the next group creation.
-	pending_sequence: Option<u64>,
+	/// Start to key the next group opened by [`Self::write`] with, instead of its keyframe's
+	/// timestamp. Set by [`Self::seek`] and consumed on the next group creation.
+	pending_start: Option<u64>,
 
 	/// This track's place in the broadcast's join interval, for a video or audio track a catalog
 	/// minted: it reports the longest group measured.
@@ -69,18 +93,45 @@ pub struct Producer<C: Container, R = ()> {
 	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
 	/// own lands. Not a floor: a group may start below it.
 	live_edge: Option<moq_net::Timestamp>,
+	/// The latest frame timestamp written, which a discontinuity marker never falls below: a frame
+	/// without a duration reaches only its own timestamp, so the live edge can sit right on it.
+	newest: Option<moq_net::Timestamp>,
+	/// The End of the latest group that ended whole, in the track's timescale. Its span runs to
+	/// there, so no later group starts below it, a discontinuity marker included.
+	ended: Option<moq_net::Timestamp>,
+	/// The source and published timestamps of the keyframe that opened the open group, when its
+	/// start moved it past a span. A frame at that source timestamp, such as the picture parameter
+	/// sets precede, is published with it.
+	moved: Option<(moq_net::Timestamp, moq_net::Timestamp)>,
+	/// The newest source timestamp in the open group, which a source end must reach.
+	source_end: Option<moq_net::Timestamp>,
 
-	/// The keyframe timestamp that opened the latest group. The next group may not start below it.
+	/// The source timestamp of the keyframe that opened the latest group. The next group may not
+	/// start below it.
 	start: Option<moq_net::Timestamp>,
-	/// The start of the group before the latest one. No frame of the latest group sits below it.
+	/// The start of the group before the latest one. A frame below it is a restart, not a splice.
 	floor: Option<moq_net::Timestamp>,
+	/// The newest frame of every group before the latest one: every frame of the latest group
+	/// presents after it.
+	ceiling: Option<moq_net::Timestamp>,
+	/// A keyframe was dropped with no group open, so the frames decoding from it are dropped too,
+	/// until a keyframe opens a group.
+	skipping: bool,
+	/// The latest keyframe written, whose leading pictures are the frames after it presenting
+	/// before it.
+	keyframe: Option<moq_net::Timestamp>,
+	/// A leading picture of [`keyframe`](Self::keyframe) was dropped, so its later leading pictures
+	/// are dropped too: they may reference it, and pictures presenting after the keyframe never
+	/// reference a leading picture.
+	tainted: bool,
 
 	/// Duration of the frame that last raised [`end`](Self::end), if it had one. Distinguishes
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
 	last_duration: Option<moq_net::Timestamp>,
 
-	/// Previous timestamp within the group and cadence observed within this epoch.
-	previous_timestamp: Option<moq_net::Timestamp>,
+	/// Previous source and published timestamps within the group, and the cadence observed within
+	/// this epoch.
+	previous_timestamp: Option<(moq_net::Timestamp, moq_net::Timestamp)>,
 	cadence: Option<moq_net::Timestamp>,
 	/// A presentation endpoint cannot bound the decode-order tail after reordering.
 	reordered: bool,
@@ -95,9 +146,6 @@ pub struct Producer<C: Container, R = ()> {
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
 	bandwidth: Option<crate::catalog::Claim>,
 
-	/// The catalog rendition this media producer owns, when it was created through a catalog.
-	rendition: Option<Box<dyn Rendition<R>>>,
-
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
 }
@@ -107,28 +155,52 @@ pub struct Producer<C: Container, R = ()> {
 /// It holds the track's open group until [`Producer::commit`] returns it, so nothing else writes to
 /// the track meanwhile. Dropping it unfinished aborts that group.
 pub(crate) struct Streamed {
-	writer: moq_net::frame::Producer,
+	payload: Payload,
+	/// The timestamp the source gave, which the producer measures; a group start may have moved
+	/// the one written.
+	source: moq_net::Timestamp,
 	timestamp: moq_net::Timestamp,
 	duration: Option<moq_net::Timestamp>,
 	keyframe: bool,
 	size: usize,
 }
 
+/// Where a [`Streamed`] frame's payload goes.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "nearly every frame is written; boxing the writer would allocate for each"
+)]
+enum Payload {
+	Written(moq_net::frame::Producer),
+	/// The producer dropped the frame (see [`Producer::write`]); this many bytes are still to come.
+	Dropped(usize),
+}
+
 impl Streamed {
 	/// Append payload bytes, readable by subscribers at once.
 	pub fn write(&mut self, chunk: &[u8]) -> crate::Result<()> {
-		self.writer.write(chunk)?;
+		match &mut self.payload {
+			Payload::Written(writer) => writer.write(chunk)?,
+			Payload::Dropped(remaining) => {
+				*remaining = remaining.checked_sub(chunk.len()).ok_or(moq_net::Error::WrongSize)?;
+			}
+		}
 		Ok(())
 	}
 
 	/// Payload bytes still to write.
 	pub fn remaining(&self) -> usize {
-		self.writer.remaining()
+		match &self.payload {
+			Payload::Written(writer) => writer.remaining(),
+			Payload::Dropped(remaining) => *remaining,
+		}
 	}
 
 	/// Abort the frame and its group with `err`.
 	pub fn abort(self, err: moq_net::Error) {
-		let _ = self.writer.abort(err);
+		if let Payload::Written(writer) = self.payload {
+			let _ = writer.abort(err);
+		}
 	}
 }
 
@@ -147,20 +219,43 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 		duration: Option<moq_net::Timestamp>,
 		size: usize,
 	) -> crate::Result<Streamed> {
-		let prefix = match self.container.prefix(timestamp)? {
-			Some(prefix) if self.buffer_duration.is_zero() => prefix,
-			_ => return Err(crate::Error::UnsupportedContainer("a streamed frame".into())),
+		if !self.buffer_duration.is_zero() || self.container.prefix(timestamp)?.is_none() {
+			return Err(crate::Error::UnsupportedContainer("a streamed frame".into()));
+		}
+		timed(timestamp, duration)?;
+		// Only an empty frame is whole before its bytes arrive, so only it can be checked up front.
+		if size == 0 {
+			self.container.check(&Frame {
+				timestamp,
+				payload: Bytes::new(),
+				keyframe,
+				duration,
+			})?;
+		}
+		let source = timestamp;
+		let Some(timestamp) = self.prepare(timestamp, keyframe)? else {
+			return Ok(Streamed {
+				payload: Payload::Dropped(size),
+				source,
+				timestamp,
+				duration,
+				keyframe,
+				size,
+			});
 		};
-		self.prepare(timestamp, keyframe)?;
+		// At the timestamp the frame is written at, which a group start may have moved.
+		let prefix = (self.container.prefix(timestamp)?)
+			.ok_or_else(|| crate::Error::UnsupportedContainer("a streamed frame".into()))?;
 		let group = self.group.take().expect("prepare opens a group");
 		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
 		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp: Some(timestamp),
+			timestamp,
 			size: total as u64,
 		})?;
 		writer.write(prefix)?;
 		Ok(Streamed {
-			writer,
+			payload: Payload::Written(writer),
+			source,
 			timestamp,
 			duration,
 			keyframe,
@@ -171,9 +266,20 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 	/// Finish a frame [`open`](Self::open) returned once its payload is written, handing its group
 	/// back to the track.
 	pub(crate) fn commit(&mut self, frame: Streamed) -> crate::Result<()> {
-		let group = frame.writer.finish()?;
+		let writer = match frame.payload {
+			Payload::Written(writer) => writer,
+			Payload::Dropped(0) => return Ok(()),
+			Payload::Dropped(_) => return Err(moq_net::Error::WrongSize.into()),
+		};
+		let group = writer.finish()?;
 		self.group = Some(group);
-		self.written(frame.timestamp, frame.duration, frame.size, frame.keyframe);
+		self.written(
+			frame.source,
+			frame.timestamp,
+			frame.duration,
+			frame.size,
+			frame.keyframe,
+		);
 		Ok(())
 	}
 }
@@ -250,12 +356,20 @@ impl<C: Container> Producer<C> {
 			group: None,
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
-			pending_sequence: None,
+			pending_start: None,
 			member: None,
 			end: None,
 			live_edge: None,
+			newest: None,
+			ended: None,
+			moved: None,
+			source_end: None,
 			start: None,
 			floor: None,
+			ceiling: None,
+			skipping: false,
+			keyframe: None,
+			tainted: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -288,12 +402,20 @@ where
 			group: None,
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
-			pending_sequence: None,
+			pending_start: None,
 			member: None,
 			end: None,
 			live_edge: None,
+			newest: None,
+			ended: None,
+			moved: None,
+			source_end: None,
 			start: None,
 			floor: None,
+			ceiling: None,
+			skipping: false,
+			keyframe: None,
+			tainted: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -336,12 +458,17 @@ where
 		})
 	}
 
-	/// Resolve a timestamp on the broadcast's shared clock.
+	/// Resolve a timestamp on the broadcast's shared clock: `hint`, or the clock's reading now.
+	///
+	/// A reading comes from the clock rather than media, so one landing on the newest group's start,
+	/// as a burst of untimed frames can, is moved one unit of the track's timescale past it: group
+	/// starts strictly increase.
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		self.rendition
-			.as_ref()
-			.ok_or(crate::Error::NotPublished)?
-			.timestamp(hint)
+		let rendition = self.rendition.as_ref().ok_or(crate::Error::NotPublished)?;
+		match hint {
+			Some(pts) => rendition.timestamp(Some(pts)),
+			None => Ok(crate::start::next(&self.inner, rendition.timestamp(None)?)?.1),
+		}
 	}
 
 	fn publish_estimate(&mut self) -> crate::Result<()> {
@@ -384,6 +511,8 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 		let interval = self.member.as_ref().and_then(|member| member.interval());
 		let mut next = rendition.fresh(container, self.inner.info().clone(), interval)?;
 		next.buffer_duration = self.buffer_duration;
+		// A seek keys the next group, which the successor opens.
+		next.pending_start = self.pending_start;
 		next.set(config)?;
 		self.end_with(None)?;
 		*self = next;
@@ -480,9 +609,9 @@ where
 		self.group.is_none()
 	}
 
-	/// One past the track's largest group, even an empty one: where a group continues after
-	/// what the track holds.
-	pub(crate) fn next_sequence(&self) -> u64 {
+	/// One past the track's largest group start, even an empty group's: the lowest start a group
+	/// after what the track holds can take.
+	pub(crate) fn next_start(&self) -> u64 {
 		self.inner.largest().map_or(0, |largest| largest.group + 1)
 	}
 
@@ -578,31 +707,57 @@ where
 	/// independently decodable (audio) marks only the first frame of each group a keyframe (see
 	/// [`needs_keyframe`](Self::needs_keyframe)) so the group spans more than one frame.
 	///
-	/// Group starts never go backwards: a keyframe below the start of the previous group, or any
+	/// A group starts at its keyframe's timestamp, in the track's timescale, and every frame of a
+	/// group presents after every frame of the groups before it. Frames within a group may still
+	/// reorder (B-frames, open-GOP leading pictures). A keyframe that doesn't start after the newest
+	/// frame written continues the open group, as at a splice whose keyframe dips below the old
+	/// content's last frames. A later frame presenting at or before the previous groups' newest,
+	/// such as a leading picture after a splice, is dropped and counted as
+	/// [skipped](Self::report_skipped), and so is a keyframe at or before the newest frame with no
+	/// group open, such as after a [`cut`](Self::cut), with the frames after it until a keyframe
+	/// opens a group.
+	///
+	/// Group starts strictly increase, and no group starts inside the span of one that ended whole
+	/// at a [`cut`](Self::cut)'s end. So with no group open, a keyframe past the newest frame but at
+	/// the latest group's start, such as media resuming right at a
+	/// [discontinuity](Self::discontinuity)'s marker, or below that end, such as one a cadence or a
+	/// rounded duration estimated past it, is stamped at the first start past both. A frame at that
+	/// keyframe's own timestamp, such as the picture its parameter sets precede, is stamped with
+	/// it, and the group's End is still estimated from the source's timestamps, so a move never
+	/// adds up across groups.
+	///
+	/// Group starts never go backwards: a keyframe below the start of the latest group, or any
 	/// frame below the start of the group before its own, returns
 	/// [`TimestampRewind`](super::TimestampRewind) with the refused timestamp and that start,
 	/// without writing, the way an oversized frame is refused. That is a restart, which is a new
-	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
-	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
-	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
-		self.prepare(frame.timestamp, frame.keyframe)?;
+	/// broadcast.
+	pub fn write(&mut self, mut frame: Frame) -> crate::Result<()> {
+		timed(frame.timestamp, frame.duration)?;
+		// Before a keyframe cuts the open group or the buffer takes the frame, so a refused frame
+		// leaves both as they were.
+		self.container.check(&frame)?;
+		let source = frame.timestamp;
+		let Some(timestamp) = self.prepare(frame.timestamp, frame.keyframe)? else {
+			return Ok(());
+		};
+		frame.timestamp = timestamp;
 
 		// Buffer or write the frame.
 		if self.buffer_duration.is_zero() {
 			let group = self.group.as_mut().unwrap();
-			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
+			let (duration, bytes) = (frame.duration, frame.payload.len());
 			let keyframe = frame.keyframe;
 			self.container.write(group, &[frame])?;
 			// Only what the container accepted is measured. A rejected frame (too large for the
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
 			// extrema never fall, so counting one would inflate the catalog for good.
-			self.written(timestamp, duration, bytes, keyframe);
+			self.written(source, timestamp, duration, bytes, keyframe);
 		} else {
 			// Buffered frames count toward the rates on the way in instead. The flush that eventually
 			// writes them takes the track down with it when it fails, so there is nothing to unwind.
 			// Their place in the write order waits for that flush, which is when the transport has them.
-			self.estimator.rate(frame.timestamp, frame.payload.len());
-			self.observe_end(frame.timestamp, frame.duration);
+			self.estimator.rate(source, frame.payload.len());
+			self.observe_end(source, timestamp, frame.duration);
 			self.buffer.push(frame);
 
 			// Flush if the buffered span has reached the buffer duration.
@@ -614,8 +769,16 @@ where
 		Ok(())
 	}
 
-	/// Check `timestamp` against the group starts, and open a group for a keyframe.
-	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<()> {
+	/// Check `timestamp` against the groups before it and open a group for a keyframe, returning
+	/// the timestamp to write the frame at, or `None` to drop it.
+	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<Option<moq_net::Timestamp>> {
+		// A frame sharing the moved keyframe's source timestamp goes with it, as the picture after
+		// its parameter sets does.
+		let source = timestamp;
+		let timestamp = match self.moved {
+			Some((moved, at)) if self.group.is_some() && timestamp == moved => at,
+			_ => timestamp,
+		};
 		let floor = match keyframe {
 			true => self.start,
 			false => self.floor,
@@ -625,59 +788,156 @@ where
 		{
 			return Err(super::TimestampRewind { timestamp, floor }.into());
 		}
+		// A seek's start is checked on the track the keyframe lands on, before anything can drop
+		// it, so a seek below the latest group's start refuses this keyframe rather than a later
+		// one. A seek has no group open, so cutting it changes nothing this depends on.
+		let sought = match (keyframe, self.pending_start) {
+			(true, Some(start)) => Some((start, self.sought(start)?)),
+			_ => None,
+		};
 
-		// A keyframe cuts the previous group, using its timestamp as the boundary where the
-		// previous group's content ends, unless it overlaps that content.
-		if keyframe {
-			let overlaps = self
-				.previous_timestamp
-				.is_some_and(|previous| timestamp_lt(timestamp, previous));
-			self.cut((!overlaps).then_some(timestamp))?;
-			if overlaps {
-				self.cadence = None;
+		// Every frame of a group presents after every frame of the groups before it, so a keyframe
+		// that doesn't start after the newest frame written continues the open group: a splice whose
+		// keyframe dips below the old content's last frames, as a TS content join does, publishes
+		// one longer group. With no group open, as after bytes were lost, it has nothing to continue
+		// and is dropped like the frames that follow it, until a keyframe past the newest frame.
+		if keyframe
+			&& let Some(newest) = self.newest
+			&& !timestamp_lt(newest, timestamp)
+		{
+			return match self.group {
+				Some(_) => Ok(self.continue_keyframe(timestamp)),
+				None => {
+					self.skipping = true;
+					Ok(self.drop_frame(timestamp))
+				}
+			};
+		}
+
+		// A keyframe opens a group keyed by its timestamp, which has to start after every group the
+		// track holds. With one open, a keyframe that doesn't, such as parameter sets and the picture
+		// they precede written as two keyframes at one timestamp, continues it instead. With none
+		// open, nor may it start inside the span of the group a cut ended whole, which runs to its
+		// End: one at the latest group's start, such as media resuming right where a break's marker
+		// sits, or below that End, as after an End estimated from a cadence or a rounded duration,
+		// is stamped at the first start past both. One below the latest group's start is refused,
+		// before anything changes.
+		let mut timestamp = timestamp;
+		// A start moved past a span takes a keyframe below it along, as a keyframe the track's
+		// spans hold is moved, so it never presents below its own group's start.
+		if let Some((start, sought)) = sought
+			&& sought != start
+			&& let Some(scale) = self.inner.info().timescale
+			&& crate::start::key(&self.inner, timestamp)? < sought
+		{
+			timestamp = moq_net::Timestamp::new(sought, scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
+		}
+		let sought = sought.map(|(_, sought)| sought);
+		let start = match (keyframe && self.pending_start.is_none(), &self.group) {
+			(false, _) => None,
+			(true, Some(_)) => match crate::start::opens(&self.inner, timestamp)? {
+				Some(start) => Some(start),
+				None => return Ok(self.continue_keyframe(timestamp)),
+			},
+			(true, None) => {
+				let (start, at) = crate::start::resume(&self.inner, timestamp, self.ended)?;
+				if at != timestamp {
+					tracing::debug!(?timestamp, ?at, "a keyframe starts past the group before it");
+				}
+				timestamp = at;
+				Some(start)
 			}
+		};
+
+		// A keyframe cuts the previous group, its timestamp the boundary where that group's content
+		// ends.
+		if keyframe {
+			self.cut(Some(timestamp))?;
 		}
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
 			if !keyframe {
+				if self.skipping {
+					return Ok(self.drop_frame(timestamp));
+				}
 				// No group yet and this delta can't anchor one. The caller (e.g. a
 				// mid-stream join) decides whether to skip until the first keyframe.
 				return Err(super::MissingKeyframe.into());
 			}
-			let group = match self.pending_sequence.take() {
-				Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
-				None => self.inner.append_group()?,
+			let group = match (self.pending_start.take().and(sought), start) {
+				(Some(start), _) => self.inner.create_group(moq_net::group::Info { start })?,
+				(None, Some(start)) => {
+					// A track's first group says nothing came before it, so a reader can tell it
+					// is the first: a decoder starting there needs no warmup.
+					if self.inner.largest().is_none() {
+						self.inner.skip_groups(0..start);
+					}
+					self.inner.append_group(timestamp)?
+				}
+				(None, None) => unreachable!("a keyframe without a pending start has one"),
 			};
 
 			self.floor = self.start;
-			self.start = Some(timestamp);
+			self.ceiling = self.newest;
+			self.skipping = false;
+			// Measured from the source, so a moved start never adds up across groups.
+			self.start = Some(source);
+			self.moved = (timestamp != source).then_some((source, timestamp));
+			self.source_end = None;
 			self.group = Some(group);
+			self.keyframe = Some(timestamp);
+			self.tainted = false;
+		} else if self.ceiling.is_some_and(|ceiling| !timestamp_lt(ceiling, timestamp)) {
+			// A frame presenting with the groups before its own, such as a leading picture after a
+			// splice, is dropped: it references pictures from before the splice, or shows new
+			// content while the old still plays.
+			self.tainted = true;
+			return Ok(self.drop_frame(timestamp));
+		} else if self.tainted && self.keyframe.is_some_and(|keyframe| timestamp_lt(timestamp, keyframe)) {
+			// A later leading picture of the same keyframe may reference the dropped one.
+			return Ok(self.drop_frame(timestamp));
 		}
 
-		Ok(())
+		Ok(Some(timestamp))
+	}
+
+	/// Note a keyframe that continues the open group, whose leading pictures are judged afresh.
+	fn continue_keyframe(&mut self, timestamp: moq_net::Timestamp) -> Option<moq_net::Timestamp> {
+		self.keyframe = Some(timestamp);
+		self.tainted = false;
+		Some(timestamp)
+	}
+
+	/// Count a frame that presents with the groups before it as skipped rather than writing it,
+	/// returning `None` for [`prepare`](Self::prepare) to report.
+	fn drop_frame(&self, timestamp: moq_net::Timestamp) -> Option<moq_net::Timestamp> {
+		tracing::debug!(
+			?timestamp,
+			"dropping a frame that presents before an earlier group ends"
+		);
+		self.report_skipped(1);
+		None
 	}
 
 	/// Measure and report a frame the group accepted unbuffered.
 	fn written(
 		&mut self,
-		timestamp: moq_net::Timestamp,
+		source: moq_net::Timestamp,
+		at: moq_net::Timestamp,
 		duration: Option<moq_net::Timestamp>,
 		bytes: usize,
 		keyframe: bool,
 	) {
-		self.estimator.rate(timestamp, bytes);
-		self.order(timestamp);
+		self.estimator.rate(source, bytes);
+		self.order(source);
 		self.count(bytes, keyframe);
-		self.observe_end(timestamp, duration);
+		self.observe_end(source, at, duration);
 	}
 
 	/// Place a written frame in the write order, unless it is history; see [`Self::history`].
 	fn order(&mut self, timestamp: moq_net::Timestamp) {
-		if self
-			.history
-			.is_none_or(|until| timestamp.as_micros() > until.as_micros())
-		{
+		if self.history.is_none_or(|until| timestamp_lt(until, timestamp)) {
 			self.estimator.order(timestamp);
 		}
 	}
@@ -688,39 +948,83 @@ where
 	/// group's content stops. A video track that writes duration markers appends an
 	/// empty frame at that bound, or at the last timestamp plus its estimated
 	/// duration. Reordered groups omit this marker because their presentation end
-	/// does not bound the last frame in decode order. The next [`write`](Self::write)
-	/// must be a keyframe. An explicit bound before the last ordered video frame
-	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
+	/// does not bound the last frame in decode order. An unreordered media group, or one given an
+	/// explicit bound, ends whole there, so the next group starts at or after it (see
+	/// [`write`](Self::write)). The next write must be a keyframe. An explicit bound
+	/// below a frame the group holds, in the track's timescale, returns
+	/// [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group. A bound at or past
+	/// the source timestamp of a keyframe [`write`](Self::write) moved past an earlier group's end
+	/// is the source's: the group ends at the moved keyframe instead.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let marker_at = end.or_else(|| self.estimated_end());
-		self.close(end, marker_at)
+		let bound = self.bound(end)?;
+		let marker_at = bound.or_else(|| self.estimated_end());
+		// Without a bound, the group's media still lasts past its last frame's timestamp. A data item
+		// has no cadence to last for, so its estimate stays out of the bitrate.
+		let measured = end.or(marker_at.filter(|_| self.container.kind() != Kind::Data));
+		self.close(measured, bound, marker_at, None)
+	}
+
+	/// Close the current group without declaring where it ends, for a source that can't tell where
+	/// its last frame stops. The next write must be a keyframe.
+	pub(crate) fn cut_unended(&mut self) -> crate::Result<()> {
+		self.close(None, None, None, None)
+	}
+
+	/// Where a group cut at `end` ends: there, or at its moved keyframe when only that frame
+	/// presents past it.
+	fn bound(&self, end: Option<moq_net::Timestamp>) -> crate::Result<Option<moq_net::Timestamp>> {
+		// A group never ends below a frame of its own, compared in the track's timescale as
+		// `finish_at` checks it.
+		let key = |timestamp| crate::start::key(&self.inner, timestamp).ok();
+		let (Some(end), Some(newest)) = (end, self.newest) else {
+			return Ok(end);
+		};
+		if self.group.is_none() || key(end) >= key(newest) {
+			return Ok(Some(end));
+		}
+		match self.moved {
+			Some((source, at)) if key(at) == key(newest) && key(end) >= key(self.source_end.unwrap_or(source)) => {
+				Ok(Some(at))
+			}
+			_ => Err(super::InvalidEnd.into()),
+		}
 	}
 
 	/// Close the current group, ending a video track's group with a duration marker at `marker_at`.
-	fn close(&mut self, end: Option<moq_net::Timestamp>, marker_at: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		if self.container.kind() == Kind::Video
-			&& !self.reordered
-			&& let Some((end, previous)) = end.zip(self.previous_timestamp)
-			&& timestamp_lt(end, previous)
-		{
-			return Err(super::InvalidEnd.into());
-		}
-
+	///
+	/// The group ends whole at `whole`, else at a bound the caller knows, such as the next
+	/// keyframe, else where a media track's duration marker goes, so a reader can tell the group
+	/// starting there continues it. The catalog's estimate measures to `measured`, the source's
+	/// end, which a moved keyframe can put below `bound`.
+	fn close(
+		&mut self,
+		measured: Option<moq_net::Timestamp>,
+		bound: Option<moq_net::Timestamp>,
+		marker_at: Option<moq_net::Timestamp>,
+		whole: Option<moq_net::Timestamp>,
+	) -> crate::Result<()> {
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
-		self.estimator.cut(end);
+		self.estimator.cut(measured);
+		let end = bound;
 		self.claim();
 
 		// The group's own state ends with it, whether or not closing it succeeds.
 		let reordered = std::mem::take(&mut self.reordered);
 		// Where this group's content stops: the duration marker when we write one, else the
 		// caller's bound, else the furthest point we wrote.
-		let reached = marker_at.or(end).max(self.end.take());
+		let reached = match (marker_at.or(end), self.end.take()) {
+			(Some(bound), Some(written)) => Some(super::later(written, bound)),
+			(bound, written) => bound.or(written),
+		};
 		self.last_duration = None;
 		self.previous_timestamp = None;
 
 		let tail_end = marker_at.filter(|_| !reordered);
-		if let Err(err) = self.close_group(tail_end, reached) {
+		// Media ends whole where its last frame does, as the duration marker says. A data track's
+		// items have no cadence to estimate that from.
+		let estimated = tail_end.filter(|_| self.container.kind() != Kind::Data);
+		if let Err(err) = self.close_group(whole.or(end).or(estimated), tail_end, reached) {
 			// A group that fails to close fails with the cause, rather than staying open for the next
 			// write to continue.
 			self.buffer.clear();
@@ -732,9 +1036,11 @@ where
 		self.publish_estimate()
 	}
 
-	/// Flush the buffer into the open group and finish it, raising the live edge to `reached`.
+	/// Flush the buffer into the open group and finish it, raising the live edge to `reached`. With
+	/// a `bound`, the group ends whole there rather than only closing.
 	fn close_group(
 		&mut self,
+		bound: Option<moq_net::Timestamp>,
 		tail_end: Option<moq_net::Timestamp>,
 		reached: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
@@ -743,7 +1049,15 @@ where
 			self.container.finish_group(group, tail_end)?;
 		}
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
+				Some(end) => {
+					group.finish_at(end.value())?;
+					self.ended = Some(end);
+				}
+				None => {
+					group.finish()?;
+				}
+			}
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
 				self.raise_live_edge(end);
@@ -758,21 +1072,40 @@ where
 		}
 	}
 
-	/// Raise the furthest presentation point written, for [`cut`](Self::cut) to report.
-	fn observe_end(&mut self, timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) {
-		self.reordered |= self.previous_timestamp.is_some_and(|previous| timestamp < previous);
-		if let Some(previous) = self.previous_timestamp
+	/// Raise the furthest presentation point written, for [`cut`](Self::cut) to report, from the
+	/// `source` timestamp of a frame written `at`. Estimates follow the source, so a keyframe a group
+	/// start moved never pushes the next estimated End, and the move after it, further.
+	fn observe_end(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		at: moq_net::Timestamp,
+		duration: Option<moq_net::Timestamp>,
+	) {
+		// Either order stepping back is a reorder: a frame after a keyframe a group start moved can
+		// publish below it, so the source's order alone misses it.
+		self.reordered |= self
+			.previous_timestamp
+			.is_some_and(|(previous, published)| timestamp < previous || timestamp_before(at, published));
+		if let Some((previous, _)) = self.previous_timestamp
 			&& let Ok(delta) = timestamp.checked_sub(previous)
 			&& !delta.is_zero()
 		{
 			self.cadence = Some(delta);
 		}
-		self.previous_timestamp = Some(timestamp);
+		self.previous_timestamp = Some((timestamp, at));
+		self.source_end = Some(self.source_end.map_or(timestamp, |end| super::later(end, timestamp)));
+		// At full precision, so the group's floor is its highest frame as `finish_at` sees it.
+		self.newest = Some(self.newest.map_or(at, |newest| super::later(newest, at)));
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
-		let micros = timestamp.as_micros() + duration.map(|d| d.as_micros()).unwrap_or(0);
-		let Ok(micros) = u64::try_from(micros) else { return };
+		let Ok(micros) = timestamp.as_micros() else { return };
+		let Ok(extra) = duration.map_or(Ok(0), |duration| duration.as_micros()) else {
+			return;
+		};
+		let Ok(micros) = u64::try_from(micros + extra) else {
+			return;
+		};
 		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
 			return;
 		};
@@ -785,23 +1118,71 @@ where
 		}
 	}
 
-	/// Exclusive group end from a known duration or the observed sample cadence.
+	/// Exclusive group end from a known duration or the observed sample cadence, never below the
+	/// newest frame, which a sum rounded to the microsecond can fall under on a finer track.
 	fn estimated_end(&self) -> Option<moq_net::Timestamp> {
 		let last = self.end?;
-		if self.last_duration.is_some() {
-			return Some(last);
-		}
-		add_micros(last, self.cadence?)
+		let end = match self.last_duration {
+			Some(_) => last,
+			None => add_micros(last, self.cadence?)?,
+		};
+		Some(self.newest.map_or(end, |newest| super::later(end, newest)))
 	}
 
-	/// Close the current group (if any) and open the next group at the given sequence.
+	/// Close the current group (if any) and open the next group at the given start.
 	///
-	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
-	/// `sequence`. Useful for joining mid-stream.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.cut(None)?;
-		self.pending_sequence = Some(sequence);
+	/// The next [`write`](Self::write) must be a keyframe and will land in a group keyed `start`,
+	/// in the track's timescale, rather than at its own timestamp. The groups after it are keyed
+	/// by their keyframes again, which have to start after it. Useful for joining mid-stream.
+	///
+	/// The closing group ends whole where its last frame does, as [`cut(None)`](Self::cut)
+	/// estimates it, but not past `start`, which no group's span may hold. A `start` at or below a
+	/// frame the track holds, or inside the span of a group that ended whole, keys the group at the
+	/// first start past both instead, as [`write`](Self::write) moves a keyframe, and a keyframe
+	/// below that start is stamped at it, with a frame at its timestamp. One that doesn't pass the
+	/// latest group's start refuses the next keyframe with
+	/// [`TimestampRewind`](super::TimestampRewind). A decoder change takes `start` to a fresh
+	/// track, which holds nothing.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
+		let mut end = self.estimated_end();
+		if let (Some(estimate), Some(newest), Some(scale)) = (end, self.newest, self.inner.info().timescale)
+			&& crate::start::key(&self.inner, estimate)? > start
+			&& crate::start::key(&self.inner, newest)? < start
+		{
+			end = Some(moq_net::Timestamp::new(start, scale).map_err(|_| moq_net::Error::TimestampMismatch)?);
+		}
+		// Measured to where the group ends, as an unbounded cut measures it; a data item has no
+		// cadence to last for.
+		let measured = end.filter(|_| self.container.kind() != Kind::Data);
+		self.close(measured, None, end, None)?;
+		self.pending_start = Some(start);
 		Ok(())
+	}
+
+	/// Where a group a [`seek`](Self::seek) keyed `start` starts: `start`, or the first start past
+	/// every frame the track holds and the span of the group that ended whole last, as a keyframe
+	/// is moved. Refused with [`TimestampRewind`](super::TimestampRewind) when `start` doesn't pass
+	/// the latest group's start.
+	fn sought(&self, start: u64) -> crate::Result<u64> {
+		let Some(scale) = self.inner.info().timescale else {
+			return Ok(start);
+		};
+		let next = self.next_start();
+		if start < next {
+			let at = |key: u64| moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch);
+			return Err(super::TimestampRewind {
+				timestamp: at(start)?,
+				floor: at(next)?,
+			}
+			.into());
+		}
+		let key = |timestamp: Option<moq_net::Timestamp>| {
+			timestamp
+				.map(|timestamp| crate::start::key(&self.inner, timestamp))
+				.transpose()
+		};
+		let past_newest = key(self.newest)?.map_or(0, |newest| newest.saturating_add(1));
+		Ok(start.max(past_newest).max(key(self.ended)?.unwrap_or(0)))
 	}
 
 	/// Publish a marker group standing for a break in the timeline: content stopped, and
@@ -812,7 +1193,7 @@ where
 	/// group looks exactly like the one that would have followed, and a consumer bounding a
 	/// sample by the next group's first frame hands it the entire gap as its duration. That
 	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes.
-	/// Consecutive sequence numbers can't rule a pause out, so this
+	/// Group starts alone can't rule a pause out, so this
 	/// marker is the only thing that can say one happened.
 	///
 	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
@@ -820,28 +1201,71 @@ where
 	/// the marker and waits for real media, instead of being served the group from *before*
 	/// the break as though it were live.
 	///
-	/// Audio and video write one empty frame at the exclusive end of the previous epoch.
-	/// That object exists on moq-transport, so the live edge moves immediately; a consumer
-	/// MUST NOT submit it to a decoder. An empty payload is data on a data track, so its
-	/// marker is one object with no bytes at all, not even the container's timestamp. The
-	/// next [`write`](Self::write) opens the group after the marker and may not start below
-	/// the last media group's start.
+	/// Audio and video write one empty frame one unit of the track's timescale before the exclusive
+	/// end of the previous epoch, so what resumes at that end starts after it, but never below the
+	/// latest frame written: a frame without a duration ends where it starts, so what resumes then
+	/// has to start after that frame. Nor below the end a [`cut`](Self::cut) gave the closing group,
+	/// whose span runs to there: the marker starts at that end. That object exists on
+	/// moq-transport, so the live edge moves immediately; a consumer MUST NOT submit it to a
+	/// decoder. An empty payload is data on a data track, so its marker is one object with no
+	/// bytes at all, not even the container's timestamp. The next [`write`](Self::write) opens the
+	/// group after the marker, which it has to start after: group starts strictly increase, so a
+	/// keyframe at the marker is stamped one unit past it.
+	///
+	/// Before anything is written there is no timeline to break, so it publishes nothing.
 	///
 	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
 	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
 	/// than one estimated frame later (a capture that reopens at once), and a guessed end past
 	/// it would read as a rewind to every consumer.
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
-		self.close(None, None)?;
+		// The live edge once the open group closes, which raises it to the furthest point written.
+		let edge = match (&self.group, self.end) {
+			(Some(_), Some(end)) if self.live_edge.is_none_or(|edge| !timestamp_lt(end, edge)) => Some(end),
+			_ => self.live_edge,
+		};
+		// The marker starts one unit of the track's timescale before the live edge, so media
+		// resuming right at the edge still starts after it, but not below the latest frame, which
+		// it would otherwise claim to end before. Or one unit past the newest group when that
+		// doesn't pass the group's start. The open group ends whole there, so a reader can tell
+		// the marker follows it.
+		let marker = match (self.pending_start, edge) {
+			// A seek keyed the next group. Its marker is stamped at the live edge, or one unit past
+			// the newest group when the edge is unknown or doesn't pass it, since starts strictly
+			// increase.
+			(Some(start), edge) => {
+				let start = self.sought(start)?;
+				let edge = edge.unwrap_or(moq_net::Timestamp::ZERO);
+				let timestamp = match self.inner.info().timescale {
+					Some(_) => crate::start::next(&self.inner, edge)?.1,
+					None => edge,
+				};
+				Some((start, timestamp, false))
+			}
+			// Nothing was written, so there is no timeline to break.
+			(None, None) => None,
+			(None, Some(edge)) => {
+				// Nor inside the span of a group a cut ended whole, which runs to its End.
+				let newest = self.newest.unwrap_or(moq_net::Timestamp::ZERO);
+				let floor = self.ended.map_or(newest, |ended| super::later(newest, ended));
+				let (start, timestamp) = crate::start::before(&self.inner, edge, floor)?;
+				Some((start, timestamp, true))
+			}
+		};
+		let whole = marker.and_then(|(_, timestamp, appended)| appended.then_some(timestamp));
+		self.close(None, None, None, whole)?;
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
 		self.cadence = None;
-		let mut group = match self.pending_sequence.take() {
-			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
-			None => self.inner.append_group()?,
+		let Some((start, timestamp, appended)) = marker else {
+			return Ok(());
 		};
-		let timestamp = self.live_edge.unwrap_or(moq_net::Timestamp::ZERO);
+		self.pending_start = None;
+		let mut group = match appended {
+			true => self.inner.append_group(timestamp)?,
+			false => self.inner.create_group(moq_net::group::Info { start })?,
+		};
 		match self.container.kind() {
 			Kind::Data => group.write_frame(timestamp, Bytes::new())?,
 			Kind::Audio | Kind::Video => self.container.write(
@@ -867,7 +1291,7 @@ where
 		let mut timestamps = self
 			.buffer
 			.iter()
-			.map(|frame| std::time::Duration::from(frame.timestamp));
+			.filter_map(|frame| std::time::Duration::try_from(frame.timestamp).ok());
 		let Some(first) = timestamps.next() else {
 			return std::time::Duration::ZERO;
 		};
@@ -901,7 +1325,8 @@ where
 			}
 			let boundary = self.buffer.get(i + 1).map(|f| f.timestamp).or(next);
 			if let Some(boundary) = boundary
-				&& let Ok(boundary) = boundary.convert(self.buffer[i].timestamp.scale())
+				&& let Some(scale) = self.buffer[i].timestamp.scale()
+				&& let Ok(boundary) = boundary.convert(scale)
 				&& let Ok(duration) = boundary.checked_sub(self.buffer[i].timestamp)
 			{
 				self.buffer[i].duration = Some(duration);
@@ -957,16 +1382,10 @@ where
 			let _ = self.inner.clone().abort(cause.reason());
 			return Err(cause);
 		}
+		// The producer keeps its own clone, whose appends the end refuses.
 		match err {
-			// The producer keeps its own clone, whose appends the end refuses.
 			None => drop(self.inner.clone().finish()?),
-			Some(err) => {
-				let next = self
-					.inner
-					.largest()
-					.map_or(0, |largest| largest.group.saturating_add(1));
-				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
-			}
+			Some(err) => drop(self.inner.clone().fail(err)?),
 		}
 		let published = self.publish_estimate();
 		// A track that ended before measuring declares what it saw, and no longer holds the join
@@ -1053,8 +1472,9 @@ where
 		self.producer.estimate()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`moq_net::track::Finished::abort`].
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the end
+	/// the track declared instead once every group below it finished: the clean end after [`Producer::finish`],
+	/// or the error [`Producer::fail`] gave.
 	pub fn abort(self, err: moq_net::Error) {
 		self.producer.abort(err);
 	}
@@ -1091,9 +1511,14 @@ mod tests {
 	/// These tests write every group up front and only then read, which the default
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
+	/// Oldest first, as they are read back.
 	fn replay() -> moq_net::track::Subscription {
 		moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(RECORDING_MAX_DELAY),
+				max: Some(RECORDING_MAX_DELAY),
+			})])
+			.with_order(moq_net::track::Order::Ascending)
 	}
 
 	/// The media track's full max age, so readers started after publishing
@@ -1393,6 +1818,62 @@ mod tests {
 		assert_eq!(producer.estimate().bitrate, Some(1_000_000));
 	}
 
+	/// A data item has no cadence to last for, so an unbounded cut measures to the next item rather
+	/// than to an end estimated from items spaced closer earlier.
+	#[tokio::test]
+	async fn unbounded_data_cuts_measure_to_the_next_item() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
+
+		// 250 bytes every 40 ms, 50 kbps: first as two items 10 ms apart, then one item at a time.
+		producer.write(sized_frame(0, true, 125)).unwrap();
+		producer.write(sized_frame(10_000, false, 125)).unwrap();
+		producer.cut(None).unwrap();
+		for i in 1..40u64 {
+			producer.write(sized_frame(i * 40_000, true, 250)).unwrap();
+			producer.cut(None).unwrap();
+		}
+
+		// A maximum, which the first group's close pair lifts a little, never to the 10 ms spacing.
+		let bitrate = producer.estimate().bitrate;
+		assert!(
+			bitrate.is_some_and(|bitrate| (50_000..55_000).contains(&bitrate)),
+			"{bitrate:?}"
+		);
+	}
+
+	/// An unbounded cut measures a group to where its last frame ends, not to that frame's
+	/// timestamp, or five-packet audio groups would advertise a quarter more than they carry.
+	/// A seek closing each group measures it the same way, and never across the gap it jumps.
+	#[tokio::test]
+	async fn seeks_measure_the_last_frame() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		for group in 0..40u64 {
+			// Five 20 ms packets of 250 bytes (100 kbps), then a seek 100 ms past their end.
+			let start = group * 200_000;
+			for i in 0..5 {
+				producer.write(sized_frame(start + i * 20_000, i == 0, 250)).unwrap();
+			}
+			producer.seek(start + 200_000).unwrap();
+		}
+		assert_eq!(producer.estimate().bitrate, Some(100_000));
+	}
+
+	#[tokio::test]
+	async fn grouped_unbounded_cuts_measure_the_last_frame() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		for i in 0..200u64 {
+			// 20 ms packets of 250 bytes: 100 kbps.
+			producer.write(sized_frame(i * 20_000, i % 5 == 0, 250)).unwrap();
+			if i % 5 == 4 {
+				producer.cut(None).unwrap();
+			}
+		}
+		assert_eq!(producer.estimate().bitrate, Some(100_000));
+	}
+
 	/// A break in the timeline is not a frame duration, so the estimate never spans one. Without the
 	/// reset a paused publisher would advertise the whole gap as the buffer a player must hold.
 	#[tokio::test]
@@ -1419,7 +1900,10 @@ mod tests {
 		type Error = crate::Error;
 
 		fn write(&self, _group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
-			match frames.iter().any(|f| f.timestamp.as_micros() == self.0 as u128) {
+			match frames
+				.iter()
+				.any(|f| f.timestamp.as_micros().unwrap() == self.0 as u128)
+			{
 				true => Err(moq_net::Error::FrameTooLarge.into()),
 				false => Ok(()),
 			}
@@ -1467,9 +1951,11 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+	async fn collect_groups(consumer: moq_net::track::Subscriber) -> Vec<usize> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut count = 0;
 			while group.next_frame().await.unwrap().is_some() {
 				count += 1;
@@ -1489,10 +1975,15 @@ mod tests {
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
-		);
+		let consumer =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(discontinuity_max_age),
+						max: Some(discontinuity_max_age),
+					},
+				)]),
+			);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
@@ -1508,7 +1999,7 @@ mod tests {
 		assert_eq!(
 			groups[1],
 			vec![(10_000, 0)],
-			"the marker is one empty frame at the exclusive end"
+			"the marker is one empty frame at the last frame, which has no duration to end later"
 		);
 		assert_eq!(groups[2][0], (2_405_070_000, 2));
 	}
@@ -1528,11 +2019,12 @@ mod tests {
 		producer.discontinuity().unwrap();
 		let fresh = producer.track().largest().map(|largest| largest.group);
 
-		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
+		assert!(fresh > stale, "the marker group is the live edge now");
 	}
 
-	/// The marker sits at the duration marker a cut wrote, not at the last frame below it,
-	/// which a consumer bounding groups by their reach would read as a rewind.
+	/// The marker sits at the duration marker a cut wrote, where the cut ended its group whole: not
+	/// a unit before it, inside that group's span, nor at the last frame below it, which a consumer
+	/// bounding groups by their reach would read as a rewind.
 	#[tokio::test]
 	async fn discontinuity_after_a_cut_starts_at_the_duration_marker() {
 		for (end, marker) in [(Some(25_000), 25_000), (None, 20_000)] {
@@ -1603,13 +2095,15 @@ mod tests {
 	}
 
 	/// Drain all groups, returning each group's (timestamp_micros, payload_len) pairs.
-	async fn collect_payloads(mut consumer: moq_net::track::Subscriber) -> Vec<Vec<(u128, usize)>> {
+	async fn collect_payloads(consumer: moq_net::track::Subscriber) -> Vec<Vec<(u128, usize)>> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				let decoded = hang::container::Frame::decode(frame.payload).unwrap();
-				frames.push((decoded.timestamp.as_micros(), decoded.payload.len()));
+				frames.push((decoded.timestamp.as_micros().unwrap(), decoded.payload.len()));
 			}
 			groups.push(frames);
 		}
@@ -1652,9 +2146,11 @@ mod tests {
 	}
 
 	/// Drain all LOC groups, returning each group's (timestamp_micros, payload_len) pairs.
-	async fn collect_loc_payloads(mut consumer: moq_net::track::Subscriber) -> Vec<Vec<(u64, usize)>> {
+	async fn collect_loc_payloads(consumer: moq_net::track::Subscriber) -> Vec<Vec<(u64, usize)>> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				let decoded = moq_loc::decode(frame.payload).unwrap();
@@ -1755,31 +2251,115 @@ mod tests {
 		assert!(matches!(err, crate::Error::MissingKeyframe(_)));
 	}
 
-	/// Drain all groups from a finished track, returning their sequence numbers.
-	async fn collect_sequences(mut consumer: moq_net::track::Subscriber) -> Vec<u64> {
-		let mut sequences = Vec::new();
-		while let Some(group) = consumer.recv_group().await.unwrap() {
-			sequences.push(group.sequence);
+	/// Drain all groups from a finished track, returning their starts.
+	async fn collect_starts(consumer: moq_net::track::Subscriber) -> Vec<u64> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
+		let mut starts = Vec::new();
+		while let Some(group) = consumer.next_group().await.unwrap() {
+			starts.push(group.start);
 		}
-		sequences
+		starts
 	}
 
-	/// `seek(n)` opens the next group at sequence `n`.
+	/// `seek(n)` opens the next group at start `n`.
 	#[tokio::test]
-	async fn seek_uses_explicit_sequence() {
+	async fn seek_uses_explicit_start() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
-		producer.write(frame(0, true)).unwrap(); // seq 0
+		producer.write(frame(0, true)).unwrap(); // start 0
 		producer.seek(42).unwrap();
-		producer.write(frame(10_000, true)).unwrap(); // seq 42
+		producer.write(frame(10_000, true)).unwrap(); // start 42
 		let _finished = producer.finish().unwrap();
 
-		assert_eq!(collect_sequences(consumer).await, vec![0, 42]);
+		assert_eq!(collect_starts(consumer).await, vec![0, 42]);
 	}
 
-	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
+	/// A seek keys a group without restamping its frames, so a cut at the source's end, as an audio
+	/// importer makes, closes the group.
+	#[tokio::test]
+	async fn cut_at_the_source_end_of_a_moved_group() {
+		for frames in [&[0][..], &[0, 20_000, 40_000, 60_000, 80_000]] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+			producer.seek(1_000_000).unwrap();
+			for (i, &timestamp) in frames.iter().enumerate() {
+				producer.write(frame(timestamp, i == 0)).unwrap();
+			}
+			let end = frames.last().unwrap() + 20_000;
+			producer.cut(Some(Timestamp::from_micros(end).unwrap())).unwrap();
+			let _finished = producer.finish().unwrap();
+
+			assert_eq!(collect_groups(consumer).await, vec![frames.len()]);
+		}
+	}
+
+	/// An overlapping splice moves a keyframe past the group a cut ended whole, so a later cut at
+	/// the source's end, below that moved frame, ends the group at the frame instead of refusing.
+	#[tokio::test]
+	async fn cut_at_the_source_end_below_a_moved_keyframe() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+		for timestamp in [0, 20_000, 40_000, 60_000, 80_000] {
+			producer.write(frame(timestamp, true)).unwrap();
+		}
+		producer.cut(Some(Timestamp::from_micros(100_000).unwrap())).unwrap();
+		// Past the newest frame but inside the ended span, so it publishes at 100 ms.
+		producer.write(frame(90_000, true)).unwrap();
+		// A bound below the keyframe's source timestamp is still below a frame of the group.
+		let below = producer.cut(Some(Timestamp::from_micros(85_000).unwrap()));
+		assert!(matches!(below, Err(crate::Error::InvalidEnd(_))), "{below:?}");
+		producer.cut(Some(Timestamp::from_micros(95_000).unwrap())).unwrap();
+		producer.write(frame(120_000, true)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		assert_eq!(
+			collect_starts(consumer).await,
+			vec![0, 20_000, 40_000, 60_000, 80_000, 100_000, 120_000]
+		);
+	}
+
+	/// A later frame below a moved keyframe still bounds its group's source end.
+	#[tokio::test]
+	async fn cut_below_a_later_frame_of_a_moved_group() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+		producer.write(frame(0, true)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(40_000).unwrap())).unwrap();
+		// Moved to 40 ms; the frame after it presents at its own 37 ms.
+		producer.write(frame(30_000, true)).unwrap();
+		producer.write(frame(37_000, false)).unwrap();
+		let below = producer.cut(Some(Timestamp::from_micros(35_000).unwrap()));
+		assert!(matches!(below, Err(crate::Error::InvalidEnd(_))), "{below:?}");
+		producer.cut(Some(Timestamp::from_micros(42_000).unwrap())).unwrap();
+		let _finished = producer.finish().unwrap();
+	}
+
+	/// A seek made before a decoder identity change keys the successor's first group.
+	#[tokio::test]
+	async fn a_seek_carries_across_a_new_identity() {
+		let (_broadcast, _catalog, mut tracks) = renditions(&["v"]);
+		let track = &mut tracks[0];
+		track.seek(42).unwrap();
+		let config = hang::catalog::VideoConfig::new("avc3.42c01e".parse::<hang::catalog::VideoCodec>().unwrap());
+		track.reconfigure(config).unwrap();
+		assert_ne!(track.name(), "v", "a new identity mints a new track");
+		let consumer = track.inner.subscribe(replay());
+		track.write(frame(10_000, true)).unwrap();
+		track.cut(None).unwrap();
+		drop(track.inner.clone().finish().unwrap());
+
+		assert_eq!(collect_starts(consumer).await, vec![42]);
+	}
+
+	/// `seek` is consumed on the next group creation; subsequent groups start at their keyframes.
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1787,11 +2367,27 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.seek(5).unwrap();
-		producer.write(frame(0, true)).unwrap(); // seq 5
-		producer.write(frame(10_000, true)).unwrap(); // seq 6 (auto-incremented)
+		producer.write(frame(0, true)).unwrap(); // start 5
+		producer.write(frame(10_000, true)).unwrap(); // start 10000, its keyframe
 		let _finished = producer.finish().unwrap();
 
-		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
+		assert_eq!(collect_starts(consumer).await, vec![5, 10_000]);
+	}
+
+	/// A marker after a seek takes the seek's start, stamped past the groups before it even when
+	/// nothing says where their content ended.
+	#[tokio::test]
+	async fn discontinuity_after_a_seek_takes_its_start() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+		producer.write(frame(0, true)).unwrap();
+		producer.seek(100_000).unwrap();
+		producer.discontinuity().unwrap();
+		let _finished = producer.finish().unwrap();
+
+		assert_eq!(collect_starts(consumer).await, vec![0, 100_000]);
 	}
 
 	/// Records the frames handed to each `write`, so tests can inspect the
@@ -1882,6 +2478,63 @@ mod tests {
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
 	}
 
+	/// Writes each frame onto the group at its own timescale, so the group's frames keep
+	/// precision a microsecond container would drop.
+	struct Stamped;
+
+	impl super::Container for Stamped {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+			for frame in frames {
+				group.write_frame(frame.timestamp, frame.payload.clone())?;
+			}
+			Ok(())
+		}
+
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
+			unreachable!("Stamped is write-only")
+		}
+
+		fn kind(&self) -> Kind {
+			Kind::Video
+		}
+	}
+
+	/// A cut bound below the newest frame by less than a microsecond is still below it in the
+	/// track's timescale, where `finish_at` checks it, so the cut is refused and the group stays
+	/// open. An estimate summed in microseconds would fall below it too, so it ends at the frame.
+	#[tokio::test]
+	async fn a_bound_below_a_frame_by_under_a_microsecond_is_refused() {
+		let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(nanos);
+		let track = track_producer("test", info);
+		let mut consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Stamped);
+		let at = |nanoseconds: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(nanoseconds, nanos).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		producer.write(at(1_000_000, true)).unwrap();
+		// Within one microsecond of the newest frame, which still counts as the newer.
+		producer.write(at(2_000_001, false)).unwrap();
+		producer.write(at(2_000_002, false)).unwrap();
+		let below = producer.cut(Some(Timestamp::new(2_000_001, nanos).unwrap()));
+		assert!(matches!(below, Err(crate::Error::InvalidEnd(_))), "{below:?}");
+		assert!(!producer.needs_keyframe(), "the refused cut leaves the group open");
+		producer.cut(None).unwrap();
+
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while group.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 3);
+		assert_eq!(group.end(), Some(2_000_002), "the estimate ends at the newest frame");
+	}
+
 	#[tokio::test]
 	async fn duration_marker_uses_cadence_not_batching_delay() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1964,7 +2617,8 @@ mod tests {
 				hang::container::Frame::decode(frame.payload)
 					.unwrap()
 					.timestamp
-					.as_micros(),
+					.as_micros()
+					.unwrap(),
 			);
 		}
 		assert_eq!(timestamps, vec![20_000, 30_000, 35_000]);
@@ -1980,10 +2634,24 @@ mod tests {
 		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 
-	/// #3798's join: an IDR one frame below the previous group's last frame, but above its
-	/// start, overlaps that group rather than rewinding it.
+	/// The media frames of each group, without duration markers.
+	fn media(groups: Vec<Vec<(u128, usize)>>) -> Vec<Vec<u128>> {
+		groups
+			.into_iter()
+			.map(|group| {
+				group
+					.into_iter()
+					.filter(|(_, len)| *len > 0)
+					.map(|(ts, _)| ts)
+					.collect()
+			})
+			.collect()
+	}
+
+	/// #3798's join: an IDR one frame below the open group's newest frame, but above its start,
+	/// continues that group, so every frame of the next group presents after it.
 	#[tokio::test]
-	async fn a_keyframe_overlapping_the_previous_group_publishes() {
+	async fn a_keyframe_overlapping_the_open_group_continues_it() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
@@ -1992,18 +2660,71 @@ mod tests {
 		producer.write(frame(166_000, false)).unwrap();
 		producer.write(frame(150_000, true)).unwrap();
 		producer.write(frame(183_000, false)).unwrap();
+		producer.write(frame(216_000, true)).unwrap();
 		let _finished = producer.finish().unwrap();
-		let groups = collect_payloads(consumer).await;
-		assert_eq!(groups[1][..2], [(150_000, 2), (183_000, 2)]);
+		assert_eq!(
+			media(collect_payloads(consumer).await),
+			[vec![100_000, 133_000, 166_000, 150_000, 183_000], vec![216_000]]
+		);
 	}
 
-	/// A group may start exactly where the previous one did: only a start below it is a rewind.
+	/// A splice whose keyframe lands just past the old content: a leading picture that would
+	/// present at or before the old content's newest frame is dropped, with the keyframe's later
+	/// leading pictures, which may reference it. The pictures presenting after the keyframe publish.
 	#[tokio::test]
-	async fn a_keyframe_at_the_previous_group_start_is_accepted() {
+	async fn a_leading_picture_at_or_before_the_previous_group_is_dropped() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.write(frame(133_000, false)).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(150_000, false)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.write(frame(183_000, false)).unwrap();
+		producer.write(frame(233_000, false)).unwrap();
+		let _finished = producer.finish().unwrap();
+		assert_eq!(
+			media(collect_payloads(consumer).await),
+			[vec![100_000, 166_000, 133_000], vec![200_000, 233_000]]
+		);
+	}
+
+	/// After a cut there is no open group for a keyframe at or before the newest frame to continue,
+	/// so it is dropped with the frames decoding from it, until a keyframe past the newest frame.
+	#[tokio::test]
+	async fn a_keyframe_overlapping_a_closed_group_is_dropped() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(133_000, false)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.cut(None).unwrap();
+		producer.write(frame(150_000, true)).unwrap();
+		assert!(producer.needs_keyframe());
+		producer.write(frame(183_000, false)).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		let _finished = producer.finish().unwrap();
+		assert_eq!(
+			media(collect_payloads(consumer).await),
+			[vec![100_000, 133_000, 166_000], vec![200_000]]
+		);
+	}
+
+	/// Group starts strictly increase, so a keyframe at the open group's start continues that group
+	/// rather than opening one.
+	#[tokio::test]
+	async fn a_keyframe_at_the_previous_group_start_continues_it() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 		producer.write(frame(100_000, true)).unwrap();
 		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(120_000, true)).unwrap();
+		let _finished = producer.finish().unwrap();
+		assert_eq!(collect_starts(consumer).await, vec![100_000, 120_000]);
 	}
 
 	/// A frame below the start of the group before its own reaches back past a whole group.
@@ -2046,6 +2767,118 @@ mod tests {
 		assert_eq!(groups[1][1], (50_000, 2));
 	}
 
+	/// Random reordering, splices, and cuts: every frame of a group presents after every frame of
+	/// the groups before it, and a frame is dropped only when it presents at or before a frame
+	/// published ahead of it.
+	#[test]
+	fn groups_never_overlap_on_random_streams() {
+		use proptest::prelude::*;
+		use proptest::test_runner::{Config, TestRunner};
+
+		let mut runner = TestRunner::new(Config {
+			cases: 256,
+			failure_persistence: None,
+			..Default::default()
+		});
+		// Per frame: its offset from a 33ms cadence, whether it is a keyframe, and whether a cut
+		// precedes it.
+		let stream = proptest::collection::vec(
+			(
+				-150_000i64..150_000,
+				proptest::bool::weighted(0.2),
+				proptest::bool::weighted(0.03),
+			),
+			1..120,
+		);
+		runner
+			.run(&stream, |frames| {
+				let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+				let mut consumer = track.subscribe(replay());
+				let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+				let mut accepted = Vec::new();
+				for (index, (offset, keyframe, cut)) in frames.into_iter().enumerate() {
+					if cut {
+						producer.cut(None).unwrap();
+					}
+					let timestamp = (1_000_000 + 33_000 * index as i64 + offset) as u64;
+					let written = producer.write(Frame {
+						timestamp: Timestamp::from_micros(timestamp).unwrap(),
+						payload: Bytes::copy_from_slice(&(index as u32).to_be_bytes()),
+						keyframe,
+						duration: None,
+					});
+					if written.is_ok() {
+						accepted.push((index as u32, timestamp as u128, keyframe));
+					}
+				}
+				let _finished = producer.finish().unwrap();
+
+				let mut groups: Vec<Vec<(u32, u128)>> = Vec::new();
+				let mut spans = Vec::new();
+				futures::executor::block_on(async {
+					while let Some(mut group) = consumer.recv_group().await.unwrap() {
+						let mut frames = Vec::new();
+						while let Some(frame) = group.read_frame().await.unwrap() {
+							let decoded = hang::container::Frame::decode(frame.payload).unwrap();
+							if let Ok(index) = <[u8; 4]>::try_from(decoded.payload.as_ref()) {
+								frames.push((u32::from_be_bytes(index), decoded.timestamp.as_micros().unwrap()));
+							}
+						}
+						groups.push(frames);
+						spans.push((group.start, group.end()));
+					}
+				});
+
+				// No group starts inside the span of a group that ended whole.
+				for pair in spans.windows(2) {
+					let ((_, end), (next, _)) = (pair[0], pair[1]);
+					prop_assert!(end.is_none_or(|end| next >= end), "{spans:?}");
+				}
+
+				let mut ceiling = None;
+				for group in &groups {
+					for &(_, timestamp) in group {
+						prop_assert!(ceiling.is_none_or(|ceiling| timestamp > ceiling), "{groups:?}");
+					}
+					ceiling = group.iter().map(|&(_, timestamp)| timestamp).max().max(ceiling);
+				}
+
+				// Published frames are the accepted ones in order, less those at or before a frame
+				// published ahead of them, those after a dropped keyframe until one is published, and
+				// the leading pictures of a keyframe after one of them was dropped.
+				let published: Vec<(u32, u128)> = groups.concat();
+				let mut next = published.iter().peekable();
+				let (mut newest, mut skipping) = (None, false);
+				let (mut latest, mut tainted) = (None, false);
+				for &(index, timestamp, keyframe) in &accepted {
+					if let Some(&(_, stamped)) = next.next_if(|&&(published, _)| published == index) {
+						// A keyframe opening a group past a whole group's End is stamped there.
+						prop_assert!(stamped >= timestamp && (keyframe || stamped == timestamp));
+						newest = newest.max(Some(stamped));
+						skipping &= !keyframe;
+						if keyframe {
+							(latest, tainted) = (Some(stamped), false);
+						}
+						prop_assert!(
+							keyframe || !tainted || latest.is_none_or(|latest| timestamp >= latest),
+							"frame {index} at {timestamp} kept after a leading picture of {latest:?} was dropped"
+						);
+					} else {
+						let leading = tainted && !keyframe && latest.is_some_and(|latest| timestamp < latest);
+						prop_assert!(
+							newest.is_some_and(|newest| timestamp <= newest) || (skipping && !keyframe) || leading,
+							"frame {index} at {timestamp} was dropped above {newest:?}"
+						);
+						skipping |= keyframe;
+						tainted |= !keyframe && latest.is_some_and(|latest| timestamp < latest);
+					}
+				}
+				prop_assert!(next.peek().is_none(), "published a frame never accepted");
+				Ok(())
+			})
+			.unwrap();
+	}
+
 	#[tokio::test]
 	async fn duration_marker_resets_after_discontinuity() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -2080,8 +2913,421 @@ mod tests {
 			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
 		let mut timestamps = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
+	}
+
+	/// A published group as a copy receives it: its start, its frames, and its End.
+	type Published = (u64, Vec<moq_net::frame::Frame>, Option<u64>);
+
+	/// Every group `consumer` reads, with its frames and End.
+	async fn collect_published(consumer: moq_net::track::Subscriber) -> Vec<Published> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
+		let mut groups = Vec::new();
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
+			let mut frames = Vec::new();
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				frames.push(frame);
+			}
+			groups.push((group.start, frames, group.end()));
+		}
+		groups
+	}
+
+	/// Replay `groups` into a fresh copy in `order`, as a lite-07 relay creates what arrives,
+	/// returning what the copy refused. A GROUP_END accounts for the starts inside its span, which
+	/// the copy then refuses, as the relay's subscription does.
+	fn copy(groups: &[Published], order: impl IntoIterator<Item = usize>) -> moq_net::Result<()> {
+		let copy = track_producer("copy", hang::container::track_info(hang::catalog::PRIORITY.video));
+		for index in order {
+			let (start, frames, end) = &groups[index];
+			let mut group = copy.create_group(moq_net::group::Info { start: *start })?;
+			for frame in frames {
+				group.write_frame(frame.timestamp, frame.payload.clone())?;
+			}
+			match end {
+				Some(end) => {
+					group.finish_at(*end)?;
+					copy.skip_groups(start + 1..*end);
+				}
+				None => drop(group.finish()?),
+			}
+		}
+		Ok(())
+	}
+
+	/// The marker a discontinuity publishes after a cut starts at the End the cut gave its group,
+	/// outside that group's span, so a lite-07 copy takes it whichever arrives first. One a unit
+	/// inside the span is refused when it arrives second. Media resuming right at the marker is
+	/// stamped one unit past it.
+	#[tokio::test]
+	async fn a_marker_after_a_cut_lands_outside_the_span_it_ended() {
+		for (end, at) in [(Some(25_000), 25_000), (None, 20_000)] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+			producer.write(frame(0, true)).unwrap();
+			producer.write(frame(10_000, false)).unwrap();
+			producer.cut(end.map(|us| Timestamp::from_micros(us).unwrap())).unwrap();
+			producer.discontinuity().unwrap();
+			producer.write(frame(at, true)).unwrap();
+			producer.write(frame(at + 10_000, false)).unwrap();
+			let _finished = producer.finish().unwrap();
+
+			let groups = collect_published(consumer).await;
+			let starts: Vec<_> = groups.iter().map(|(start, _, _)| *start).collect();
+			assert_eq!(starts, [0, at, at + 1], "cut({end:?})");
+			assert_eq!(groups[0].2, Some(at), "the cut ends its group whole");
+			let resumed = groups[2].1[0].timestamp.as_micros().unwrap();
+			assert_eq!(
+				resumed,
+				u128::from(at + 1),
+				"the resumed keyframe is stamped past the marker"
+			);
+
+			for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
+				copy(&groups, order).unwrap_or_else(|err| panic!("cut({end:?}) in {order:?}: {err}"));
+			}
+			let inside = [groups[0].clone(), (at - 1, Vec::new(), None)];
+			assert!(
+				copy(&inside, [0, 1]).is_err(),
+				"a marker inside the span arriving second"
+			);
+		}
+	}
+
+	/// An explicit end below a frame the group holds is refused for every kind, without closing
+	/// the group, rather than closing it without the End it meant.
+	#[tokio::test]
+	async fn a_cut_below_a_written_frame_is_refused_for_every_kind() {
+		use crate::container::Kind;
+		let cases: [(Kind, &[u64], u64, u64); 4] = [
+			(Kind::Audio, &[0, 20_000], 10_000, 40_000),
+			(Kind::Data, &[0, 20_000], 10_000, 20_000),
+			(Kind::Video, &[0, 40_000], 20_000, 80_000),
+			// Reordered: the newest frame presents before the last one decoded.
+			(Kind::Video, &[0, 120_000, 40_000, 80_000], 100_000, 120_000),
+		];
+		for (kind, timestamps, below, end) in cases {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(kind));
+			for (index, timestamp) in timestamps.iter().enumerate() {
+				producer.write(frame(*timestamp, index == 0)).unwrap();
+			}
+			let refused = producer.cut(Some(Timestamp::from_micros(below).unwrap()));
+			assert!(
+				matches!(refused, Err(crate::Error::InvalidEnd(_))),
+				"{kind:?}: {refused:?}"
+			);
+			assert!(!producer.needs_keyframe(), "{kind:?}: the group stays open");
+			producer.cut(Some(Timestamp::from_micros(end).unwrap())).unwrap();
+			let _finished = producer.finish().unwrap();
+
+			let groups = collect_published(consumer).await;
+			assert_eq!(groups.len(), 1, "{kind:?}");
+			assert_eq!(
+				groups[0].2,
+				Some(end),
+				"{kind:?}: the group ends whole where it was cut"
+			);
+		}
+	}
+
+	/// A keyframe past the newest frame but below the End a cut estimated from the cadence, as a
+	/// faster cadence or a duration rounded up overshoots, starts at that End rather than inside
+	/// the span it closed, and the rest of its group follows.
+	#[tokio::test]
+	async fn a_keyframe_below_an_estimated_end_starts_at_it() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.cut(None).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(233_000, false)).unwrap();
+		producer.write(frame(266_000, false)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		assert_eq!(
+			groups[0].2,
+			Some(232_000),
+			"the cut estimates one 66ms frame past the last"
+		);
+		assert_eq!(groups[1].0, 232_000, "the keyframe starts at the End");
+		let decoded: Vec<_> = (groups[1].1.iter())
+			.map(|frame| hang::container::Frame::decode(frame.payload.clone()).unwrap())
+			.filter(|frame| !frame.payload.is_empty())
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
+		assert_eq!(decoded, [232_000, 233_000, 266_000]);
+		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A source whose stated durations overshoot its spacing moves each keyframe at most by that
+	/// overshoot: the next End is estimated from where the source put the frame, not where its
+	/// group start moved it, so the moves never add up into a rewind. Past twice the spacing, a
+	/// keyframe at or below the newest frame is dropped rather than refused.
+	#[tokio::test]
+	async fn moved_keyframes_never_add_up_across_groups() {
+		for (duration, starts) in [
+			(144_000, vec![0, 144_000, 244_000, 344_000, 444_000, 544_000]),
+			(250_000, vec![0, 250_000, 350_000, 550_000]),
+		] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+			for i in 0..6 {
+				let frame = Frame {
+					duration: Some(Timestamp::from_micros(duration).unwrap()),
+					..frame(i * 100_000, true)
+				};
+				producer.write(frame).unwrap();
+				producer.cut(None).unwrap();
+			}
+			let _finished = producer.finish().unwrap();
+
+			let groups = collect_published(consumer).await;
+			let published: Vec<_> = groups.iter().map(|(start, _, _)| *start).collect();
+			assert_eq!(published, starts, "{duration}us frames every 100ms");
+			copy(&groups, (0..groups.len()).rev()).unwrap();
+		}
+	}
+
+	/// Parameter sets written as a keyframe ahead of their picture at one timestamp move with it:
+	/// the picture continues the group the parameter sets opened, at the same moved start.
+	#[tokio::test]
+	async fn a_frame_at_a_moved_keyframes_timestamp_moves_with_it() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.cut(None).unwrap();
+		// The parameter sets, then their picture.
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(233_000, false)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		assert_eq!(
+			media(collect_payloads(consumer).await),
+			[vec![100_000, 166_000], vec![232_000, 232_000, 233_000]]
+		);
+	}
+
+	/// A seek can't key a group at or below a frame the track holds, nor inside the span of a group
+	/// that ended whole, as the group it closes does when its last frame passes the seek: the group
+	/// starts at the first start past both instead, as a keyframe would. One that doesn't pass the
+	/// latest group's start is a rewind.
+	#[tokio::test]
+	async fn a_seek_inside_what_the_track_holds_starts_past_it() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(66_000, false)).unwrap();
+		// The group ends whole one 66ms frame past its last, at 132ms, which holds the seek.
+		producer.seek(50_000).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(233_000, false)).unwrap();
+		producer.seek(0).unwrap();
+		let rewind = producer.write(frame(300_000, true)).unwrap_err();
+		assert!(
+			matches!(&rewind, crate::Error::TimestampRewind(rewind) if rewind.floor.as_micros().unwrap() == 132_001),
+			"{rewind:?}"
+		);
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let spans: Vec<_> = groups.iter().map(|(start, _, end)| (*start, *end)).collect();
+		assert_eq!(spans, [(0, Some(132_000)), (132_000, Some(266_000))]);
+		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A seek's start moved past the span of the group it closed takes a keyframe below that span's
+	/// End along, as `write` moves one, so the keyframe never presents below its own group's start.
+	#[tokio::test]
+	async fn a_seek_moved_past_a_span_takes_its_keyframe_along() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(66_000, false)).unwrap();
+		// The group ends whole at 132ms, past the seek and the keyframe after it.
+		producer.seek(50_000).unwrap();
+		producer.write(frame(100_000, true)).unwrap();
+		// The picture its parameter sets precede goes with it.
+		producer.write(frame(100_000, false)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let spans: Vec<_> = groups.iter().map(|(start, _, end)| (*start, *end)).collect();
+		assert_eq!(spans[0], (0, Some(132_000)));
+		assert_eq!(spans[1].0, 132_000);
+		let timestamps: Vec<_> = groups[1]
+			.1
+			.iter()
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
+		assert_eq!(timestamps[..3], [132_000, 132_000, 166_000]);
+		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A seek below the latest group's start refuses the next keyframe even when that keyframe
+	/// overlaps the frames written and would otherwise be dropped.
+	#[tokio::test]
+	async fn a_seek_below_the_latest_start_refuses_an_overlapping_keyframe() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.seek(90_000).unwrap();
+		// Past the group's start but below its newest frame, so dropped were the seek valid.
+		let rewind = producer.write(frame(150_000, true)).unwrap_err();
+		assert!(
+			matches!(&rewind, crate::Error::TimestampRewind(rewind) if rewind.timestamp.as_micros().unwrap() == 90_000),
+			"{rewind:?}"
+		);
+	}
+
+	/// Published order is compared at the track's own precision: on a nanosecond track, a frame a
+	/// nanosecond below its moved keyframe reorders the group though both share a microsecond.
+	#[tokio::test]
+	async fn a_frame_a_nanosecond_below_a_moved_keyframe_reorders_its_group() {
+		let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(nanos);
+		let track = track_producer("test", info);
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Stamped);
+		let at = |nanoseconds: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(nanoseconds, nanos).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		producer.write(at(1_000_000, true)).unwrap();
+		producer.write(at(1_500_000, false)).unwrap();
+		producer.cut(Some(Timestamp::new(2_000_002, nanos).unwrap())).unwrap();
+		// Below the End the cut set, so moved to it, while the frame after it stays a nanosecond
+		// below.
+		producer.write(at(1_900_000, true)).unwrap();
+		producer.write(at(2_000_001, false)).unwrap();
+		producer.cut(None).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let timestamps: Vec<_> = groups[1].1.iter().map(|frame| frame.timestamp.value()).collect();
+		assert_eq!(timestamps, [2_000_002, 2_000_001]);
+		assert_eq!(groups[1].2, None, "a reordered group ends without an estimated End");
+	}
+
+	/// A frame after a moved keyframe that publishes below it reorders the group as published, so
+	/// the group's presentation end no longer bounds its decode-order tail and no marker says so.
+	#[tokio::test]
+	async fn a_frame_published_below_a_moved_keyframe_reorders_its_group() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(100_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(232_000).unwrap())).unwrap();
+		// Below the End the cut set, so moved to it, while the frame after it stays.
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(220_000, false)).unwrap();
+		producer.cut(None).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups[1], vec![(232_000, 2), (220_000, 2)]);
+	}
+
+	/// A seek keys the next group itself, so the group it closes ends whole at the estimate from its
+	/// cadence only when that doesn't pass the seek's start, and at the start otherwise.
+	#[tokio::test]
+	async fn a_seek_caps_the_estimated_end_at_its_start() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(66_000, false)).unwrap();
+		// One 66ms frame past the last is 132ms, past the seek.
+		producer.seek(100_000).unwrap();
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(133_000, false)).unwrap();
+		// 166ms leaves a gap before the seek.
+		producer.seek(500_000).unwrap();
+		producer.write(frame(500_000, true)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let spans: Vec<_> = groups.iter().map(|(start, _, end)| (*start, *end)).collect();
+		assert_eq!(spans[..2], [(0, Some(100_000)), (100_000, Some(166_000))]);
+		copy(&groups, [1, 0, 2]).unwrap();
+	}
+
+	/// An open GOP's leading pictures present after every frame of the group before theirs but
+	/// before their keyframe, so inside the span of that group, which ends whole at the keyframe.
+	/// That breaks nothing: each span holds no other group's start, and every frame of a group
+	/// presents before every frame of a higher one.
+	#[tokio::test]
+	async fn open_gop_spans_hold_no_other_start() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		// Decode order, in milliseconds: each keyframe's leading pictures reference the P-frame
+		// before it.
+		let decode_order = [
+			(0, true),
+			(90, false),
+			(30, false),
+			(60, false),
+			(180, false),
+			(120, false),
+			(150, false),
+			(270, true),
+			(210, false),
+			(240, false),
+			(360, false),
+			(300, false),
+			(330, false),
+			(450, true),
+			(390, false),
+		];
+		for (millis, keyframe) in decode_order {
+			producer.write(frame(millis * 1_000, keyframe)).unwrap();
+		}
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let starts: Vec<_> = groups.iter().map(|(start, _, _)| *start).collect();
+		assert_eq!(starts, [0, 270_000, 450_000]);
+		assert_eq!(groups[0].2, Some(270_000), "a group ends whole at the next keyframe");
+		for (start, _, end) in &groups {
+			let Some(end) = end else { continue };
+			assert!(
+				!starts.iter().any(|other| other > start && other < end),
+				"[{start}, {end}) holds another start: {starts:?}"
+			);
+		}
+		let presented: Vec<Vec<u128>> = (groups.iter())
+			.map(|(_, frames, _)| {
+				frames
+					.iter()
+					.map(|frame| frame.timestamp.as_micros().unwrap())
+					.collect()
+			})
+			.collect();
+		assert_eq!(presented[1], [270_000, 210_000, 240_000, 360_000, 300_000, 330_000]);
+		for pair in presented.windows(2) {
+			let (lower, higher) = (pair[0].iter().max().unwrap(), pair[1].iter().min().unwrap());
+			assert!(lower < higher, "{presented:?}");
+		}
+		copy(&groups, [2, 1, 0]).unwrap();
 	}
 }

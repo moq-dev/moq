@@ -69,3 +69,34 @@ export function resetCode(reason: unknown): number {
 export function streamCode(code: bigint): number {
 	return Number(BigInt.asUintN(32, code));
 }
+
+/** The QUIC transport error codes (RFC 9000 §20.1) a CONNECTION_CLOSE carries for a peer's
+ *  violation, as rs/qmux sends them. */
+export const TransportCode = {
+	FLOW_CONTROL_ERROR: 0x03,
+	STREAM_LIMIT_ERROR: 0x04,
+	STREAM_STATE_ERROR: 0x05,
+	FINAL_SIZE_ERROR: 0x06,
+	FRAME_ENCODING_ERROR: 0x07,
+	TRANSPORT_PARAMETER_ERROR: 0x08,
+	PROTOCOL_VIOLATION: 0x0a,
+} as const;
+
+/** A peer's violation of the transport, carrying the QUIC transport error code the
+ *  CONNECTION_CLOSE that ends the session sends. */
+export class TransportError extends Error {
+	/** The QUIC transport error code, one of {@link TransportCode}. */
+	readonly code: number;
+
+	constructor(code: number, message: string) {
+		super(message);
+		this.name = "TransportError";
+		this.code = code;
+	}
+}
+
+/** The QUIC transport error code a failure handling the peer's input closes with: its own code
+ *  when it is a {@link TransportError}, else PROTOCOL_VIOLATION. */
+export function transportCode(err: unknown): number {
+	return err instanceof TransportError ? err.code : TransportCode.PROTOCOL_VIOLATION;
+}

@@ -20,7 +20,8 @@
 //! any pictures the display queue still holds. A parser decodes nothing after
 //! end-of-stream, so each drain replaces it. Timestamps are threaded through
 //! the parser (`ulClockRate` is set to microseconds), so output frames keep
-//! correct presentation times even across reordering.
+//! correct presentation times even across reordering, and are mapped back to the
+//! exact [`Timestamp`] each access unit went in with.
 
 use core::ffi::{c_int, c_uint, c_ulong, c_ulonglong, c_void};
 use std::collections::VecDeque;
@@ -39,6 +40,7 @@ use moq_nvenc::sys::nvcuvid::{
 	CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS, CUVIDSOURCEDATAPACKET, CUvideopacketflags, CUvideoparser,
 };
 
+use super::submitted::Submitted;
 use super::{Backend, Codec, Stream};
 use crate::frame::{Surface, cuda};
 use crate::{Error, Frame};
@@ -56,6 +58,10 @@ pub(crate) struct Nvdec {
 	/// Boxed so its address is stable: the parser holds a raw pointer to it for
 	/// the lifetime of the parser (callbacks dereference it during parse).
 	state: Box<State>,
+	/// Access units the parser has taken, for the timestamp to give their
+	/// pictures: cuvid carries whole microseconds, which would change a
+	/// [`Timestamp`] at its own scale.
+	submitted: Submitted,
 	/// Pictures mapped and copied out, waiting for `receive`.
 	ready: VecDeque<Frame>,
 }
@@ -137,7 +143,8 @@ impl Nvdec {
 
 		// `CudaContext::new` retains the device's primary context, the same one
 		// the NVENC backend uses, so frames pass between them without a copy.
-		let ctx = CudaContext::new(0).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
+		let ordinal = cuda::ordinal(&config.device)?.unwrap_or(0);
+		let ctx = CudaContext::new(ordinal).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
 		ctx.bind_to_thread()
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 		// The decoder itself waits for the first sequence header, so ask now
@@ -166,6 +173,7 @@ impl Nvdec {
 			parser: Some(parser),
 			codec: cuda_codec,
 			state,
+			submitted: Submitted::default(),
 			ready: VecDeque::new(),
 		})
 	}
@@ -200,7 +208,10 @@ impl Nvdec {
 		// A failed map discards this parse's pictures so an error never precedes them.
 		let queued = self.ready.len();
 		let mapped = displayed.iter().try_for_each(|disp| {
-			self.ready.push_back(self.state.map_frame(disp)?);
+			let surface = self.state.map_frame(disp)?;
+			// Timestamps rode the parser from `decode` (microseconds, unsigned).
+			let timestamp = self.submitted.restore(disp.timestamp.max(0) as u64)?;
+			self.ready.push_back(Frame::new(surface, timestamp));
 			Ok(())
 		});
 		displayed.clear();
@@ -214,6 +225,7 @@ impl Nvdec {
 
 impl Backend for Nvdec {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		let key = self.submitted.key(timestamp)?;
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// ENDOFPICTURE: each payload is one complete access unit, so the
 			// parser sees the picture boundary without waiting for the next AU.
@@ -222,9 +234,10 @@ impl Backend for Nvdec {
 			payload_size: access_unit.len() as c_ulong,
 			payload: access_unit.as_ptr(),
 			// cuvid's clock rate is microseconds (set at parser creation).
-			timestamp: timestamp.as_micros() as i64,
+			timestamp: key as i64,
 		};
 
+		self.submitted.remember(key, timestamp);
 		self.parse(&mut packet)
 	}
 
@@ -251,6 +264,8 @@ impl Backend for Nvdec {
 		// the next access unit goes to a new parser. The cuvid decoder is kept: the
 		// new parser's sequence callback reuses it while the format holds.
 		self.destroy_parser();
+		// The drain released every picture, so none is still owed a timestamp.
+		self.submitted.clear();
 		let parser = create_parser(self.codec, &mut self.state)
 			.map_err(|err| Error::CodecGone(format!("NVDEC parser replacement: {err}")))?;
 		self.parser = Some(parser);
@@ -426,7 +441,7 @@ impl State {
 
 	/// Map one decoded picture and copy it device-to-device into a recycled CUDA
 	/// buffer, so the fixed surface pool is released before the next decode.
-	fn map_frame(&self, disp: &CUVIDPARSERDISPINFO) -> Result<Frame, Error> {
+	fn map_frame(&self, disp: &CUVIDPARSERDISPINFO) -> Result<Surface, Error> {
 		let decoder = self
 			.decoder
 			.as_ref()
@@ -482,9 +497,7 @@ impl State {
 		// copy failed; a leaked mapping would starve the output-surface pool.
 		unsafe { (self.api.unmap_video_frame)(decoder.handle, dev_ptr) };
 
-		// Timestamps rode the parser from `decode` (microseconds, unsigned).
-		let timestamp = Timestamp::from_micros(disp.timestamp.max(0) as u64).unwrap_or(Timestamp::ZERO);
-		Ok(Frame::new(Surface::Cuda(copied?), timestamp))
+		Ok(Surface::Cuda(copied?))
 	}
 }
 
@@ -709,13 +722,13 @@ mod tests {
 			for encoded in encoder.encode_all(&gradient_frame(&rgba, w, h, i)).unwrap() {
 				for decoded in decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap() {
 					let i420 = decoded.surface.to_i420().unwrap().into_owned();
-					out.push((decoded.timestamp.as_micros() as u64, i420));
+					out.push((decoded.timestamp.as_micros().unwrap() as u64, i420));
 				}
 			}
 		}
 		for decoded in decoder.flush_all().unwrap() {
 			let i420 = decoded.surface.to_i420().unwrap().into_owned();
-			out.push((decoded.timestamp.as_micros() as u64, i420));
+			out.push((decoded.timestamp.as_micros().unwrap() as u64, i420));
 		}
 		assert!(!out.is_empty(), "NVDEC produced no frames");
 		out
@@ -762,11 +775,11 @@ mod tests {
 					.unwrap()
 				{
 					let frames = decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap();
-					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
+					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros().unwrap() as u64));
 				}
 			}
 			let frames = decoder.flush_all().unwrap();
-			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
+			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros().unwrap() as u64));
 			// A second flush lands on a parser that has seen no packet yet.
 			assert!(
 				decoder.flush_all().unwrap().is_empty(),

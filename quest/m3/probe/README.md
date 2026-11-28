@@ -16,7 +16,7 @@ Moved to m3 2026-11-12 (maintainer, /quest-audit): nothing left in it breaks, it
 
 The estimators stop learning once a connection is app-limited. moq-quic's
 BBR3 only raises `max_bw` from an app-limited sample above its current value;
-while app-limited it ages its window every 3 s, so the estimate falls to what
+while app-limited the estimate it reports ages every 3 s, so it falls to what
 the flow still delivers but never rises past it (`update_max_bw` in
 `rs/moq-congestion/src/bbr3/mod.rs`). Chromium's QUICHE gates its BBR2 filter
 the same way without the aging, and its Cubic estimate stops growing while the
@@ -63,9 +63,9 @@ Decided with the maintainer on 2026-10-20:
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
   the only native backend with a probing hook; moq-quic under CUBIC
   has no sender, keep `Report`, and never
-  disable a rung. lite-07 reserves its stream
-  type before the cut (Padding Stream 0x2), and
-  the sender stays here.
+  disable a rung. Padding left lite-07 on 2026-11-16 (lite-07 freezes with no
+  Padding stream or datagram type); [padding](/quest/m5/probe-padding.md)
+  brings one back in the later lite version that ships it.
 - The JS publisher's rung disable split into its own quest here, since it
   probes with padding.
 - The target then split: m1 keeps the send target
@@ -102,4 +102,4 @@ This README's own work, once the children land:
 
 ## Related
 
-- [Realtime uplink congestion control](/quest/m4/quic-realtime.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)
+- [Realtime uplink congestion control](/quest/m5/quic-realtime.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

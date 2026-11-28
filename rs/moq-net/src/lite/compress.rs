@@ -48,26 +48,14 @@ fn resolve(base: Option<&Path>, path: PathRef) -> Result<Option<Path>, Error> {
 		return Ok(Some(path.rest));
 	};
 	let keep = usize::try_from(path.keep).map_err(|_| Error::ProtocolViolation)?;
-	let head = head(base, keep).ok_or(Error::ProtocolViolation)?;
+	let end = base.head_len(keep).ok_or(Error::ProtocolViolation)?;
+	let head = &base.as_str()[..end];
 	let suffix = match (head.is_empty(), path.rest.is_empty()) {
 		(true, _) => Ok(path.rest),
 		(false, true) => Path::new(head),
 		(false, false) => Path::concat(head, path.rest.as_str()),
 	};
-	Ok(suffix.ok().filter(|suffix| suffix.parts().count() <= Path::MAX_PARTS))
-}
-
-/// The first `keep` segments of `path`, or `None` if it has fewer.
-fn head(path: &Path, keep: usize) -> Option<&str> {
-	if keep == 0 {
-		return Some("");
-	}
-	let s = path.as_str();
-	let mut ends = s
-		.match_indices('/')
-		.map(|(i, _)| i)
-		.chain((!s.is_empty()).then_some(s.len()));
-	ends.nth(keep - 1).map(|end| &s[..end])
+	Ok(suffix.ok().filter(|suffix| suffix.depth() <= Path::MAX_PARTS))
 }
 
 /// Resolves the bases on a received announce stream. Only used on versions with
@@ -109,8 +97,7 @@ impl AnnounceDecoder {
 		self.live.next.saturating_sub(1)
 	}
 
-	/// The suffix of the live id an ANNOUNCE_UPDATE or ANNOUNCE_RESTART names, which
-	/// stays live. An id whose path was refused has none.
+	/// The suffix of the live id an ANNOUNCE_UPDATE names, which stays live. An id whose path was refused has none.
 	pub fn get(&self, id: u64) -> Result<Path, Error> {
 		self.live.suffix(id).cloned()
 	}
@@ -251,9 +238,10 @@ impl AnnounceEncoder {
 			return literal();
 		};
 		// Where the segments after `keep` start, sharing the suffix's buffer.
-		let s = suffix.as_str();
-		let start = s.match_indices('/').nth(keep - 1).map_or(s.len(), |(i, _)| i + 1);
-		let rest = suffix.slice_from(start);
+		let end = suffix
+			.head_len(keep)
+			.expect("the longest shared head is within the suffix");
+		let rest = suffix.slice_from((end + 1).min(suffix.len()));
 
 		let base = next - id;
 		let keep = keep as u64;
@@ -431,6 +419,60 @@ mod tests {
 		assert_eq!(wire, path(2, 2, "d"));
 	}
 
+	/// An escaped `/` stays inside its part, and a run of `\\` before a `/` leaves that `/` bare,
+	/// so `keep` counts decoded parts and a head never ends inside an escape.
+	#[test]
+	fn keeps_whole_parts_across_an_escape() {
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, r"room/a\/b/cam-1");
+		start(&mut encoder, &mut decoder, r"room/c\\/d/cam-1");
+
+		// `room` and `a\/b` are two parts.
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/b/cam-2"));
+		assert_eq!(wire, path(2, 2, "cam-2"));
+		let suffix = decoder.start(Some(wire)).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b/cam-2");
+
+		// `c\\` ends in an escaped backslash, so its `/` separates.
+		let (_, wire) = encoder.start(Path::from_static(r"room/c\\/e"));
+		assert_eq!(wire, path(2, 2, "e"));
+		let suffix = decoder.start(Some(wire)).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/c\\/e");
+
+		// A keep of 2 on `room/a\/b/cam-1` is the whole `a\/b` part, never `room/a\`; the
+		// previous release would read it as 3 parts.
+		let suffix = decoder.start(Some(path(4, 2, "x"))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b/x");
+		// And one more than it has is refused.
+		assert!(matches!(
+			decoder.start(Some(path(5, 4, "x"))),
+			Err(Error::ProtocolViolation)
+		));
+	}
+
+	/// Every pair of paths up to depth three over parts that hold `\/` and `\\`: the encoder's
+	/// output for the second always resolves to it against the first.
+	#[test]
+	fn every_escaped_pair_round_trips() {
+		let parts = ["a", r"b\/c", r"d\\", r"e\\\/f"];
+		let mut paths = vec![];
+		for len in 1..=3u32 {
+			for n in 0..parts.len().pow(len) {
+				let picked: Vec<_> = (0..len).map(|i| parts[n / parts.len().pow(i) % parts.len()]).collect();
+				paths.push(picked.join("/"));
+			}
+		}
+		for first in &paths {
+			for second in &paths {
+				let mut encoder = AnnounceEncoder::new(VERSION);
+				let mut decoder = AnnounceDecoder::default();
+				start(&mut encoder, &mut decoder, first);
+				start(&mut encoder, &mut decoder, second);
+			}
+		}
+	}
+
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
@@ -453,13 +495,12 @@ mod tests {
 
 	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
 	/// this hex too.
-	const GOLDEN: &str =
-		"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
+	const GOLDEN: &str = "001600000a726f6f6d2f612f63616d01610000000000ff00000f0102036d696301610000000000ff0002070000000000ff0001020100000d0201016201610000000000ff00";
 
 	#[cfg(feature = "async")]
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
-		// Lite-07 names a route instead of a hop chain, so none travels.
+		// No relay announced these again, so their chains are empty.
 		vec![
 			Announced::Start(Path::from_static("room/a/cam"), vec![]),
 			Announced::Start(Path::from_static("room/a/mic"), vec![]),
@@ -478,9 +519,33 @@ mod tests {
 		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden());
 	}
 
+	/// A compressed stream whose bases keep parts holding `\/` and `\\`, pinned byte for byte;
+	/// `js/net/src/lite/announce.test.ts` decodes this hex too.
+	const GOLDEN_ESCAPED: &str = "001b00000f726f6f6d2f615c2f622f63616d2d3101610000000000ff00001701010b635c5c2f642f63616d2d3101610000000000ff00001102020563616d2d3201610000000000ff00000d0202016501610000000000ff00";
+
+	#[cfg(feature = "async")]
+	fn golden_escaped() -> Vec<crate::fuzz::Announced> {
+		use crate::fuzz::Announced;
+		vec![
+			Announced::Start(Path::from_static(r"room/a\/b/cam-1"), vec![]),
+			Announced::Start(Path::from_static(r"room/c\\/d/cam-1"), vec![]),
+			Announced::Start(Path::from_static(r"room/a\/b/cam-2"), vec![]),
+			Announced::Start(Path::from_static(r"room/c\\/e"), vec![]),
+		]
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn golden_escaped_stream_is_pinned() {
+		let encoded = crate::fuzz::encode_announces(&golden_escaped(), true);
+		let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+		assert_eq!(hex, GOLDEN_ESCAPED);
+		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden_escaped());
+	}
+
 	/// The literal lite-07 stream `js/net` writes for the same announcements, never picking a
 	/// base; `js/net/src/lite/announce.test.ts` pins its encoder to it.
-	const JS_LITERAL: &str = "001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d696300016100000002020000010101000f000006726f6f6d2f62000161000000";
+	const JS_LITERAL: &str = "001600000a726f6f6d2f612f63616d01610000000000ff00001600000a726f6f6d2f612f6d696301610000000000ff0002070000000000ff00010201000012000006726f6f6d2f6201610000000000ff00";
 
 	#[test]
 	#[cfg(feature = "async")]
@@ -490,5 +555,22 @@ mod tests {
 			.map(|i| u8::from_str_radix(&JS_LITERAL[i..i + 2], 16).unwrap())
 			.collect();
 		assert_eq!(crate::fuzz::decode_announces(&bytes, true), golden());
+	}
+
+	/// A lite-06 start for a path that opens with U+FEFF, which is text and not a byte order mark;
+	/// `js/net/src/lite/announce.test.ts` pins its encoder and decoder to the same bytes.
+	const BOM_LITE06: &str = "00150aefbbbf636f6e636572740000ffffffffffffffff";
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_leading_bom_is_part_of_the_path() {
+		let announced = vec![crate::fuzz::Announced::Start(
+			Path::from_static("\u{feff}concert"),
+			vec![],
+		)];
+		let encoded = crate::fuzz::encode_announces(&announced, false);
+		let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+		assert_eq!(hex, BOM_LITE06);
+		assert_eq!(crate::fuzz::decode_announces(&encoded, false), announced);
 	}
 }

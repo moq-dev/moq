@@ -3,7 +3,8 @@ import type * as announce from "../announce.ts";
 import type { RouteOptions, Routes } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
-import type { Drain } from "./goaway.ts";
+import type { Goaway } from "./goaway.ts";
+import type { Liveness } from "./keep_alive.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
@@ -31,6 +32,13 @@ export interface Session {
 	readonly probe: Getter<Probe>;
 
 	/**
+	 * Whether the peer was heard within the `keepAlive` connect option's `soft` limit, or
+	 * undefined when the session runs without one. Turns `stale` once `soft` passes unheard,
+	 * `live` again on the peer's next frame, and the session closes if `hard` passes too.
+	 */
+	readonly liveness: Getter<Liveness> | undefined;
+
+	/**
 	 * The tokens this side presented and the grant they earned, plus the tokens the peer
 	 * presents. On moq-lite-07-wip each side presents its connection's credential right after
 	 * setup. Otherwise the grant stays undefined.
@@ -50,17 +58,17 @@ export interface Session {
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
-	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
+	 * Subscribe to broadcast announcements matching `filter`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
-	 * relative to the session; captures report what the scope's wildcards stood for.
+	 * relative to the session; captures report what the filter's wildcards stood for.
 	 * Only routes whose literal name matches are reported unless `options.covering`
 	 * opts in, and hidden routes unless `options.hidden` does. A peer without
 	 * discovery refuses or resets the stream.
 	 */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: RouteOptions): Routes;
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: RouteOptions): Routes;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.
@@ -89,12 +97,12 @@ export interface Session {
 	 * The URI is peer-controlled: apply a redirect policy you trust before dialing it or presenting
 	 * tokens to it, as the reconnecting `Connection` does with `goaway.redirect`.
 	 */
-	readonly draining: GetPromise<Drain>;
+	readonly draining: GetPromise<Goaway>;
 
 	/**
-	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the
+	 * Settles when the session closes: `null` for a clean close, an `Error.Session` when the
 	 * peer closed with a code (e.g. `SessionCode.Unauthorized` for an auth rejection), or the
 	 * transport's own failure. Never rejects.
 	 */
-	closed: Promise<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 }

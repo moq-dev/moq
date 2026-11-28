@@ -988,7 +988,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -1099,7 +1099,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
@@ -1114,7 +1114,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
 
 	mkv.decode(cluster).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first block anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first block publishes the catalog");
@@ -1185,7 +1185,7 @@ async fn laced_opus_frames() {
 			for (index, packet) in packets.iter().enumerate() {
 				let frame = reader.read_frame().await.unwrap().expect("one frame per packet");
 				assert_eq!(frame.payload.as_ref(), *packet, "{lacing:?}, grouped={grouped}");
-				assert_eq!(frame.timestamp.as_micros(), 107_000 + index as u128 * 20_000);
+				assert_eq!(frame.timestamp.as_micros().unwrap(), 107_000 + index as u128 * 20_000);
 			}
 			assert!(reader.read_frame().await.unwrap().is_none());
 		}
@@ -1253,6 +1253,68 @@ async fn malformed_lacing_is_refused() {
 	}
 }
 
+/// An unlaced audio block lasts the track's DefaultDuration, so a group cut at an irregular gap
+/// measures its bitrate to where its last packet ends rather than one guessed gap later.
+#[tokio::test(start_paused = true)]
+async fn unlaced_audio_bitrate_counts_the_default_duration() {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(20_000_000));
+	let payload = [0xf8; 250];
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.cluster(0, || {
+			// Three 20 ms packets in each 100 ms, the last after a 60 ms gap: 60 kb/s.
+			(0..15i16)
+				.flat_map(|cycle| [0, 20, 80].map(|at| simple_block(1, cycle * 100 + at, true, &payload)))
+				.collect()
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let snapshot = catalog.snapshot();
+	let rendition = snapshot.audio.renditions.values().next().unwrap();
+	assert_eq!(rendition.bitrate, Some(60_000));
+	let _finished = importer.finish().unwrap();
+}
+
+/// An audio block a rewind puts before its group's start closes the group past its furthest frame,
+/// rather than failing the import by cutting it below its own frames.
+#[tokio::test(start_paused = true)]
+async fn a_rewound_audio_block_closes_past_its_group() {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(20_000_000));
+	let payload = [0xf8; 4];
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.cluster(0, || {
+			[100, 120, 140, 90, 160]
+				.map(|at| simple_block(1, at, true, &payload))
+				.into()
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let _finished = importer.finish().unwrap();
+}
+
 /// An unlaced block's duration follows its cadence, not an unparsed track default.
 #[tokio::test(start_paused = true)]
 async fn unlaced_block_duration_does_not_use_track_default() {
@@ -1298,7 +1360,7 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	while let Some(mut group) = track.recv_group().await.unwrap() {
 		while let Some(frame) = group.read_frame().await.unwrap() {
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
-			last = Some((frame.timestamp.as_micros(), frame.payload.len()));
+			last = Some((frame.timestamp.as_micros().unwrap(), frame.payload.len()));
 		}
 	}
 	assert_eq!(last, Some((80_000, 0)));
@@ -1878,18 +1940,9 @@ async fn a_seek_mid_block_waits_for_the_block() {
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.audio.renditions.keys().next().unwrap();
-	let replay = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
-	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-	let mut groups = Vec::new();
-	while let Some(mut group) = track.recv_group().await.unwrap() {
-		let mut frames = 0;
-		while group.read_frame().await.unwrap().is_some() {
-			frames += 1;
-		}
-		groups.push((group.sequence, frames));
-	}
-	assert_eq!(groups, [(0, 2), (100, 1)]);
+	let groups = groups(&consumer, name).await;
+	// The block's group ends whole past its second 20ms frame, so the seek's group starts there.
+	assert_eq!(groups, [(0, 2), (40_000, 1)]);
 }
 
 /// A WebM with one VP9 track whose `Video` element holds `children` beside its dimensions.
@@ -2146,4 +2199,338 @@ fn repeated_reinit_keeps_flat_state() {
 		assert!(snapshot.video.renditions.is_empty(), "{label}");
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");
 	}
+}
+
+/// An avcC or hvcC track whose first keyframe carries a parameter set in band lands as
+/// `avc3`/`hev1`; one whose keyframe doesn't stays `avc1`/`hvc1`. The keyframe decides even when it
+/// streams in a byte at a time behind an earlier audio block, and the catalog waits for it: the
+/// first one published already lists the video.
+#[tokio::test(start_paused = true)]
+async fn keyframe_decides_where_parameter_sets_live() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_IPB)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = h265::build_hvcc(
+		&[Bytes::from_static(h265::fixtures::VPS)],
+		&[Bytes::from_static(h265::fixtures::SPS_NVENC)],
+		&[Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	let prefixed = |nals: &[&[u8]]| -> Vec<u8> {
+		nals.iter()
+			.flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+			.collect()
+	};
+	let h264_idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	let h265_idr: &[u8] = &[0x26, 0x01, 0xaf, 0x10];
+
+	for (codec_id, private, sps, idr) in [
+		("V_MPEG4/ISO/AVC", avcc, h264::fixtures::SPS_IPB, h264_idr),
+		("V_MPEGH/ISO/HEVC", hvcc, h265::fixtures::SPS_NVENC, h265_idr),
+	] {
+		for in_band in [false, true] {
+			let keyframe = match in_band {
+				true => prefixed(&[sps, idr]),
+				false => prefixed(&[idr]),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![
+					track_entry_audio_opus(1, 48_000.0, 2),
+					MatroskaSpec::TrackEntry(Master::Full(vec![
+						MatroskaSpec::TrackNumber(2),
+						MatroskaSpec::TrackUID(2),
+						MatroskaSpec::TrackType(1),
+						MatroskaSpec::CodecID(codec_id.into()),
+						MatroskaSpec::CodecPrivate(private.to_vec()),
+					])),
+				])
+				.cluster(0, || {
+					vec![
+						simple_block(1, 0, true, &[0xfc, 0x00]),
+						simple_block(2, 0, true, &keyframe),
+					]
+				})
+				.segment_end()
+				.build();
+
+			for chunk in [1, data.len()] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut published = crate::catalog::hang::Consumer::<()>::new(
+					broadcast.consume().track(hang::Catalog::DEFAULT_NAME).unwrap(),
+				);
+				let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+				let waiter = kio::Waiter::noop();
+				let mut first = None;
+				for chunk in data.chunks(chunk) {
+					mkv.decode(chunk).unwrap();
+					if first.is_none()
+						&& let std::task::Poll::Ready(snapshot) = published.poll_next(&waiter)
+					{
+						first = snapshot.unwrap().map(|timed| timed.value);
+					}
+				}
+				let first = first.expect("the keyframe publishes the catalog");
+				assert_eq!(
+					first.video.renditions.len(),
+					1,
+					"{codec_id}: the first catalog lists the video"
+				);
+				let snapshot = catalog.snapshot();
+				assert_eq!(snapshot.audio.renditions.len(), 1);
+				let config = snapshot
+					.video
+					.renditions
+					.values()
+					.next()
+					.expect("the keyframe publishes the record");
+				let detected = match &config.codec {
+					VideoCodec::H264(codec) => codec.inline,
+					VideoCodec::H265(codec) => codec.in_band,
+					other => panic!("{other:?}"),
+				};
+				assert_eq!(detected, in_band, "{codec_id} {}", config.codec);
+				assert_eq!(config.description.as_deref(), Some(private.as_ref()));
+				let _finished = mkv.finish().unwrap();
+			}
+		}
+	}
+}
+
+/// An audio Block's own BlockDuration, before or after it, overrides the track default, so its
+/// group closes where its packets end instead of the default's estimate.
+#[tokio::test(start_paused = true)]
+async fn audio_block_duration_overrides_the_default() {
+	use MatroskaSpec::BlockDuration;
+	for before in [true, false] {
+		let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+		let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+			unreachable!()
+		};
+		children.push(MatroskaSpec::DefaultDuration(20_000_000));
+		// 5 ms packets in a track that defaults to 20 ms.
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![entry])
+			.cluster(0, || {
+				(0..40i16)
+					.map(|index| {
+						let (front, back) = match before {
+							true => (vec![BlockDuration(5)], vec![]),
+							false => (vec![], vec![BlockDuration(5)]),
+						};
+						block_group(1, index * 5, b"\xf8\xff\xfe", front, back)
+					})
+					.collect()
+			})
+			.segment_end()
+			.build();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&data).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let published = crate::container::test_util::published(&consumer, &snapshot).await;
+		let expected: Vec<u128> = (0..40).map(|index| index * 5_000).collect();
+		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
+
+		let name = snapshot.audio.renditions.keys().next().unwrap();
+		assert_eq!(
+			groups(&consumer, name).await,
+			[(0, 20), (100_000, 20)],
+			"before {before}"
+		);
+	}
+}
+
+/// Each group's start and frame count, replaying the track's whole history.
+async fn groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(u64, usize)> {
+	let replay = moq_net::track::Subscription::default()
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: Some(std::time::Duration::from_secs(3600)),
+			max: Some(std::time::Duration::from_secs(3600)),
+		})])
+		.with_order(moq_net::track::Order::Ascending);
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut groups = Vec::new();
+	while let Some(mut group) = track.recv_group().await.unwrap() {
+		let mut frames = 0;
+		while group.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		groups.push((group.start, frames));
+	}
+	groups
+}
+
+/// An Opus track whose packets default to `default_duration` nanoseconds.
+fn opus_track(default_duration: u64) -> MatroskaSpec {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(default_duration));
+	entry
+}
+
+/// An import joining a catalog clock another source already placed shifts where its groups end
+/// along with its frames.
+#[tokio::test(start_paused = true)]
+async fn a_shifted_clock_cuts_where_its_frames_end() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![opus_track(20_000_000)])
+		.cluster(0, || {
+			(0..10i16)
+				.map(|index| simple_block(1, index * 20, true, b"\xf8\xff\xfe"))
+				.collect()
+		})
+		.segment_end()
+		.build();
+	let wall = kio::clock::wall();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.place(moq_net::Timestamp::from_secs(10).unwrap(), wall)
+		.unwrap();
+	// This source's zero lands 10 s into the catalog clock.
+	let timebase = catalog.timebase();
+	timebase.place(moq_net::Timestamp::ZERO, wall).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve()).with_timebase(timebase);
+	importer.decode(&data).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.audio.renditions.keys().next().unwrap();
+	assert_eq!(groups(&consumer, name).await, [(10_000_000, 5), (10_100_000, 5)]);
+}
+
+/// A laced block's BlockDuration spaces its packets when it precedes them. One that follows them
+/// comes too late to, so the block ends a default past its last packet rather than below it.
+#[tokio::test(start_paused = true)]
+async fn laced_audio_with_a_block_duration() {
+	use webm_iterable::matroska_spec::{BlockLacing, Frame};
+	for before in [true, false] {
+		// Twenty 5 ms packets a block, in a track that defaults to 20 ms.
+		let packets = vec![b"\xf8\xff\xfe".as_slice(); 20];
+		let (step, spacing) = match before {
+			true => (5_000, 100),
+			false => (20_000, 400),
+		};
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![opus_track(20_000_000)])
+			.cluster(0, || {
+				(0..2i16)
+					.map(|index| {
+						let mut block = SimpleBlock::new_uncheked(
+							&[],
+							1,
+							index * spacing,
+							false,
+							Some(BlockLacing::Xiph),
+							false,
+							true,
+						);
+						block.set_frame_data(&packets.iter().map(|data| Frame { data }).collect());
+						let MatroskaSpec::SimpleBlock(raw) = block.into() else {
+							unreachable!()
+						};
+						let mut children = vec![MatroskaSpec::Block(raw)];
+						let duration = MatroskaSpec::BlockDuration(100);
+						match before {
+							true => children.insert(0, duration),
+							false => children.push(duration),
+						}
+						MatroskaSpec::BlockGroup(Master::Full(children))
+					})
+					.collect()
+			})
+			.segment_end()
+			.build();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&data).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let published = crate::container::test_util::published(&consumer, &snapshot).await;
+		let start = spacing as u128 * 1_000;
+		let expected: Vec<u128> = (0..2)
+			.flat_map(|block| (0..20).map(move |index| block * start + index * step))
+			.collect();
+		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
+		let name = snapshot.audio.renditions.keys().next().unwrap();
+		assert_eq!(
+			groups(&consumer, name).await,
+			[(0, 20), (start as u64, 20)],
+			"before {before}"
+		);
+	}
+}
+
+/// A seek while a BlockGroup's trailing fields stream in waits behind the one its Block deferred,
+/// so the newer start wins.
+#[tokio::test(start_paused = true)]
+async fn a_seek_after_a_deferred_one_wins() {
+	use MatroskaSpec::{BlockDuration, ReferenceBlock};
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.track_video(1, "V_VP9", 16, 16)
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"key"),
+				block_group(1, 33, b"delta", vec![ReferenceBlock(-33)], vec![BlockDuration(33)]),
+				simple_block(1, 66, true, b"next"),
+			]
+		})
+		.segment_end()
+		.build();
+	let delta = data.windows(5).position(|window| window == b"delta").unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	// Mid-Block, then between the Block and its BlockDuration.
+	importer.decode(&data[..delta + 2]).unwrap();
+	importer.seek(1_000_000).unwrap();
+	importer.decode(&data[delta + 2..delta + 5]).unwrap();
+	importer.seek(2_000_000).unwrap();
+	importer.decode(&data[delta + 5..]).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let starts: Vec<u64> = groups(&consumer, name)
+		.await
+		.into_iter()
+		.map(|(start, _)| start)
+		.collect();
+	assert_eq!(starts, [0, 2_000_000]);
 }

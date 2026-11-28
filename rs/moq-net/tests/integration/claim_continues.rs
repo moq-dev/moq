@@ -1,25 +1,29 @@
 #![cfg(feature = "async")]
 
 //! A worker claiming a prefix answers each request by publishing the exact path. The exact
-//! route carries the claim's instance while it lives, so on moq-lite-07, which carries
-//! instances end to end, the first subscription through the claim continues on it, across
-//! relays. Once the job ends the claim moves to a fresh instance, so a restarted job is
-//! another stream. Older wires mint an instance per announcement, so their first
+//! route carries the claim's identity while it lives, so on moq-lite-07, which carries
+//! identities end to end, the first subscription through the claim continues on it, across
+//! relays. Once the job ends the claim moves to a fresh identity, so a restarted job is
+//! another stream. Older wires mint an identity per announcement, so their first
 //! subscription through the claim sees another broadcast rather than a splice.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Error, Instance, Timestamp, Version, origin, track};
+use moq_net::{Error, Identity, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn lite07() -> Version {
@@ -40,20 +44,20 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
-async fn settle() {
+pub(super) async fn settle() {
 	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// A worker claiming `claim`, answering each request with an output whose `video` track
 /// carries the worker's name and how many outputs it made before.
-struct Worker {
-	claim: Rc<origin::Claim>,
+pub(super) struct Worker {
+	pub(super) claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
-	origin: origin::Producer,
+	pub(super) origin: origin::Producer,
 }
 
 impl Worker {
-	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
+	pub(super) fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(origin.claim(claim, origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -69,8 +73,8 @@ impl Worker {
 					)
 					.unwrap();
 				let tag = format!("{name}{}", served.borrow().len());
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, tag.into_bytes()).unwrap();
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
 				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
@@ -80,8 +84,17 @@ impl Worker {
 	}
 
 	/// How many outputs the worker was asked for.
-	fn served(&self) -> usize {
+	pub(super) fn served(&self) -> usize {
 		self.outputs.borrow().len()
+	}
+
+	/// Write the next group of the latest output.
+	pub(super) fn write(&self) {
+		let outputs = self.outputs.borrow();
+		let (_, track) = outputs.last().expect("an output");
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"next".to_vec()).unwrap();
+		group.finish().unwrap();
 	}
 
 	/// End the latest output, as a worker does when the job stops.
@@ -91,39 +104,45 @@ impl Worker {
 	}
 }
 
-/// Every announce event already delivered, as `(kind, prefix, instance)`.
-async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Instance)> {
+/// Every announce event already delivered, as `(kind, prefix, identity)`.
+pub(super) async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Identity)> {
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		let (kind, announce) = match event.expect("announce ended") {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce: a,
+				..
 			} => ("start", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				announce: a,
+				..
 			} => ("update", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce: a,
+				..
 			} => ("restart", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce: a,
+				..
 			} => ("end", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Offline,
 				announce: a,
+				..
 			} => ("offline", a),
+			other => panic!("unexpected route event {other:?}"),
 		};
-		events.push((kind, announce.prefix.to_string(), announce.route.instance().clone()));
+		events.push((kind, announce.prefix.to_string(), announce.route.identity().clone()));
 	}
 	events
 }
 
-/// The events without their instances.
-fn kinds(events: &[(&'static str, String, Instance)]) -> Vec<(&'static str, String)> {
+/// The events without their identities.
+pub(super) fn kinds(events: &[(&'static str, String, Identity)]) -> Vec<(&'static str, String)> {
 	events.iter().map(|(kind, prefix, _)| (*kind, prefix.clone())).collect()
 }
 
@@ -142,7 +161,7 @@ async fn first(origin: &origin::Producer, path: &str) -> Option<String> {
 
 /// The first frame at `path` through `origin`. Unless the first subscription through the
 /// claim `continues`, it resets, and the next one reads.
-async fn watch(continues: bool, origin: &origin::Producer, path: &str) -> String {
+pub(super) async fn watch(continues: bool, origin: &origin::Producer, path: &str) -> String {
 	if !continues {
 		assert_eq!(first(origin, path).await, None, "the first subscription continued");
 		settle().await;
@@ -151,8 +170,8 @@ async fn watch(continues: bool, origin: &origin::Producer, path: &str) -> String
 }
 
 /// `W -> R -> E`: the edge reads through `W`'s claim on its first subscription on lite-07,
-/// where every hop announces the answer under the claim's instance. An older wire mints an
-/// instance per announcement, so its first subscription resets, unless the claim is at the
+/// where every hop announces the answer under the claim's identity. An older wire mints an
+/// identity per announcement, so its first subscription resets, unless the claim is at the
 /// answer's own path: there the worker's answer is the same stream as the claim, so it
 /// announces nothing new.
 async fn chain(version: Version, claim: &str) {
@@ -173,7 +192,7 @@ async fn chain(version: Version, claim: &str) {
 	assert_eq!(watch(continues, &edge, "pool/p").await, "w0", "{version}");
 	assert_eq!(worker.served(), 1, "{version}");
 
-	let lent = worker.claim.instance();
+	let lent = worker.claim.identity();
 	for (at, events) in [
 		("relay", drain(&mut at_relay).await),
 		("edge", drain(&mut at_edge).await),
@@ -192,9 +211,9 @@ async fn chain(version: Version, claim: &str) {
 			),
 		}
 		if version == lite07()
-			&& let Some((_, _, instance)) = events.last()
+			&& let Some((_, _, identity)) = events.last()
 		{
-			assert_eq!(instance, &lent, "{version}: at the {at}");
+			assert_eq!(identity, &lent, "{version}: at the {at}");
 		}
 	}
 
@@ -227,7 +246,7 @@ chain_tests! {
 	at_the_claim_lite07: lite07(), "pool/p",
 }
 
-/// A job that stops moves the claim to a fresh instance, end to end: the next request for
+/// A job that stops moves the claim to a fresh identity, end to end: the next request for
 /// the path wakes the worker for another stream, a request pinned to the ended one is
 /// refused, and the first subscription through the claim continues on the new job.
 #[kio::test]
@@ -243,13 +262,13 @@ async fn a_restarted_job_is_another_stream() {
 		let mut at_edge = edge.consume().routes();
 		drain(&mut at_edge).await;
 		assert_eq!(first(&edge, "pool/p").await.as_deref(), Some("w0"));
-		let spent = worker.claim.instance();
+		let spent = worker.claim.identity();
 		drain(&mut at_edge).await;
 
 		worker.stop();
 		settle().await;
-		let advanced = worker.claim.instance();
-		assert_ne!(advanced, spent, "the claim kept the ended job's instance");
+		let advanced = worker.claim.identity();
+		assert_ne!(advanced, spent, "the claim kept the ended job's identity");
 		let events = drain(&mut at_edge).await;
 		assert!(
 			events.contains(&("end", "pool/p".to_string(), spent.clone())),
@@ -266,13 +285,13 @@ async fn a_restarted_job_is_another_stream() {
 
 		assert_eq!(first(&edge, "pool/p").await.as_deref(), Some("w0"));
 		assert_eq!(worker.served(), 1);
-		assert_eq!(worker.outputs.borrow()[0].0.instance(), advanced);
+		assert_eq!(worker.outputs.borrow()[0].0.identity(), advanced);
 	})
 	.await
 	.expect("timed out");
 }
 
-/// Two workers claim `pool` on `R`, each with its own instance. `R`'s reader resolved through
+/// Two workers claim `pool` on `R`, each with its own identity. `R`'s reader resolved through
 /// the cheaper one continues on that worker's answer, and the other is never asked.
 #[kio::test]
 async fn two_workers_keep_their_own_readers() {
@@ -283,7 +302,7 @@ async fn two_workers_keep_their_own_readers() {
 		let _a = link(lite07(), &a.origin, &relay, 1).await;
 		let _b = link(lite07(), &b.origin, &relay, 10).await;
 		settle().await;
-		assert_ne!(a.claim.instance(), b.claim.instance());
+		assert_ne!(a.claim.identity(), b.claim.identity());
 
 		let mut announced = relay.consume().routes();
 		assert_eq!(kinds(&drain(&mut announced).await), [("start", "pool".to_string())]);
@@ -291,7 +310,7 @@ async fn two_workers_keep_their_own_readers() {
 		assert_eq!(first(&relay, "pool/p").await.as_deref(), Some("a0"));
 		assert_eq!(
 			drain(&mut announced).await,
-			[("start", "pool/p".to_string(), a.claim.instance())]
+			[("start", "pool/p".to_string(), a.claim.identity())]
 		);
 		assert_eq!(b.served(), 0);
 	})
@@ -313,11 +332,11 @@ async fn an_unrequested_publish_is_its_own_stream() {
 		assert_eq!(kinds(&drain(&mut announced).await), [("start", "pool".to_string())]);
 
 		let direct = worker.origin.route("pool/q", origin::RouteOptions::default()).unwrap();
-		assert_ne!(direct.instance(), worker.claim.instance());
+		assert_ne!(direct.identity(), worker.claim.identity());
 		settle().await;
 		assert_eq!(
 			drain(&mut announced).await,
-			[("start", "pool/q".to_string(), direct.instance())]
+			[("start", "pool/q".to_string(), direct.identity())]
 		);
 	})
 	.await
@@ -351,7 +370,7 @@ async fn an_older_downstream_sees_another_broadcast() {
 	.expect("timed out");
 }
 
-/// `W -> R` on lite-06 and `R -> E` on lite-07: the older hop mints an instance for each
+/// `W -> R` on lite-06 and `R -> E` on lite-07: the older hop mints an identity for each
 /// announcement, so the edge's first subscription through the claim sees another broadcast
 /// rather than a splice, and the next one reads.
 #[kio::test]
@@ -372,7 +391,7 @@ async fn an_older_upstream_hop_restarts_the_reader() {
 }
 
 /// `W -> {R1, R2} -> E` on lite-07: both relays carry the claim and its answer under the
-/// worker's instance, so the edge's first subscription continues whichever way it routes.
+/// worker's identity, so the edge's first subscription continues whichever way it routes.
 #[kio::test]
 async fn a_diamond_continues_the_first_reader() {
 	kio::clock::timeout(TEST_TIMEOUT, async {
@@ -391,7 +410,7 @@ async fn a_diamond_continues_the_first_reader() {
 		assert_eq!(first(&edge, "pool/p").await.as_deref(), Some("w0"));
 		assert_eq!(worker.served(), 1);
 		let mut late = edge.consume().routes();
-		let lent = worker.claim.instance();
+		let lent = worker.claim.identity();
 		assert_eq!(
 			drain(&mut late).await,
 			[

@@ -9,8 +9,14 @@
 # CHECK_TIMES=FILE also writes each phase's wall seconds, CPU milliseconds, and
 # label there, one per line, ending with the whole run's.
 # `--query` prints the selection before CI installs its toolchain and caches.
+# A local check skips a `memo` module's phase that last passed in this worktree
+# on the same inputs; CHECK_RERUN=1 runs it anyway. CI never skips one.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
+
+# The environment as the caller passed it, for the memo below. Taken first: the
+# dev shell exports names such as `name` and `phases` that this script reuses.
+inherited=$(export -p)
 
 usage="usage: sh/dispatch.sh check|fix|ci [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
@@ -75,7 +81,13 @@ fi
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
 #   fix             `just fix` runs it too; check and ci run every module.
-declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=()
+#   memo            A local check skips a phase of it that passed before in this
+#                   worktree when no file in the working tree, nor the diff, its
+#                   tools, or the environment, changed since (see memo_key). It
+#                   is for modules that cost minutes even on a rerun: Rust's
+#                   tests, and its builds once mbx evicts an idle worktree's
+#                   target directory.
+declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() memo=()
 checks=()
 fixes=()
 module() {
@@ -91,6 +103,7 @@ module() {
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
             fix) fixes+=("$name") ;;
+            memo) memo[$name]=1 ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
                 exit 2
@@ -108,52 +121,69 @@ module() {
 # before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
 # target directory and leaves a fresh output untouched, so the first of those
 # lanes builds it while the rest wait in Cargo, and none rewrites it while
-# another reads it. py builds its test features into a target directory of its
-# own, and carla runs its tools outside py's venv.
+# another reads it. py and dart share target/ffi-testing (and lane=ffi_testing)
+# for their testing,openh264 builds, and carla runs its tools outside py's venv.
 module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)' \
-    tools='uv' compiles=check
+    tools='uv' compiles=check lane=ffi_testing
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-# moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
-    tools='cargo jq' compiles='check fix' fix
+# libmoq's lint compiles the C doc samples. The files Rust reads outside rs/,
+# which sh/rs/reads.sh lists and select.test.py holds this scope to, come
+# last: the relay's configs, unit, and NixOS module, the scripts the tests
+# run, and the vectors the tests share with JS and the docs.
+module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/(nextest|hakari)\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
+    tools='cargo jq cc' compiles='check fix' fix memo
+# Clippy for macOS and Windows over rs's selection, so a platform-gated error
+# fails here rather than in the nightly native lanes. A local check narrows it
+# to the selected crates that name a platform; `just ci` lints them all. The flake pins its
+# toolchain and the zig that compiles its build scripts' C, so a change there
+# lints the whole workspace (see sh/rs/select.sh).
+module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
+    tools='cargo jq nix zig' compiles=check memo
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
 module cargo_nix '((^|/)(Cargo\.(toml|lock)|build\.rs)$|^rs/.*/src/(lib\.rs|main\.rs|bin/)|^nix/(Cargo\.nix|crate-hashes\.json)$|^sh/rs/cargo-nix\.sh$|^flake\.lock$)' \
     tools='nix nixfmt cargo' fix
-# The C package links moq-c's native-libs lists, and the C++ package's FFI
+# The C package links libmoq's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
-module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
+module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
     tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format' compiles=check fix
-# The package links moq-c's native-libs lists, and compiles its doc samples.
+# The package links libmoq's native-libs lists, and compiles its doc samples.
 # It shares a lane with obs_compile because both build cpp/moq/build.
-module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
+module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
     tools='cargo cmake c++ uniffi-bindgen-cpp clang-format' compiles=check lane=cpp fix
 # The plugin and its tests call through the bindings generated from cpp/moq
-# and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
+# and moq-ffi and link through libmoq's native-libs lists, and flake.nix owns
 # the libobs headers it compiles against.
-module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
+module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/libmoq/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The bun lane serializes fixers and JS builds that write shared outputs.
-# Dependency setup separately uses sh/js/install.py across every entry point.
+# Dependency setup uses sh/js/install.py (locked) across every entry point,
+# and fix already sets limit=1, so read-only JS/Bun checks run in parallel.
 # Biome checks the whole repository. It registers before js so
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
+# js and dead_code share a lane because package builds remove and recreate
+# js/*/dist/ while fallow resolves js/*/test-dts/*.ts imports against dist/.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3 uv' lane=bun fix
+    tools='bun python3 uv' lane=js_dist fix
+# fallow over the whole workspace: removing the last use of an export in one
+# package leaves it dead in the package that defines it, which a run scoped to
+# the changed packages would never analyze.
+module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
+    tools='bun uv' lane=js_dist
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
-# the bun lane so it reads the dependencies js installs.
+# its own install lock so it can run beside js.
 module audio_quality '^(js/(hang|watch|net|signals|clock)/|test/audio-quality/|test/lib/|test/justfile$)' \
-    tools='bun uv' lane=bun
+    tools='bun uv'
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -170,7 +200,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # rs/, narrowed after the tool check to the crates it path-depends on, so their
 # API changes compile it while other rs/ changes skip it.
 module carla_bridge '^(\.cargo/config\.toml$|Cargo\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
-    tools='cargo jq' compiles='check fix' fix
+    tools='cargo jq' compiles='check fix' fix memo
 # Reads the bridge's manifest and the root workspace's, so it needs cargo and
 # runs only after setup. Dev-dependencies of the crates it reaches never build
 # into it, so they are left out.
@@ -201,11 +231,20 @@ module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bin
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
-    tools='bun uv kramdown-rfc xml2rfc' lane=bun
+    tools='bun uv kramdown-rfc xml2rfc'
 module markdown '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
+# Workflow lints and repository-wide policy, such as every opt-in test having a
+# caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo jq'
+# `just gh test`, the repository tooling tests, follow what they run and read,
+# including the selectors under sh/, the release-plz configuration, the nfpm
+# configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
+# that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
+# runs in `gh check` instead. Nightly's full gate runs them whatever changed.
+module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
+    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm'
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -218,9 +257,9 @@ module moq_sh '^infra/moq-sh/' \
 # as does a bump of the flake-pinned validator.
 module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
     tools='quest'
-# `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
-# nixpkgs, and the last moves on a flake.lock bump alone.
-module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
+# `obs check` compares the OBS pinned in buildspec.json, flake.nix, nixpkgs,
+# and @moq/obs, and nixpkgs moves on a flake.lock bump alone.
+module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$|js/obs/src/obs\.ts$)' \
     tools='clang-format cmake gersemi jq' fix
 # ts.yml's crate filters against the closure test/ts/run.sh builds, which
 # moves only with a manifest, the lockfile, or the harness's packages.
@@ -246,13 +285,12 @@ module nix '' \
     tools='nixfmt' fix
 module justfile '' \
     fix
-# dart builds moq-ffi with the filtered environment its build hook gets, then
-# checks that the hook finds that build fresh. Any other Cargo build in between
-# reruns the host build scripts in target/debug that track the environment,
-# such as bindgen's BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook
-# then rebuilds again, so it runs alone, last.
+# dart pins the cdylib generate.sh builds via hooks.user_defines.moq_ffi.library
+# so the Dart build hook never invokes Cargo again. It shares target/ffi-testing
+# (and its lane) with py so both reuse one testing,openh264 dependency build
+# without racing on libmoq_ffi.so.
 module dart '^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)' \
-    tools='cargo dart uniffi_bindgen_dart' compiles=check alone fix
+    tools='cargo dart uniffi_bindgen_dart' compiles=check lane=ffi_testing fix
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -404,22 +442,25 @@ files() {
 }
 
 # One phase of one module, run through `run`. The bindings run their tests in
-# their check; rs, js, py, and gh test right after it, in the same lane.
+# their check; rs, js, and py test right after it, in the same lane.
 step() {
     local listed=$logs/$2.files
     case "$1:$2" in
         check:js) run just js check-changed "$js_list" ;;
         check:workers) run just js workers ;;
+        check:dead_code) run just js dead-code ;;
         check:moq_sh) run just infra moq-sh test ;;
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:rs_cross) run just rs cross-lint-changed "$rs_list" ;;
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
-            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench
             ;;
         check:quest) run bash sh/quest.sh check ;;
+        check:tooling) run just gh test ;;
         check:audio_quality) run just test audio-quality --replays --enforce ;;
         check:drill) run just test drill-sensitivity --apply-only ;;
         check:obs_compile) run just obs compile ;;
@@ -481,7 +522,6 @@ step() {
         test:rs) run just rs test-changed "$rs_list" ;;
         test:js) run just js test-changed "$js_list" ;;
         test:py) run just py test ;;
-        test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
         fix:carla_bridge) run just carla bridge-fix ;;
         fix:cargo_nix) run just rs cargo-nix ;;
@@ -548,6 +588,76 @@ lane_cpu() {
     done
 }
 
+# A tree of the working tree as `git add -A` would stage it, tracked and new
+# files alike, written without touching the real index.
+# Errexit does not reach into a command substitution, so it is set here.
+snapshot() (
+    set -e
+    index=$(mktemp "$logs/index.XXXXXX")
+    trap 'rm -f "$index"' EXIT
+    cat "$(git rev-parse --git-path index)" >"$index"
+    GIT_INDEX_FILE=$index git add -A
+    GIT_INDEX_FILE=$index git write-tree
+)
+
+# A hash of everything one phase of a module could read, from a snapshot: the
+# whole working tree, not the files its pattern matches, since a phase reads
+# more than selects it (moq-net's unit tests run test/interop's scripts, which
+# import js/), and no list of those reads stays complete. Beside the tree: the
+# diff, which picks the crates a phase covers, its tools, and the environment.
+# Every exported variable counts but the shell's and systemd's per-run
+# bookkeeping (`quest gate` runs a command as a systemd unit) and the
+# dispatcher's own CHECK_* controls, so an unforeseen one that steers a build or
+# a test can only cost a rerun. Ignored files are left out: what they hold, such
+# as node_modules, follows from tracked ones like bun.lock.
+memo_key() (
+    set -e
+    phase=$1 module=$2 tree=$3
+    {
+        echo "$phase $module $tree ${all:+all}"
+        [[ -n "$all" ]] || cat "$changed"
+        grep -Ev '^declare -x (PWD|OLDPWD|SHLVL|_|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|MANAGERPID|CHECK_[A-Za-z0-9_]*)(=|$)' <<<"$inherited"
+        read -ra list <<<"${tools[$module]}"
+        tool_identity "${list[@]}"
+    } | git hash-object --stdin
+)
+
+# What each tool resolves to. A Nix store path names its contents; any other
+# binary, such as a shim or a distribution's compiler, is hashed, since an
+# upgrade replaces it in place. Cargo brings the toolchain it drives, which a
+# rustup shim hides behind the same file, so rustc reports its own version.
+tool_identity() (
+    set -e
+    for tool in "$@"; do
+        [[ "$tool" != cargo ]] || set -- "$@" rustc rustdoc clippy-driver cargo-nextest
+    done
+    for tool in "$@"; do
+        if ! path=$(command -v "$tool"); then
+            echo "$tool absent"
+            continue
+        fi
+        path=$(realpath "$path")
+        case "$path" in
+            /nix/store/*) echo "$tool $path" ;;
+            *) echo "$tool $path $(git hash-object --no-filters "$path")" ;;
+        esac
+    done
+    if [[ " $* " == *" rustc "* ]] && command -v rustc >/dev/null; then
+        rustc -vV
+    fi
+)
+
+# The phases a module runs for this verb: a check also runs the tests of the
+# modules that have them.
+phases_of() {
+    phases=("$verb")
+    if [[ "$verb" == check ]]; then
+        case "$1" in
+            rs | js | py) phases+=(test) ;;
+        esac
+    fi
+}
+
 # Run one lane's modules in order, appending each phase's wall seconds and CPU
 # milliseconds to the lane's times file and announcing each phase's start and
 # end on fd 3. A failed phase skips the rest of that module, but independent
@@ -561,14 +671,7 @@ run_lane() {
     lane_status=0
     trap 'stop; cancelled; exit 143' TERM
     for module in "$@"; do
-        phases=("$verb")
-        # gh's tooling tests run on every diff: path selection would let a
-        # broken selector skip the very tests that catch it.
-        if [[ "$verb" == check ]]; then
-            case "$module" in
-                rs | js | py | gh) phases+=(test) ;;
-            esac
-        fi
+        phases_of "$module"
         for phase in "${phases[@]}"; do
             current="$phase $module"
             began=$SECONDS
@@ -576,6 +679,14 @@ run_lane() {
             cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
+            key=${keys["$phase $module"]:-}
+            if [[ -n "$key" && -z "${CHECK_RERUN:-}" && -f "$memo_dir/$phase-$module" &&
+                "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
+                echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
+                record unchanged
+                current=
+                continue
+            fi
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
             # the phase would die on TERM at once, orphaning its commands.
             # Trapped, it exits once they do, so a cancel returns only after
@@ -597,6 +708,7 @@ run_lane() {
                 break
             fi
             if ((status)); then
+                [[ -z "$memo_dir" || ! -v "memo[$module]" ]] || rm -f "$memo_dir/$phase-$module"
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
@@ -605,6 +717,13 @@ run_lane() {
             fi
             record
             current=
+            # Recorded only when nothing it reads changed while it ran.
+            if [[ -n "$key" ]] && after=$(snapshot) && after=$(memo_key "$phase" "$module" "$after") &&
+                [[ "$after" == "$key" ]]; then
+                mkdir -p "$memo_dir"
+                echo "$key" >"$memo_dir/$phase-$module.$BASHPID"
+                mv -f "$memo_dir/$phase-$module.$BASHPID" "$memo_dir/$phase-$module"
+            fi
         done
     done
     return "$lane_status"
@@ -662,6 +781,61 @@ cancel() {
 }
 
 logs=$(mktemp -d)
+
+# The memo lives in this worktree's git directory, so it goes with the worktree.
+# CI and `just ci` (CI_STRICT) always run every phase.
+# Each memo phase's key is taken here, before any phase runs, where errexit
+# stops the run if one cannot be computed. Only a local check reads or writes
+# a pass, and CHECK_RERUN=1 only writes one; any local run, `just ci` included,
+# forgets the pass of a phase that fails, so a flaky failure is never skipped.
+memo_dir=
+tree=
+declare -A keys=()
+if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
+    for module in "${selected[@]}"; do
+        [[ -v "memo[$module]" ]] || continue
+        memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
+        [[ "$action" == check && -z "${CI_STRICT:-}" ]] || break
+        [[ -n "$tree" ]] || tree=$(snapshot)
+        phases_of "$module"
+        for phase in "${phases[@]}"; do
+            keys["$phase $module"]=$(memo_key "$phase" "$module" "$tree")
+        done
+    done
+fi
+# Prints the process tree under PID, one indented line per process.
+processes() {
+    local -A kids=() lines=()
+    local pid ppid row
+    while read -r pid ppid row; do
+        kids[$ppid]+=" $pid"
+        lines[$pid]=$row
+    done < <(ps -A -o pid= -o ppid= -o etime= -o args=)
+    walk() {
+        local each
+        printf '%*s%s %.240s\n' "$2" '' "$1" "${lines[$1]-}"
+        for each in ${kids[$1]-}; do walk "$each" $(($2 + 2)); done
+    }
+    walk "$1" 0
+}
+
+# A TERM is a cancel or a job timeout, and those come when a lane hangs, whose
+# output would otherwise die with it in its buffer. So before stopping the
+# lanes, print each running lane's processes and buffered output, naming what
+# it waits on. This comes first because a runner kills the job seconds after
+# its TERM, so each log prints only its tail, whose last lines name the wait.
+# An INT is a local Ctrl-C, which needs neither.
+stopped() {
+    local pid name
+    for pid in "${!running[@]}"; do
+        name=${running[$pid]}
+        if github; then echo "::error::$action: lane $name was still running"; else echo "$action: lane $name was still running" >&2; fi
+        processes "$pid"
+        tail -c 65536 "$logs/$name.log"
+        ! github || echo "::endgroup::"
+    done
+}
+
 declare -A running=()
 lone=
 next=0
@@ -672,14 +846,14 @@ failed_status=0
 # trap already ran; the next wait blocks until every lane has exited.
 trap 'cancel; until wait; do :; done; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap '((limit == 1)) || stopped; exit 143' TERM
 
 # Each lane runs in its own process group, so a cancel reaches its whole tree;
 # a lane shell stops its running phase and waits for it before it exits.
 # Concurrent lanes buffer their output and print it whole when they finish; a
 # serial run streams instead. A buffered lane still announces each phase on the
-# run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
-# job timeout that never reaches this script, names the phase it stopped in.
+# run's stderr as it starts and ends, so even a run killed mid-phase without a
+# signal it traps names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
 # hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
 # running lanes and starts no more.

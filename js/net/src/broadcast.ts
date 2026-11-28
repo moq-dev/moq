@@ -8,21 +8,22 @@ import * as cache from "./cache.ts";
 import * as datagram from "./datagram.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type * as Instance from "./instance.ts";
+import type * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
+import * as Meta from "./meta.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
-import { registerWire, trackOf, wireOf } from "./wire.ts";
+import { checkName } from "./util/utf8.ts";
+import { type Broadcast, type Produced, registerWire, trackMetaOf, trackOf, wireOf } from "./wire.ts";
 
-export { Tracks, type TracksEvent } from "./listing.ts";
+export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
 
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
-// Info lookups pending or held on a track.
+// The info lookups on an on-demand track.
 class Lookups {
-	pending = new Signal(0);
 	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
 	opened = false;
 }
@@ -43,6 +44,12 @@ class BroadcastState {
 	tracks = new Map<string, track.Producer>();
 	// The on-demand producer for each name, shared by every subscription and info lookup until it closes.
 	requests = new Map<string, track.Producer>();
+	// The same for each name's metadata copy, kept apart so no payload reader is ever handed one.
+	// Only filled while `meta` is set.
+	metaRequests = new Map<string, track.Producer>();
+	// Whether its request handler fills a metadata copy apart from the payload one; see
+	// `hooks.serveMeta`. Otherwise a metadata reader takes the payload copy's headers.
+	meta = false;
 	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Requests`;
@@ -60,14 +67,15 @@ class BroadcastState {
 	pool = new cache.Pool({ expiry: cache.DEFAULT_EXPIRY });
 }
 
-// A new track of the broadcast, caching into its pool.
-function createProducer(state: BroadcastState, name: string): track.Producer {
+// A new track of the broadcast, caching into its pool: its metadata copy when `meta`.
+function createProducer(state: BroadcastState, name: string, meta = false): track.Producer {
 	const producer = new track.Producer(name);
 	hooks.poolTrack(producer, state.pool);
+	if (meta) hooks.metaTrack(producer);
 	return producer;
 }
 
-// Datagram tracks never enter the stream listing or cache.
+// Datagram tracks never enter the stream cache.
 function liveDatagrams(state: BroadcastState, name: string, passive = false): datagram.Consumer | undefined {
 	const producer = state.datagrams.get(name);
 	if (!producer) return;
@@ -78,23 +86,38 @@ function liveDatagrams(state: BroadcastState, name: string, passive = false): da
 	return passive ? hooks.observeDatagrams(producer) : producer.consume();
 }
 
-function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
+// Create the datagram track `name`, listed until it ends unless `listed` is false: a session's
+// datagram track riding a stream track's subscription serves a request, not the inventory.
+function createDatagrams(
+	state: BroadcastState,
+	name: string,
+	info: Partial<datagram.Info>,
+	listed = true,
+): datagram.Producer | undefined {
 	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
 	// A request its readers closed waits for async cleanup; serve the name fresh instead.
 	const queued = state.datagramRequested
 		.peek()
 		.find((request) => request.name === name && request.closed.peek() === undefined);
+	let producer: datagram.Producer;
 	if (queued) {
 		state.datagramRequested.mutate((requests) => requests.splice(requests.indexOf(queued), 1));
-		return queued.accept(info);
+		producer = queued.accept(info);
+	} else {
+		const existing = state.datagrams.get(name);
+		if (existing?.closed.peek() === undefined && existing) return undefined;
+		producer = new datagram.Producer(name).accept(info);
+		state.datagrams.set(name, producer);
+		void producer.closed.then(() => {
+			if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
+		});
 	}
-	const existing = state.datagrams.get(name);
-	if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
-	const producer = new datagram.Producer(name).accept(info);
-	state.datagrams.set(name, producer);
-	void producer.closed.then(() => {
-		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
-	});
+	if (listed) {
+		const accepted = hooks.datagramInfo(producer);
+		if (!accepted) throw new Error("datagram track has not been accepted");
+		state.listing.listDatagrams(producer, accepted);
+		void producer.closed.then(() => state.listing.unlistOwn(producer, true));
+	}
 	return producer;
 }
 
@@ -183,21 +206,28 @@ function closeState(state: BroadcastState) {
 	state.closers.clear();
 }
 
-// The producer already serving `name`, evicting entries that can no longer serve it.
-function lookup(state: BroadcastState, name: string): track.Producer | undefined {
-	const inserted = state.tracks.get(name);
+// The producer already serving `name`, or its metadata copy when `meta`, evicting entries that can
+// no longer serve it. The application inserts payload tracks alone.
+function lookup(state: BroadcastState, name: string, meta = false): track.Producer | undefined {
+	const inserted = meta ? undefined : state.tracks.get(name);
 	if (inserted) {
 		if (!(hooks.trackReleased(inserted).peek() instanceof Error)) return inserted;
 		state.tracks.delete(name);
 	}
 
-	const requested = state.requests.get(name);
+	const requests = requestsOf(state, meta);
+	const requested = requests.get(name);
 	if (requested) {
 		if (hooks.trackReleased(requested).peek() === undefined) return requested;
-		state.requests.delete(name);
+		requests.delete(name);
 	}
 
 	return undefined;
+}
+
+// The on-demand producers for payload copies, or for metadata copies when `meta`.
+function requestsOf(state: BroadcastState, meta: boolean): Map<string, track.Producer> {
+	return meta ? state.metaRequests : state.requests;
 }
 
 // The producer serving `name`, or a new one with a request queued for it.
@@ -207,15 +237,19 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 // lookup fans out from one request instead of opening another. Whoever serves it closes it once
 // unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
 // the entry so a later subscribe requests the track again.
-function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
+//
+// A metadata reader (`meta`) gets a logical track of its own only where the handler fills one
+// (`state.meta`), and the payload one otherwise, whose headers it takes.
+function logical(state: BroadcastState, name: string, meta = false): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
 	}
 
-	const existing = lookup(state, name);
+	const copy = meta && state.meta;
+	const existing = lookup(state, name, copy);
 	if (existing) return { producer: existing, requested: false };
 
-	const producer = createProducer(state, name);
+	const producer = createProducer(state, name, copy);
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
@@ -225,38 +259,43 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 
 	const lookups = new Lookups();
 	state.lookups.set(producer, lookups);
-	state.requests.set(name, producer);
+	const requests = requestsOf(state, copy);
+	requests.set(name, producer);
 	void hooks.trackReleased(producer).then(() => {
-		if (state.requests.get(name) === producer) state.requests.delete(name);
+		if (requests.get(name) === producer) requests.delete(name);
 	});
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, pending: state.pending, lookups }));
+		requested.push(hooks.makeRequest({ name, producer, pending: state.pending, lookups, meta: copy }));
 	});
 
 	return { producer, requested: true };
 }
 
-function subscribe(state: BroadcastState, name: string, options?: track.Subscription): track.Subscriber {
-	return logical(state, name).producer.subscribe(options);
+function subscribe(state: BroadcastState, name: string, options?: track.Subscription, meta = false): track.Subscriber {
+	return logical(state, name, meta).producer.subscribe(options);
 }
 
-// A lookup holds a request until `hold` aborts, even before the answer. An unanswered
-// request stays open for its handler; after acceptance nobody holding it releases it.
-async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
+// A lookup counts as the track's demand until `hold` aborts (without one, until the answer), before
+// and after acceptance, as a Rust `Resolving` does while held. An unanswered request stays open for its handler; after
+// acceptance, the last holder of a request a lookup opened releases it.
+async function resolveTrackInfo(
+	state: BroadcastState,
+	name: string,
+	hold?: AbortSignal,
+	meta = false,
+): Promise<track.Info> {
 	hold?.throwIfAborted();
-	const { producer, requested } = logical(state, name);
+	const { producer, requested } = logical(state, name, meta);
 	const lookups = state.lookups.get(producer);
-	if (!lookups) return producer.info();
-	if (requested) lookups.opened = true;
-	lookups.pending.update((pending) => pending + 1);
+	if (lookups && requested) lookups.opened = true;
+	const unhold = hooks.holdTrack(producer);
 
 	const info = producer.info();
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending.peek() === 0 && producer.demand().wanted.peek() === undefined)
-			hooks.releaseTrack(producer);
+		if (lookups?.opened && !producer.demand().wanted.peek()) hooks.releaseTrack(producer);
 	};
 	info.then(
 		() => {
@@ -267,7 +306,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	);
 	const end = () => {
 		ended = true;
-		lookups.pending.update((pending) => pending - 1);
+		unhold();
 		if (answered) release();
 	};
 
@@ -283,8 +322,8 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string): track.Position | undefined {
-	const producer = lookup(state, name);
+function largest(state: BroadcastState, name: string, meta = false): track.Position | undefined {
+	const producer = lookup(state, name, meta && state.meta);
 	return producer && hooks.cachedLargest(producer);
 }
 
@@ -297,26 +336,34 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
-	sequence: bigint,
+	key: bigint,
 	options: track.FetchGroupOptions = {},
+	meta = false,
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(state, name, {
-		...track.Subscription.default(),
-		priority: options.priority,
-		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1n } }],
-	});
-	hooks.fetchBudget(subscriber, options.maxDelay);
+	const subscriber = subscribe(
+		state,
+		name,
+		{
+			...track.Subscription.default(),
+			priority: options.priority,
+			ranges: [{ start: key, end: key }],
+			placed: new Map([[0, key]]),
+		},
+		meta,
+	);
+	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
+	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {
 		// Judged in this turn when the track is known, so a cached group is taken before anything
 		// else can change it. A track requested on demand opens its handler once accepted, so its
 		// miss is judged then.
-		let asked = hooks.askFetch(subscriber, sequence);
+		let asked = hooks.askFetch(subscriber, key);
 		if (asked === "pending") {
 			await untilAborted(subscriber.info(), options.signal);
-			asked = hooks.askFetch(subscriber, sequence);
+			asked = hooks.askFetch(subscriber, key);
 		}
-		if (asked !== true) throw new NotFound(`group ${sequence}`);
+		if (asked !== true) throw new NotFound(`group ${key}`);
 		for (;;) {
 			const recv = hooks.tryRecvGroup(subscriber, true);
 			switch (recv.kind) {
@@ -324,8 +371,10 @@ async function fetchGroup(
 					// Close the subscription once the caller has read or released the group, not
 					// now: an in-progress group must keep receiving frames for its lifetime
 					// (mirrors Rust poll_fetch), and a failed group's unread frames stay in the
-					// cache's reach, billed and evictable, until the caller lets them go.
-					void hooks.groupDone(recv.group).then(() => subscriber.close());
+					// cache's reach, expirable, until the caller lets them go.
+					void (
+						(options as FetchFrom).held ? hooks.groupReleased(recv.group) : hooks.groupDone(recv.group)
+					).then(() => subscriber.close());
 					return recv.group;
 				case "drop":
 					// Its own reason, so a stale verdict stays OLD: a relay's fill asking under this
@@ -334,7 +383,7 @@ async function fetchGroup(
 				case "error":
 					throw recv.error;
 				case "done":
-					throw new NotFound(`group ${sequence}`);
+					throw new NotFound(`group ${key}`);
 			}
 			await untilAborted(changed(subscriber), options.signal);
 		}
@@ -342,6 +391,22 @@ async function fetchGroup(
 		subscriber.close();
 		throw err;
 	}
+}
+
+/**
+ * A FETCH's first frame, which the lite publisher passes to {@link fetchGroup} beside its public
+ * options. An application always fetches a group from frame 0, as in Rust.
+ *
+ * @internal
+ */
+export interface FetchFrom {
+	frameStart?: number;
+	/**
+	 * Keep the fetch's subscription, which judges the group's budget, until the reader releases
+	 * the group rather than once it reads the end: a publisher still owed an acknowledgement
+	 * resets a response that goes stale meanwhile.
+	 */
+	held?: boolean;
 }
 
 // Settles once a read of `subscriber` may go differently.
@@ -354,9 +419,9 @@ function changed(subscriber: track.Subscriber): Promise<void> {
 	});
 }
 
-// Remove and return the request queued for `name`, if no handler has taken it yet.
+// Remove and return the payload request queued for `name`, if no handler has taken it yet.
 function takeQueued(state: BroadcastState, name: string): track.Request | undefined {
-	const queued = state.requested.peek().find((request) => request.name === name);
+	const queued = state.requested.peek().find((request) => request.name === name && !request.meta);
 	if (!queued) return undefined;
 	state.requested.mutate((requests) => {
 		requests.splice(requests.indexOf(queued), 1);
@@ -364,18 +429,29 @@ function takeQueued(state: BroadcastState, name: string): track.Request | undefi
 	return queued;
 }
 
+// What a metadata reader resolves names through where the handler fills metadata copies apart
+// (`state.meta`): undefined elsewhere, where it reads the payload copies through `view` itself.
+function metaView(state: BroadcastState, view: Produced): () => Broadcast | undefined {
+	const meta: Produced = {
+		...view,
+		subscribe: (name, options) => subscribe(state, name, options, true),
+		resolveTrackInfo: (name, hold) => resolveTrackInfo(state, name, hold, true),
+		largest: (name) => largest(state, name, true),
+		fetchGroup: (name, key, options) => fetchGroup(state, name, key, options, true),
+	};
+	return () => (state.meta ? meta : undefined);
+}
+
 // Serve `producer` as the broadcast's track for its name, listed with `info`.
 function adopt(state: BroadcastState, producer: track.Producer, info: track.Info): void {
-	const lookups = state.lookups.get(producer) ?? new Lookups();
-	state.lookups.set(producer, lookups);
 	state.tracks.set(producer.name, producer);
-	state.listing.listOwn(producer.name, producer, info);
+	state.listing.listTrack(producer, info);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
 	void hooks.trackReleased(producer).then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
-		state.listing.unlistOwn(producer.name, producer);
+		state.listing.unlistOwn(producer);
 	});
 }
 
@@ -389,20 +465,21 @@ export class Producer {
 	#path = Path.empty();
 
 	constructor() {
-		registerWire(this, {
+		const view: Produced = {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
+			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
-			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			createDatagrams: (name, info, listed) => createDatagrams(this.#state, name, info, listed),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
 			lister: () => makeLister(this.#state.listing),
-		});
+		};
+		registerWire(this, { ...view, meta: metaView(this.#state, view) });
 	}
 
 	static {
@@ -444,16 +521,18 @@ export class Producer {
 	}
 
 	/**
-	 * Create a track, insert it into the broadcast, and return its producer.
+	 * Create a track, insert it into the broadcast, and return its producer, or `undefined` while
+	 * an open track or a live request holds the name.
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
-	 * An append on the track throws if it would reuse a sequence an earlier track of the name
-	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name. `info` resolves as
-	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
+	 * An append on the track throws if it would reuse a key an earlier track of the name
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if the
+	 * broadcast is closed, or if the name holds a lone surrogate, which UTF-8 cannot carry. `info`
+	 * resolves as {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live
+	 * edge only.
 	 */
-	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer | undefined {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -471,7 +550,7 @@ export class Producer {
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
 		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
-			throw new Error(`duplicate track: ${name}`);
+			return undefined;
 		}
 
 		const producer = createProducer(this.#state, name).accept(info);
@@ -479,8 +558,11 @@ export class Producer {
 		return producer;
 	}
 
-	/** Create a live datagram track in a namespace separate from stream tracks. */
-	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer {
+	/**
+	 * Create a live datagram track in a namespace separate from stream tracks, or `undefined`
+	 * while a live datagram track holds the name.
+	 */
+	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer | undefined {
 		return createDatagrams(this.#state, name, info);
 	}
 
@@ -492,7 +574,7 @@ export class Producer {
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
-		this.#state.listing.unlistOwn(name, track);
+		this.#state.listing.unlistOwn(track);
 	}
 
 	/** A lazy read handle for a track on this broadcast. */
@@ -510,7 +592,7 @@ export class Producer {
 interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
-	instance?: Instance.Valid;
+	identity?: Identity.Valid;
 	unlisted?: boolean;
 }
 
@@ -529,7 +611,7 @@ let makeConsumer: (shared: Shared) => Consumer;
 export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
-	#instance?: Instance.Valid;
+	#identity?: Identity.Valid;
 	// Served on request through a route claiming a shorter prefix, which names no broadcast to list.
 	#unlisted: boolean;
 
@@ -539,7 +621,7 @@ export class Consumer {
 	protected constructor(shared?: never);
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
-		this.#instance = shared?.instance;
+		this.#identity = shared?.identity;
 		this.#unlisted = shared?.unlisted ?? false;
 		if (shared) {
 			this.#state = shared.state;
@@ -551,20 +633,21 @@ export class Consumer {
 			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
-		registerWire(this, {
+		const view: Produced = {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
+			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
-			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			createDatagrams: (name, info, listed) => createDatagrams(this.#state, name, info, listed),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
 			lister: () => makeLister(this.#state.listing),
-		});
+		};
+		registerWire(this, { ...view, meta: metaView(this.#state, view) });
 	}
 
 	static {
@@ -573,13 +656,23 @@ export class Consumer {
 			if (target instanceof Consumer) target.#path = path;
 			else stampProducer(target, path);
 		};
-		hooks.stampInstance = (target, instance) => {
-			target.#instance = instance;
+		hooks.stampIdentity = (target, identity) => {
+			target.#identity = identity;
 		};
 		hooks.stampUnlisted = (target) => {
 			target.#unlisted = true;
 		};
 		hooks.unlisted = (target) => target.#unlisted;
+		hooks.serveMeta = (target) => {
+			target.#state.meta = true;
+		};
+		hooks.resolveHeld = (target, name, hold) => {
+			const state = target.#state;
+			if (state.closed.peek() !== undefined) return undefined;
+			const producer = lookup(state, name);
+			if (!producer || !hooks.acceptedInfo(producer)) return undefined;
+			return resolveTrackInfo(state, name, hold);
+		};
 	}
 
 	/**
@@ -595,14 +688,14 @@ export class Consumer {
 	}
 
 	/**
-	 * The instance of the route an origin resolved this handle through: the stream it reads.
+	 * The identity of the route an origin resolved this handle through: the stream it reads.
 	 *
 	 * An origin stamps it with each request's result, so it names the stream actually serving
 	 * this handle even when the request named none. `undefined` for a handle not handed out by
 	 * an origin.
 	 */
-	get instance(): Instance.Valid | undefined {
-		return this.#instance;
+	get identity(): Identity.Valid | undefined {
+		return this.#identity;
 	}
 
 	/**
@@ -632,24 +725,35 @@ export class Consumer {
 	/**
 	 * This consumer's backing state and path, for a clone. Opaque (`never`) so the state type
 	 * stays unexported; a subclass passes it straight back into its own `super(...)`.
+	 *
+	 * @internal
 	 */
 	protected shareState(): never {
 		return {
 			state: this.#state,
 			path: this.#path,
-			instance: this.#instance,
+			identity: this.#identity,
 			unlisted: this.#unlisted,
 		} satisfies Shared as never;
 	}
 
 	/** Read a datagram track live from now, independently of any same-name stream track. */
 	datagrams(name: string): datagram.Consumer {
+		checkName(name);
 		return wireOf(this).datagrams(name);
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
 	track(name: string): track.Consumer {
 		return trackOf(name, this);
+	}
+
+	/**
+	 * Get a lazy handle to a track's metadata: its groups and each frame's header, without the
+	 * payload. See {@link Meta}.
+	 */
+	meta(name: string): Meta.Consumer {
+		return Meta.consumerOf(trackMetaOf(name, this));
 	}
 
 	/**

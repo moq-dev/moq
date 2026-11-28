@@ -28,11 +28,17 @@ pub struct Text {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub renditions: BTreeMap<String, TextConfig>,
 }
 
-impl crate::catalog::Section for Text {
-	const MAP: &'static str = "renditions";
+impl crate::catalog::Entry for TextConfig {
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
+	}
 }
 
 impl Text {
@@ -77,6 +83,7 @@ pub struct TextConfig {
 	/// broadcast that served this catalog (e.g. `../source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -87,18 +94,8 @@ pub struct TextConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
-
-	/// The instance of the stream the reference names, when the catalog knows it. Absent names
-	/// whichever stream the reader resolves first, as in every catalog before this field.
-	///
-	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
-	/// over a wire that carries no instance has one its session minted, which proves nothing,
-	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
-	/// catalog's own stream.
-	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub instance: Option<moq_net::Instance>,
 
 	/// The serialization format of each cue payload.
 	#[serde_as(as = "DisplayFromStr")]
@@ -110,10 +107,14 @@ pub struct TextConfig {
 	pub role: TextRole,
 
 	/// The BCP-47 language tag of the track (e.g. `en`, `es-419`), if known.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub lang: Option<String>,
 
 	/// A human-readable label for a track picker, when `lang` alone is ambiguous (e.g. distinguishing
 	/// "English" from "English (SDH)").
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub label: Option<String>,
 
 	/// Container format for frame encoding. Defaults to "legacy" (a microsecond timestamp prefix
@@ -121,10 +122,10 @@ pub struct TextConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay, in milliseconds, before the publisher flushes the next cue. A consumer's
-	/// jitter buffer should be at least this large. Absent means each cue is flushed immediately.
-	///
-	/// Serialized as an integer number of milliseconds, rounded up.
+	/// The largest media span the publisher hands to the transport behind a cue's timestamp, with
+	/// the same meaning and whole-millisecond encoding as
+	/// [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter). A cue written in timestamp
+	/// order adds nothing.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
@@ -162,7 +163,6 @@ impl TextConfig {
 		Self {
 			broadcast: None,
 			track: None,
-			instance: None,
 			format,
 			role: TextRole::default(),
 			lang: None,

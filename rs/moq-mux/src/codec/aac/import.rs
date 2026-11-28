@@ -9,8 +9,8 @@ use crate::container::Frame;
 /// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend
 /// it): frames accumulate into the current group until the caller [`cut`](Self::cut)s or
 /// [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade passes that through,
-/// so boundaries are the caller's either way: cut per packet for one group (one QUIC stream) the
-/// relay forwards without waiting, or less often to batch frames into fewer groups. The codec's
+/// so boundaries are the caller's either way: [`Join`](crate::container::Join) says when a group
+/// (one QUIC stream) holds its 100 ms. The codec's
 /// packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
@@ -54,10 +54,19 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::AudioConfig>> {
+		self.track.finish()
+	}
+
+	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
+	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
+		self.track.end_with(None)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -85,9 +94,9 @@ impl Import {
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 

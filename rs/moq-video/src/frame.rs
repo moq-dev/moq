@@ -31,9 +31,9 @@
 
 use std::borrow::Cow;
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 use moq_net::Timestamp;
@@ -90,11 +90,11 @@ impl Frame {
 ///
 /// The four bytes are the kernel DRM fourcc, kept as a newtype so a stride,
 /// PipeWire format id, or another bare integer cannot be passed accidentally.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DrmFormat(u32);
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DrmFormat {
 	/// Semi-planar 8-bit 4:2:0 YUV: one luma plane, one interleaved Cb/Cr plane.
 	pub const NV12: Self = Self::from_bytes(*b"NV12");
@@ -121,14 +121,14 @@ impl DrmFormat {
 }
 
 /// One plane within a Linux DMA-BUF allocation.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmaBufPlane {
 	offset: u32,
 	stride: u32,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufPlane {
 	/// Describe a plane's byte offset and row stride.
 	pub const fn new(offset: u32, stride: u32) -> Self {
@@ -151,7 +151,7 @@ impl DmaBufPlane {
 /// Keep this value alive for as long as an external device may read from the
 /// descriptor returned by [`as_fd`](Self::as_fd). Dropping it releases the
 /// producer's buffer when no other frame or export still owns that lease.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub struct DmaBufExport {
 	fd: OwnedFd,
 	#[cfg_attr(
@@ -170,10 +170,10 @@ pub struct DmaBufExport {
 /// it here. A screen frame's fence signals within a frame time; anything past
 /// this is a wedged compositor, and the caller's CPU fallback beats blocking a
 /// render thread forever.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 const DMA_BUF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 	let mut event = libc::pollfd {
 		fd: fd.as_raw_fd(),
@@ -217,7 +217,7 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufExport {
 	/// Borrow the exported descriptor without separating it from its producer lease.
 	pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
@@ -232,14 +232,14 @@ impl DmaBufExport {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::os::fd::AsFd for DmaBufExport {
 	fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
 		std::os::fd::AsFd::as_fd(&self.fd)
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for DmaBufExport {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("DmaBufExport").finish_non_exhaustive()
@@ -253,7 +253,7 @@ impl std::fmt::Debug for DmaBufExport {
 /// consumer is ready to import it, avoiding one open fd for every buffered
 /// frame. Dropping the last clone or [`DmaBufExport`] releases the producer's
 /// buffer.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub struct DmaBuf {
 	format: DrmFormat,
@@ -265,7 +265,7 @@ pub struct DmaBuf {
 	inner: Arc<dyn DmaBufFrame>,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for DmaBuf {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("DmaBuf")
@@ -278,7 +278,7 @@ impl std::fmt::Debug for DmaBuf {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBuf {
 	/// Retain an external DMA-BUF and its producer's release guard.
 	///
@@ -368,7 +368,7 @@ impl DmaBuf {
 }
 
 /// The format, tiling, and plane layout of an external DMA-BUF.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 pub(crate) struct DmaBufLayout {
 	/// DRM fourcc describing the pixel format.
@@ -383,7 +383,7 @@ pub(crate) struct DmaBufLayout {
 	pub(crate) color: Option<Color>,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufLayout {
 	/// Describe linear planes and set optional tiling and color fields afterward.
 	#[cfg(test)]
@@ -398,13 +398,13 @@ impl DmaBufLayout {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 struct ExternalDmaBuf<T: Send + Sync + 'static> {
 	fd: OwnedFd,
 	_owner: T,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl<T: Send + Sync + 'static> DmaBufFrame for ExternalDmaBuf<T> {
 	fn export(&self) -> std::io::Result<OwnedFd> {
 		self.fd.try_clone()
@@ -420,7 +420,7 @@ impl<T: Send + Sync + 'static> DmaBufFrame for ExternalDmaBuf<T> {
 ///
 /// Kept private to the crate so backend lifetimes and download mechanisms do
 /// not become public implementable API. [`DmaBuf`] is the stable consumer seam.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub(crate) trait DmaBufFrame: Send + Sync {
 	fn export(&self) -> std::io::Result<OwnedFd>;
 	fn download_i420(&self) -> Result<I420, Error>;
@@ -461,7 +461,7 @@ pub enum Surface {
 	#[cfg(target_os = "linux")]
 	Vulkan(vulkan::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	DmaBuf(DmaBuf),
 	/// Zero-copy GPU buffer (Android `AHardwareBuffer`, 4:2:0 8-bit). Produced
 	/// only by the MediaCodec decoder.
@@ -483,7 +483,7 @@ impl Surface {
 			Surface::Cuda(c) => c.width,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.width(),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.width,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.width,
@@ -502,12 +502,45 @@ impl Surface {
 			Surface::Cuda(c) => c.height,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.height(),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.height,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.height,
 			Surface::I420(i) => i.height,
 		}
+	}
+
+	/// A second handle on this picture, which capture keeps to repeat a still
+	/// screen. A GPU surface is retained rather than copied. `None` for an Android
+	/// buffer, which holds a decoder's queue slot and never comes from capture.
+	#[cfg(feature = "capture")]
+	pub(crate) fn retain(&self) -> Option<Self> {
+		Some(match self {
+			#[cfg(apple)]
+			Surface::PixelBuffer(s) => Surface::PixelBuffer(apple::PixelBuffer {
+				buffer: s.buffer.clone(),
+				width: s.width,
+				height: s.height,
+				color: s.color,
+			}),
+			#[cfg(target_os = "windows")]
+			Surface::Texture(t) => Surface::Texture(d3d11::Texture {
+				device: t.device.clone(),
+				texture: t.texture.clone(),
+				width: t.width,
+				height: t.height,
+				color: t.color,
+			}),
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Cuda(c) => Surface::Cuda(c.clone()),
+			#[cfg(target_os = "linux")]
+			Surface::Vulkan(v) => Surface::Vulkan(v.clone()),
+			#[cfg(target_os = "linux")]
+			Surface::DmaBuf(d) => Surface::DmaBuf(d.clone()),
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(_) => return None,
+			Surface::I420(i) => Surface::I420(i.clone()),
+		})
 	}
 
 	/// Convert tightly-packed RGBA (`width * height * 4` bytes, no row padding) to
@@ -613,7 +646,7 @@ impl Surface {
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Surface::DmaBuf(buffer) if output == crate::Output::Native => {
-				match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
+				match vaapi::resize(buffer, size, config.device.render()) {
 					Ok(scaled) => Surface::DmaBuf(scaled),
 					Err(err) => {
 						static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -703,7 +736,7 @@ impl Surface {
 			Surface::Cuda(c) => c.color(),
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => None,
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.color,
@@ -727,7 +760,7 @@ impl Surface {
 			Surface::Cuda(cuda) => &mut cuda.color,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => return,
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(buffer) => &mut buffer.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(buffer) => &mut buffer.color,
@@ -756,7 +789,7 @@ impl Surface {
 			Surface::Vulkan(_) => Err(Error::Unsupported(
 				"External Vulkan surfaces have no CPU mapping or download fallback".into(),
 			)),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => Ok(Cow::Owned(b.download_i420()?)),
@@ -1572,10 +1605,11 @@ pub mod apple {
 	use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-		CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-		kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
-		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+		CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
+		CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+		kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
+		kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey,
+		kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 	use objc2_video_toolbox::VTPixelTransferSession;
@@ -1732,21 +1766,14 @@ pub mod apple {
 			let (w, h) = (self.width as usize, self.height as usize);
 			let (cw, ch) = (w / 2, h / 2);
 
-			let status = unsafe { CVPixelBufferLockBaseAddress(&self.buffer, LOCK_READ_ONLY) };
-			if status != 0 {
-				return Err(Error::codec(anyhow::anyhow!(
-					"CVPixelBufferLockBaseAddress failed: {status}"
-				)));
-			}
-			let _guard = UnlockGuard(&self.buffer);
+			let locked = Locked::new(&self.buffer, LOCK_READ_ONLY)?;
 
 			let mut data = vec![0u8; I420::len(Size::new(self.width, self.height))?];
 			let (luma, chroma) = data.split_at_mut(w * h);
 			let (u_plane, v_plane) = chroma.split_at_mut(cw * ch);
 
 			// Plane 0: Y, copied row by row honoring stride.
-			let y_base = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 0) as *const u8;
-			let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 0);
+			let (y_base, y_stride) = locked.plane(0, w, h)?;
 			for row in 0..h {
 				unsafe {
 					ptr::copy_nonoverlapping(y_base.add(row * y_stride), luma[row * w..].as_mut_ptr(), w);
@@ -1754,8 +1781,7 @@ pub mod apple {
 			}
 
 			// Plane 1: interleaved UV -> split into U and V.
-			let uv_base = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 1) as *const u8;
-			let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 1);
+			let (uv_base, uv_stride) = locked.plane(1, cw * 2, ch)?;
 			for row in 0..ch {
 				let src = unsafe { uv_base.add(row * uv_stride) };
 				for col in 0..cw {
@@ -1904,11 +1930,53 @@ pub mod apple {
 			.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build CFNumber")))
 	}
 
-	struct UnlockGuard<'a>(&'a CVPixelBuffer);
+	/// A pixel buffer with its base address locked, unlocked on drop so no early
+	/// return leaks the lock.
+	struct Locked<'a> {
+		buffer: &'a CVPixelBuffer,
+		flags: CVPixelBufferLockFlags,
+	}
 
-	impl Drop for UnlockGuard<'_> {
+	impl<'a> Locked<'a> {
+		fn new(buffer: &'a CVPixelBuffer, flags: CVPixelBufferLockFlags) -> Result<Self, Error> {
+			let status = unsafe { CVPixelBufferLockBaseAddress(buffer, flags) };
+			if status != 0 {
+				return Err(Error::codec(anyhow::anyhow!(
+					"CVPixelBufferLockBaseAddress failed: {status}"
+				)));
+			}
+			Ok(Self { buffer, flags })
+		}
+
+		/// Plane `index`'s base address and row stride, checked to hold `rows`
+		/// rows of `row_bytes` each, so copying that much stays inside it.
+		fn plane(&self, index: usize, row_bytes: usize, rows: usize) -> Result<(*mut u8, usize), Error> {
+			let planes = CVPixelBufferGetPlaneCount(self.buffer);
+			if index >= planes {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer has {planes} planes, not plane {index}"
+				)));
+			}
+			let base = CVPixelBufferGetBaseAddressOfPlane(self.buffer, index).cast::<u8>();
+			let stride = CVPixelBufferGetBytesPerRowOfPlane(self.buffer, index);
+			let height = CVPixelBufferGetHeightOfPlane(self.buffer, index);
+			if base.is_null() {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer plane {index} has no base address"
+				)));
+			}
+			if stride < row_bytes || height < rows {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer plane {index} is {stride} bytes by {height} rows, too small for {row_bytes} by {rows}"
+				)));
+			}
+			Ok((base, stride))
+		}
+	}
+
+	impl Drop for Locked<'_> {
 		fn drop(&mut self) {
-			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
+			unsafe { CVPixelBufferUnlockBaseAddress(self.buffer, self.flags) };
 		}
 	}
 
@@ -1994,33 +2062,25 @@ pub mod apple {
 			.map(|p| unsafe { CFRetained::from_raw(p) })
 			.ok_or_else(|| Error::codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
 
-		let flags = CVPixelBufferLockFlags(0);
-		let status = unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) };
-		if status != 0 {
-			return Err(Error::codec(anyhow::anyhow!(
-				"CVPixelBufferLockBaseAddress failed: {status}"
-			)));
+		{
+			let locked = Locked::new(&buffer, CVPixelBufferLockFlags(0))?;
+			copy_plane(&locked, 0, frame.y(), w, h)?;
+			copy_plane(&locked, 1, frame.u(), cw, ch)?;
+			copy_plane(&locked, 2, frame.v(), cw, ch)?;
 		}
-
-		copy_plane(&buffer, 0, frame.y(), w, h);
-		copy_plane(&buffer, 1, frame.u(), cw, ch);
-		copy_plane(&buffer, 2, frame.v(), cw, ch);
-
-		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 		Ok(buffer)
 	}
 
 	/// Copy a tightly-packed source plane into a pixel-buffer plane, honoring its
 	/// (possibly padded) row stride.
-	fn copy_plane(buffer: &CVPixelBuffer, plane: usize, src: &[u8], row_bytes: usize, rows: usize) {
-		let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) as *mut u8;
-		let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+	fn copy_plane(locked: &Locked, plane: usize, src: &[u8], row_bytes: usize, rows: usize) -> Result<(), Error> {
+		let (base, stride) = locked.plane(plane, row_bytes, rows)?;
 		for y in 0..rows {
-			unsafe {
-				let dst = base.add(y * stride);
-				std::ptr::copy_nonoverlapping(src[y * row_bytes..].as_ptr(), dst, row_bytes);
-			}
+			let row = &src[y * row_bytes..(y + 1) * row_bytes];
+			// SAFETY: `plane` checked the plane holds `rows` rows of `row_bytes`.
+			unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), base.add(y * stride), row_bytes) };
 		}
+		Ok(())
 	}
 }
 
@@ -2964,6 +3024,56 @@ mod tests {
 		);
 	}
 
+	/// A real frame from a Sony ZV-E10 (MJPEG-only UVC, 4:2:2, sent without an
+	/// end-of-image marker), byte for byte as the V4L2 and PipeWire paths
+	/// receive it. Each 80x80 block of the luma, and the mean of each chroma
+	/// plane, must match ffmpeg's decode of the same file, so a squashed,
+	/// shifted, or torn picture fails. ffmpeg's full-to-limited range scaling
+	/// rounds a little higher than the RGB round trip does, up to 4 on a block.
+	#[cfg(all(target_os = "linux", feature = "capture"))]
+	#[test]
+	fn mjpeg_capture_decodes_a_real_camera_frame() {
+		const FRAME: &[u8] = include_bytes!("frame/test_data/zv_e10_1280x720.jpg");
+		#[rustfmt::skip]
+		const FFMPEG_LUMA: [u8; 144] = [
+			18, 17, 19, 25, 39, 34, 33, 27, 21, 19, 20, 19, 23, 31, 30, 24,
+			18, 18, 20, 24, 29, 26, 35, 28, 56, 21, 36, 25, 27, 30, 31, 27,
+			18, 19, 20, 20, 20, 40, 51, 55, 66, 19, 32, 17, 24, 31, 30, 24,
+			18, 18, 19, 17, 20, 36, 114, 54, 30, 18, 32, 19, 28, 29, 29, 24,
+			17, 18, 17, 18, 19, 48, 121, 69, 39, 20, 26, 21, 23, 26, 20, 22,
+			17, 17, 16, 28, 24, 35, 80, 62, 53, 24, 24, 25, 28, 25, 19, 21,
+			17, 17, 16, 34, 43, 61, 86, 62, 20, 22, 24, 27, 26, 24, 20, 18,
+			19, 18, 16, 21, 38, 27, 54, 30, 18, 18, 24, 20, 22, 19, 17, 20,
+			19, 19, 16, 16, 19, 18, 54, 23, 17, 17, 19, 17, 19, 17, 17, 17,
+		];
+		let size = Size::new(1280, 720);
+		let frame = super::I420::from_mjpeg(FRAME, size).expect("camera frame to i420");
+		assert_eq!(frame.size(), size);
+		let luma = size.pixels() as usize;
+		let (width, block) = (1280, 80);
+		for (index, want) in FFMPEG_LUMA.iter().enumerate() {
+			let (column, row) = (index % 16, index / 16);
+			let sum: usize = (0..block)
+				.flat_map(|y| (0..block).map(move |x| (row * block + y) * width + column * block + x))
+				.map(|offset| usize::from(frame.data()[offset]))
+				.sum();
+			let got = sum / (block * block);
+			assert!(
+				got.abs_diff(usize::from(*want)) <= 4,
+				"block {column},{row}: {got}, ffmpeg {want}"
+			);
+		}
+		let chroma = luma / 4;
+		let mean = |plane: &[u8]| plane.iter().map(|&c| usize::from(c)).sum::<usize>() / chroma;
+		let (u, v) = frame.data()[luma..].split_at(chroma);
+		assert!(
+			mean(u).abs_diff(125) <= 1 && mean(v).abs_diff(133) <= 1,
+			"chroma {} {}",
+			mean(u),
+			mean(v)
+		);
+	}
+
 	/// A short buffer is rejected at construction rather than panicking later: the
 	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
 	/// a public `I420` has to be impossible to build malformed.
@@ -3043,7 +3153,7 @@ mod tests {
 		assert!(matches!(surface.to_i420().unwrap(), Cow::Borrowed(_)));
 	}
 
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	#[test]
 	fn to_i420_owns_downloaded_native_pixels() {
 		use std::borrow::Cow;
@@ -3291,6 +3401,19 @@ mod tests {
 		assert_eq!(actual.data(), expected.data());
 	}
 
+	/// A pixel buffer that claims a larger picture than CoreVideo allocated is
+	/// refused rather than read past its planes, and leaves it unlocked.
+	#[cfg(apple)]
+	#[test]
+	fn pixel_buffer_download_refuses_a_size_past_its_planes() {
+		let surface = nv12_surface(&gradient_i420(64, 48));
+		let oversized = super::apple::PixelBuffer::new(surface.buffer.clone(), 64, 480);
+		assert!(oversized.download_i420().is_err());
+
+		// The failed download released its lock, so the buffer still reads.
+		assert_eq!(surface.download_i420().unwrap().height, 48);
+	}
+
 	#[cfg(apple)]
 	use super::apple::nv12_surface;
 
@@ -3427,7 +3550,7 @@ mod tests {
 	}
 }
 
-#[cfg(all(test, target_os = "linux", feature = "dmabuf"))]
+#[cfg(all(test, target_os = "linux"))]
 mod external_dmabuf_tests {
 	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};

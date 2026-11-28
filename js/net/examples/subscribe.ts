@@ -5,16 +5,13 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url, consume: origin });
 
-	// Keep one publisher instance; wait.ts shows following publisher restarts.
-	const broadcast = origin.request(Moq.Path.from("my-broadcast"));
+	// Keep one publisher identity, or throw if none serves the path; wait.ts shows following
+	// publisher restarts. The request owns the broadcast, so close it when done.
+	const request = origin.request(Moq.Path.from("my-broadcast"));
+	const broadcast = await request.broadcast();
 
 	// Subscribe to a specific track (with the default subscription)
-	let active = broadcast.active.peek();
-	while (!active) {
-		await broadcast.active.changed();
-		active = broadcast.active.peek();
-	}
-	const track = active.track("chat").subscribe();
+	const track = broadcast.track("chat").subscribe();
 
 	// Read data as it arrives
 	for (;;) {
@@ -40,7 +37,7 @@ async function main() {
 	}
 
 	track.close();
-	broadcast.close();
+	request.close();
 	await connection.close();
 	origin.close();
 }

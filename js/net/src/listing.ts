@@ -1,74 +1,114 @@
 /**
  * A broadcast's track listing: the tracks it lists, reported to each reader in order.
  *
- * A track is listed while it is in the broadcast's table: created by its producer until it
- * aborts or is removed, or answered by a {@link Lister}, as a session lists its peer's tracks.
- * A track served only on request is never listed, and listing never requests one.
+ * A track is listed while it is in the broadcast's table: created by its producer (a track of
+ * groups until it aborts or is removed, a datagram track until it ends), or answered by a
+ * {@link Lister}, as a session lists its peer's tracks. A track served only on request is never
+ * listed, and listing never requests one.
  *
- * Each {@link Tracks} reader keeps its own queue, keyed by name in insertion order, so a
- * stalled reader holds at most one pending change per name: an add and a removal it has not
- * reached cancel, and a removal and re-add of a name it saw collapse in place. Its state is
- * bounded by the names it saw plus the live set, however long it stalls.
+ * Datagram tracks are a namespace apart from tracks of groups, so a name is listed at most once
+ * per kind.
+ *
+ * Each {@link Tracks} reader keeps its own queue, keyed by kind and name in insertion order, so a
+ * stalled reader holds at most one pending change per listed track: an add and a removal it has
+ * not reached cancel, and a removal and re-add of a track it saw collapse in place. Its state is
+ * bounded by the tracks it saw plus the live set, however long it stalls.
  *
  * @module
  */
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
+import type * as datagram from "./datagram.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
 import type * as track from "./track.ts";
 
 /**
+ * A listed track's kind and fixed properties: a track of groups with its {@link track.Info}, or
+ * with `datagrams` set, a datagram track with its {@link datagram.Info}.
+ *
+ * @public
+ */
+export type Listed = { datagrams?: false; info: track.Info } | { datagrams: true; info: datagram.Info };
+
+/**
  * What a {@link Tracks} listing reports, in order.
  *
- * `added`: a track the broadcast lists, with its fixed properties. `synced`: every track
- * listed when the listing began, and still listed, was reported; sent once, and later events
- * are live. `removed`: a track an earlier `added` reported is no longer listed, unfinished: its
- * producer aborted, or the answer that listed it withdrew it; a handler may still serve its name
- * on request. `finished`: a track an earlier `added` reported is no longer listed because it
- * finished.
+ * `added`: a track the broadcast lists, with its kind and fixed properties. `synced`: every
+ * track listed once the listing was complete (at once for a local broadcast, on its moq-lite
+ * upstream's SYNCED for a session's copy), and still listed, was reported; sent once, and later
+ * events are live. A session over moq-transport fails the listing instead, since that upstream
+ * never signals a complete list. `removed`: a track an earlier `added` reported is no longer listed,
+ * unfinished: its producer aborted, or the answer that listed it withdrew it; a handler may still
+ * serve its name on request. `finished`: a track an earlier `added` reported is no longer listed
+ * because it finished. A removal of a datagram track sets `datagrams`, as its `added` did.
  *
  * @public
  */
 export type TracksEvent =
-	| { kind: "added"; name: string; info: track.Info }
+	| ({ kind: "added"; name: string } & Listed)
 	| { kind: "synced" }
-	| { kind: "removed"; name: string }
-	| { kind: "finished"; name: string };
+	| { kind: "removed"; name: string; datagrams?: boolean }
+	| { kind: "finished"; name: string; datagrams?: boolean };
+
+/** A producer whose track the listing lists. */
+type Own = { datagrams?: false; producer: track.Producer } | { datagrams: true; producer: datagram.Producer };
 
 /**
- * Whether `own` leaves the listing as finished: it closed cleanly, or it declared its end and is
- * still open, as the Rust listing counts a producer that finished but still holds its track.
+ * Whether `own` leaves the listing as finished: it closed cleanly, or a track of groups declared
+ * its end and is still open, as the Rust listing counts a producer that finished but still holds
+ * its track.
  */
-function finished(own: track.Producer): boolean {
-	const released = hooks.trackReleased(own).peek();
-	return released === null || (released === undefined && hooks.trackFinished(own));
+function finished(own: Own): boolean {
+	if (own.datagrams) return own.producer.closed.peek() === null;
+	const released = hooks.trackReleased(own.producer).peek();
+	return released === null || (released === undefined && hooks.trackFinished(own.producer));
+}
+
+/**
+ * The key a listed track is held under: its kind, then its name, so the kinds never collide.
+ *
+ * @internal
+ */
+export function keyOf(name: string, datagrams: boolean | undefined): string {
+	return (datagrams ? "d" : "t") + name;
+}
+
+/** The event for the track under `key` leaving the listing. */
+function removal(key: string, finished: boolean): TracksEvent {
+	const kind = finished ? "finished" : "removed";
+	const name = key.slice(1);
+	return key[0] === "d" ? { kind, name, datagrams: true } : { kind, name };
 }
 
 /** One listed track and who lists it. */
 interface Entry {
-	info: track.Info;
+	listed: Listed;
 	/** The producer whose track lists it, so a stale unlist never removes a later track of the name. */
-	own?: track.Producer;
+	own?: Own;
 	/** Whether the lister's answer lists it. */
 	answered: boolean;
 }
 
 /**
- * A change a reader has yet to read. `readd` is a removal of a name it saw, then the name listed
- * again. A removal carries whether the track finished.
+ * A change a reader has yet to read. `readd` is a removal of a track it saw, then a track of the
+ * same kind and name listed again. A removal carries whether the track finished.
  */
 type Pending =
-	| { kind: "add"; info: track.Info }
+	| { kind: "add"; listed: Listed }
 	| { kind: "remove"; finished: boolean }
-	| { kind: "readd"; finished: boolean; info: track.Info };
+	| { kind: "readd"; finished: boolean; listed: Listed };
 
-/** One reader's pending changes, keyed by name in the order they happened. */
+/**
+ * Where one reader's SYNCED stands: the listing has not synced, SYNCED went out, or the keys of the
+ * changes queued when it synced. Those lead the queue, so SYNCED goes out once they were read, and
+ * a change queued later never postpones it.
+ */
+type Sync = "waiting" | "sent" | Set<string>;
+
+/** One reader's pending changes, keyed by kind and name in the order they happened. */
 class Queue {
 	pending = new Map<string, Pending>();
-	/** Events left to send before SYNCED, once the listing has synced. */
-	bound?: number;
-	/** SYNCED was sent. */
-	synced = false;
+	sync: Sync = "waiting";
 	/** `null` once the listing ended, or the error that ended it. */
 	end?: Error | null;
 	/** The reader left the listing, or a newer reader of its owner replaced it. */
@@ -79,38 +119,37 @@ class Queue {
 		this.changed.update((n) => n + 1);
 	}
 
-	add(name: string, info: track.Info) {
-		// A name is listed once at a time, so only its removal can be pending.
-		const pending = this.pending.get(name);
-		if (pending?.kind === "remove") this.pending.set(name, { kind: "readd", finished: pending.finished, info });
-		else this.pending.set(name, { kind: "add", info });
+	add(key: string, listed: Listed) {
+		// A track is listed once at a time, so only its removal can be pending.
+		const pending = this.pending.get(key);
+		if (pending?.kind === "remove") this.pending.set(key, { kind: "readd", finished: pending.finished, listed });
+		else this.pending.set(key, { kind: "add", listed });
 		this.wake();
 	}
 
-	remove(name: string, finished: boolean) {
+	remove(key: string, finished: boolean) {
 		// Never read: the two cancel. Otherwise the removal replaces a pending re-add in place.
-		if (this.pending.get(name)?.kind === "add") this.pending.delete(name);
-		else this.pending.set(name, { kind: "remove", finished });
+		if (this.pending.get(key)?.kind === "add") this.dequeue(key);
+		else this.pending.set(key, { kind: "remove", finished });
 		this.wake();
 	}
 
-	/** The events the pending changes take to read. */
-	events(): number {
-		let events = 0;
-		for (const pending of this.pending.values()) events += pending.kind === "readd" ? 2 : 1;
-		return events;
+	/** Drop the change queued under `key`, so SYNCED no longer waits on it. */
+	dequeue(key: string) {
+		this.pending.delete(key);
+		if (this.sync instanceof Set) this.sync.delete(key);
 	}
 
-	/** The listing synced: SYNCED goes out once what is queued now was read, or earlier if the queue drains first. */
-	sync() {
-		if (this.synced || this.bound !== undefined) return;
-		this.bound = this.events();
+	/** The listing synced: SYNCED goes out once what is queued now was read. */
+	synced() {
+		if (this.sync !== "waiting") return;
+		this.sync = new Set(this.pending.keys());
 		this.wake();
 	}
 
 	/** The listing's answer restarted before this reader was told it synced. */
 	unsync() {
-		if (!this.synced) this.bound = undefined;
+		if (this.sync instanceof Set) this.sync = "waiting";
 	}
 
 	finish(end: Error | null) {
@@ -120,7 +159,7 @@ class Queue {
 	}
 
 	ready(): boolean {
-		return this.end !== undefined || this.pending.size > 0 || (!this.synced && this.bound !== undefined);
+		return this.end !== undefined || this.pending.size > 0 || this.sync instanceof Set;
 	}
 
 	next(): TracksEvent | undefined {
@@ -128,31 +167,31 @@ class Queue {
 		if (this.end === null) {
 			// A clean end still reports each track that left before it, and how; an add the
 			// reader never read is dropped.
-			for (const [name, pending] of this.pending) {
-				this.pending.delete(name);
-				if (pending.kind !== "add") return { kind: pending.finished ? "finished" : "removed", name };
+			for (const [key, pending] of this.pending) {
+				this.pending.delete(key);
+				if (pending.kind !== "add") return removal(key, pending.finished);
 			}
 			return undefined;
 		}
-		if (!this.synced && this.bound !== undefined && (this.bound === 0 || this.pending.size === 0)) {
-			this.synced = true;
+		if (this.sync instanceof Set && this.sync.size === 0) {
+			this.sync = "sent";
 			return { kind: "synced" };
 		}
 		const first = this.pending.entries().next();
 		if (first.done) throw new Error("a ready queue has a pending change");
-		const [name, pending] = first.value;
-		if (!this.synced && this.bound !== undefined) this.bound -= 1;
+		const [key, pending] = first.value;
 		switch (pending.kind) {
 			case "add":
-				this.pending.delete(name);
-				return { kind: "added", name, info: pending.info };
+				this.dequeue(key);
+				return { kind: "added", name: key.slice(1), ...pending.listed };
 			case "remove":
-				this.pending.delete(name);
-				return { kind: pending.finished ? "finished" : "removed", name };
+				this.dequeue(key);
+				return removal(key, pending.finished);
 			case "readd":
-				// Setting an existing key keeps its place, so the add is read next.
-				this.pending.set(name, { kind: "add", info: pending.info });
-				return { kind: pending.finished ? "finished" : "removed", name };
+				// Setting an existing key keeps its place, so the add is read next, and SYNCED
+				// still waits on it if it did.
+				this.pending.set(key, { kind: "add", listed: pending.listed });
+				return removal(key, pending.finished);
 		}
 	}
 }
@@ -201,19 +240,19 @@ export class Listing {
 	/** Re-evaluate whether the listing has synced, telling readers when it changed. */
 	#resync(was: boolean) {
 		const now = this.#synced();
-		if (!was && now) for (const queue of this.#readers) queue.sync();
+		if (!was && now) for (const queue of this.#readers) queue.synced();
 		if (was && !now) for (const queue of this.#readers) queue.unsync();
 	}
 
-	#insert(name: string, entry: Entry) {
-		this.#live.set(name, entry);
-		for (const queue of this.#readers) queue.add(name, entry.info);
+	#insert(key: string, entry: Entry) {
+		this.#live.set(key, entry);
+		for (const queue of this.#readers) queue.add(key, entry.listed);
 	}
 
-	/** Unlist `name`, telling readers whether it `finished`. */
-	#remove(name: string, finished: boolean) {
-		if (!this.#live.delete(name)) return;
-		for (const queue of this.#readers) queue.remove(name, finished);
+	/** Unlist the track under `key`, telling readers whether it `finished`. */
+	#remove(key: string, finished: boolean) {
+		if (!this.#live.delete(key)) return;
+		for (const queue of this.#readers) queue.remove(key, finished);
 	}
 
 	/**
@@ -225,8 +264,8 @@ export class Listing {
 			throw new StreamError(StreamCode.Unroutable, { message: "broadcast is closed" });
 		}
 		const queue = new Queue();
-		for (const [name, entry] of this.#live) queue.pending.set(name, { kind: "add", info: entry.info });
-		if (this.#synced()) queue.bound = queue.pending.size;
+		for (const [key, entry] of this.#live) queue.pending.set(key, { kind: "add", listed: entry.listed });
+		if (this.#synced()) queue.sync = new Set(queue.pending.keys());
 		this.#readers.add(queue);
 		if (owner) {
 			const older = this.#owners.get(owner);
@@ -250,28 +289,39 @@ export class Listing {
 		this.#counted();
 	}
 
-	/** List a track `own` created. */
-	listOwn(name: string, own: track.Producer, info: track.Info) {
-		const entry = this.#live.get(name);
+	/** List the track of groups `producer` created. */
+	listTrack(producer: track.Producer, info: track.Info) {
+		this.#listOwn(producer.name, { producer }, { info });
+	}
+
+	/** List the datagram track `producer` created. */
+	listDatagrams(producer: datagram.Producer, info: datagram.Info) {
+		this.#listOwn(producer.name, { datagrams: true, producer }, { datagrams: true, info });
+	}
+
+	#listOwn(name: string, own: Own, listed: Listed) {
+		const key = keyOf(name, listed.datagrams);
+		const entry = this.#live.get(key);
 		if (!entry) {
-			this.#insert(name, { info, own, answered: false });
+			this.#insert(key, { listed, own, answered: false });
 		} else if (entry.own && !entry.answered) {
 			// The earlier track of the name has not unlisted yet, but it left the table for this
 			// one: readers see it go, as it ended, and the new one arrive.
-			this.#remove(name, finished(entry.own));
-			this.#insert(name, { info, own, answered: false });
+			this.#remove(key, finished(entry.own));
+			this.#insert(key, { listed, own, answered: false });
 		} else {
 			// Listed already by the answer, and it never stopped being listed: only the owner moves.
 			entry.own = own;
 		}
 	}
 
-	/** Unlist a track `own` created, as it ended, unless a later one took its name. */
-	unlistOwn(name: string, own: track.Producer) {
-		const entry = this.#live.get(name);
-		if (entry?.own !== own) return;
+	/** Unlist the track `producer` created, as it ended, unless a later one took its name. */
+	unlistOwn(producer: track.Producer | datagram.Producer, datagrams = false) {
+		const entry = this.#live.get(keyOf(producer.name, datagrams));
+		if (!entry?.own || entry.own.producer !== producer) return;
+		const own = entry.own;
 		entry.own = undefined;
-		if (!entry.answered) this.#remove(name, finished(own));
+		if (!entry.answered) this.#remove(keyOf(producer.name, datagrams), finished(own));
 	}
 
 	/** Lister support; see {@link Lister}. */
@@ -290,18 +340,28 @@ export class Listing {
 		this.#resync(was);
 	}
 
-	answerAdd(name: string, info: track.Info) {
-		const entry = this.#live.get(name);
+	answerAdd(name: string, listed: Listed) {
+		const key = keyOf(name, listed.datagrams);
+		const entry = this.#live.get(key);
 		if (entry?.answered) throw new Error(`duplicate listed track: ${name}`);
 		if (entry) entry.answered = true;
-		else this.#insert(name, { info, answered: true });
+		// Copied, so an event forwarded as the answer lends it nothing else.
+		else
+			this.#insert(key, {
+				listed: listed.datagrams ? { datagrams: true, info: listed.info } : { info: listed.info },
+				answered: true,
+			});
 	}
 
-	answerRemove(name: string, finished: boolean) {
-		const entry = this.#live.get(name);
-		if (!entry?.answered) throw new Error(`track not listed: ${name}`);
+	answerRemove(name: string, finished: boolean, datagrams = false) {
+		this.#answerRemove(keyOf(name, datagrams), finished);
+	}
+
+	#answerRemove(key: string, finished: boolean) {
+		const entry = this.#live.get(key);
+		if (!entry?.answered) throw new Error(`track not listed: ${key.slice(1)}`);
 		entry.answered = false;
-		if (!entry.own) this.#remove(name, finished);
+		if (!entry.own) this.#remove(key, finished);
 	}
 
 	answerSynced() {
@@ -318,8 +378,8 @@ export class Listing {
 	}
 
 	#unanswer() {
-		for (const [name, entry] of [...this.#live]) {
-			if (entry.answered) this.answerRemove(name, false);
+		for (const [key, entry] of [...this.#live]) {
+			if (entry.answered) this.#answerRemove(key, false);
 		}
 		this.#answered = false;
 	}
@@ -330,8 +390,8 @@ export class Listing {
 	 * track is what served it.
 	 */
 	close() {
-		for (const [name, entry] of [...this.#live]) {
-			if (entry.own && finished(entry.own)) this.#remove(name, true);
+		for (const [key, entry] of [...this.#live]) {
+			if (entry.own && finished(entry.own)) this.#remove(key, true);
 		}
 		this.detach(null);
 	}
@@ -359,7 +419,7 @@ export function listTracks(listing: Listing, owner?: object): Tracks {
 /**
  * The tracks a broadcast lists, from its consumer's `tracks()`.
  *
- * Reports every track listed when it was created, then `synced`, then each change as it
+ * Reports every track listed once the listing is complete, then `synced`, then each change as it
  * happens, until the broadcast ends: a clean end comes after each track that left before it, and
  * a track still listed then ends unfinished. Listing a broadcast never requests a track: subscribe to
  * each listed one through the consumer's `track(name)`.
@@ -448,19 +508,25 @@ export class Lister {
 		return this.#listing.closed;
 	}
 
-	/** List a track. Throws if this answer already lists it. */
-	add(name: string, info: track.Info): void {
-		this.#answering?.answerAdd(name, info);
+	/** List a track of the kind `listed` says. Throws if this answer already lists that kind and name. */
+	add(name: string, listed: Listed): void {
+		this.#answering?.answerAdd(name, listed);
 	}
 
-	/** Stop listing a track that left unfinished, reported as `removed`. Throws if this answer does not list it. */
-	remove(name: string): void {
-		this.#answering?.answerRemove(name, false);
+	/**
+	 * Stop listing a track that left unfinished, reported as `removed`; a datagram track with
+	 * `datagrams`. Throws if this answer does not list that kind and name.
+	 */
+	remove(name: string, datagrams = false): void {
+		this.#answering?.answerRemove(name, false, datagrams);
 	}
 
-	/** Stop listing a track that finished, reported as `finished`. Throws if this answer does not list it. */
-	finish(name: string): void {
-		this.#answering?.answerRemove(name, true);
+	/**
+	 * Stop listing a track that finished, reported as `finished`; a datagram track with
+	 * `datagrams`. Throws if this answer does not list that kind and name.
+	 */
+	finish(name: string, datagrams = false): void {
+		this.#answering?.answerRemove(name, true, datagrams);
 	}
 
 	/** The answer holds everything this hop knows now; later changes are live. */

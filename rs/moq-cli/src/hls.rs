@@ -179,14 +179,14 @@ impl Tls {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `instance`. Once the playlist ends, serve the finished broadcast for the linger.
-pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::Instance) -> anyhow::Result<()> {
+/// announced under `identity`. Once the playlist ends, serve the finished broadcast for the linger.
+pub async fn import(target: ImportTarget, args: ImportArgs, identity: moq_net::Identity) -> anyhow::Result<()> {
 	let ImportTarget { origin, name, ingest } = target;
 	// Held through the linger, so the finished broadcast stays announced while it serves the tail.
 	let route = origin
 		.route(
 			&name,
-			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+			moq_net::origin::RouteOptions::hidden().with_identity(identity, 0),
 		)
 		.context("failed to create broadcast")?;
 
@@ -273,8 +273,8 @@ fn playlist_url(playlist: &str) -> anyhow::Result<Url> {
 /// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
 /// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
-	let scope = moq_net::Patterns::from(
-		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	let scope = moq_net::Prefixes::from(
+		moq_net::Prefix::try_from(name.as_str()).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let scoped = origin
 		.scope("", &scope)
@@ -283,8 +283,8 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
 
-	// Serving and recording share one server, which follows the publisher instances: a recording
-	// ends at what its instance listed once another takes the broadcast over.
+	// Serving and recording share one server, which follows the publisher identities: a recording
+	// ends at what its identity listed once another takes the broadcast over.
 	let server = moq_hls::Server::new(scoped.clone(), config)?;
 
 	let tls = args.tls.into_config()?;
@@ -526,12 +526,12 @@ mod test {
 			playlist: playlist.to_str().unwrap().to_string(),
 			cmaf: false,
 		};
-		let importing = tokio::spawn(import(target, args, moq_net::Instance::random()));
+		let importing = tokio::spawn(import(target, args, moq_net::Identity::random()));
 
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
 		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
@@ -539,7 +539,7 @@ mod test {
 		// The source restarts at zero under the same init segment.
 		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
 		let err = importing.await.unwrap().expect_err("a reset fails the import");
-		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+		assert!(format!("{err:#}").contains("failed to decode"), "{err:#}");
 
 		for track in [&mut media, &mut listing] {
 			let ended = ended_with(track).await;

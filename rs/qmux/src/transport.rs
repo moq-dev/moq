@@ -26,8 +26,9 @@ use crate::{Config, Error};
 /// [`poll_recv`](Self::poll_recv) gets a waiter of its own, and the driver polls it only
 /// after that waiter is woken. [`poll_flush`](Self::poll_flush) runs only after a step
 /// that received or queued a record, or whose last flush did not finish. So a transport that
-/// writes on its own, such as a keep-alive Ping or a Pong reply, queues it from `poll_recv`
-/// (waking that waiter from its timer), and the flush that follows sends it.
+/// writes on its own, such as a keep-alive Ping or a Pong reply, notes it from `poll_recv`
+/// (waking that waiter from its timer), and the flush that follows queues and sends it, waiting
+/// for room on the flush's waiter.
 pub trait Transport {
 	/// Bind the session's framing, before the first poll.
 	fn bind(&mut self, _config: &Config) {}
@@ -69,15 +70,15 @@ pub trait Transport {
 	}
 }
 
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
+/// The size of each read buffer: one default record with its size field, or one draft-00
+/// frame. Records are sliced out of it, and the session counts every slice as pinning a whole
+/// buffer of this size. A larger record gets a buffer of its own size.
+pub(crate) const READ_BUFFER: usize = crate::MAX_FRAME_SIZE;
+
 mod stream;
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 pub use stream::Stream;
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 pub(crate) use stream::build as build_stream_session;
 
-#[cfg(feature = "ws")]
 mod websocket;
-// Public for `Driver<WsTransport<_>>`, though callers never need to name it.
-#[cfg(feature = "ws")]
-pub(crate) use websocket::WsTransport;
+// Named only in `Driver<WsTransport<_>>`, so a caller can hold or wrap a WebSocket driver.
+pub use websocket::WsTransport;

@@ -6,7 +6,6 @@ import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
-import 'package:moq/src/surface.dart' show surfaceFrom;
 import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
@@ -31,13 +30,28 @@ void main() {
     expect(request.priority(), 12);
     final producer = request.accept(info: null);
     expect(producer.priority(), 12);
-    expect(stream.demand().wanted(), isNull);
+    expect(stream.demand().wanted(), isFalse);
     producer.insert(
-      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+      datagram: Datagram(
+        sequence: 7,
+        timestamp: Timestamp.unscaled(7),
+        payload: utf8.encode('seven'),
+      ),
     );
     final datagram = await consumer.recv().timeout(timeout);
     expect(datagram?.sequence, 7);
+    expect(datagram?.timestamp.scale, isNull);
+    expect(datagram?.timestamp.value, 7);
     expect(datagram?.payload, utf8.encode('seven'));
+    // An unscaled timestamp names the sequence an append writes at.
+    expect(
+      producer.append(
+        timestamp: Timestamp.unscaled(9),
+        payload: utf8.encode('nine'),
+      ),
+      9,
+    );
+    expect((await consumer.recv().timeout(timeout))?.sequence, 9);
     consumer.cancel();
     expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
     producer.finish();
@@ -53,7 +67,7 @@ void main() {
       () => moq_media.ContainerProducer(
         broadcast: other,
         init: moq_media.ContainerInit(
-          format: moq_media.ContainerFormat.fmp4,
+          format: moq_media.ContainerFormat.fmp4(),
           data: Uint8List(0),
           timebase: timebase,
         ),
@@ -81,42 +95,246 @@ void main() {
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
 
-  test('raw writes without timestamps stay untimed', () async {
+  // Updates published before the reader joins reach a holding reader in order, each with its
+  // timestamp; an arrival reader takes only the newest.
+  test('a holding catalog reader reads every update within its delay', () async {
+    final broadcast = BroadcastProducer();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+    for (final value in ['1', '2']) {
+      catalog.setSection(name: 'app', json: value);
+    }
+    final consumer = broadcast.consume();
+
+    for (final (delay, expected) in [
+      (Duration.zero, ['2']),
+      (const Duration(minutes: 1), ['1', '2']),
+    ]) {
+      final reader = await moq_media.CatalogConsumer.subscribe(
+        broadcast: consumer,
+        delay: delay,
+      ).timeout(timeout);
+      final read = <String>[];
+      var last = 0;
+      while (read.isEmpty || read.last != '2') {
+        final update = await reader.next().timeout(timeout);
+        expect(update, isNotNull, reason: '$delay delay');
+        expect(update!.timestamp.scale, isNotNull);
+        expect(
+          update.timestamp.value,
+          greaterThan(last),
+          reason: '$delay delay',
+        );
+        last = update.timestamp.value;
+        // The broadcast's first catalog, published before any section, is not one of ours.
+        final app = update.sections['app'];
+        if (app != null) read.add(app);
+      }
+      reader.cancel();
+      expect(read, expected, reason: '$delay delay');
+    }
+    broadcast.close();
+  });
+
+  test('a metadata subscription reads frame headers', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'video',
+      info: TrackInfo(maxAge: Duration.zero, timescale: 1000000),
+    );
+    final MetaConsumer meta = await broadcast
+        .consume()
+        .subscribeMeta(name: 'video', subscription: null)
+        .timeout(timeout);
+    expect(meta.info().timescale, 1000000);
+
+    final group = track.appendGroup(start: Timestamp(value: 0, scale: 1000000));
+    group.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('key'),
+        timestamp: Timestamp(value: 0, scale: 1000000),
+      ),
+    );
+    group.writeFrame(
+      frame: Frame(
+        payload: Uint8List(0),
+        timestamp: Timestamp(value: 1, scale: 1000000),
+      ),
+    );
+    group.finish();
+    track.finish();
+
+    final MetaGroup read = (await meta.recvGroup().timeout(timeout))!;
+    expect(read.start(), 0);
+    final headers = <(int, int, int?)>[];
+    while (true) {
+      final FrameHeader? header = await read.nextHeader().timeout(timeout);
+      if (header == null) break;
+      headers.add((
+        header.size,
+        header.timestamp.value,
+        header.timestamp.scale,
+      ));
+    }
+    expect(headers, [(3, 0, 1000000), (0, 1, 1000000)]);
+    expect(await meta.recvGroup().timeout(timeout), isNull);
+    meta.cancel();
+    broadcast.close();
+  });
+
+  test('releasing a producer ends an on-demand track', () async {
+    final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+
+    final idle = broadcast.publishTrack(name: 'idle', info: null);
+    final idleDemand = idle.demand();
+    while (await idleDemand.wantedChanged().timeout(timeout)) {}
+    idle.dispose();
+    await expectLater(
+      idleDemand.wantedChanged().timeout(timeout),
+      throwsA(isA<ClosedMoqException>()),
+    );
+
+    final track = broadcast.publishTrack(name: 'status', info: null);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout)) {}
+    final late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'status', subscription: null)
+        .timeout(timeout);
+    track.dispose();
+
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'status');
+    final next = request.accept(info: null);
+    next.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('served again'),
+        timestamp: Timestamp.unscaled(0),
+      ),
+    );
+    final frame = await late.readFrame().timeout(timeout);
+    expect(utf8.decode(frame!.payload), 'served again');
+    late.cancel();
+    requests.cancel();
+    broadcast.close();
+  });
+
+  test('raw writes on a scale-less track carry their group key', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'untimed', info: null);
     final consumer = track.consume(subscription: null);
-    track.writeFrame(frame: Frame(payload: utf8.encode('payload')));
+    track.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('payload'),
+        timestamp: Timestamp.unscaled(0),
+      ),
+    );
     final frame = await consumer.readFrame().timeout(timeout);
-    expect(frame?.timestamp, isNull);
+    expect(frame?.timestamp.scale, isNull);
+    expect(frame?.timestamp.value, 0);
     expect(consumer.info().timescale, isNull);
+    // A scaled timestamp disagrees with the scale-less track.
+    expect(
+      () => track.writeFrame(
+        frame: Frame(
+          payload: utf8.encode('payload'),
+          timestamp: Duration.zero.toTimestamp(),
+        ),
+      ),
+      throwsA(
+        isA<ProtocolMoqException>().having(
+          (error) => error.details.kind,
+          'kind',
+          MoqProtocolKind.timestampMismatch,
+        ),
+      ),
+    );
     track.finish();
     broadcast.close();
   });
 
-  test('an omitted max age is zero and the unlimited flag sets none', () {
+  test('an omitted max age is zero and a null one sets none', () {
     final broadcast = BroadcastProducer();
-    final omitted = broadcast
-        .publishTrack(name: 'omitted', info: null)
-        .consume(subscription: null)
-        .info();
-    expect(omitted.maxAge, Duration.zero);
+    for (final (i, info) in [null, TrackInfo()].indexed) {
+      final omitted = broadcast
+          .publishTrack(name: 'omitted$i', info: info)
+          .consume(subscription: null)
+          .info();
+      expect(omitted.maxAge, Duration.zero);
+    }
     final unlimited = broadcast
-        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAge: null))
         .consume(subscription: null)
         .info();
     expect(unlimited.maxAge, isNull);
-    expect(unlimited.maxAgeUnlimited, isTrue);
+    broadcast.close();
+  });
+
+  test(
+    'a refresh reads back as published and an omitted one asks for nothing',
+    () {
+      final broadcast = BroadcastProducer();
+      final refreshed = broadcast
+          .publishTrack(
+            name: 'refresh',
+            info: TrackInfo(
+              refresh: TrackRefresh(
+                ratio: 2,
+                interval: const Duration(milliseconds: 500),
+              ),
+            ),
+          )
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(refreshed.ratio, 2);
+      expect(refreshed.interval, const Duration(milliseconds: 500));
+      final plain = broadcast
+          .publishTrack(name: 'plain', info: TrackInfo())
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(plain.ratio, isNull);
+      expect(plain.interval, isNull);
+      broadcast.close();
+    },
+  );
+
+  test('a subscriber refresh with nothing to send returns at once', () async {
+    final broadcast = BroadcastProducer();
+    final consumer = broadcast
+        .publishTrack(
+          name: 'status',
+          info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+        )
+        .consume(subscription: null);
+    // A track with no group has nothing more to send: its first is already asked for.
+    await consumer.refresh();
+    broadcast.close();
+  });
+
+  test('refresh returns once the first subscriber asks for a group', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+    );
+    final demand = track.demand();
+    final consumer = track.consume(subscription: null);
+    await demand.refresh().timeout(timeout);
+    consumer.cancel();
+    track.finish();
     broadcast.close();
   });
 
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
-      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.min, isNull);
       expect(subscription.delay.max, Duration.zero);
     }
-    final unset = Delay(min: null, max: null);
-    expect(unset.min, isNull);
-    expect(unset.max, isNull);
+    final stated = Delay(min: Duration.zero, max: null);
+    expect(stated.min, Duration.zero);
+    expect(stated.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -139,10 +357,12 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
+        info: TrackInfo(maxAge: null, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
-        final group = track.appendGroup();
+        final group = track.appendGroup(
+          start: Duration(milliseconds: ms).toTimestamp(),
+        );
         group.writeFrame(
           frame: Frame(
             payload: utf8.encode('x'),
@@ -155,16 +375,16 @@ void main() {
       final consumer = track.consume(
         subscription: Subscription(
           delay: Delay(max: const Duration(seconds: 10)),
-          ranges: [Range(start: RelativeMoqAnchor(2))],
+          ranges: [Range(start: Timestamp.unscaled(0))],
           order: Order.ascending,
         ),
       );
-      final sequences = <int>[];
+      final starts = <int>[];
       for (var i = 0; i < 3; i++) {
         final group = await consumer.recvGroup().timeout(timeout);
-        sequences.add(group!.sequence());
+        starts.add(group!.start());
       }
-      expect(sequences, [0, 1, 2]);
+      expect(starts, [0, 1000, 2000]);
       broadcast.close();
     },
   );
@@ -199,8 +419,8 @@ void main() {
 
     // Generated records compare by identity, so compare the fields.
     void expectEverything(Grant? grant) {
-      expect(grant?.publish, ['**']);
-      expect(grant?.subscribe, ['**']);
+      expect(grant?.publish, ['']);
+      expect(grant?.subscribe, ['']);
       expect(grant?.expires, isNull);
     }
 
@@ -304,8 +524,8 @@ void main() {
     },
   );
 
-  test('an announced instance pins request and follow', () async {
-    // moq-lite-06 carries no instance, so the session mints one for the route.
+  test('an announced identity pins request and follow', () async {
+    // moq-lite-06 carries no identity, so the session mints one for the route.
     const version = ['moq-lite-06'];
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -338,19 +558,19 @@ void main() {
 
     final announced = client.announced();
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    final minted = present.announce.route.instance;
+    final minted = present.announce.route.identity;
     expect(minted.isMinted(), isTrue);
 
-    await client.request('live', instance: minted).timeout(timeout);
-    final following = client.follow('live', instance: minted);
+    await client.request('live', identity: minted).timeout(timeout);
+    final following = client.follow('live', identity: minted);
     expect(await following.available().timeout(timeout), isNotNull);
 
-    // The same text, parsed, names another instance that nothing serves.
-    final named = Instance.parse(text: minted.text());
+    // The same text, parsed, names another identity that nothing serves.
+    final named = Identity.parse(text: minted.text());
     expect(named.isMinted(), isFalse);
     expect(named, isNot(minted));
     await expectLater(
-      client.request('live', instance: named).timeout(timeout),
+      client.request('live', identity: named).timeout(timeout),
       throwsA(isA<ProtocolMoqException>()),
     );
 
@@ -431,9 +651,9 @@ void main() {
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
     final demand = track.demand();
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
 
-    final producer = track.appendGroup();
+    final producer = track.appendGroup(start: Duration.zero.toTimestamp());
     producer.writeFrame(
       frame: MoqFrame(
         payload: utf8.encode('dart round trip'),
@@ -485,7 +705,7 @@ void main() {
           keepAlive: Duration.zero,
           gso: false,
           mtuDiscovery: true,
-          congestionControl: CongestionControl.loss,
+          congestionControl: CongestionControl.cubic(),
           keylog: false,
         ),
         once: true,
@@ -617,8 +837,8 @@ void main() {
         ),
       );
       final frame = await consumer.readFrame().timeout(timeout);
-      expect(frame?.timestamp?.value, value);
-      expect(frame?.timestamp?.scale, 90000);
+      expect(frame?.timestamp.value, value);
+      expect(frame?.timestamp.scale, 90000);
     }
 
     for (final invalid in [
@@ -655,6 +875,20 @@ void main() {
       () => const Duration(microseconds: -1).toTimestamp(),
       throwsArgumentError,
     );
+    expect(
+      () => Timestamp(value: 3, scale: 0).toDuration(),
+      throwsArgumentError,
+    );
+    // A u64 past 2^63 reads as a negative int, and still converts as unsigned.
+    expect(() => Timestamp(value: -1, scale: 1).toDuration(), throwsRangeError);
+    expect(
+      Timestamp(value: 1 << 62, scale: -1).toDuration(),
+      const Duration(microseconds: 250000),
+    );
+    // A scale-less track's key is no time.
+    final unscaled = Timestamp.unscaled(3);
+    expect([unscaled.value, unscaled.scale], [3, null]);
+    expect(unscaled.toDuration, throwsStateError);
   });
 
   test('a broadcast is reachable only while announced', () async {
@@ -676,7 +910,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventPresent>());
     expect((first as AnnounceEventPresent).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instance());
+    expect(first.announce.route.identity, route.identity());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -690,7 +924,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventPresent;
-    expect(again.announce.route.instance, route.instance());
+    expect(again.announce.route.identity, route.identity());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -740,31 +974,31 @@ void main() {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final consumer = origin.consume();
     final announced = consumer.announced(config: MoqAnnounceConfig());
-    final following = consumer.follow(path: 'instance');
-    final first = origin.route(path: 'instance', options: RouteOptions());
+    final following = consumer.follow(path: 'identity');
+    final first = origin.route(path: 'identity', options: RouteOptions());
 
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    expect(present.announce.route.instance, first.instance());
+    expect(present.announce.route.identity, first.identity());
     (await following.available().timeout(timeout))!.dispose();
 
-    final camera = Instance.parse(text: 'camera');
+    final camera = Identity.parse(text: 'camera');
     expect(camera.isMinted(), isFalse);
     final second = origin.route(
-      path: 'instance',
-      options: RouteOptions(instance: camera, epoch: 1),
+      path: 'identity',
+      options: RouteOptions(identity: camera, epoch: 1),
     );
-    expect(second.instance(), camera);
+    expect(second.identity(), camera);
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     first.withdraw();
     second.withdraw();
     final absent = await nextRoute(announced) as AnnounceEventAbsent;
-    expect(absent.announce.route.instance, camera);
+    expect(absent.announce.route.identity, camera);
 
     expect(
-      () => Instance.parse(text: ''),
-      throwsA(isA<InvalidInstanceMoqException>()),
+      () => Identity.parse(text: ''),
+      throwsA(isA<InvalidIdentityMoqException>()),
     );
     first.cancel();
     second.cancel();
@@ -819,10 +1053,10 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
-    // A hidden job route answers nobody until it announces, under the instance its
+    // A hidden job route answers nobody until it announces, under the identity its
     // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instance(), dynamic.instance());
+    expect(served.identity(), dynamic.identity());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.
@@ -843,10 +1077,7 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(
-          timescale: 1000000,
-          compression: MoqCompression.deflate,
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -865,15 +1096,132 @@ void main() {
     // next() yields every state in order; latest() skips the buffered third.
     moq_json.Value? value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 1});
-    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 1));
+    expect(value.timestamp.toDuration(), const Duration(milliseconds: 1));
     value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 2});
     value = await consumer.latest().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 4});
-    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 4));
+    expect(value.timestamp.toDuration(), const Duration(milliseconds: 4));
 
     consumer.cancel();
     producer.finish();
+    broadcast.close();
+  });
+
+  test('native encoders serve a renewal', () async {
+    final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+
+    moq_audio.ProducerOptions mic(String? track) => moq_audio.ProducerOptions(
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()),
+      track: track,
+    );
+    final audio = moq_audio.Producer(catalog: catalog, options: mic('mic'));
+    var late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'mic', subscription: null)
+        .timeout(timeout);
+    audio.dispose();
+    var request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'mic');
+    final served = moq_audio.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: mic(null),
+    );
+    for (var i = 0; i < 3; i++) {
+      served.write(
+        frame: moq_audio.Frame(
+          timestamp: Timestamp(value: i * 20000, scale: 1000000),
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+
+    moq_video.ProducerOptions camera(String? track) =>
+        moq_video.ProducerOptions(
+          input: moq_video.EncoderInput(
+            format: moq_video.PixelFormat.rgba(),
+            width: 320,
+            height: 240,
+            framerate: moq_video.FrameRate(numerator: 30, denominator: 1),
+          ),
+          output: moq_video.EncoderOutput(
+            codec: moq_video.Codec.h264(),
+            kind: moq_video.SoftwareEncoder(),
+          ),
+          track: track,
+        );
+    final video = moq_video.Producer(
+      catalog: catalog,
+      options: camera('camera'),
+    );
+    late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'camera', subscription: null)
+        .timeout(timeout);
+    video.dispose();
+    request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'camera');
+    final next = moq_video.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: camera(null),
+    );
+    next.write(
+      frame: moq_video.Frame(
+        timestamp: Timestamp(value: 0, scale: 1000000),
+        data: Uint8List(320 * 240 * 4)..fillRange(0, 320 * 240 * 4, 0x80),
+      ),
+    );
+    next.finish();
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+    requests.cancel();
+    broadcast.close();
+  });
+
+  test('JSON release serves a reader that joined late', () async {
+    final broadcast = MoqBroadcastProducer();
+    final requests = broadcast.requests();
+    final info = MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh());
+    final producer = moq_json.StreamProducer(
+      broadcast: broadcast,
+      track: broadcast.publishTrack(name: 'events', info: info),
+    );
+    final demand = producer.demand();
+    while (await demand.wantedChanged().timeout(timeout)) {}
+
+    final late = moq_json.StreamConsumer(
+      track: await broadcast
+          .consume()
+          .subscribeTrack(name: 'events', subscription: null)
+          .timeout(timeout),
+    );
+    producer.dispose();
+
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'events');
+    final next = moq_json.StreamProducer(
+      broadcast: broadcast,
+      track: request.accept(info: info),
+    );
+    next.append(
+      value: jsonEncode('served again'),
+      timestamp: Duration.zero.toTimestamp(),
+    );
+    final record = await late.next().timeout(timeout);
+    expect(jsonDecode(record!.value), 'served again');
+    late.cancel();
+    requests.cancel();
     broadcast.close();
   });
 
@@ -882,10 +1230,7 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(
-          timescale: 1000000,
-          compression: MoqCompression.deflate,
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.WindowConfig(),
     );
@@ -911,12 +1256,12 @@ void main() {
       final push = timed!.event as moq_json.WindowEventPush;
       expect(push.index, n);
       expect(jsonDecode(push.value), {'n': n});
-      expect(timed.timestamp?.toDuration(), Duration(milliseconds: n));
+      expect(timed.timestamp.toDuration(), Duration(milliseconds: n));
     }
     final timed = await consumer.next().timeout(timeout);
     final pop = timed!.event as moq_json.WindowEventPop;
     expect([pop.start, pop.end], [0, 2]);
-    expect(timed.timestamp?.toDuration(), const Duration(milliseconds: 3));
+    expect(timed.timestamp.toDuration(), const Duration(milliseconds: 3));
 
     // The cut's new group restates record 2, which this reader already has.
     producer.cut();
@@ -927,7 +1272,7 @@ void main() {
     final pushed = await consumer.next().timeout(timeout);
     final push = pushed!.event as moq_json.WindowEventPush;
     expect(push.index, 3);
-    expect(pushed.timestamp?.toDuration(), const Duration(milliseconds: 4));
+    expect(pushed.timestamp.toDuration(), const Duration(milliseconds: 4));
 
     producer.finish();
     expect(await consumer.next().timeout(timeout), isNull);
@@ -940,13 +1285,13 @@ void main() {
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
       options: moq_video.ProducerOptions(
         input: moq_video.EncoderInput(
-          format: moq_video.PixelFormat.rgba,
+          format: moq_video.PixelFormat.rgba(),
           width: 320,
           height: 240,
           framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
         ),
         output: moq_video.EncoderOutput(
-          codec: moq_video.Codec.h264,
+          codec: moq_video.Codec.h264(),
 
           kind: moq_video.SoftwareEncoder(),
         ),
@@ -969,6 +1314,7 @@ void main() {
     final consumer = broadcast.consume();
     final catalogs = await moq_media.CatalogConsumer.subscribe(
       broadcast: consumer,
+      delay: Duration.zero,
     ).timeout(timeout);
     final catalog = await catalogs.next().timeout(timeout);
     final decoder = await moq_video.Consumer.subscribe(
@@ -994,10 +1340,10 @@ void main() {
     decoder.cancel();
     final pixels = frame.width() * frame.height();
     expect(
-      frame.pixels(format: moq_video.PixelFormat.i420).length,
+      frame.pixels(format: moq_video.PixelFormat.i420()).length,
       pixels * 3 ~/ 2,
     );
-    final packed = frame.pixels(format: moq_video.PixelFormat.rgba);
+    final packed = frame.pixels(format: moq_video.PixelFormat.rgba());
     expect(packed.length, pixels * 4);
     for (var i = 3; i < packed.length; i += 4) {
       expect(packed[i], 0xFF);
@@ -1008,14 +1354,6 @@ void main() {
     video.finish();
     catalogs.cancel();
     broadcast.close();
-  });
-
-  // A surface kind the package predates maps to the fallback arm instead of failing.
-  test('video surface maps an unknown kind', () {
-    expect(surfaceFrom(null), isNull);
-    final pixels = surfaceFrom(PixelBufferMoqVideoSurface(7));
-    expect((pixels as moq_video.PixelBuffer).pointer, 7);
-    expect(surfaceFrom(_FutureSurface()), isA<moq_video.UnknownSurface>());
   });
 
   // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
@@ -1037,12 +1375,15 @@ void main() {
     final consumer = broadcast.consume();
     final catalogs = await moq_media.CatalogConsumer.subscribe(
       broadcast: consumer,
+      delay: Duration.zero,
     ).timeout(timeout);
     final rendition = (await catalogs.next().timeout(timeout))!.audio['mic']!;
 
+    // No max delay: a zero one skips a group once its successor is a warmup old by the
+    // native wall clock, so a read that starts late under load never returns.
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: Delay(min: Duration(milliseconds: 80)),
+      delay: Delay(min: Duration(milliseconds: 80), max: null),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(
@@ -1055,7 +1396,10 @@ void main() {
       broadcast: consumer,
       id: 'mic',
       catalogAudio: rendition,
-      output: moq_audio.DecoderOutput(format: moq_audio.SampleFormat.f32),
+      output: moq_audio.DecoderOutput(
+        format: moq_audio.SampleFormat.f32,
+        delay: Delay(max: null),
+      ),
     ).timeout(timeout);
     expect(fixed.delay(), const Duration(milliseconds: 80));
     final initial = estimated.delay();
@@ -1109,16 +1453,4 @@ void main() {
     producer.finish();
     broadcast.close();
   });
-}
-
-/// Stands in for a generated surface variant this package predates.
-final class _FutureSurface extends MoqVideoSurface {
-  @override
-  RustBuffer lower() => throw UnimplementedError();
-
-  @override
-  int allocationSize() => throw UnimplementedError();
-
-  @override
-  int write(Uint8List buf) => throw UnimplementedError();
 }

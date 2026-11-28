@@ -51,7 +51,7 @@ Beyond "does not panic":
   same code, so emitting something we would reject is a bug on the wire.
 - Encoding is stable: encode, decode, encode again yields identical bytes. Skipped
   where a parameter map reaches the wire, since those encoders walk a `HashMap` and its
-  iteration order differs per instance (moq-lite SETUP).
+  iteration order differs per identity (moq-lite SETUP).
 - A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
   to the same announcements.
 - Every path decoded from the wire (a moq-lite path, an IETF namespace or Full Track

@@ -1,6 +1,6 @@
 ---
 title: Transport
-description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, and WebRTC data channels
+description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, and stream listeners
 ---
 
 # Transport
@@ -33,10 +33,7 @@ support it. The TypeScript client is pickier than the browsers: it uses
 WebTransport on Firefox only from 153 (earlier releases allow too few incoming
 streams) and keeps Safari on the WebSocket fallback, since WebKit bugs stall
 long sessions even though Safari 26.4 ships the API. Native
-clients can use WebTransport too, but usually skip it. Both Rust runtime
-crates expose `quic::web` as a WebTransport library usable without MoQ;
-see [moq-tokio](https://docs.rs/moq-tokio/latest/moq_tokio/quic/web/) and
-[moq-uring](https://docs.rs/moq-uring/latest/moq_uring/quic/web/).
+clients can use WebTransport too, but usually skip it.
 
 ## WebSocket fallback
 
@@ -60,6 +57,16 @@ plaintext. Dial `https://`, `wss://`, `moqt://`, `moql://`, or `tls://` instead.
 Each side lets the other hold 10,000 streams open in each direction, as over
 QUIC, since MoQ holds one per subscription and per live group. Set it with
 `websocket.maxStreams` in `@moq/net` and `quic.max_streams` in `moq-tokio`.
+
+A dialed WebSocket session closes after 30 s without a frame and pings when
+quiet to stay open. Set `websocket.idleTimeout` in `@moq/net` or
+`connect.websocket.idle_timeout` in `moq-tokio` to change it, or to `null` and
+`0s` to turn it off when the server's is off too: a quiet session then sends
+nothing, which lets a server that sleeps between messages stay asleep, and a
+dead link surfaces as the WebSocket closing. QMux negotiates the timeout only on
+drafts 01 and later, so `@moq/net` runs no idle timer on a `qmux-00` session;
+`moq-tokio` also pings at the WebSocket layer, which covers `qmux-00`, and
+probes RTT every second; both turn off with the rest.
 
 QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and
@@ -87,23 +94,6 @@ publishers use this to avoid UDP and certificate setup. Both listeners
 authenticate through the same JWT and public-access rules as QUIC, and the Unix
 socket can additionally allowlist the connecting process by uid, gid, or pid.
 See [stream listeners](/bin/relay/auth#stream-listeners).
-
-## WebRTC data channels (experimental)
-
-The private workspace P2P transport is exercised by `test/p2p`; it is not a
-published package. Applications in this checkout that negotiate a browser
-`RTCPeerConnection` can pass an
-[`@moq/p2p` transport](https://github.com/moq-dev/moq/tree/main/js/p2p) to
-`@moq/net`'s connect or accept. One reliable ordered data channel carries qmux
-records, with no datagrams. The application supplies signaling and ICE and
-keeps ownership of the peer connection; closing the transport closes only its
-channel. SCTP ordering means one lost packet can hold back every stream.
-
-Native peers can use `moq-webrtc`'s `p2p` feature, which runs its own ICE agent:
-host candidates on every interface, server-reflexive candidates from the STUN
-servers it is given, and mDNS resolution of a browser's `.local` candidates.
-The application still carries the offer, answer, and candidates; the offering
-peer connects as the MoQ client and the answering peer accepts.
 
 ## Custom Rust transports
 

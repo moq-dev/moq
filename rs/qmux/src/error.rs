@@ -70,8 +70,9 @@ pub enum Error {
 	#[error("idle timeout")]
 	IdleTimeout,
 
-	/// The peer never sent its transport parameters.
-	#[error("handshake timeout: peer never sent transport parameters")]
+	/// The handshake (TCP, TLS, WebSocket upgrade, and transport parameters) outlasted
+	/// [`Config::handshake_timeout`](crate::Config::handshake_timeout).
+	#[error("handshake timeout")]
 	HandshakeTimeout,
 
 	/// An application protocol name that is not an HTTP token, or an ALPN that names no
@@ -103,7 +104,6 @@ pub enum Error {
 	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The WebSocket failed.
-	#[cfg(feature = "ws")]
 	#[error(transparent)]
 	WebSocket(WebSocketError),
 
@@ -160,6 +160,19 @@ impl Error {
 	}
 }
 
+impl Error {
+	/// The CONNECTION_CLOSE code a peer earns by causing this error, or `None` when the session
+	/// just resets.
+	pub(crate) fn close_code(&self) -> Option<TransportErrorCode> {
+		match self {
+			Self::FrameTooLarge | Self::FrameEncoding => Some(TransportErrorCode::FRAME_ENCODING_ERROR),
+			Self::FlowControlError => Some(TransportErrorCode::FLOW_CONTROL_ERROR),
+			Self::ProtocolViolation => Some(TransportErrorCode::PROTOCOL_VIOLATION),
+			_ => None,
+		}
+	}
+}
+
 // Hand-written rather than `#[from]`: thiserror's `#[from]` would generate
 // `From<Arc<std::io::Error>>`, but `?` call sites yield a bare `std::io::Error`.
 impl From<std::io::Error> for Error {
@@ -169,25 +182,21 @@ impl From<std::io::Error> for Error {
 }
 
 /// A WebSocket failure, opaque so the WebSocket implementation is not part of this API.
-#[cfg(feature = "ws")]
 #[derive(Clone, Debug)]
 pub struct WebSocketError(Arc<tokio_tungstenite::tungstenite::Error>);
 
-#[cfg(feature = "ws")]
 impl std::fmt::Display for WebSocketError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		self.0.fmt(f)
 	}
 }
 
-#[cfg(feature = "ws")]
 impl std::error::Error for WebSocketError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		self.0.source()
 	}
 }
 
-#[cfg(feature = "ws")]
 impl Error {
 	/// Classify a WebSocket failure.
 	pub(crate) fn websocket(err: tokio_tungstenite::tungstenite::Error) -> Self {
@@ -226,7 +235,7 @@ impl moq_net::transport::Error for Error {
 	}
 }
 
-#[cfg(all(test, feature = "ws"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use tokio_tungstenite::tungstenite::{self, http};

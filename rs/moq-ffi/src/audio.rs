@@ -58,7 +58,8 @@ impl From<MoqAudioSampleFormat> for moq_audio::Format {
 ///
 /// An immutable object so adding a codec later does not break callers
 /// switching over a closed enum.
-#[derive(uniffi::Object)]
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
 pub struct MoqAudioCodec {
 	inner: moq_audio::encode::Codec,
 }
@@ -81,6 +82,11 @@ impl MoqAudioCodec {
 		Arc::new(Self {
 			inner: moq_audio::encode::Codec::Aac,
 		})
+	}
+
+	/// The codec's lowercase name, such as `opus`.
+	pub fn name(&self) -> String {
+		self.inner.as_str().to_string()
 	}
 }
 
@@ -231,16 +237,20 @@ pub enum MoqAudioRead {
 	},
 }
 
-impl From<moq_audio::decode::Read> for MoqAudioRead {
-	fn from(read: moq_audio::decode::Read) -> Self {
-		match read {
+impl MoqAudioRead {
+	/// The binding's read for `read`, or `None` for a kind this binding predates.
+	fn new(read: moq_audio::decode::Read) -> Option<Self> {
+		Some(match read {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
-			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
+			moq_audio::decode::Read::Gap {
+				timestamp, duration, ..
+			} => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
-			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
-		}
+			moq_audio::decode::Read::End { end, .. } => Self::End { end: end.into() },
+			_ => return None,
+		})
 	}
 }
 
@@ -313,8 +323,8 @@ impl MoqAudioEncoder {
 		let guard = self.inner.lock().unwrap();
 		let encoder = guard.as_ref().ok_or(MoqError::Closed)?;
 		let format = match encoder.codec() {
-			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::Opus,
-			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::Aac,
+			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::opus(),
+			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::aac(),
 			codec => return Err(moq_audio::Error::Unsupported(format!("no audio init for {codec}")).into()),
 		};
 		let data = encoder.catalog().description.ok_or(MoqError::Unsupported)?;
@@ -391,23 +401,26 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Constructed from a broadcast's media catalog. Each
-/// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
-/// is PCM in the format declared by the [`MoqAudioEncoderInput`]
+/// Constructed from a broadcast's media catalog. Each [`write`](Self::write) accepts an
+/// [`MoqAudioFrame`] whose `data` is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
-	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
+	/// The claim itself; [`reservation`](Self::reservation) hands out only views of it.
+	reservation: std::sync::Mutex<Option<Arc<moq_net::bandwidth::Reservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
 }
 
-// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+// Closed with its broadcast before its finish, the track ends with the close's cause.
 impl crate::producer::Child for MoqAudioProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::runtime().enter();
@@ -420,7 +433,9 @@ impl crate::producer::Child for MoqAudioProducer {
 
 impl Drop for MoqAudioProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+		let _guard = crate::ffi::runtime().enter();
+		self.reservation.get_mut().unwrap().take();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -462,10 +477,12 @@ impl MoqAudioProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
-	/// producer holds it until [`finish`](Self::finish).
+	/// [`MoqAllocator`]. The producer owns the claim, not the handle: dropping the
+	/// handle keeps it, and [`finish`](Self::finish) releases it however many handles
+	/// remain, after which they read no rate.
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
-		self.reservation.lock().unwrap().clone()
+		let guard = self.reservation.lock().unwrap();
+		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?)))
 	}
 
 	/// Drain the encoder and finish the audio track.
@@ -498,6 +515,35 @@ impl MoqAudioProducer {
 	#[uniffi::constructor]
 	pub fn new(
 		catalog: &crate::media::MoqMediaCatalogProducer,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, None, options)
+	}
+
+	/// Open an audio track on the track a subscriber's `request` asks for, as [`new`](Self::new)
+	/// does on a track of its own.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its producer was
+	/// released while read: serve it with the options it was first published with. Options that
+	/// change the track info its readers hold end the track with `MalformedTrack` and fail here;
+	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
+	/// request names the track, so [`MoqAudioProducerOptions::track`] must be `None`, and it
+	/// must belong to the catalog's broadcast. A config the codec refuses rejects the request
+	/// with `NotFound`.
+	#[uniffi::constructor]
+	pub fn requested(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Arc<crate::producer::MoqTrackRequest>,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, Some(request), options)
+	}
+}
+
+impl MoqAudioProducer {
+	fn open(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Option<Arc<crate::producer::MoqTrackRequest>>,
 		options: MoqAudioProducerOptions,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
@@ -538,18 +584,30 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.inner().clone();
 		}
 
-		let (producer, children) = broadcast.with_state(|state| {
-			let producer =
-				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
-			Ok((producer, state.children.clone()))
-		})?;
+		let (producer, children) = match request {
+			None => broadcast.with_state(|state| {
+				let producer =
+					moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
+				Ok((producer, state.children.clone()))
+			})?,
+			Some(request) => {
+				let (catalog, children) =
+					broadcast.with_state(|state| Ok((state.catalog.clone(), state.children.clone())))?;
+				let producer = request.answer_in(&children, |request| {
+					Ok(moq_audio::encode::Producer::requested(
+						request, catalog, input, &options,
+					)?)
+				})?;
+				(producer, children)
+			}
+		};
 
 		// Producer::new does not reserve today (only capture does), so the
 		// binding holds the claim itself. Passing the allocator into Options
 		// means the Rust producer will reserve and follow whenever it starts to.
 		let reservation = bandwidth
 			.as_ref()
-			.map(|bandwidth| bandwidth.reserve_demand(&producer.demand(), producer.bitrate().as_bps()));
+			.map(|bandwidth| Arc::new(bandwidth.inner().reserve(&producer.demand(), producer.bitrate())));
 
 		children.adopt(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
@@ -569,9 +627,14 @@ struct ConsumerInner {
 
 impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioRead>, MoqError> {
-		let read = self.consumer.read().await;
-		self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
-		Ok(read?.map(MoqAudioRead::from))
+		loop {
+			let read = self.consumer.read().await;
+			self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
+			let Some(read) = read? else { return Ok(None) };
+			if let Some(read) = MoqAudioRead::new(read) {
+				return Ok(Some(read));
+			}
+		}
 	}
 }
 
@@ -638,7 +701,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.track = catalog_audio.track;
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
-	config.container = catalog_audio.container.into();
+	config.container = catalog_audio.container.try_into()?;
 	config.jitter = catalog_audio.jitter;
 	config.warmup = catalog_audio.warmup;
 	Ok(config)
@@ -668,11 +731,8 @@ impl MoqAudioConsumer {
 		// Reject malformed or unknown codec names before resolving the broadcast reference.
 		// Decoder setup checks recognized codecs after resolution, without a second codec gate.
 		let reference = catalog_audio.broadcast.clone();
-		let instance = catalog_audio.instance.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), instance.as_deref())
-			.await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -713,11 +773,22 @@ mod tests {
 	use super::*;
 	use crate::media::{MoqAudio, MoqContainer};
 
+	/// Codecs compare and hash by value, and their names are distinct.
+	#[test]
+	fn codecs_name_compare_and_hash_by_value() {
+		assert_eq!(MoqAudioCodec::opus().name(), "opus");
+		assert_eq!(MoqAudioCodec::aac().name(), "aac");
+		assert_eq!(
+			std::collections::HashSet::from([MoqAudioCodec::opus(), MoqAudioCodec::opus()]).len(),
+			1
+		);
+		assert_ne!(MoqAudioCodec::opus(), MoqAudioCodec::aac());
+	}
+
 	fn catalog_audio(codec: &str) -> MoqAudio {
 		MoqAudio {
 			label: None,
 			broadcast: None,
-			instance: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -820,7 +891,10 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp: MoqTimestamp { value: 0, scale: 1 },
+					timestamp: MoqTimestamp {
+						value: 0,
+						scale: Some(1),
+					},
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();
@@ -893,7 +967,7 @@ mod tests {
 	fn codec_only_encoder_reports_its_opus_head() {
 		let encoder = MoqAudioEncoder::new(opus_output(None)).unwrap();
 		let init = encoder.track_init().unwrap();
-		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
+		assert_eq!(init.format, crate::media::MoqAudioFormat::opus());
 		assert_eq!(&init.data[..8], b"OpusHead");
 		// Channel count, then a nonzero pre-skip for the codec lookahead.
 		assert_eq!(init.data[9], 2);

@@ -15,7 +15,7 @@ install mode:
     uv run --no-project python ../sh/js/install.py {{ mode }}
 
 # `build` runs here rather than as its own gate: the per-package `check` script
-# is `tsc --noEmit`, which never runs declaration emit, so the errors that only
+# is `bun check --no-script`, which never runs declaration emit, so the errors that only
 # surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
 # break an npm publish. It costs about 20s for every package.
 #
@@ -34,6 +34,12 @@ check:
 # Type-check and build changed workspace packages and their transitive dependents.
 check-changed list:
     python3 ../sh/js/workspace.py check '{{ list }}'
+
+# Find unused files, exports, types, class members, and dependencies in the whole
+# workspace; .fallowrc.jsonc lists the entry points no plugin finds.
+dead-code:
+    uv run --no-project python ../sh/js/install.py frozen
+    bun fallow dead-code --root ..
 
 # Validate the Worker deploy bundles outside the Bun workspace.
 workers:
@@ -71,7 +77,7 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, fills, fill-probe, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, refresh, compression, or datagrams.
+# Run one net benchmark: broadcasts, forward, requests, fills, fill-probe, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, window-drop, publisher-update, refresh, compression, datagrams, or routed-claims.
 bench name:
     uv run --no-project python ../sh/js/install.py frozen
     bun net/bench/{{ name }}.ts
@@ -79,7 +85,7 @@ bench name:
 # Sweep browser publisher fairness over backlog x viewers using the devShell's Chromium.
 serve-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project net/bench/tsconfig.json
+    bun check --no-script -p net/bench/tsconfig.json
     bun net/bench/serve-browser.ts
 
 # Sweep catalog estimate publishes and subscribe updates over tracks x viewers.
@@ -117,20 +123,16 @@ worklet-matrix:
 build:
     python3 ../sh/js/workspace.py build --all
 
-# Ensure the built public libraries can load without browser globals.
-dist-imports:
-    bun -e 'await import("./watch/dist/index.js"); await import("./publish/dist/index.js")'
-
 # Compare eager and cold lazy WebSocket fallback setup in Chromium.
 qmux-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project net/bench/tsconfig.json
+    bun check --no-script -p net/bench/tsconfig.json
     bun net/bench/qmux.ts
 
 # Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
 pattern-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project pattern/bench/tsconfig.json
+    bun check --no-script -p pattern/bench/tsconfig.json
     bun pattern/bench/algebra.ts
 
 # Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
@@ -141,19 +143,19 @@ clock-bench:
 # Sweep buffered JSON stream reads over record count, payload size, and compression.
 json-stream-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun check --no-script -p json/bench/tsconfig.json
     bun json/bench/stream.ts
 
 # Sweep snapshot codec cost over document size and changed keys.
 json-codec-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun check --no-script -p json/bench/tsconfig.json
     bun json/bench/codec.ts
 
 # Compare the duplicate-refusing JSON frame parse against bare JSON.parse.
 json-parse-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun check --no-script -p json/bench/tsconfig.json
     bun json/bench/parse.ts
 
 # Sweep a slow hang consumer's skipped groups against its warning traffic and catch-up time.
@@ -164,7 +166,7 @@ slow-group-bench:
 # Sweep a hang consumer's buffered groups, frames per group, publishers and players across arrival orders.
 buffered-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project hang/bench/tsconfig.json
+    bun check --no-script -p hang/bench/tsconfig.json
     bun hang/bench/buffered.ts
 
 # Sweep the audio jitter estimator's held history against in-order and reordered frames.
@@ -187,18 +189,13 @@ audio-warmup-bench:
     uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/warmup.ts
 
-# Sweep data-channel qmux stream count and payload size.
-p2p-bench:
-    uv run --no-project python ../sh/js/install.py frozen
-    bun p2p/bench/transport.ts
-
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bun crypto/bench/pump.ts
+    bun e2ee/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bunx tsc --noEmit --project publish/bench/tsconfig.json
+    bun check --no-script -p publish/bench/tsconfig.json
     bun publish/bench/audio.ts

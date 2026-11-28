@@ -11,7 +11,7 @@ mod standin;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use carla_bridge::Bridge;
@@ -253,15 +253,12 @@ fn step(camera: &mut Camera, worker: &mut Worker, latency: &mut Latency, number:
 	keyframes
 }
 
-fn socket_path() -> PathBuf {
-	std::env::temp_dir().join(format!("carla-bridge-test-{}.sock", std::process::id()))
-}
-
 #[test]
 #[ignore = "needs a Linux NVIDIA GPU; run by `just carla bridge-gpu`"]
 fn gpu_video_reaches_the_worker() {
 	let gpu = Gpu::open().expect("an NVIDIA Vulkan device");
-	let bridge = Bridge::listen(socket_path()).expect("listen");
+	let dir = tempfile::tempdir().expect("a directory for the socket");
+	let bridge = Bridge::listen(dir.path().join("bridge.sock")).expect("listen");
 	let mut sd = Camera::new(&gpu, &bridge, STREAM, SD, 3);
 	let mut hd = Camera::new(&gpu, &bridge, STREAM, HD, 3);
 	let mut latency = Latency::default();

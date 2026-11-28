@@ -37,11 +37,15 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(try request.priority(), 12)
         let producer = try request.accept()
         XCTAssertEqual(try producer.priority(), 12)
-        XCTAssertNil(try stream.demand().wanted)
-        try producer.insert(Datagram(sequence: 7, timestamp: nil, payload: Data("seven".utf8)))
+        XCTAssertFalse(try stream.demand().wanted)
+        try producer.insert(Datagram(sequence: 7, timestamp: .unscaled(7), payload: Data("seven".utf8)))
         let datagram = try await consumer.recv()
         XCTAssertEqual(datagram?.sequence, 7)
         XCTAssertEqual(datagram?.payload, Data("seven".utf8))
+        // A scale-less datagram's unscaled timestamp names the sequence it writes at.
+        XCTAssertEqual(try producer.append(Data("nine".utf8), timestamp: .unscaled(9)), 9)
+        let nine = try await consumer.recv()
+        XCTAssertEqual(nine?.timestamp, .unscaled(9))
         consumer.cancel()
         let priority = try await producer.priorityChanged(last: 12)
         XCTAssertNil(priority)
@@ -51,7 +55,7 @@ final class SmokeTests: XCTestCase {
     }
 
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertNil(Subscription.default.delay.min)
         XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
@@ -61,7 +65,7 @@ final class SmokeTests: XCTestCase {
         let timebase = try Media.Timebase(broadcast: owner)
         XCTAssertThrowsError(
             try Media.ContainerProducer(
-                broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
+                broadcast: other, initData: Media.ContainerInit(format: .fmp4(), data: Data(), timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()
@@ -70,9 +74,9 @@ final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "errors")
-        let producer = try track.appendGroup()
+        let producer = try track.appendGroup(start: .unscaled(0))
         let consumer = try broadcast.consume()
-        let group = try await consumer.fetchGroup(name: "errors", sequence: 0)
+        let group = try await consumer.fetchGroup(name: "errors", start: 0)
         try producer.abort(errorCode: 404)
         do {
             _ = try await group.readFrame()
@@ -87,25 +91,25 @@ final class SmokeTests: XCTestCase {
 
     func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
         let broadcast = try BroadcastProducer()
-        let info = TrackInfo(maxAgeUnlimited: true, timescale: 1_000_000)
+        let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
         let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
-            let group = try track.appendGroup()
+            let group = try track.appendGroup(start: micros(ms * 1_000))
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
             try group.finish()
         }
         let consumer = try track.consume(
             subscription: Subscription(
                 delay: Delay(min: 0, max: 10),
-                ranges: [Subscription.Range(start: .relative(groups: 2))],
+                ranges: [Subscription.Range(start: .unscaled(0))],
                 order: .ascending
             ))
-        var sequences: [UInt64] = []
+        var starts: [UInt64] = []
         for _ in 0..<3 {
             let group = try await consumer.recvGroup()
-            sequences.append(try XCTUnwrap(group).sequence)
+            starts.append(try XCTUnwrap(group).start)
         }
-        XCTAssertEqual(sequences, [0, 1, 2])
+        XCTAssertEqual(starts, [0, 1_000, 2_000])
     }
 
     /// An error's description is the Rust error message.
@@ -172,6 +176,56 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// A negative, infinite, or NaN duration throws `Config`, where the generated converter would abort.
+    func testBadDurationThrowsConfig() async throws {
+        func assertConfig(_ body: () throws -> Void, _ what: String) {
+            XCTAssertThrowsError(try body(), what) { error in
+                guard case MoqError.Config = error else {
+                    return XCTFail("\(what): expected Config, got \(error)")
+                }
+            }
+        }
+        for bad in [-1, Double.infinity, Double.nan] {
+            assertConfig({ _ = try Client(timeout: bad) }, "client timeout \(bad)")
+            assertConfig({ _ = try Client(quic: QuicConfig(idleTimeout: bad)) }, "quic idle \(bad)")
+            assertConfig({ _ = try Client(backoff: Backoff(initial: bad)) }, "backoff initial \(bad)")
+            assertConfig({ _ = try Server(quic: QuicConfig(keepAlive: bad)) }, "server keep-alive \(bad)")
+
+            let broadcast = try BroadcastProducer()
+            var info = try broadcast.publishTrack(name: "info").consume().info()
+            info.maxAge = bad
+            assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "max age \(bad)")
+            info.maxAge = 0
+            info.refresh = TrackRefresh(interval: bad)
+            assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "refresh interval \(bad)")
+
+            var subscription = Subscription.default
+            subscription.delay.max = bad
+            let track = try broadcast.publishTrack(name: "events")
+            assertConfig({ _ = try track.consume(subscription: subscription) }, "delay max \(bad)")
+            assertConfig({ try track.consume().update(subscription: subscription) }, "update delay max \(bad)")
+            do {
+                _ = try await broadcast.consume().subscribeTrack(name: "events", subscription: subscription)
+                XCTFail("subscribeTrack accepted delay \(bad)")
+            } catch MoqError.Config {}
+            do {
+                _ = try await Media.CatalogConsumer.subscribe(broadcast: broadcast.consume(), delay: bad)
+                XCTFail("catalog subscribe accepted delay \(bad)")
+            } catch MoqError.Config {}
+            assertConfig(
+                {
+                    _ = try Video.Encoder(
+                        input: VideoEncoderInput(
+                            format: .rgba(), width: 64, height: 64,
+                            framerate: Video.FrameRate(numerator: 30, denominator: 1)),
+                        output: VideoEncoderOutput(codec: VideoCodec.h264(), join: bad, kind: .software))
+                }, "video join \(bad)")
+            assertConfig(
+                { _ = try Audio.Encoder(output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDuration: bad)) },
+                "audio frame duration \(bad)")
+        }
+    }
+
     /// Both sides read the grant their peer gave them, and a peer that verifies no
     /// tokens of its own refuses another one as unsupported.
     func testSessionAuthReadsTheGrant() async throws {
@@ -200,7 +254,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        let everything = Grant(publish: [""], subscribe: [""], expires: nil)
         for side in [session, peer] {
             for try await grant in side.grants() where grant == everything {
                 break
@@ -271,10 +325,10 @@ final class SmokeTests: XCTestCase {
         session.cancel(code: 0)
     }
 
-    /// Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back
-    /// pins `request` and `follow`, while its text parsed is another, named instance that nothing
+    /// Over moq-lite-06, whose wire carries no identity, the session mints one: passing it back
+    /// pins `request` and `follow`, while its text parsed is another, named identity that nothing
     /// serves.
-    func testAnnouncedInstancePinsRequestAndFollow() async throws {
+    func testAnnouncedIdentityPinsRequestAndFollow() async throws {
         let version = ["moq-lite-06"]
         let published = OriginProducer()
         let route = try published.route(path: "live")
@@ -301,12 +355,12 @@ final class SmokeTests: XCTestCase {
         guard case .present(let present) = try await nextRoute(try consumer.announced()) else {
             return XCTFail("expected an announcement")
         }
-        let minted = present.route.instance
+        let minted = present.route.identity
         XCTAssertTrue(minted.isMinted())
 
-        _ = try await consumer.request(path: "live", instance: minted)
-        let following = try consumer.follow(path: "live", instance: minted)
-        // Cancelling ends the wait below, so an instance that never resolves fails rather than hangs.
+        _ = try await consumer.request(path: "live", identity: minted)
+        let following = try consumer.follow(path: "live", identity: minted)
+        // Cancelling ends the wait below, so an identity that never resolves fails rather than hangs.
         let watchdog = Task {
             try await Task.sleep(nanoseconds: 10_000_000_000)
             following.cancel()
@@ -316,13 +370,13 @@ final class SmokeTests: XCTestCase {
         XCTAssertNotNil(followed)
         following.cancel()
 
-        let named = try Instance.parse(text: minted.text())
+        let named = try Identity.parse(text: minted.text())
         XCTAssertFalse(named.isMinted())
         XCTAssertEqual(named.description, minted.text())
         XCTAssertNotEqual(named, minted)
         do {
-            _ = try await consumer.request(path: "live", instance: named)
-            XCTFail("the same text, named, is another instance")
+            _ = try await consumer.request(path: "live", identity: named)
+            XCTFail("the same text, named, is another identity")
         } catch {}
     }
 
@@ -363,7 +417,7 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
-        XCTAssertEqual(first.route.instance, route.instance)
+        XCTAssertEqual(first.route.identity, route.identity)
 
         try route.withdraw()
         guard case .absent(let retracted) = try await nextRoute(announced) else {
@@ -380,7 +434,7 @@ final class SmokeTests: XCTestCase {
         guard case .present(let again) = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
-        XCTAssertEqual(again.route.instance, route.instance)
+        XCTAssertEqual(again.route.identity, route.identity)
         _ = try await consumer.request(path: "live")
         route.cancel()
     }
@@ -447,22 +501,22 @@ final class SmokeTests: XCTestCase {
         chat.cancel()
     }
 
-    func testNewInstanceRestartsFollowersButStaysListed() async throws {
+    func testNewIdentityRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
         let consumer = origin.consume()
         let announced = try consumer.announced(prefix: "")
-        let following = try consumer.follow(path: "instance")
-        let first = try origin.route(path: "instance")
+        let following = try consumer.follow(path: "identity")
+        let first = try origin.route(path: "identity")
         guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(present.route.instance.isMinted())
-        XCTAssertEqual(present.route.instance, first.instance)
+        XCTAssertFalse(present.route.identity.isMinted())
+        XCTAssertEqual(present.route.identity, first.identity)
         let firstBroadcast = try await following.available()
         XCTAssertNotNil(firstBroadcast)
 
-        let camera = try Instance.parse(text: "camera")
-        let second = try origin.route(path: "instance", instance: camera, epoch: 1)
+        let camera = try Identity.parse(text: "camera")
+        let second = try origin.route(path: "identity", identity: camera, epoch: 1)
         let takeover = try await following.available()
         XCTAssertNotNil(takeover)
 
@@ -472,12 +526,12 @@ final class SmokeTests: XCTestCase {
         guard case .absent(let absent) = try await nextRoute(announced) else {
             return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(absent.route.instance, camera)
-        XCTAssertEqual(absent.route.instance.description, "camera")
+        XCTAssertEqual(absent.route.identity, camera)
+        XCTAssertEqual(absent.route.identity.description, "camera")
 
-        XCTAssertThrowsError(try Instance.parse(text: "")) { error in
-            guard case MoqError.InvalidInstance = error else {
-                return XCTFail("expected InvalidInstance, got \(error)")
+        XCTAssertThrowsError(try Identity.parse(text: "")) { error in
+            guard case MoqError.InvalidIdentity = error else {
+                return XCTFail("expected InvalidIdentity, got \(error)")
             }
         }
         first.cancel()
@@ -514,7 +568,7 @@ final class SmokeTests: XCTestCase {
         let request = try XCTUnwrap(requested)
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
-        XCTAssertEqual(served.instance, dynamic.instance)
+        XCTAssertEqual(served.identity, dynamic.identity)
         let broadcast = served.broadcast
         XCTAssertTrue(broadcast === served.broadcast)
         // Only announcing answers the requester.
@@ -568,7 +622,7 @@ final class SmokeTests: XCTestCase {
             optimizeForLatency: true
         )
         let media = try Media.TrackProducer.video(
-            broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
+            broadcast: broadcast, initData: Media.VideoInit(format: .h264(), data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
@@ -589,24 +643,80 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try catalog.now())
     }
 
+    /// Updates published before the reader joins reach a holding reader in order, each with its
+    /// timestamp; an arrival reader takes only the newest.
+    func testHoldingCatalogReaderReadsEveryUpdateWithinItsDelay() async throws {
+        let broadcast = try BroadcastProducer()
+        defer { try? broadcast.close() }
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        for value in ["1", "2"] {
+            try catalog.setSection(name: "app", json: value)
+        }
+        let consumer = try broadcast.consume()
+
+        for (delay, expected) in [(0.0, ["2"]), (60.0, ["1", "2"])] {
+            let reader = try await Media.CatalogConsumer.subscribe(broadcast: consumer, delay: delay)
+            var read: [String] = []
+            var last: UInt64 = 0
+            while read.last != "2" {
+                let next = try await reader.next()
+                let update = try XCTUnwrap(next, "\(delay)s delay")
+                XCTAssertNotNil(update.timestamp.scale)
+                XCTAssertGreaterThan(update.timestamp.value, last, "\(delay)s delay")
+                last = update.timestamp.value
+                // The broadcast's first catalog, published before any section, is not one of ours.
+                if let app = update.sections["app"] {
+                    read.append(app)
+                }
+            }
+            reader.cancel()
+            XCTAssertEqual(read, expected, "\(delay)s delay")
+        }
+    }
+
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
-        let group = try track.appendGroup()
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
+        let group = try track.appendGroup(start: micros(0))
         try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
 
         let consumer = try broadcast.consume()
         let fetched = try await consumer.fetchGroup(
             name: "events",
-            sequence: 0,
+            start: 0,
             options: FetchGroupOptions(priority: 3)
         )
-        XCTAssertEqual(fetched.sequence, 0)
+        XCTAssertEqual(fetched.start, 0)
         let frame = try await fetched.readFrame()
         XCTAssertEqual(frame?.payload, Data("cached".utf8))
         let end = try await fetched.readFrame()
         XCTAssertNil(end)
+    }
+
+    func testMetadataSubscriptionReadsFrameHeaders() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
+        let meta = try await broadcast.consume().subscribeMeta(name: "video")
+        XCTAssertEqual(meta.info().timescale, 1_000_000)
+
+        let group = try track.appendGroup(start: micros(0))
+        try group.writeFrame(Data("key".utf8), timestamp: micros(0))
+        try group.writeFrame(Data(), timestamp: micros(1))
+        try group.finish()
+        try track.finish()
+
+        var starts: [UInt64] = []
+        var headers: [FrameHeader] = []
+        for try await group in meta {
+            starts.append(group.start)
+            for try await header in group {
+                headers.append(header)
+            }
+        }
+        XCTAssertEqual(starts, [0])
+        XCTAssertEqual(headers.map(\.size), [3, 0])
+        XCTAssertEqual(headers.map(\.timestamp), [micros(0), micros(1)])
     }
 
     func testJsonSnapshotRoundTrip() async throws {
@@ -619,7 +729,7 @@ final class SmokeTests: XCTestCase {
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
             track: try broadcast.publishTrack(
-                name: "status", info: TrackInfo(timescale: 1_000_000, compression: .deflate)))
+                name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate())))
         let consumer = try Json.SnapshotConsumer<Status>(
             broadcast: try broadcast.consume(), name: "status")
 
@@ -648,7 +758,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<Event>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000)))
         let consumer = try Json.StreamConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
 
@@ -670,7 +780,8 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compression: .deflate))
+            track: try broadcast.publishTrack(
+                name: "log", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate()))
         )
         let consumer = try Json.WindowConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "log"))
@@ -703,7 +814,7 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
-        let timed = TrackInfo(timescale: 1_000_000)
+        let timed = TrackInfo(maxAge: 0, timescale: 1_000_000)
         let snapshot = try Json.SnapshotProducer<[String: Int]>(
             broadcast: broadcast, track: try broadcast.publishTrack(name: "status", info: timed))
         let stream = try Json.StreamProducer<[String: Int]>(
@@ -711,35 +822,147 @@ final class SmokeTests: XCTestCase {
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
-        XCTAssertNil(snapshotDemand.wanted)
+        XCTAssertFalse(snapshotDemand.wanted)
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
             broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
-        while try await snapshotDemand.wantedChanged() == nil {}
-        while try await streamDemand.wantedChanged() == nil {}
-        XCTAssertEqual(snapshotDemand.wanted, 0)
+        while try await !snapshotDemand.wantedChanged() {}
+        while try await !streamDemand.wantedChanged() {}
+        XCTAssertTrue(snapshotDemand.wanted)
 
         snapshotConsumer.cancel()
         streamConsumer.cancel()
-        while try await snapshotDemand.wantedChanged() != nil {}
-        while try await streamDemand.wantedChanged() != nil {}
+        while try await snapshotDemand.wantedChanged() {}
+        while try await streamDemand.wantedChanged() {}
 
         try broadcast.close()
     }
 
-    func testRawTrackWithoutTimestampStaysUntimed() async throws {
+    /// Released once unwanted, a track ends; a reader that joined since is served by the next
+    /// request for it.
+    func testReleaseEndsAnOnDemandTrack() async throws {
+        let broadcast = try BroadcastProducer()
+        let requests = try broadcast.requests()
+
+        var idle: TrackProducer? = try broadcast.publishTrack(name: "idle")
+        let idleDemand = try idle!.demand()
+        while try await idleDemand.wantedChanged() {}
+        idle = nil
+        do {
+            _ = try await idleDemand.wantedChanged()
+            XCTFail("the watcher outlived its released track")
+        } catch MoqError.Closed {}
+
+        var track: TrackProducer? = try broadcast.publishTrack(name: "status")
+        let demand = try track!.demand()
+        while try await demand.wantedChanged() {}
+        let late = try await broadcast.consume().subscribeTrack(name: "status")
+        track = nil
+
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "status")
+        let next = try request.accept()
+        try next.writeFrame(Data("served again".utf8), timestamp: .unscaled(0))
+        let frame = try await late.readFrame()
+        XCTAssertEqual(frame?.payload, Data("served again".utf8))
+        late.cancel()
+        try broadcast.close()
+    }
+
+    /// A native encoder serves a track asked for again after its producer was released while
+    /// read, published with the same settings.
+    func testNativeEncodersServeARenewal() async throws {
+        let broadcast = try BroadcastProducer()
+        let requests = try broadcast.requests()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+
+        let mic = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+        let opus = AudioEncoderOutput(codec: AudioCodec.opus())
+        var audio: Audio.Producer? = try Audio.Producer(
+            catalog: catalog, input: mic, output: opus, track: "mic")
+        var late = try await broadcast.consume().subscribeTrack(name: "mic")
+        audio = nil
+        var request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "mic")
+        audio = try Audio.Producer.requested(
+            catalog: catalog, request: request, input: mic, output: opus)
+        for index in 0..<3 {
+            try audio!.write(
+                AudioFrame(timestamp: micros(UInt64(index) * 20_000), data: Data(count: 960 * 4)))
+        }
+        var frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+
+        let camera = VideoEncoderInput(
+            format: .rgba(), width: 320, height: 240,
+            framerate: Video.FrameRate(numerator: 30, denominator: 1))
+        let h264 = VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software)
+        var video: Video.Producer? = try Video.Producer(
+            catalog: catalog, input: camera, output: h264, track: "camera")
+        late = try await broadcast.consume().subscribeTrack(name: "camera")
+        video = nil
+        request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "camera")
+        video = try Video.Producer.requested(
+            catalog: catalog, request: request, input: camera, output: h264)
+        try video!.write(
+            VideoFrame(timestamp: micros(0), data: Data(repeating: 0x80, count: 320 * 240 * 4)))
+        try video!.finish()
+        frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+        try broadcast.close()
+    }
+
+    /// A released typed producer hands a reader that joined since to the next request, like a
+    /// raw one.
+    func testJsonReleaseServesALateReader() async throws {
+        let broadcast = try BroadcastProducer()
+        let requests = try broadcast.requests()
+        let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
+        var producer: Json.StreamProducer<String>? = try Json.StreamProducer<String>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: info))
+        let demand = try producer!.demand()
+        while try await demand.wantedChanged() {}
+
+        let late = try Json.StreamConsumer<String>(
+            track: try await broadcast.consume().subscribeTrack(name: "events"))
+        producer = nil
+
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "events")
+        let next = try Json.StreamProducer<String>(broadcast: broadcast, track: try request.accept(info: info))
+        try next.append("served again", timestamp: micros(0))
+        let record = try await late.next()
+        XCTAssertEqual(record, Json.Timed(value: "served again", timestamp: micros(0)))
+        late.cancel()
+        try broadcast.close()
+    }
+
+    func testScaleLessTrackCarriesGroupKey() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "untimed")
         let consumer = try track.consume()
-        try track.writeFrame(Data("payload".utf8))
+        // A scale-less track has no time, so a frame names its group's key instead.
+        XCTAssertThrowsError(try track.writeFrame(Data("timed".utf8), timestamp: micros(0)))
+        try track.writeFrame(Data("payload".utf8), timestamp: .unscaled(0))
         let received = try await consumer.readFrame()
         let frame = try XCTUnwrap(received)
         XCTAssertEqual(frame.payload, Data("payload".utf8))
-        XCTAssertNil(frame.timestamp)
+        XCTAssertEqual(frame.timestamp, .unscaled(0))
+        XCTAssertNil(frame.timestamp.scale)
         XCTAssertNil(consumer.info().timescale)
+        // A group's frames carry that group's key, and only it.
+        let group = try track.createGroup(start: 1)
+        XCTAssertThrowsError(try group.writeFrame(Data("other".utf8), timestamp: .unscaled(2)))
+        try group.writeFrame(Data("grouped".utf8), timestamp: .unscaled(group.start))
+        try group.finish()
+        let grouped = try await consumer.readFrame()
+        XCTAssertEqual(grouped?.timestamp, .unscaled(1))
         try track.finish()
         try broadcast.close()
     }
@@ -748,16 +971,41 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
         XCTAssertEqual(omitted.maxAge, 0)
-        let info = TrackInfo(maxAgeUnlimited: true)
+        let info = TrackInfo(maxAge: nil)
         let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
         XCTAssertNil(unlimited.maxAge)
-        XCTAssertTrue(unlimited.maxAgeUnlimited)
+        try broadcast.close()
+    }
+
+    /// A refresh reads back as published, and a bare one asks for nothing.
+    func testTrackInfoRefresh() throws {
+        let broadcast = try BroadcastProducer()
+        let info = TrackInfo(maxAge: 0, refresh: TrackRefresh(ratio: 2, interval: 0.5))
+        let got = try broadcast.publishTrack(name: "refresh", info: info).consume().info().refresh
+        XCTAssertEqual(got.ratio, 2)
+        XCTAssertEqual(got.interval, 0.5)
+        let plain = try broadcast.publishTrack(name: "plain").consume().info().refresh
+        XCTAssertNil(plain.ratio)
+        XCTAssertNil(plain.interval)
+        try broadcast.close()
+    }
+
+    /// The first subscriber of a track with no group asks for one.
+    func testDemandRefreshWaitsForAGroupRequest() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(
+            name: "status", info: TrackInfo(maxAge: 0, refresh: TrackRefresh(ratio: 0)))
+        let demand = try track.demand()
+        let consumer = try track.consume()
+        try await demand.refresh()
+        _ = consumer
+        try track.finish()
         try broadcast.close()
     }
 
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
         let payload = Data("ready".utf8)
@@ -767,7 +1015,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(frame?.payload, payload)
         XCTAssertEqual(frame?.timestamp, micros(12_345))
 
-        let group = try track.appendGroup()
+        let group = try track.appendGroup(start: micros(23_456))
         let groupConsumer = try group.consume()
         let groupPayload = Data("group".utf8)
         try group.writeFrame(groupPayload, timestamp: micros(23_456))
@@ -783,7 +1031,7 @@ final class SmokeTests: XCTestCase {
 
     func testTimestampsAreExact() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(timescale: 90_000))
+        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(maxAge: 0, timescale: 90_000))
         let consumer = try track.consume()
 
         // A present zero stays present, and one 90 kHz tick reads back as itself rather than
@@ -835,6 +1083,8 @@ final class SmokeTests: XCTestCase {
             Timestamp(value: 0, scale: 0),
             Timestamp(value: 0, scale: 1 << 62),
             Timestamp(value: 1 << 61, scale: 90_000),
+            // A scale-less timestamp has no time to convert.
+            .unscaled(5),
         ] {
             assertTimeOverflow(try invalid.duration)
         }
@@ -842,11 +1092,11 @@ final class SmokeTests: XCTestCase {
 
     func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000))
+        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
-        try track.appendGroup().finish()
-        try track.appendGroup().finish()
+        try track.appendGroup(start: micros(0)).finish()
+        try track.appendGroup(start: micros(1_000)).finish()
         try track.writeFrame(Data("populated".utf8), timestamp: micros(2_000))
 
         let frame = try await consumer.readFrame()
@@ -860,13 +1110,13 @@ final class SmokeTests: XCTestCase {
     func testSparseGroupsAndKnownEnd() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "sparse")
-        let group = try track.createGroup(sequence: 2)
-        XCTAssertEqual(group.sequence, 2)
+        let group = try track.createGroup(start: 2)
+        XCTAssertEqual(group.start, 2)
         try group.finish()
 
         try track.finish(at: 5)
-        try track.createGroup(sequence: 4).finish()
-        XCTAssertThrowsError(try track.createGroup(sequence: 5))
+        try track.createGroup(start: 4).finish()
+        XCTAssertThrowsError(try track.createGroup(start: 5))
         try track.finish()
         try broadcast.close()
     }
@@ -925,13 +1175,15 @@ final class SmokeTests: XCTestCase {
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.audio["mic"])
 
+        // No max delay: a zero one skips a group once its successor is a warmup old by the
+        // native wall clock, so a read that starts late under load never returns.
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: 0), estimate: false)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: nil), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0, max: nil))
         )
         XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
         let initial = estimated.delay
@@ -964,8 +1216,9 @@ final class SmokeTests: XCTestCase {
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(
-                format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
-            output: VideoEncoderOutput(codec: .h264, kind: .software),
+                format: .rgba(), width: 320, height: 240,
+                framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+            output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software),
             track: "camera"
         )
         try route.announce()
@@ -998,10 +1251,10 @@ final class SmokeTests: XCTestCase {
         decoder.cancel()
         XCTAssertNil(frame.surface())
 
-        let planar = try frame.pixels(format: .i420)
+        let planar = try frame.pixels(format: .i420())
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)
 
-        let packed = try frame.pixels(format: .rgba)
+        let packed = try frame.pixels(format: .rgba())
         XCTAssertEqual(packed.count, Int(frame.width()) * Int(frame.height()) * 4)
         XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 

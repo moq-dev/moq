@@ -52,7 +52,7 @@ const OBSERVED = [
 	"announce",
 	"stats",
 	"echo-path",
-	"capture",
+	"idle",
 ] as const;
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -70,13 +70,13 @@ export type SourceType = "camera" | "screen" | "file";
 export type AnnounceMode = "always" | "source";
 
 /**
- * What a muted or invisible track does with its capture.
+ * What a muted or invisible (idle) track does with its capture.
  *
  * `hold` keeps the device open, so resuming is instant but the browser's capture indicator stays lit.
  * `release` closes it, so the indicator goes dark and resuming reopens it; the track reads as disabled
  * in the catalog until it has. A screen share or file stops only once both tracks are off. Defaults to `hold`.
  */
-export type CaptureMode = "hold" | "release";
+export type IdleMode = "hold" | "release";
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
@@ -100,10 +100,10 @@ function parseAnnounce(value: string | null): AnnounceMode {
 	throw invalidAttribute("announce", value, '"source" or "always"');
 }
 
-function parseCapture(value: string | null): CaptureMode {
+function parseIdle(value: string | null): IdleMode {
 	if (value === null) return "hold";
 	if (value === "hold" || value === "release") return value;
-	throw invalidAttribute("capture", value, '"hold" or "release"');
+	throw invalidAttribute("idle", value, '"hold" or "release"');
 }
 
 function parsePreview(value: string | null): Preview.Mode {
@@ -138,9 +138,9 @@ class Enabled extends Signal<boolean> {
 		super(false);
 	}
 
-	override set(value: boolean, notify?: boolean): void {
+	override set(value: boolean, force?: true): void {
 		this.#wanted = value;
-		super.set(value && this.#running, notify);
+		super.set(value && this.#running, force);
 	}
 
 	run(running: boolean): void {
@@ -174,7 +174,7 @@ export default class MoqPublish extends HTMLElement {
 		// Where viewers may publish feedback, relative to the broadcast, or undefined to solicit none.
 		echoPath: new Signal<Moq.Path.Relative | undefined>(undefined),
 		// Whether a muted or invisible track keeps its capture open.
-		capture: new Signal<CaptureMode>("hold"),
+		idle: new Signal<IdleMode>("hold"),
 	};
 
 	/**
@@ -227,7 +227,7 @@ export default class MoqPublish extends HTMLElement {
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 
-	// Whether to capture each track: connected, and with `capture="release"` also allowed by `muted`
+	// Whether to capture each track: connected, and with `idle="release"` also allowed by `muted`
 	// and `invisible`. A screen share or file carries both tracks, so it captures while either does.
 	#videoCapture = new Signal(false);
 	#audioCapture = new Signal(false);
@@ -268,7 +268,7 @@ export default class MoqPublish extends HTMLElement {
 
 		this.signals.run((effect) => {
 			const enabled = effect.get(this.#enabled);
-			const hold = effect.get(this.controls.capture) === "hold";
+			const hold = effect.get(this.controls.idle) === "hold";
 			const video = enabled && (hold || !effect.get(this.controls.invisible));
 			const audio = enabled && (hold || !effect.get(this.controls.muted));
 			this.#videoCapture.set(video);
@@ -296,7 +296,7 @@ export default class MoqPublish extends HTMLElement {
 			rotation: this.#capture.out.rotation,
 			stats: this.controls.stats,
 			probe: this.connection.probe,
-			echo: this.controls.echoPath,
+			echoPath: this.controls.echoPath,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -463,7 +463,7 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "announce", effect.get(this.controls.announce)));
 		this.signals.run((effect) => this.#reflect(effect, "stats", effect.get(this.controls.stats) ? "" : undefined));
 		this.signals.run((effect) => this.#reflect(effect, "echo-path", effect.get(this.controls.echoPath)));
-		this.signals.run((effect) => this.#reflect(effect, "capture", effect.get(this.controls.capture)));
+		this.signals.run((effect) => this.#reflect(effect, "idle", effect.get(this.controls.idle)));
 		this.signals.run(this.#runSource.bind(this));
 	}
 
@@ -494,7 +494,7 @@ export default class MoqPublish extends HTMLElement {
 			else if (name === "backend") this.backend = parseBackend(newValue);
 			else if (name === "stats") this.stats = parseBoolean(newValue, false);
 			else if (name === "echo-path") this.echoPath = parseEchoPath(newValue);
-			else if (name === "capture") this.capture = parseCapture(newValue);
+			else if (name === "idle") this.idle = parseIdle(newValue);
 			else {
 				const exhaustive: never = name;
 				throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -547,7 +547,7 @@ export default class MoqPublish extends HTMLElement {
 
 		// Sources stay alive while disconnected so device and file selections survive a reconnect;
 		// the connection gate releases their capture and device discovery. `muted` and `invisible`
-		// release a device only with `capture="release"`.
+		// release a device only with `idle="release"`.
 		if (!source) return;
 
 		if (source === "camera") {
@@ -665,7 +665,7 @@ export default class MoqPublish extends HTMLElement {
 
 	/**
 	 * Whether audio is muted, mirrored by the `muted` attribute. Muting sends nothing while keeping the
-	 * rendition live, so unmuting reaches every listener at once; `capture` decides whether the
+	 * rendition live, so unmuting reaches every listener at once; `idle` decides whether the
 	 * microphone stays open.
 	 */
 	get muted(): boolean {
@@ -679,7 +679,7 @@ export default class MoqPublish extends HTMLElement {
 
 	/**
 	 * Whether video is hidden, mirrored by the `invisible` attribute. Hiding stops encoding and the
-	 * preview; `capture` decides whether the camera stays open.
+	 * preview; `idle` decides whether the camera stays open.
 	 */
 	get invisible(): boolean {
 		return this.controls.invisible.peek();
@@ -690,14 +690,14 @@ export default class MoqPublish extends HTMLElement {
 		this.#accept("invisible");
 	}
 
-	/** What a muted or invisible track does with its capture, mirrored by the `capture` attribute. */
-	get capture(): CaptureMode {
-		return this.controls.capture.peek();
+	/** What a muted or invisible track does with its capture, mirrored by the `idle` attribute. */
+	get idle(): IdleMode {
+		return this.controls.idle.peek();
 	}
 
-	set capture(value: CaptureMode) {
-		this.controls.capture.set(parseCapture(value));
-		this.#accept("capture");
+	set idle(value: IdleMode) {
+		this.controls.idle.set(parseIdle(value));
+		this.#accept("idle");
 	}
 
 	/** What a <canvas> preview renders, mirrored by the `preview` attribute. */

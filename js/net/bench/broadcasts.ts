@@ -5,9 +5,9 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import { HopSchema, WireRoute } from "../src/hop.ts";
-import * as Instance from "../src/instance.ts";
-import { AnnounceRequest } from "../src/lite/announce.ts";
+import { defined } from "../src/defined.test-util.ts";
+import { toHop, WireRoute } from "../src/hop.ts";
+import * as Identity from "../src/identity.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
 import { TrackInfo } from "../src/lite/track.ts";
@@ -15,7 +15,7 @@ import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
-import { Stream, Writer } from "../src/stream.ts";
+import { Writer } from "../src/stream.ts";
 import { wireOf } from "../src/wire.ts";
 
 // Keep protocol diagnostics out of the measured CSV on stdout.
@@ -49,19 +49,13 @@ for (const scope of [
 				scope === "full-name" || scope === "overlap-only"
 					? origin.consume().routes(Path.Pattern.parse("**/*.chat"))
 					: (scope === "producer-scopes"
-							? origin.scope(
-									Path.empty(),
-									new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]),
-								)
+							? origin.scope(Path.empty(), Path.Prefixes.parse([`room/0/tag-${index}`]))
 							: scope === "rooted-producers"
-								? origin.scope(
-										Path.from("room"),
-										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
-									)
+								? origin.scope(Path.from("room"), Path.Prefixes.parse([`0/tag-${index}`]))
 								: origin
 						).routes(
 							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
-							// These scopes only overlap `room/<index>`, so they measure the covering view.
+							// These scopes only lie beneath the touched route, so they measure the covering view.
 							{ covering: scope !== "unscoped" },
 						),
 			);
@@ -101,7 +95,7 @@ console.log("tracks,listings,create_remove_and_read_us");
 for (const trackCount of [8, 128, 1024]) {
 	for (const listingCount of [1, 8, 32]) {
 		const broadcast = new BroadcastProducer();
-		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		for (let index = 0; index < trackCount; index++) defined(broadcast.createTrack(`held-${index}`));
 		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
 		// Past each listing's initial set and SYNCED.
 		for (const listing of listings) {
@@ -109,7 +103,7 @@ for (const trackCount of [8, 128, 1024]) {
 		}
 		const start = performance.now();
 		for (let index = 0; index < listed; index++) {
-			broadcast.createTrack(`new-${index}`);
+			defined(broadcast.createTrack(`new-${index}`));
 			for (const listing of listings) {
 				const event = await listing.next();
 				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
@@ -127,15 +121,15 @@ for (const trackCount of [8, 128, 1024]) {
 
 // Resolve one touched path while both the table and that path's readers grow.
 console.log("request,routes,readers,update_and_read_us");
-const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
+const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
 for (const pinned of [false, true]) {
 	for (const routeCount of routeCounts) {
 		for (const readerCount of observerCounts) {
 			const origin = new Producer();
 			const reader = origin.consume();
-			const options = pinned ? { instance } : {};
+			const options = pinned ? { identity } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) =>
-				origin.route(Path.from(`room/${index}`), { instance: { id: instance, epoch: 0n } }),
+				origin.route(Path.from(`room/${index}`), { identity: { id: identity, epoch: 0n } }),
 			);
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
@@ -144,7 +138,7 @@ for (const pinned of [false, true]) {
 				publishers[0].setCost(BigInt(index + 1));
 				await Promise.resolve();
 				for (const request of requests) {
-					if (!request.active.peek()) throw new Error("same-instance request lost its front");
+					if (!request.active.peek()) throw new Error("same-identity request lost its front");
 					checksum++;
 				}
 			}
@@ -194,32 +188,24 @@ const quic = {
 		};
 	},
 } as unknown as WebTransport;
-console.log("auth,patterns,fetches,grant_update_us");
-for (const patternCount of [8, 32, 128]) {
+console.log("auth,prefixes,fetches,grant_update_us");
+for (const prefixCount of [8, 32, 128]) {
 	for (const fetchCount of [1, 8, 32]) {
-		const subscribe = new Path.Patterns([
-			Path.Pattern.subtree("room"),
-			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
+		const subscribe = Path.Prefixes.parse([
+			"room",
+			...Array.from({ length: prefixCount - 1 }, (_, i) => `other/${i}`),
 		]);
-		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
-		const subscriber = new Subscriber(
-			quic,
-			Version.DRAFT_05,
-			HopSchema.parse(1n),
-			undefined,
-			undefined,
-			undefined,
-			grant,
-		);
+		const grant = new Signal<Grant | undefined>({ publish: new Path.Prefixes(), subscribe });
+		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 		const groups = await Promise.all(
 			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0n)),
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {
-			grant.set({ publish: new Path.Patterns(), subscribe, expires: Wall.unixMillis(i) });
+			grant.set({ publish: new Path.Prefixes(), subscribe, expires: Wall.unixMillis(i) });
 			await Promise.resolve();
 		}
-		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
+		console.log(`fetch,${prefixCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
 		for (const group of groups) {
 			if (group.closed.peek() !== undefined) throw new Error("allowed fetch ended");
 			group.close();
@@ -230,11 +216,11 @@ for (const patternCount of [8, 32, 128]) {
 
 // Restart a served prefix while both its path count and readers per path grow.
 console.log("restart,paths,readers,update_us");
-const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
+const nextIdentity = Identity.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
+		const dynamic = origin.claim(Path.from("room"), { identity: { id: identity, epoch: 0n } });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
@@ -247,7 +233,7 @@ for (const pathCount of routeCounts) {
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();
-		wireOf(dynamic).update({ instance: nextInstance });
+		wireOf(dynamic).update({ identity: nextIdentity });
 		await Promise.resolve();
 		const elapsed = performance.now() - start;
 		for (const [index, request] of requests.entries()) {
@@ -273,13 +259,13 @@ for (const routeCount of routeCounts) {
 		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
 		const held = sources.map((source, i) => {
 			const path = Path.from(`pool/${i % routeCount}/job/${i}`);
-			return cache.insert(path, cache.instance(path), source.consume());
+			return cache.insert(path, cache.identity(path), source.consume());
 		});
 		const touched = Path.from("pool/0/job/0");
 		const start = performance.now();
 		for (let i = 0; i < 4096; i++) {
 			cache.announce(Path.from("pool/0"), owners[0], { ...WireRoute.default, cost: BigInt(i) });
-			const shared = cache.get(touched, cache.instance(touched));
+			const shared = cache.get(touched, cache.identity(touched));
 			if (!shared || shared.closed !== held[0].closed) throw new Error("update replaced the source");
 			shared.close();
 		}
@@ -298,22 +284,22 @@ for (const routeCount of routeCounts) {
 		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], WireRoute.default);
 		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
 		const paths = sources.map((_, i) => Path.from(`pool/0/job/${i}`));
-		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
+		const held = sources.map((source, i) => cache.insert(paths[i], cache.identity(paths[i]), source.consume()));
 		const specific = {};
 		const prefix = Path.from("pool/0/job");
-		const instance = Instance.random();
+		const identity = Identity.random();
 		let duplicates = 0;
 		const start = performance.now();
 		for (let round = 0; round < 256; round++) {
-			if (round % 2 === 0) cache.announce(prefix, specific, { ...WireRoute.default, instance });
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...WireRoute.default, identity });
 			else cache.withdraw(prefix, specific);
 			for (let i = 0; i < consumerCount; i++) {
-				const instance = cache.instance(paths[i]);
-				const shared = cache.get(paths[i], instance);
+				const identity = cache.identity(paths[i]);
+				const shared = cache.get(paths[i], identity);
 				if (shared) shared.close();
 				else {
 					if (round > 0) duplicates++;
-					held.push(cache.insert(paths[i], instance, sources[i].consume()));
+					held.push(cache.insert(paths[i], identity, sources[i].consume()));
 				}
 			}
 		}
@@ -339,13 +325,13 @@ for (const routeCount of routeCounts) {
 		let elapsed = 0;
 		let stale = 0;
 		for (let round = 0; round < 256; round++) {
-			const held = paths.map((path) => cache.insert(path, cache.instance(path), source.consume()));
+			const held = paths.map((path) => cache.insert(path, cache.identity(path), source.consume()));
 			const start = performance.now();
 			cache.announce(prefix, owner, WireRoute.default);
 			cache.withdraw(prefix, owner);
 			elapsed += performance.now() - start;
 			for (const path of paths) {
-				const shared = cache.get(path, cache.instance(path));
+				const shared = cache.get(path, cache.identity(path));
 				if (shared) {
 					stale++;
 					shared.close();
@@ -375,16 +361,16 @@ for (const routeCount of routeCounts) {
 				cache.announce(prefix, owners[route], WireRoute.default);
 				for (let consumer = 0; consumer < (route === 0 ? consumerCount : 1); consumer++) {
 					const path = Path.from(`${prefix}/job/${consumer}`);
-					const instance = cache.instance(path);
+					const identity = cache.identity(path);
 					if (route === 0)
-						instance.validity?.signal.addEventListener(
+						identity.validity?.signal.addEventListener(
 							"abort",
 							() => {
 								refused++;
 							},
 							{ once: true },
 						);
-					held.push(cache.insert(path, instance, source.consume()));
+					held.push(cache.insert(path, identity, source.consume()));
 				}
 			}
 			const start = performance.now();
@@ -409,21 +395,25 @@ for (const routeCount of routeCounts) {
 		});
 		const senders = Array.from({ length: observerCount }, () => {
 			const pair = createMockTransportPair(ALPN_07_WIP);
-			const publisher = new Publisher(pair.server, Version.DRAFT_07, HopSchema.parse(1n), origin.consume());
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
-			const stream = new Stream({
-				version: Version.DRAFT_07,
-				readable: new ReadableStream<Uint8Array>(),
-				writable: new WritableStream<Uint8Array>({
-					async write() {
+			// The session's Announce Stream, whose first write stalls.
+			const create = pair.server.createUnidirectionalStream.bind(pair.server);
+			pair.server.createUnidirectionalStream = async (options) => {
+				const writer = (await create(options)).getWriter();
+				return new WritableStream<Uint8Array>({
+					async write(chunk) {
 						entered.resolve();
 						await release.promise;
+						await writer.write(chunk);
 					},
-				}),
-			});
-			const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
-			return { pair, publisher, entered, release, running };
+					close: () => writer.close(),
+					abort: (reason) => writer.abort(reason),
+				}) as Awaited<ReturnType<typeof create>>;
+			};
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
+			publisher.request(false, [], [{ prefix: Path.empty(), hidden: false }]);
+			return { pair, publisher, entered, release };
 		});
 		await Promise.all(senders.map((sender) => sender.entered.promise));
 		const start = performance.now();
@@ -438,11 +428,10 @@ for (const routeCount of routeCounts) {
 			`stalled-announce,${routeCount},${observerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
 		);
 		await Promise.all(
-			senders.map(async ({ pair, publisher, release, running }) => {
+			senders.map(async ({ pair, publisher, release }) => {
 				const drained = publisher.drain();
 				release.resolve();
 				await drained;
-				await running;
 				publisher.close();
 				pair.client.close();
 				pair.server.close();

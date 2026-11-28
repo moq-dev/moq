@@ -100,19 +100,18 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
 			run -= 1;
 		}
 
-		// Encode deltas.
-		let mut last_scale = 8;
-		for scale in &list[0..run] {
-			let delta_scale = *scale as i32 - last_scale;
-			self.se(delta_scale)?;
-			last_scale = *scale as i32;
+		// Encode deltas. The decoder adds them modulo 256, and 7.4.2.1.1.1
+		// bounds each to -128..=127, so each is taken modulo 256 into that range.
+		let mut last_scale = 8u8;
+		for &scale in &list[0..run] {
+			self.se(scale.wrapping_sub(last_scale) as i8)?;
+			last_scale = scale;
 		}
 
-		// Didn't encode all values, encode -|last_scale| to set decoder's
-		// |next_scale| (H.264 7.3.2.1.1.1) to zero, i.e. decoder should repeat
-		// last values in matrix.
+		// Didn't encode all values: set the decoder's next_scale (H.264
+		// 7.3.2.1.1.1) to zero, so it repeats the last value to the end.
 		if run < list.len() {
-			self.se(-last_scale)?;
+			self.se(0u8.wrapping_sub(last_scale) as i8)?;
 		}
 
 		Ok(())
@@ -323,7 +322,8 @@ impl<'n, W: Write> Synthesizer<'n, Sps, W> {
 			self.se(self.nalu.offset_for_top_to_bottom_field)?;
 			self.ue(self.nalu.num_ref_frames_in_pic_order_cnt_cycle)?;
 
-			for offset_for_ref_frame in &self.nalu.offset_for_ref_frame {
+			let cycle = usize::from(self.nalu.num_ref_frames_in_pic_order_cnt_cycle);
+			for offset_for_ref_frame in &self.nalu.offset_for_ref_frame[..cycle] {
 				self.se(*offset_for_ref_frame)?;
 			}
 		}

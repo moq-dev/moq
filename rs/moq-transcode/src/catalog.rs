@@ -329,7 +329,10 @@ pub(crate) async fn rung_entry(
 	let mut config = transcode.encoder(rung.size, encode_rate);
 	config.bitrate = Some(rung.bitrate);
 
-	let mut entry = config.probe().await?;
+	// The probe opens a session like any rung encoder, on the one the budget keeps for probes.
+	let session = transcode.sessions.probe().await;
+	let (entry, _session) = crate::config::opening(session, async move { config.probe().await }).await;
+	let mut entry = entry?;
 	entry.framerate = rung.framerate.map(moq_video::FrameRate::as_f64);
 	// A property of the source rather than the ladder: every rung shows the same picture.
 	entry.optimize_for_latency = source.optimize_for_latency;
@@ -346,11 +349,134 @@ pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 	}
 }
 
+/// The derivative catalog: each source snapshot republished with the ladder, on the source's
+/// timeline.
+///
+/// The rungs carry the source's media timestamps, so a catalog change is stamped where the source
+/// stamped it: a player holding an update until its media reaches that time applies it with the
+/// frames it describes. The producer's own clock reads nothing of the source's media, so it never
+/// times a change. A scale-less source catalog track's keys are not times: its changes land as early
+/// as they can, in effect for whatever media the reader holds.
+pub(crate) struct Derived {
+	producer: moq_mux::catalog::Producer,
+	/// Where the source's renditions are referenced from, when they are passed through.
+	source: Option<Relative>,
+	anchor: Anchor,
+	/// The last publish's stamp, in the catalog track's scale. Every later one passes it.
+	last: Option<moq_net::Timestamp>,
+}
+
+impl Derived {
+	/// Register the (empty) derivative catalog on `output`.
+	pub(crate) fn new(output: &mut moq_net::broadcast::Producer, source: Option<Relative>) -> Result<Self, Error> {
+		Ok(Self {
+			producer: moq_mux::catalog::Producer::new(output, moq_mux::catalog::Config::default())?,
+			source,
+			anchor: Anchor::default(),
+			last: None,
+		})
+	}
+
+	/// Publish `snapshot` of the source with `rungs`, stamped at the source's own timestamp.
+	///
+	/// A stamp that does not pass the last publish lands one unit past it, the earliest the change can
+	/// still take effect: a source republishing an earlier time, or a ladder move republishing the
+	/// snapshot that asked for it. The catalog never rewinds and the change is never dropped.
+	pub(crate) fn publish(
+		&mut self,
+		snapshot: &mut moq_json::Timed<moq_mux::catalog::hang::Catalog>,
+		rungs: &[Published],
+	) -> Result<(), Error> {
+		self.anchor.pin(&mut snapshot.value);
+		let at = self.stamp(snapshot.at)?;
+		let mut guard = self.producer.modify(at)?;
+		populate(&mut guard, &snapshot.value, rungs, self.source.as_ref())?;
+		guard.commit()?;
+		self.last = Some(at);
+		Ok(())
+	}
+
+	/// Where a change the source stamped `at` lands on the derivative catalog.
+	fn stamp(&self, at: moq_net::Timestamp) -> Result<moq_net::Timestamp, Error> {
+		let at = match at.scale() {
+			Some(_) => at,
+			None => moq_net::Timestamp::ZERO,
+		};
+		// The scale `moq_mux::catalog::Producer` creates the catalog tracks with, so two stamps one
+		// unit apart publish as two groups.
+		let at = hang::Catalog::default_track_info().rescale(at)?;
+		match self.last {
+			Some(last) if at.value() <= last.value() => {
+				let scale = last.scale().ok_or(moq_net::Error::TimestampMismatch)?;
+				let next = last.value().checked_add(1).ok_or(moq_net::Error::TimestampMismatch)?;
+				Ok(moq_net::Timestamp::new(next, scale)?)
+			}
+			_ => Ok(at),
+		}
+	}
+
+	/// End the derivative catalog cleanly, once the source ends.
+	pub(crate) fn finish(&mut self) -> Result<(), Error> {
+		Ok(self.producer.finish()?)
+	}
+
+	/// End the derivative catalog with `err`, keeping an earlier clean finish or error.
+	pub(crate) fn abort(&self, err: moq_net::Error) {
+		self.producer.clone().abort(err);
+	}
+}
+
+/// The source `sync.clock` the derivative first published under, which a later snapshot cannot move.
+///
+/// Once published, the derivative's catalog refuses a different mapping, and its rungs have already
+/// stamped the source's timestamps under the old one. A source that changes its clock mid-stream
+/// keeps the derivative on the first one: [`pin`](Self::pin) overwrites the snapshot's, so
+/// `populate` never asks the catalog producer to change it.
+#[derive(Default)]
+struct Anchor {
+	/// `Some` once a snapshot was seen; the inner `None` is a source with no clock.
+	clock: Option<Option<hang::catalog::Clock>>,
+	/// The last changed clock warned about, so a repeating snapshot warns once.
+	warned: Option<Option<hang::catalog::Clock>>,
+}
+
+impl Anchor {
+	/// Pin `snapshot` to the clock the first one carried, which the first call records.
+	fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
+		let anchored = *self.clock.get_or_insert(snapshot.sync.clock);
+		// The same mapping in other units is no change, which the catalog producer accepts too.
+		// Compared exactly by cross-multiplying, since flooring both to microseconds would pass a
+		// sub-microsecond change on to a producer that refuses it.
+		let same = match (snapshot.sync.clock, anchored) {
+			(None, None) => true,
+			(Some(a), Some(b)) => match (a.wall.scale(), b.wall.scale()) {
+				(Some(a_scale), Some(b_scale)) => {
+					a.wall.value() as u128 * b_scale.as_u64() as u128
+						== b.wall.value() as u128 * a_scale.as_u64() as u128
+				}
+				_ => a == b,
+			},
+			_ => false,
+		};
+		if !same {
+			if self.warned != Some(snapshot.sync.clock) {
+				tracing::warn!(
+					?anchored,
+					changed = ?snapshot.sync.clock,
+					"source sync.clock changed; the derivative keeps the one it published under"
+				);
+				self.warned = Some(snapshot.sync.clock);
+			}
+			snapshot.sync.clock = anchored;
+		}
+	}
+}
+
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
 /// update, with whatever the ladder resolved to for that snapshot.
-pub(crate) fn populate(
+fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
 	rungs: &[Published],
@@ -359,8 +485,8 @@ pub(crate) fn populate(
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
 	// The derivative republishes the child's timeline, so its timestamps only mean something under
-	// the child's wall mapping.
-	out.media.clock = source.media.clock;
+	// the child's wall mapping, or none when the child has none. See [`Anchor`] for a change.
+	out.sync.clock = source.sync.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
 	out.video.display = source.video.display.clone();
@@ -371,15 +497,16 @@ pub(crate) fn populate(
 		out.video.insert(&published.rung.name, published.entry.clone())?;
 	}
 
+	// Every rung mirrors the source's groups one for one, so it promises the source's join
+	// interval, and nothing else measures one for tracks written group by group. An HLS export
+	// numbers segments on it, so the rungs share the source's segment numbers. Fixed once set.
+	if out.sync.interval.is_none() {
+		out.sync.interval = source.sync.interval;
+	}
+
 	let Some(rel) = source_rel else {
 		return Ok(());
 	};
-
-	// The source's renditions are listed too, and they promise only the source's join interval,
-	// so the derivative joins on it unless its own tracks already declared one. Fixed once set.
-	if out.media.join.is_none() {
-		out.media.join = source.media.join;
-	}
 
 	for (name, config) in &source.video.renditions {
 		if config.broadcast.is_some() {
@@ -493,10 +620,10 @@ mod tests {
 	#[test]
 	fn rungs_never_upscale() {
 		let rungs = crate::Config::default().ladder;
-		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(2_000_000))).unwrap();
+		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(3_000_000))).unwrap();
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
-		// admitted only because its bitrate (1.2M) undercuts the source (2M).
+		// admitted only because its bitrate (2.3M) undercuts the source (3M).
 		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
 	}
 
@@ -1000,36 +1127,118 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
-		child.media.clock = Some(clock);
+		child.sync.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.media.clock, Some(clock), "a derivative keeps the child's clock");
+		assert_eq!(out.sync.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 
-	/// A derivative listing the source's renditions joins on the source's interval, unless its own
-	/// tracks already declared one; one listing only its rungs declares its own.
 	#[test]
-	fn populate_carries_the_source_interval_with_its_renditions() {
-		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
+	fn populate_mirrors_a_clockless_child() {
+		let child = moq_mux::catalog::hang::Catalog::<()>::default();
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		out.sync.clock = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1).unwrap()).unwrap());
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(out.sync.clock, None, "no clock is invented for a child without one");
+	}
+
+	/// A change keeps the source's stamp while it passes the last publish, compared in the catalog
+	/// track's milliseconds; one that doesn't lands a unit past it, as does a scale-less key.
+	#[test]
+	fn derived_stamps_follow_the_source_without_rewinding() {
+		let mut output = moq_net::broadcast::Info::new().produce();
+		let mut derived = Derived::new(&mut output, None).unwrap();
+		let mut publish = |at| {
+			let mut snapshot = moq_json::Timed::new(moq_mux::catalog::hang::Catalog::<()>::default(), at);
+			derived.publish(&mut snapshot, &[]).unwrap();
+			derived.last.unwrap()
+		};
+		let ms = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+
+		assert_eq!(publish(ms(5)), ms(5));
+		assert_eq!(publish(ms(5)), ms(6), "a republished stamp moves past the last");
+		assert_eq!(publish(ms(3)), ms(7), "an earlier stamp moves past the last");
+		let within = moq_net::Timestamp::from_micros(7_500).unwrap();
+		assert_eq!(
+			publish(within),
+			ms(8),
+			"a stamp inside the last millisecond moves past it"
+		);
+		assert_eq!(publish(ms(20)), ms(20));
+		assert_eq!(publish(moq_net::Timestamp::unscaled(30)), ms(21), "a key is no time");
+		assert_eq!(publish(ms(30)), ms(30));
+	}
+
+	/// The first snapshot's clock, or lack of one, is the one every later snapshot carries.
+	#[test]
+	fn anchor_holds_the_first_clock() {
+		let clock = |micros| Some(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros).unwrap()).unwrap());
+		let pinned = |anchor: &mut Anchor, to| {
+			let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
+			snapshot.sync.clock = to;
+			anchor.pin(&mut snapshot);
+			snapshot.sync.clock
+		};
+
+		let mut anchor = Anchor::default();
+		assert_eq!(pinned(&mut anchor, clock(1)), clock(1));
+		assert_eq!(pinned(&mut anchor, clock(1)), clock(1));
+		assert_eq!(pinned(&mut anchor, clock(2)), clock(1));
+		assert_eq!(pinned(&mut anchor, None), clock(1));
+
+		// The same mapping in other units is left as the source wrote it.
+		let mut anchor = Anchor::default();
+		let millis = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_millis(5).unwrap()).unwrap());
+		assert_eq!(pinned(&mut anchor, clock(5_000)), clock(5_000));
+		assert_eq!(pinned(&mut anchor, millis), millis);
+		assert_eq!(pinned(&mut anchor, clock(5_001)), clock(5_000));
+		// 5,000.5 microseconds floors to the anchor's microsecond but is a different mapping.
+		let nanos = Some(
+			hang::catalog::Clock::new(
+				moq_net::Timestamp::new(5_000_500, moq_net::Timescale::new(1_000_000_000).unwrap()).unwrap(),
+			)
+			.unwrap(),
+		);
+		assert_eq!(pinned(&mut anchor, nanos), clock(5_000));
+
+		let mut anchor = Anchor::default();
+		assert_eq!(pinned(&mut anchor, None), None);
+		assert_eq!(pinned(&mut anchor, clock(2)), None, "a clockless start stays clockless");
+	}
+
+	/// A derivative joins on the source's interval, whether it lists only its rungs or the source's
+	/// renditions too, and keeps the first one declared.
+	#[test]
+	fn populate_carries_the_source_interval() {
+		let interval = |secs| Some(std::time::Duration::from_secs(secs));
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
-		child.media.join = interval(4);
 		let rel = Relative::new(".").unwrap();
 
+		// The source declares its interval only once it has measured one.
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.media.join, None, "only rungs: the derivative measures its own");
+		assert_eq!(out.sync.interval, None, "nothing to promise yet");
 
-		populate(&mut out, &child, &[], Some(&rel)).unwrap();
-		assert_eq!(out.media.join, interval(4));
+		child.sync.interval = interval(4);
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(
+			out.sync.interval,
+			interval(4),
+			"only rungs: they cut where the source does"
+		);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
-		out.media.join = interval(2);
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
-		assert_eq!(out.media.join, interval(2), "fixed once declared");
+		assert_eq!(out.sync.interval, interval(4));
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		out.sync.interval = interval(2);
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.sync.interval, interval(2), "fixed once declared");
 	}
 
-	/// A derivative runs on its source's mapping: `populate` writes the source's `media.clock` through
+	/// A derivative runs on its source's mapping: `populate` writes the source's `sync.clock` through
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
@@ -1053,7 +1262,7 @@ mod tests {
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
-		let mut guard = derived.modify().unwrap();
+		let mut guard = derived.modify(derived.next_timestamp()).unwrap();
 		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
 		guard.commit().unwrap();
 		let adopted = derived.clock();
@@ -1078,6 +1287,6 @@ mod tests {
 		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("the update is published");
 		};
-		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
+		assert_eq!(frame.timestamp.as_millis().unwrap(), adopted.now().as_millis().unwrap());
 	}
 }

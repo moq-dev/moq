@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use hang::catalog::{Include, Media};
+use hang::catalog::Include;
 use moq_mux::{catalog::hang::Catalog, follow};
 
 #[cfg(feature = "server")]
@@ -23,9 +23,9 @@ struct Context {
 	origin: moq_net::origin::Consumer,
 	window: Duration,
 	spawner: driver::Spawner,
-	/// The root catalog's `media`. An include is part of the root broadcast, so its
+	/// The root catalog's `sync`. An include is part of the root broadcast, so its
 	/// renditions share the root's timeline and segment on the root's grid.
-	root: kio::Producer<Media>,
+	root: kio::Producer<hang::catalog::Timeline>,
 }
 
 #[derive(Default)]
@@ -42,7 +42,7 @@ struct Entry {
 enum Current {
 	Pending,
 	Offline,
-	Online(Arc<Instance>),
+	Online(Arc<Identity>),
 	Failed(
 		#[cfg_attr(
 			not(feature = "server"),
@@ -52,13 +52,14 @@ enum Current {
 	),
 }
 
-struct Instance {
-	id: String,
+struct Identity {
+	/// The [`token`](super::token) its URLs carry.
+	id: Arc<str>,
 	renditions: renditions::Producer,
 	_owner: driver::Owner,
 }
 
-impl Drop for Instance {
+impl Drop for Identity {
 	fn drop(&mut self) {
 		self.renditions.cut();
 		self.renditions.clear();
@@ -80,11 +81,11 @@ impl Producer {
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		let Ok(mut state) = self.state.write() else { return };
-		// Republished estimates leave the root media as is, so only a change wakes the children.
-		if *self.context.root.read() != catalog.media
+		// Republished estimates leave the root sync section as is, so only a change wakes the children.
+		if *self.context.root.read() != catalog.sync
 			&& let Ok(mut root) = self.context.root.write()
 		{
-			*root = catalog.media;
+			*root = catalog.sync;
 		}
 		state
 			.entries
@@ -94,9 +95,9 @@ impl Producer {
 				continue;
 			}
 			let current = kio::Producer::new(Current::Pending);
-			let owner = match source.follow(Some(&reference.broadcast), reference.instance.as_ref()) {
-				Ok(instances) => Some(self.context.spawner.spawn(FollowInstances {
-					instances,
+			let owner = match source.follow(Some(&reference.broadcast)) {
+				Ok(identities) => Some(self.context.spawner.spawn(FollowIdentities {
+					identities,
 					current: current.clone(),
 					context: self.context.clone(),
 				})),
@@ -133,12 +134,12 @@ impl Producer {
 			.poll_ref(waiter, |state| {
 				for entry in state.entries.values() {
 					let ready = entry.current.poll_ref(waiter, |current| {
-						if let Current::Online(instance) = &**current {
+						if let Current::Online(identity) = &**current {
 							// The set's changes wake this; each rendition's binding wakes it as it resolves.
-							if instance.renditions.poll_advertised(waiter).is_pending() {
+							if identity.renditions.poll_advertised(waiter).is_pending() {
 								return Poll::Pending;
 							}
-							let listable = instance.renditions.snapshot().iter().any(|rendition| {
+							let listable = identity.renditions.snapshot().iter().any(|rendition| {
 								rendition.is_enabled()
 									&& rendition.poll_resolved(waiter) == Poll::Ready(true)
 									&& rendition.poll_refused(waiter).is_pending()
@@ -168,8 +169,8 @@ impl Producer {
 		let mut audio = Vec::new();
 		for (id, entry) in &state.entries {
 			let current = entry.current.read();
-			let Current::Online(instance) = &*current else { continue };
-			for rendition in instance.renditions.snapshot() {
+			let Current::Online(identity) = &*current else { continue };
+			for rendition in identity.renditions.snapshot() {
 				// A rendition whose binding is still resolving may yet be denied, so it waits; one
 				// whose binding failed has no media to serve.
 				let noop = kio::Waiter::noop();
@@ -179,7 +180,7 @@ impl Producer {
 				{
 					continue;
 				}
-				let uri = master::include_uri(parent, id, &instance.id, &rendition, query);
+				let uri = master::include_uri(parent, id, &identity.id, &rendition, query);
 				match rendition.kind {
 					Kind::Video => video.push(master::VideoVariant {
 						uri,
@@ -215,14 +216,14 @@ impl Producer {
 			return Poll::Ready(Ok(None));
 		};
 		match entry.current.poll_ref(waiter, |current| {
-			let instance = match &**current {
+			let identity = match &**current {
 				Current::Pending => return Poll::Pending,
 				Current::Failed(err) => return Poll::Ready(Err(err.clone())),
 				Current::Offline => return Poll::Ready(Ok(None)),
-				Current::Online(instance) if instance.id != at.instance => return Poll::Ready(Ok(None)),
-				Current::Online(instance) => instance,
+				Current::Online(identity) if *identity.id != *at.token => return Poll::Ready(Ok(None)),
+				Current::Online(identity) => identity,
 			};
-			Poll::Ready(Ok(ready!(instance.renditions.poll_get(waiter, kind, name))))
+			Poll::Ready(Ok(ready!(identity.renditions.poll_get(waiter, kind, name))))
 		}) {
 			Poll::Ready(Ok(result)) => Poll::Ready(result),
 			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
@@ -231,26 +232,25 @@ impl Producer {
 	}
 }
 
-/// Follows an include's instances into its [`Current`], watching each one's catalog.
-struct FollowInstances {
-	instances: follow::Instances,
+/// Follows an include's identities into its [`Current`], watching each one's catalog.
+struct FollowIdentities {
+	identities: follow::Identities,
 	current: kio::Producer<Current>,
 	context: Context,
 }
 
-impl kio::Task for FollowInstances {
+impl kio::Task for FollowIdentities {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let next = match ready!(self.instances.poll_next(waiter)) {
+			let next = match ready!(self.identities.poll_next(waiter)) {
 				Ok(Some(broadcast)) => {
 					let id = broadcast
 						.info()
-						.instance
-						.clone()
-						.unwrap_or_else(moq_net::Instance::random)
-						.to_string();
+						.identity
+						.as_ref()
+						.map_or_else(|| super::token(&moq_net::Identity::random()), super::token);
 					let source = moq_mux::Source::new(self.context.origin.clone(), broadcast);
 					let renditions = renditions::Producer::lazy(self.context.window, self.context.spawner.clone());
 					let owner = self.context.spawner.lead(super::WatchCatalog::new(
@@ -258,7 +258,7 @@ impl kio::Task for FollowInstances {
 						renditions.clone(),
 						super::Role::Include(self.context.root.consume()),
 					));
-					Current::Online(Arc::new(Instance {
+					Current::Online(Arc::new(Identity {
 						id,
 						renditions,
 						_owner: owner,
@@ -323,16 +323,16 @@ mod tests {
 	async fn a_cold_lookup_waits_for_the_first_follow_event() {
 		let origin = moq_tokio::origin::spawn();
 		let _parent = origin.route("room/live", Default::default()).unwrap();
-		let child_id = moq_net::Instance::random();
+		let child_id = moq_net::Identity::random();
 		let child = origin
 			.route(
 				"room/child",
-				moq_net::origin::RouteOptions::default().with_instance(child_id.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_identity(child_id.clone(), 0),
 			)
 			.unwrap();
 		let source = crate::resolved(&origin, "room/live").await;
 		let mut catalog = Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		catalog.sync.interval = Some(Duration::from_secs(2));
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video.coded_width = Some(320);
 		video.coded_height = Some(240);
@@ -342,8 +342,7 @@ mod tests {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Producer::new(track, Default::default());
-		json.update(moq_net::Timed::from(&catalog).at(moq_net::Timestamp::ZERO))
-			.unwrap();
+		json.update(&catalog, moq_net::Timestamp::ZERO).unwrap();
 		catalog.video.renditions.clear();
 		catalog.include.insert(
 			"child".into(),
@@ -354,7 +353,7 @@ mod tests {
 		include.sync(&source, &catalog);
 		let at = super::super::Include {
 			id: "child".into(),
-			instance: child_id.to_string(),
+			token: super::super::token(&child_id).to_string(),
 		};
 		let mut lookup = Box::pin(include.rendition(&at, Kind::Video, "v"));
 		// The catalog has been read, but the driver has not yet polled its follow task.

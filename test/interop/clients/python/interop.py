@@ -23,8 +23,10 @@ AUTH and prints it as an `auth granted` line before the client starts.
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import json
 import math
+import signal
 import struct
 import sys
 from datetime import timedelta
@@ -121,7 +123,7 @@ async def publish(
         producer = route.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
-            producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
+            producer, moq.media.VideoInit(format=moq.media.VideoFormat.h264(), data=b"")
         )
         audio = moq.audio.Producer(
             catalog,
@@ -164,7 +166,7 @@ async def publish(
             producer.close()
             health = client.route(f"{broadcast}.health", hidden=True)
             live = health.broadcast.publish_track("live")
-            live.write_frame(b"session-alive")
+            live.write_frame(b"session-alive", moq.Timestamp.unscaled(0))
             live.finish()
             health.announce()
 
@@ -204,7 +206,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -243,7 +245,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
             async for group in live:
                 async with group:
                     async for frame in group:
-                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        # Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
                         if seen or frame.payload != b"session-alive":
                             raise RuntimeError("unexpected session health payload")
                         seen = True
@@ -322,7 +324,7 @@ async def subscribe(
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
         )
 
         total = 0
@@ -368,6 +370,9 @@ def main() -> None:
     if args.role == "subscribe" and not args.finish and (not args.audio_out or not args.audio_ms):
         parser.error("subscribe needs --audio-out and --audio-ms")
 
+    # The harness's `timeout` sends SIGTERM to a client that hangs: dump every thread first, so
+    # the log shows where it waited, then end as SIGTERM would.
+    faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:

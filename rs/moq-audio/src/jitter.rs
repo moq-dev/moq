@@ -77,6 +77,14 @@ impl Target {
 		}
 	}
 
+	/// A frame produced before the subscription, which arrived at `arrival` but was
+	/// skipped unread. A fixed target ignores it.
+	pub(crate) fn backlog(&mut self, arrival: f64) {
+		if let Self::Auto(estimator) = self {
+			estimator.backlog(arrival);
+		}
+	}
+
 	/// Set the codec's frame duration, the term added on top of the measurement.
 	pub(crate) fn set_frame(&mut self, frame: f64) {
 		if let Self::Auto(estimator) = self {
@@ -191,6 +199,11 @@ impl History {
 		}
 	}
 
+	/// The smallest `arrival - media` held, the fastest path seen. Must not be empty.
+	fn fastest(&self) -> f64 {
+		self.reference(f64::INFINITY).expect("a non-empty history").key()
+	}
+
 	/// The fastest entry with `entry.media <= media`, the oldest on a tie.
 	fn reference(&self, media: f64) -> Option<Entry> {
 		// Media timestamps increase along the ring, so the prefix ends at a binary search.
@@ -279,6 +292,14 @@ pub(crate) struct Estimator {
 	interval: f64,
 	/// The largest delay seen in that interval.
 	peak: f64,
+	/// The oldest media timestamp measured in that interval.
+	oldest: f64,
+	/// The first arrival, when the subscription began, once one has been seen.
+	start: Option<f64>,
+	/// The latest a frame produced before the subscription arrived, no earlier than `start`.
+	joined: f64,
+	/// Every interval closed so far measured the join, so a skipped backlog can still extend it.
+	open: bool,
 	/// A declared end precedes the next measured observation, so the silence before it is not idle.
 	ended: bool,
 	/// The earliest a frame stalled in this interval was due.
@@ -306,6 +327,10 @@ impl Estimator {
 			origin: None,
 			interval: 0.0,
 			peak: 0.0,
+			oldest: 0.0,
+			start: None,
+			joined: 0.0,
+			open: true,
 			ended: false,
 			due: f64::INFINITY,
 			late: f64::NEG_INFINITY,
@@ -324,11 +349,27 @@ impl Estimator {
 			self.history.push(arrival, media);
 		}
 
+		// A frame due before the first arrival by the window's fastest path was produced
+		// before the subscription began: it is the backlog a join delivers, and the join
+		// lasts until it has all arrived.
+		match self.start {
+			// A backlog skipped before this may have landed after it, as when a newest-first
+			// replay lands the newer group first.
+			None => {
+				self.start = Some(arrival);
+				self.joined = self.joined.max(arrival);
+			}
+			Some(start) => {
+				if media + self.history.fastest() < start {
+					self.joined = self.joined.max(arrival);
+				}
+			}
+		}
+
 		// The fastest frame in the window at or before this one, so delay is measured
 		// against the best-case path instead of against the previous frame, and an older
 		// frame held behind newer ones reads as the wait playing it in order costs. A
-		// frame older than the whole window, such as a subscription's backlog behind its
-		// live edge, has nothing to be measured against.
+		// frame older than the whole window has nothing to be measured against.
 		let Some(reference) = self.history.reference(media) else {
 			return;
 		};
@@ -340,6 +381,7 @@ impl Estimator {
 		let Some(origin) = self.origin else {
 			self.origin = Some(arrival);
 			self.peak = delay;
+			self.oldest = media;
 			self.note(arrival, delay);
 			return;
 		};
@@ -348,11 +390,17 @@ impl Estimator {
 		let resumed = std::mem::take(&mut self.ended);
 		if interval <= self.interval {
 			self.peak = self.peak.max(delay);
+			self.oldest = self.oldest.min(media);
 			self.note(arrival, delay);
 			return;
 		}
 
-		self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
+		if self.joining() {
+			self.pending += 1.0;
+		} else {
+			self.open = false;
+			self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
+		}
 
 		if resumed {
 			// A silence the publisher declared says nothing about the path, so the
@@ -362,13 +410,22 @@ impl Estimator {
 			self.interval = 0.0;
 		} else {
 			// Held until this interval closes: a stall it holds owns them.
-			self.pending = interval - self.interval - 1.0;
+			self.pending += interval - self.interval - 1.0;
 			self.interval = interval;
 		}
 		self.peak = delay;
+		self.oldest = media;
 		self.due = f64::INFINITY;
 		self.late = f64::NEG_INFINITY;
 		self.note(arrival, delay);
+	}
+
+	/// An interval holding a frame due before the join's backlog finished arriving
+	/// measured the join, not the path: its frames queued behind the backlog, and the
+	/// player skipped onto the clock past all of it. It folds nothing, like an interval
+	/// with no arrival.
+	fn joining(&self) -> bool {
+		self.oldest + self.history.fastest() < self.joined
 	}
 
 	/// A frame later than a whole interval was due in an earlier one, so it is stalled.
@@ -424,6 +481,16 @@ impl Estimator {
 		self.fold(Some(stall.bucket));
 		for _ in 0..f64::min(stall.span, IDLE_MAX) as u32 {
 			self.fold(None);
+		}
+	}
+
+	/// A frame produced before the subscription, skipped unread, so the join lasts
+	/// until it arrived as if it had been observed.
+	fn backlog(&mut self, arrival: f64) {
+		// Before any observation the join has not started, and lasts at least until this once it
+		// does. Once an interval measured the path the join is over, and a skip is an outage's.
+		if self.open {
+			self.joined = self.joined.max(arrival);
 		}
 	}
 
@@ -492,6 +559,9 @@ pub(crate) mod tests {
 		/// Indices of the frames observed right after a declared end.
 		#[serde(default)]
 		pub ends: Vec<usize>,
+		/// Indices of the frames skipped unread, reported by arrival instead of observed.
+		#[serde(default)]
+		pub skipped: Vec<usize>,
 		pub target: Vec<(usize, f64)>,
 	}
 
@@ -517,9 +587,9 @@ pub(crate) mod tests {
 	/// A corpus case by name, read directly from the checked-in file so neither
 	/// implementation is graded against the other.
 	pub(crate) fn case(name: &str) -> Case {
-		let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join("../../doc/concept/audio-jitter")
-			.join(format!("{name}.json"));
+		let path =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join(format!("../../doc/concept/audio-jitter/{name}.json"));
 		let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
 		serde_json::from_str(&json).unwrap()
 	}
@@ -530,7 +600,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 14] = [
+	const CORPUS: [&str; 16] = [
 		"advertised",
 		"backlog",
 		"batches",
@@ -538,10 +608,12 @@ pub(crate) mod tests {
 		"fixed",
 		"flush",
 		"idle",
+		"join",
 		"outage",
 		"paced",
 		"reorder",
 		"silence",
+		"skipped",
 		"spike",
 		"straggler",
 		"tunein",
@@ -563,7 +635,10 @@ pub(crate) mod tests {
 				if case.ends.contains(&index) {
 					target.end();
 				}
-				target.observe(arrival, media);
+				match case.skipped.contains(&index) {
+					true => target.backlog(arrival),
+					false => target.observe(arrival, media),
+				}
 				let actual = target.millis();
 				assert!(
 					(actual - series[index]).abs() <= 1e-6,
@@ -572,6 +647,47 @@ pub(crate) mod tests {
 				);
 			}
 		}
+	}
+
+	/// Every frame of `outage` from its second interval on also reported as a skipped
+	/// group's arrival once observed, as a consumer closing groups below its cursor
+	/// would. Taken as backlog, each would make its interval fold nothing: the prior
+	/// would linger, and the outages that raise the target would go unmeasured.
+	#[test]
+	fn leaves_the_join_where_it_ended_once_an_interval_measured_the_path() {
+		let case = case("outage");
+		let mut plain = Target::new(Duration::ZERO, true, None);
+		let mut reported = Target::new(Duration::ZERO, true, None);
+		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+			plain.observe(arrival, media);
+			reported.observe(arrival, media);
+			if arrival >= case.arrival[0] + RESAMPLE {
+				reported.backlog(arrival);
+			}
+			assert_eq!(reported.millis(), plain.millis());
+		}
+	}
+
+	/// A newest-first replay lands the newer group first, so a backlog given up before
+	/// anything was observed can land after the first observed frame. The join lasts until
+	/// it did either way, so the frames held behind it fold nothing.
+	#[test]
+	fn holds_a_backlog_skipped_before_the_first_observation_until_the_join_starts() {
+		let [plain, early, late] = [None, Some(0), Some(1)].map(|at| {
+			let mut target = Target::new(Duration::ZERO, true, None);
+			(0..100)
+				.map(|i| {
+					if at == Some(i) {
+						target.backlog(1000.0);
+					}
+					let late = if (5..10).contains(&i) { 200.0 } else { 0.0 };
+					target.observe(500.0 + i as f64 * 20.0 + late, i as f64 * 20.0);
+					target.millis()
+				})
+				.collect::<Vec<_>>()
+		});
+		assert_eq!(early, late);
+		assert_ne!(late, plain);
 	}
 
 	/// The #3517 regression, without the corpus: a stale frame then paced audio far

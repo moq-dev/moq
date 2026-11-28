@@ -23,19 +23,21 @@ pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
+mod identity;
 pub(crate) mod ietf;
 mod info;
-mod instance;
 pub mod message;
+#[cfg(all(test, feature = "async"))]
+mod meta_tests;
 mod parameters;
 pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub use publisher::{CoverageBench, PausedBench};
+pub use publisher::{CoverageBench, UpdateBench};
 #[cfg(feature = "async")]
-mod replay;
+pub(crate) mod replay;
 #[cfg(feature = "async")]
 mod session;
 mod setup;

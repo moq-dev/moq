@@ -2,6 +2,7 @@
 #include <obs.hpp>
 
 #include "moq-output.h"
+#include "moq-encoder-rate.h"
 #include "moq-error.h"
 #include "moq-implementation.h"
 #include "moq-settings.h"
@@ -72,12 +73,84 @@ const moq::Error *PhaseFailure(const moq::ConnectionPhase &phase)
 		phase.get_variant());
 }
 
-// Retune `encoder` to `bitrate_bps`, the way OBS's own RTMP dynamic bitrate does.
-void SetBitrate(obs_encoder_t *encoder, uint64_t bitrate_bps)
+// Retune `encoder` to `bitrate_bps` in its `key` setting, the way OBS's own RTMP dynamic
+// bitrate does. The key is where the encoder holds its peak: "bitrate" for most, but
+// "max_bitrate" for NVENC's constant quality. An encoder that also averages (NVENC's plain
+// VBR) keeps that average at `average_kbps`, lowered to the peak so the pair stays valid.
+void SetBitrate(obs_encoder_t *encoder, const char *key, uint64_t bitrate_bps, long long average_kbps)
 {
 	OBSDataAutoRelease settings = obs_data_create();
-	obs_data_set_int(settings, "bitrate", (long long)(bitrate_bps / 1000));
+	const long long peak_kbps = (long long)(bitrate_bps / 1000);
+	obs_data_set_int(settings, key, peak_kbps);
+	if (average_kbps > 0)
+		obs_data_set_int(settings, "bitrate", std::min(average_kbps, peak_kbps));
 	obs_encoder_update(encoder, settings);
+}
+
+// The kbps this encoder is priced at: its hard peak when it has one, else its bitrate
+// setting, which a quality target (CQP, CRF) only reserves.
+int EncoderCapKbps(const MoQPeak &peak, obs_data_t *settings)
+{
+	if (peak.key)
+		return (int)peak.kbps;
+	return settings ? (int)obs_data_get_int(settings, "bitrate") : 0;
+}
+
+// The hard peak `encoder`'s settings configure, if any.
+MoQPeak PeakOf(obs_encoder_t *encoder, obs_data_t *settings)
+{
+	const char *id = obs_encoder_get_id(encoder);
+	return settings && id ? EncoderPeak(id, settings) : MoQPeak{};
+}
+
+// Makes every video encoder of `output` hold the cap its settings name as a hard peak, before
+// OBS initializes it: the cap the catalog advertises is the one set here, whatever else the
+// user's rate settings say. An encoder whose settings name no bitrate is left alone.
+// An encoder already running (shared with a recording that started first) cannot switch rate
+// control, so its settings stay as they are and the catalog advertises the cap it runs with.
+// Returns why the output cannot start, or an empty string: one that runs uncapped (CQP, CRF,
+// lossless) has no cap to advertise.
+std::string CapEncoders(obs_output_t *output)
+{
+	for (uint32_t idx = 0; idx < MAX_OUTPUT_VIDEO_ENCODERS; idx++) {
+		obs_encoder_t *encoder = obs_output_get_video_encoder2(output, idx);
+		const char *id = encoder ? obs_encoder_get_id(encoder) : nullptr;
+		OBSDataAutoRelease settings = id ? obs_encoder_get_settings(encoder) : nullptr;
+		if (!settings)
+			continue;
+		const long long cap = ConfiguredCapKbps(id, settings);
+		if (cap <= 0) {
+			LOG_WARNING("Video encoder %s names no bitrate, so it has no cap to advertise", id);
+			continue;
+		}
+		const bool active = obs_encoder_active(encoder);
+		if (active) {
+			const long long running = RunningCapKbps(id, settings);
+			if (running <= 0)
+				return std::string("Video encoder ") + id +
+				       " is already running without a bitrate cap (rate control " +
+				       obs_data_get_string(settings, "rate_control") +
+				       "). Stop the recording first, or give it its own encoder.";
+			for (const std::string &option : RateOptions(id, settings))
+				LOG_WARNING("Video encoder %s: %s %s can override its %lld kbps cap", id,
+					    EncoderOptionsKey(id), option.c_str(), running);
+			LOG_INFO("Video encoder %s already running, advertising its %lld kbps cap", id, running);
+			continue;
+		}
+		OBSDataAutoRelease patch = obs_data_create();
+		const MoQCap result = EnforceCap(id, settings, patch, cap);
+		for (const std::string &replaced : result.replaced)
+			LOG_WARNING("Video encoder %s: replacing %s to hold its %lld kbps cap", id, replaced.c_str(),
+				    cap);
+		for (const std::string &option : result.overridden)
+			LOG_WARNING("Video encoder %s: %s %s can override the %lld kbps cap. Use the MoQ "
+				    "dock's Quality or Performance profile, which hold it without it.",
+				    id, EncoderOptionsKey(id), option.c_str(), cap);
+		if (result.changed)
+			obs_encoder_update(encoder, patch);
+		LOG_INFO("Video encoder %s capped at %lld kbps", id, cap);
+	}
+	return "";
 }
 
 // Whether `rate_control` lets the "bitrate" setting drive the encoder's output.
@@ -135,6 +208,7 @@ bool MoQOutput::Start()
 	// OBS restarts a reconnecting output by calling start again with no stop in
 	// between, so drop whatever the previous attempt left behind.
 	Reset();
+	total_bytes_sent = 0;
 
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
@@ -146,6 +220,14 @@ bool MoQOutput::Start()
 
 	if (!obs_output_can_begin_data_capture(output, 0)) {
 		LOG_ERROR("Cannot begin data capture");
+		return false;
+	}
+
+	// The cap goes on before initialization, which reads the settings it builds the encoder from.
+	const std::string uncapped = CapEncoders(output);
+	if (!uncapped.empty()) {
+		LOG_ERROR("%s", uncapped.c_str());
+		obs_output_set_last_error(output, uncapped.c_str());
 		return false;
 	}
 
@@ -182,7 +264,7 @@ bool MoQOutput::Start()
 
 	// Route the broadcast on an origin of our own, visible at once so subscribers can
 	// discover it. Stop() closes it, so each Start creates a fresh route, under a fresh
-	// instance it mints and keeps across reconnects. The route is held until Reset():
+	// identity it mints and keeps across reconnects. The route is held until Reset():
 	// releasing it would retract the broadcast.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
@@ -239,7 +321,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance_id()->text();
+		identity = (*next_route)->identity()->text();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -381,7 +463,7 @@ void MoQOutput::Reset()
 		session.reset();
 		link = Link::kPending;
 		url.clear();
-		instance.clear();
+		identity.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -391,7 +473,13 @@ void MoQOutput::Reset()
 	// Following the grant rewrote the encoder's bitrate, which the next Start()
 	// reads back as the configured rate. Restored after media_mutex is released:
 	// an idle encoder applies the update inline.
-	std::vector<std::pair<OBSEncoder, uint64_t>> restore;
+	struct Restore {
+		OBSEncoder encoder;
+		const char *key;
+		uint64_t bitrate_bps;
+		long long average_kbps;
+	};
+	std::vector<Restore> restore;
 
 	std::unique_lock<std::mutex> lock(media_mutex);
 	for (auto &[encoder, track] : video_tracks) {
@@ -399,7 +487,8 @@ void MoQOutput::Reset()
 			track.producer->finish();
 		if (track.rate && track.applied_bps != track.bitrate_bps) {
 			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
-				restore.emplace_back(std::move(strong), track.bitrate_bps);
+				restore.push_back(
+					{std::move(strong), track.rate_key, track.bitrate_bps, track.average_kbps});
 		}
 	}
 	video_tracks.clear();
@@ -435,14 +524,14 @@ void MoQOutput::Reset()
 
 	lock.unlock();
 
-	for (auto &[encoder, bitrate] : restore)
-		SetBitrate(encoder, bitrate);
+	for (auto &r : restore)
+		SetBitrate(r.encoder, r.key, r.bitrate_bps, r.average_kbps);
 }
 
-std::string MoQOutput::GetInstance()
+std::string MoQOutput::GetIdentity()
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return instance;
+	return identity;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
@@ -614,6 +703,9 @@ void MoQOutput::Data(struct encoder_packet *packet)
 	}
 }
 
+// How much audio a group carries: a new group (one QUIC stream) every 100 ms.
+static constexpr int64_t AUDIO_JOIN_US = 100'000;
+
 // The packet's timestamp on the broadcast clock, or nothing when it falls before zero.
 static std::optional<moq::Timestamp> PacketTimestamp(const struct encoder_packet *packet)
 {
@@ -659,15 +751,27 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		return;
 	}
 
-	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
-	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
-	// waiting for the next, the right trade for live. Video groups at its own keyframes.
-	if (auto result = track.producer->cut(); !result) {
-		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
-		return;
+	// Audio has no keyframes, so it has no group boundary of its own: without a cut the whole
+	// stream is one group, and a cut per packet spends a QUIC stream per packet. The packet that
+	// brings a group to 100 ms closes it, as moq-mux's `container::Join::DEFAULT` does, so the
+	// relay sees it finish without waiting for the next; packets still forward as written.
+	const int64_t start_us = packet->pts * packet->timebase_num * 1'000'000 / packet->timebase_den;
+	const uint32_t sample_rate = obs_encoder_get_sample_rate(encoder);
+	const int64_t frame_us = sample_rate ? int64_t(obs_encoder_get_frame_size(encoder)) * 1'000'000 / sample_rate
+					     : 0;
+	const int64_t group_start_us = track.group_start_us.value_or(start_us);
+	const int64_t end_us = start_us + frame_us;
+	if (end_us < group_start_us || end_us - group_start_us >= AUDIO_JOIN_US) {
+		track.group_start_us.reset();
+		if (auto result = track.producer->cut(); !result) {
+			LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
+			return;
+		}
+	} else {
+		track.group_start_us = group_start_us;
 	}
 
-	total_bytes_sent += packet->size;
+	total_bytes_sent.fetch_add(packet->size, std::memory_order_relaxed);
 }
 
 void MoQOutput::VideoData(struct encoder_packet *packet)
@@ -730,14 +834,14 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	}
 	track.started = true;
 
-	total_bytes_sent += packet->size;
+	total_bytes_sent.fetch_add(packet->size, std::memory_order_relaxed);
 }
 
 // NOTE: Caller must hold media_mutex.
 void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target)
 {
 	if (const auto *enabled = std::get_if<moq::RateTarget::kEnabled>(&target.get_variant())) {
-		SetBitrate(encoder, enabled->bitrate_bps);
+		SetBitrate(encoder, track.rate_key, enabled->bitrate_bps, track.average_kbps);
 		track.applied_bps = enabled->bitrate_bps;
 		track.enabled = true;
 		return;
@@ -787,7 +891,8 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	OBSDataAutoRelease settings = obs_encoder_get_settings(encoder);
 	const auto video_width = obs_encoder_get_width(encoder);
 	const auto video_height = obs_encoder_get_height(encoder);
-	const int video_bitrate_kbps = settings ? (int)obs_data_get_int(settings, "bitrate") : 0;
+	const MoQPeak peak = PeakOf(encoder, settings);
+	const int video_bitrate_kbps = EncoderCapKbps(peak, settings);
 
 	uint8_t *extra_data = nullptr;
 	size_t extra_size = 0;
@@ -804,11 +909,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	// with inline parameter sets, which is what OBS hands us.
 	moq::VideoInit config{};
 	if (strcmp(codec, "h264") == 0) {
-		config.format = moq::VideoFormat::kAvc3;
+		config.format = moq::VideoFormat::h264();
 	} else if (strcmp(codec, "hevc") == 0) {
-		config.format = moq::VideoFormat::kHev1;
+		config.format = moq::VideoFormat::h265();
 	} else if (strcmp(codec, "av1") == 0) {
-		config.format = moq::VideoFormat::kAv01;
+		config.format = moq::VideoFormat::av01();
 	} else {
 		LOG_ERROR("Unsupported video codec: %s", codec);
 		video_tracks[encoder] = Track{};
@@ -819,13 +924,14 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		config.data.assign(extra_data, extra_data + extra_size);
 
 	// Seed catalog fields a downstream moq-transcode needs before measured rates
-	// arrive: coded size (also from SPS once parsed) and configured CBR bitrate so
-	// same-height ladder rungs can undercut the mezzanine.
+	// arrive: coded size (also from SPS once parsed) and the encoder's hard peak, which
+	// CBR and capped VBR both configure, so same-height ladder rungs can undercut the
+	// mezzanine. The catalog prices a rendition at that peak, never its measured rate.
 	moq::VideoHint hint{};
 	if (video_width > 0 && video_height > 0)
 		hint.coded = moq::Dimensions{video_width, video_height};
 	const std::string rate_control = settings ? obs_data_get_string(settings, "rate_control") : "";
-	if (video_bitrate_kbps > 0 && (rate_control == "CBR" || rate_control == "cbr"))
+	if (peak.key)
 		hint.bitrate = (uint64_t)video_bitrate_kbps * 1000ULL;
 	hint.optimize_for_latency = true;
 	config.hint = hint;
@@ -846,7 +952,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 			kbps = (int)(known->second.bitrate_bps / 1000);
 		} else {
 			OBSDataAutoRelease other_settings = obs_encoder_get_settings(other);
-			kbps = other_settings ? (int)obs_data_get_int(other_settings, "bitrate") : 0;
+			kbps = EncoderCapKbps(PeakOf(other, other_settings), other_settings);
 		}
 		if (kbps > lower_kbps && kbps < video_bitrate_kbps) {
 			lower = other;
@@ -886,10 +992,12 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	entry.producer = *track;
 	if (video_bitrate_kbps > 0) {
 		entry.bitrate_bps = (uint64_t)video_bitrate_kbps * 1000ULL;
-		// Following needs an encoder that retunes live and a rate control the
-		// bitrate drives; a quality target (CQP, CRF) only reserves.
+		// Following needs an encoder that retunes live and either holds a peak or has a
+		// rate control the bitrate drives; a quality target (CQP, CRF) only reserves.
 		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
-		if (dynamic && BitrateDriven(rate_control)) {
+		if (dynamic && (peak.key || BitrateDriven(rate_control))) {
+			entry.rate_key = peak.key ? peak.key : "bitrate";
+			entry.average_kbps = peak.average_kbps;
 			entry.rate = moq::RateControl::init(moq::RatePolicy{entry.bitrate_bps, lower_bps});
 			entry.applied_bps = entry.bitrate_bps;
 			entry.encoder = OBSGetWeakRef(encoder);
@@ -935,11 +1043,11 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 	// failing on it deep inside.
 	moq::AudioInit config{};
 	if (strcmp(codec, "opus") == 0) {
-		config.format = moq::AudioFormat::kOpus;
+		config.format = moq::AudioFormat::opus();
 	} else if (strcmp(codec, "aac") == 0) {
-		config.format = moq::AudioFormat::kAac;
+		config.format = moq::AudioFormat::aac();
 	} else if (strcmp(codec, "flac") == 0) {
-		config.format = moq::AudioFormat::kFlac;
+		config.format = moq::AudioFormat::flac();
 	} else {
 		LOG_ERROR("Unsupported audio codec: %s", codec);
 		audio_tracks[encoder] = Track{};

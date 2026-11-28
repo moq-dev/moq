@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::Patterns;
+use crate::Prefixes;
 use crate::coding::*;
 
 use super::{Message, Version};
@@ -45,9 +45,9 @@ impl<'a> Message<'a> for Auth {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthOk {
 	/// What the opener may publish to the acceptor.
-	pub publish: Patterns,
+	pub publish: Prefixes,
 	/// What the opener may subscribe to from the acceptor.
-	pub subscribe: Patterns,
+	pub subscribe: Prefixes,
 	/// How long until the grant lapses, or `None` for never.
 	pub expires: Option<Duration>,
 }
@@ -61,8 +61,8 @@ impl<'a> Message<'a> for AuthOk {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let publish = Patterns::decode(r, version)?;
-		let subscribe = Patterns::decode(r, version)?;
+		let publish = Prefixes::decode(r, version)?;
+		let subscribe = Prefixes::decode(r, version)?;
 		let expires = match r.varint()? {
 			0 => None,
 			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
@@ -98,6 +98,22 @@ pub struct AuthError {
 	/// A code from the session error registry.
 	pub code: u64,
 	pub reason: String,
+}
+
+impl AuthError {
+	/// Whether the code says the acceptor failed to decide (INTERNAL_ERROR, TOO_MANY_REQUESTS,
+	/// or CONTROL_MESSAGE_TIMEOUT), so the presenter presents the token again after a backoff.
+	/// Any other code is the acceptor's verdict.
+	pub(crate) fn undecided(&self) -> bool {
+		use crate::SessionError;
+		[
+			SessionError::Internal,
+			SessionError::TooManyRequests,
+			SessionError::Timeout,
+		]
+		.iter()
+		.any(|undecided| u64::from(undecided.to_code()) == self.code)
+	}
 }
 
 /// Longest AUTH_ERROR reason, in bytes. Matches the GOAWAY URI cap: generous for a
@@ -174,10 +190,10 @@ impl<'a> Decode<'a, Version> for AuthReply {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Pattern;
+	use crate::Prefix;
 
-	fn patterns(texts: &[&str]) -> Patterns {
-		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
+	fn prefixes(texts: &[&str]) -> Prefixes {
+		texts.iter().map(|text| Prefix::try_from(*text).unwrap()).collect()
 	}
 
 	fn encode<T: Encode<Version>>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
@@ -202,16 +218,16 @@ mod tests {
 		}
 	}
 
-	/// `**` grants everything, the empty pattern only the root, and the empty list
-	/// nothing; literals and wildcards travel exactly, never widened to a prefix.
+	/// The empty prefix grants everything and the empty list nothing; each prefix travels
+	/// as written, covering its subtree.
 	#[test]
 	fn auth_ok_round_trips() {
 		for (publish, subscribe, expires) in [
-			(patterns(&["**"]), patterns(&[]), None),
-			(patterns(&[""]), patterns(&["room/**"]), None),
+			(prefixes(&[""]), prefixes(&[]), None),
+			(prefixes(&["room"]), prefixes(&["lobby", r"a\/b"]), None),
 			(
-				patterns(&["room/alice", "room/*/cam", "**/demo.hang"]),
-				patterns(&["room/cam-*.hang", "lobby/**"]),
+				prefixes(&["room/alice", "room-b", "demo.hang"]),
+				prefixes(&["room/cam", "lobby"]),
 				Some(Duration::from_secs(60)),
 			),
 		] {
@@ -228,29 +244,40 @@ mod tests {
 	#[test]
 	fn auth_ok_golden() {
 		let msg = AuthReply::Ok(AuthOk {
-			publish: patterns(&["room/*/cam", "**/b.hang"]),
-			subscribe: patterns(&[""]),
+			publish: prefixes(&["room-b", "room/a"]),
+			subscribe: prefixes(&[""]),
 			expires: Some(Duration::from_millis(1000)),
 		});
 		let buf = encode(&msg, Version::Lite07).unwrap();
 		#[rustfmt::skip]
 		let want: &[u8] = &[
 			0x00, // AUTH_OK
-			0x1a, // length
-			0x02, // publish count, in canonical order
-			0x09, b'*', b'*', b'/', b'b', b'.', b'h', b'a', b'n', b'g',
-			0x0a, b'r', b'o', b'o', b'm', b'/', b'*', b'/', b'c', b'a', b'm',
+			0x13, // length
+			0x02, // publish count, in segment order: a subtree right after its prefix
+			0x06, b'r', b'o', b'o', b'm', b'/', b'a',
+			0x06, b'r', b'o', b'o', b'm', b'-', b'b',
 			0x01, // subscribe count
-			0x00, // the empty pattern: the root alone
+			0x00, // the empty prefix: everything
 			0x83, 0xe8, // expires: 1000ms, as a leading-ones varint
 		];
 		assert_eq!(&buf[..], want);
 	}
 
-	/// Only valid, canonical text decodes: each pattern has exactly one encoding.
+	/// Only a valid prefix decodes: a wildcard, from a peer still writing patterns, is
+	/// refused like any other malformed prefix.
 	#[test]
-	fn invalid_patterns_are_refused() {
-		for text in ["*/**", "/room", "room/", "room//a", "a*b*c", "**/**", "a**"] {
+	fn invalid_prefixes_are_refused() {
+		for text in [
+			"**",
+			"room/**",
+			"*",
+			"room/*/cam",
+			"cam-*.hang",
+			"/room",
+			"room/",
+			"room//a",
+			r"a\b",
+		] {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, Version::Lite07.into());
 			w.varint(AUTH_OK).unwrap();
@@ -283,8 +310,8 @@ mod tests {
 	#[test]
 	fn zero_expiry_rounds_up() {
 		let msg = AuthReply::Ok(AuthOk {
-			publish: Patterns::new(),
-			subscribe: Patterns::new(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::new(),
 			expires: Some(Duration::ZERO),
 		});
 		let AuthReply::Ok(got) = round_trip(&msg) else {
@@ -296,8 +323,8 @@ mod tests {
 	#[test]
 	fn maximum_expiry_round_trips() {
 		let msg = AuthReply::Ok(AuthOk {
-			publish: Patterns::new(),
-			subscribe: Patterns::new(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::new(),
 			expires: Some(Duration::from_millis(MAX_EXPIRES_MS)),
 		});
 		assert_eq!(round_trip(&msg), msg);
@@ -331,6 +358,20 @@ mod tests {
 				Auth::decode_msg(&mut Decoder::new(&[0], version.into()), version),
 				Err(DecodeError::Version)
 			));
+		}
+	}
+
+	/// Only INTERNAL_ERROR (0x1), TOO_MANY_REQUESTS (0x7), and CONTROL_MESSAGE_TIMEOUT (0x11)
+	/// leave a token undecided, as the draft's AUTH_ERROR section lists them. Mirrored in
+	/// `js/net/src/lite/auth.test.ts`.
+	#[test]
+	fn only_three_codes_leave_a_token_undecided() {
+		for code in (0..0x100).chain([u64::from(u32::MAX), u64::MAX]) {
+			let reply = AuthError {
+				code,
+				reason: String::new(),
+			};
+			assert_eq!(reply.undecided(), matches!(code, 0x1 | 0x7 | 0x11), "{code:#x}");
 		}
 	}
 }

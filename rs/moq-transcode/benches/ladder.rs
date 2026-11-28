@@ -15,7 +15,6 @@
 //! Run with `cargo bench -p moq-transcode --bench ladder`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_transcode::{Config, Ladder, Rung};
@@ -98,12 +97,12 @@ async fn fanout(sinks: &mut [(moq_video::Size, moq_video::encode::Sink)], frame:
 
 /// CPU time the calling thread has used, which on a current-thread runtime is the worker's.
 #[cfg(unix)]
-fn thread_cpu() -> Duration {
+fn thread_cpu() -> std::time::Duration {
 	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 	// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
 	let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
 	assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
-	Duration::new(
+	std::time::Duration::new(
 		u64::try_from(time.tv_sec).unwrap(),
 		u32::try_from(time.tv_nsec).unwrap(),
 	)
@@ -186,7 +185,7 @@ impl Source {
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
 
-		let mut guard = self.catalog.modify().unwrap();
+		let mut guard = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		guard.video = hang::catalog::Video::default();
 		guard.video.insert("video", video).unwrap();
 	}
@@ -226,7 +225,7 @@ fn flapping(c: &mut Criterion) {
 		};
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		let current = loop {
-			let snapshot = catalogs.next().await.unwrap().unwrap();
+			let snapshot = catalogs.next().await.unwrap().unwrap().value;
 			if !snapshot.video.renditions.is_empty() {
 				break names(&snapshot);
 			}
@@ -241,7 +240,7 @@ fn flapping(c: &mut Criterion) {
 			source.publish(size(pictures[edits % pictures.len()]));
 			runtime.block_on(async {
 				loop {
-					let snapshot = catalogs.next().await.unwrap().unwrap();
+					let snapshot = catalogs.next().await.unwrap().unwrap().value;
 					let next = names(&snapshot);
 					if next != current {
 						current = next;

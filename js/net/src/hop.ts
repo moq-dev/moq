@@ -7,10 +7,8 @@
  *
  * @module
  */
-import type { Duration } from "@moq/clock";
-import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
-import type * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
@@ -20,17 +18,19 @@ import { isLeadingOnes, type StreamVersion } from "./stream.ts";
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
  * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *
- * The {@link HopSchema} validates any incoming value and brands it so the type system
+ * {@link toHop} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
- * (e.g. `randomHop`) uses `HopSchema.parse(...)` to brand a raw bigint.
+ * (e.g. `randomHop`) brands a raw bigint the same way.
  */
-export const HopSchema = z
-	.bigint()
-	.check(z.refine((value) => value >= 0n && value < 1n << 64n, "Hop must be a non-negative 64-bit integer"))
-	.brand("Hop");
+export type Hop = bigint & { readonly [hopBrand]: true };
 
-/** A relay's hop id, validated by {@link HopSchema}. */
-export type Hop = z.infer<typeof HopSchema>;
+declare const hopBrand: unique symbol;
+
+/** Brand `value` as a {@link Hop}, refusing anything outside the unsigned 64-bit range. */
+export function toHop(value: bigint): Hop {
+	if (value < 0n || value >= 1n << 64n) throw new RangeError("Hop must be a non-negative 64-bit integer");
+	return value as Hop;
+}
 
 /**
  * The reserved id 0, meaning "no identity".
@@ -40,7 +40,7 @@ export type Hop = z.infer<typeof HopSchema>;
  * in common, and never excluded from an advertisement. A chain that holds a 0 anywhere
  * is anonymous for route selection.
  */
-export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
+export const UNKNOWN_HOP: Hop = toHop(0n);
 
 /**
  * The id `hop` carries on a wire in `version`'s varint form.
@@ -77,7 +77,7 @@ export function randomHop(): Hop {
 	// Mask to 53 bits.
 	const raw = buf[0] & 0x1f_ffff_ffff_ffffn;
 	// Guard against the (astronomically unlikely) zero draw.
-	return HopSchema.parse(raw === 0n ? 1n : raw);
+	return toHop(raw === 0n ? 1n : raw);
 }
 
 /** The static cost of pulling content through a route; lower wins. */
@@ -87,6 +87,16 @@ export type Cost = bigint;
 export const Cost = {
 	/** The price a live publisher seeds. */
 	zero: 0n,
+	/** Crossing a link neither end priced, so an unpriced mesh routes by hop count. */
+	link: 1n,
+	/** The most a wire cost carries. */
+	max: 2n ** 62n - 1n,
+	/** A route's cost plus the price of the link it arrived on, saturating at {@link Cost.max}. */
+	charged(route: Cost, link: Cost): Cost {
+		const sum = route + link;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+		return sum > Cost.max ? Cost.max : sum;
+	},
 };
 
 /**
@@ -98,32 +108,21 @@ export const Cost = {
  */
 export interface RouteInfo {
 	/**
-	 * The stream the route serves: routes with one instance serve one continuous sequence
+	 * The stream the route serves: routes with one identity serve one continuous sequence
 	 * space, so a subscription resumes from one to another. Pass it to an origin `request` to
 	 * pin this stream.
 	 */
-	readonly instance?: Instance.Valid;
+	readonly identity?: Identity.Valid;
 	/** What pulling content via this route costs; lower wins. */
 	readonly cost: Cost;
 	/**
 	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
 	 * network lost every path to it but may recover one, so the announcement stays. It ranks
-	 * with a draining route, below every available one, and requests through it may fail until
-	 * it recovers: request again once it turns available.
+	 * below every available claim of its prefix, a draining one included, though a more specific
+	 * claim still shadows a broader one, and requests through it may fail until it recovers:
+	 * request again once it turns available.
 	 */
 	readonly available: boolean;
-	/**
-	 * The round trip to the route's origin node over moq-lite-07, informational: it never ranks
-	 * or selects a route.
-	 *
-	 * Each link on the path adds its min RTT, the lowest smoothed RTT it measured over the last
-	 * 30 seconds, this session's own link included. Undefined on any other wire, on a route this
-	 * origin serves itself, and while any link on the path has no measurement.
-	 *
-	 * A listing reports it as of the event that carries the route: a change to the RTT alone is
-	 * no event.
-	 */
-	readonly rtt?: Duration;
 }
 
 /**
@@ -134,26 +133,25 @@ export interface RouteInfo {
  */
 export function routeInfo(route: WireRoute): RouteInfo {
 	return {
-		instance: route.instance,
+		identity: route.identity,
 		cost: route.cost,
 		available: route.available ?? true,
-		rtt: route.rtt,
 	};
 }
 
 /**
  * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
- * orders an instance's incarnations, the hop chain it took, the credential that advertises it,
+ * orders an identity's incarnations, the hop chain it took, the credential that advertises it,
  * and whether it drains, which applications never see.
  *
  * @internal
  */
 export interface WireRoute {
-	/** See {@link RouteInfo.instance}. Always set on a route the origin delivers. */
-	readonly instance?: Instance.Valid;
+	/** See {@link RouteInfo.identity}. Always set on a route the origin delivers. */
+	readonly identity?: Identity.Valid;
 	/**
-	 * Which incarnation of {@link instance} this is: among its routes at one prefix only the
-	 * highest epoch is eligible, cheaper or not. Never compared across instances.
+	 * Which incarnation of {@link identity} this is: among its routes at one prefix only the
+	 * highest epoch is eligible, cheaper or not. Never compared across identities.
 	 */
 	readonly epoch?: bigint;
 	/**
@@ -173,20 +171,31 @@ export interface WireRoute {
 	readonly auth?: Credential;
 	/**
 	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
-	 * other eligible route, whatever its cost, yet still serves when nothing else does. A
-	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
+	 * other available route, whatever its cost, yet above one held unavailable, and still serves
+	 * when nothing else does. A preference state, never a saturated cost. Local: never forwarded,
+	 * and readers never see it.
 	 */
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
 	/**
-	 * The origin node a lite-07 route reaches, which every request through it names. Unset on a
-	 * route announced here and on every other version. Local: requests name it, readers never
-	 * see it.
+	 * A claim a lite-07 peer sent, one per identity at a path, which a reader asking for every
+	 * claim reports as a route of its own. Unset on a route announced here and on every other
+	 * version. Local: readers never see it.
 	 */
-	readonly node?: bigint;
-	/** See {@link RouteInfo.rtt}. */
-	readonly rtt?: Duration;
+	readonly claimed?: boolean;
+	/**
+	 * The lowest priority of a link on the way to a lite-07 claim's publisher: higher ranks
+	 * first, after drain and before cost. Unset ranks as 0, the priority of a link no one set.
+	 * Local, as `claimed` is.
+	 */
+	readonly priority?: number;
+	/**
+	 * How many segments broader the lite-07 claim is than the path it is presented at: a claim
+	 * exactly at a path outranks every broader one shown there, before anything else. Unset ranks
+	 * as 0. Local, as `claimed` is.
+	 */
+	readonly above?: bigint;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -194,22 +203,28 @@ export const WireRoute = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
 	default: { hops: [], cost: Cost.zero } as WireRoute,
 
-	/** Fill route defaults and saturate the static price at the wire ceiling. */
+	/**
+	 * Fill route defaults and saturate the static price at the wire ceiling. A plain JavaScript
+	 * caller can pass any string as a named identity, so its text is checked as `Identity.parse`
+	 * does, before a peer refuses it.
+	 */
 	normalize(route: Partial<WireRoute> = {}): WireRoute {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
+		const identity = typeof route.identity === "string" ? Identity.parse(route.identity) : route.identity;
 		const max = 2n ** 62n - 1n;
 		return {
-			instance: route.instance,
-			epoch: route.instance === undefined ? undefined : (route.epoch ?? 0n),
+			identity,
+			epoch: identity === undefined ? undefined : (route.epoch ?? 0n),
 			hops: route.hops ? [...route.hops] : [],
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
 			draining: route.draining,
 			available: route.available,
-			node: route.node,
-			rtt: route.rtt,
+			claimed: route.claimed,
+			priority: route.priority,
+			above: route.above,
 		};
 	},
 };
@@ -227,8 +242,8 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, and RTT.
+ * Whether two routes name the same identity, epoch, hop chain, cost, auth, drain state,
+ * availability, whether a lite-07 peer claimed it, priority, and how far above its path a claim is.
  *
  * @internal
  */
@@ -236,14 +251,15 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
-		a.instance === b.instance &&
+		a.identity === b.identity &&
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
-		a.node === b.node &&
-		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
+		(a.claimed ?? false) === (b.claimed ?? false) &&
+		(a.priority ?? 0) === (b.priority ?? 0) &&
+		(a.above ?? 0n) === (b.above ?? 0n) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

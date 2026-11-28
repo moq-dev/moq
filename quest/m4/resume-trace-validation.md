@@ -11,29 +11,25 @@ anyone remembering to resync the model.
 
 Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
 moq-net): every TLA+ model gets trace validation, not route alone, so none
-can keep passing on code that has moved on. Milestone m4, behind route's.
+can keep passing on code that has moved on. Milestone m4.
 
-- Reuse the trace format and the TLC recipe
-  [route trace validation](/quest/m3/route-trace-validation.md) builds. The
+- Build the trace format and the TLC recipe that
+  [reconnect](/quest/m4/reconnect-trace-validation.md) and
+  [subscribe](/quest/m4/subscribe-trace-validation.md) reuse: route's trace
+  validation, which was to build them, gave way to the
+  exhaustive route search, which `route::tests::multicast_search` now runs on the new router (decided
+  2026-11-14, maintainer, on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)). The
   sweep records each step as the model action it corresponds to (the
   `verify-resume` skill's Coverage table is the mapping) with the variables
   the model keeps, and TLC checks the trace is a behaviour of the spec.
 - The sweep covers more than the model does (ranges, cache expiry, a second
   instance). Restrict the validated cases to what the model covers or grow
   the model, whichever costs less, and say which.
-- Before starting, check [Resume as producer replacement](/quest/m4/resume-redesign.md):
-  it deletes the per-reader path this model describes. If it has landed or is
-  in flight, validate against the redesign's model instead, or delete this
-  quest with the old one.
+- The per-reader path this model describes stays: the producer-replacement
+  redesign that would have deleted it was dropped 2026-11-15 (maintainer,
+  /quest-complete).
 - Nightly on the sweep's fresh seed (`test resume-model`); the merge gate
   only if it stays fast on the fixed cases.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - the trace format and TLC recipe this reuses
-
-## Related
-
-- [Resume as producer replacement](/quest/m4/resume-redesign.md) - rewrites the code this validates

@@ -20,37 +20,25 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
+		timebase: crate::catalog::Timebase<E>,
 		format: ContainerFormat,
 	) -> Self {
+		use crate::container::{flv, fmp4, mkv, ts};
 		match format {
-			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved),
-			ContainerFormat::Mkv => Self::mkv(broadcast, reserved),
-			ContainerFormat::Ts => Self::ts(broadcast, reserved),
-			ContainerFormat::Flv => Self::flv(broadcast, reserved),
+			ContainerFormat::Fmp4 => {
+				Self::Fmp4(Box::new(fmp4::Import::new(broadcast, reserved).with_timebase(timebase)))
+			}
+			ContainerFormat::Mkv => Self::Mkv(Box::new(mkv::Import::new(broadcast, reserved).with_timebase(timebase))),
+			ContainerFormat::Ts => Self::Ts(Box::new(ts::Import::new(broadcast, reserved).with_timebase(timebase))),
+			ContainerFormat::Flv => Self::Flv(Box::new(flv::Import::new(broadcast, reserved).with_timebase(timebase))),
 		}
-	}
-
-	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, reserved)))
-	}
-
-	fn mkv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, reserved)))
-	}
-
-	fn ts(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, reserved)))
-	}
-
-	fn flv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, reserved)))
 	}
 
 	fn decode(&mut self, data: &[u8]) -> Result<()> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
 			ContainerImpl::Mkv(decoder) => decoder.decode(data),
-			ContainerImpl::Ts(decoder) => decoder.decode(data).map_err(Into::into),
+			ContainerImpl::Ts(decoder) => Ok(decoder.decode(data)?),
 			ContainerImpl::Flv(decoder) => decoder.decode(data),
 		}
 	}
@@ -82,12 +70,12 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
+	fn seek(&mut self, start: u64) -> Result<()> {
 		match self {
-			ContainerImpl::Fmp4(decoder) => decoder.seek(sequence),
-			ContainerImpl::Mkv(decoder) => decoder.seek(sequence),
-			ContainerImpl::Ts(decoder) => decoder.seek(sequence).map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.seek(sequence),
+			ContainerImpl::Fmp4(decoder) => decoder.seek(start),
+			ContainerImpl::Mkv(decoder) => decoder.seek(start),
+			ContainerImpl::Ts(decoder) => decoder.seek(start).map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.seek(start),
 		}
 	}
 }
@@ -100,13 +88,16 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 impl<E: crate::container::ts::Catalog> Container<E> {
 	/// Create a new container importer, decoding [`ContainerInit::data`] as the initial chunk.
 	///
-	/// The data may be empty, leaving every byte to [`Self::decode`].
+	/// The data may be empty, leaving every byte to [`Self::decode`]. It shifts through
+	/// [`ContainerInit::timebase`] when shared, a timestamp base of the catalog `reserved` belongs to,
+	/// or a fresh one of its own.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &ContainerInit,
+		init: &ContainerInit<E>,
 	) -> Result<Self> {
-		let mut inner = ContainerImpl::new(broadcast, reserved, init.format);
+		let timebase = init.timebase.clone().unwrap_or_else(|| reserved.producer().timebase());
+		let mut inner = ContainerImpl::new(broadcast, reserved, timebase, init.format);
 		inner.decode(&init.data)?;
 		Ok(Self { inner })
 	}
@@ -143,9 +134,9 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		self.inner.cut()
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.inner.seek(sequence)
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.inner.seek(start)
 	}
 }
 
@@ -175,7 +166,8 @@ pub struct Finished<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	/// Abort every track with `err`. Readers still draining a track get its clean end instead once
+	/// every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedImpl::Fmp4(finished) => finished.abort(err),

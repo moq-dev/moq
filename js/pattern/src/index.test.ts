@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, IntersectionError, InvalidPattern, Pattern, Patterns, type Segment } from "./index.ts";
+import * as Segments from "./index.ts";
+import {
+	compareSpecificity,
+	IntersectionError,
+	InvalidPattern,
+	Pattern,
+	Patterns,
+	parts,
+	type Segment,
+} from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
@@ -560,6 +569,39 @@ describe("Patterns", () => {
 	});
 });
 
+describe("parts", () => {
+	test("splits only at an unescaped separator", () => {
+		const cases: [string, string[]][] = [
+			["", []],
+			["a/b/c", ["a", "b", "c"]],
+			["a\\/b", ["a\\/b"]],
+			["a\\\\/b", ["a\\\\", "b"]],
+			["a\\\\\\/b", ["a\\\\\\/b"]],
+			["\\//\\/", ["\\/", "\\/"]],
+			["/a//b/", ["", "a", "", "b", ""]],
+		];
+		for (const [path, want] of cases) expect(parts(path)).toEqual(want);
+		expect(parts("a/b\\/c/d", 2)).toEqual(["a", "b\\/c"]);
+	});
+
+	test("rejoining the parts gives back the path", () => {
+		let texts = [""];
+		for (let n = 0; n < 7; n++) {
+			texts = texts.flatMap((text) => ["a", "/", "\\"].map((c) => text + c));
+			for (const text of texts) expect(parts(text).join("/")).toBe(text);
+		}
+	});
+
+	test("escape and unescape are inverses", () => {
+		for (const content of ["", "plain", "/", "\\", "a/\\b", "\\\\//", "café/"]) {
+			const segment = Segments.escape(content);
+			expect(parts(segment)).toHaveLength(content === "" ? 0 : 1);
+			expect(Segments.unescape(segment)).toBe(content);
+		}
+		expect(Segments.escape("a/b\\c")).toBe("a\\/b\\\\c");
+	});
+});
+
 test("patterns own immutable segment records", () => {
 	const literal = { kind: "literal" as const, value: "a" };
 	const partial = { kind: "partial" as const, prefix: "b", suffix: "c" };
@@ -596,7 +638,7 @@ test("ordering keeps distinct JS strings distinct", () => {
 	expect(new Patterns([a, b]).equals(new Patterns([b, a]))).toBe(true);
 });
 
-test("pattern instances cannot replace their validated representation", () => {
+test("pattern identities cannot replace their validated representation", () => {
 	const pattern = Pattern.parse("safe");
 	const union = new Patterns([pattern]);
 	expect(Reflect.set(pattern, "segments", [{ kind: "wildcard" }])).toBe(false);

@@ -346,7 +346,9 @@ impl Inner {
 			if let Some(conn) = conn {
 				// Once per receive rather than per datagram: `stats` copies the
 				// whole struct and queries the congestion controller.
-				conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
+				// The peer's MAX_DATA or ACK ends a wait and may declare losses, and its data
+				// may spend the receive window.
+				super::connection::record(&conn.wire, &conn.conn.borrow().stats());
 				conn.kick();
 			}
 		}

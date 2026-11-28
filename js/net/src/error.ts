@@ -18,12 +18,14 @@ export type SessionCode = number & { readonly [SESSION_CODE]: true };
 /**
  * Codes a peer sends when terminating the session, mirroring the Rust `Session`.
  *
- * Specified by moq-lite, which reuses moq-transport's codes unchanged. Call `SessionCode(code)`
- * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
- * and the two are disjoint, so the same integer means different things in each.
+ * moq-lite's registry, which reuses moq-transport's value for each code the two share. Call
+ * `SessionCode(code)` to construct an application code in the 64+ range. {@link StreamCode} is
+ * the other registry, and the two are disjoint, so the same integer means different things in
+ * each.
  *
  * Codes 32-47 are reserved: nothing is sent there, and the draft gives a received one no
- * meaning, so treat anything not listed below as an unspecified error rather than guessing.
+ * meaning. A code only moq-transport defines arrives as its number too, so treat anything not
+ * listed below as an unspecified error rather than guessing.
  *
  * @public
  */
@@ -39,32 +41,18 @@ export const SessionCode = Object.freeze(
 		Expired: 0x18 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
-		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
-		InvalidRequestId: 0x4 as SessionCode,
-		/** A key-value pair was malformed or repeated more than allowed. */
-		KeyValueFormatting: 0x6 as SessionCode,
 		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements. */
 		TooManyRequests: 0x7 as SessionCode,
-		/** A PATH the peer may not send, such as a server sending one at all. */
-		InvalidPath: 0x8 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
 		Timeout: 0x11 as SessionCode,
-		/** A token registration would exceed the advertised token cache size, which is 0 when unadvertised. */
-		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
 		/** The token could not be parsed. Retrying with the same token will fail again. */
 		MalformedAuthToken: 0x16 as SessionCode,
-		/** A token named an alias that was never registered. */
-		UnknownAuthTokenAlias: 0x17 as SessionCode,
-		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
-		InvalidAuthority: 0x19 as SessionCode,
-		/** The peer cannot support the requested feature; moq-lite only. */
+		/** The peer cannot support the requested feature, token, or grant. */
 		Unsupported: 0x30 as SessionCode,
-		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
-		TooManyRequestUpdates: 0x1b as SessionCode,
 	} as const),
 );
 
@@ -117,15 +105,12 @@ export const StreamCode = Object.freeze(
 		Unroutable: 0x36 as StreamCode,
 		/** The grant does not cover this request, or no longer does. The session stays up. */
 		Unauthorized: 0x3b as StreamCode,
-		/**
-		 * The publisher reset a group's stream to make room for a higher-priority one, pausing the
-		 * group for a later stream to continue rather than giving it up (lite-07).
-		 */
-		Yielded: 0x3c as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 		/** A frame's timedness or timestamp doesn't match its track's timescale. */
 		TimestampMismatch: 0x39 as StreamCode,
+		/** The group start will never be produced (declared skipped, or a discontinuity). */
+		Skip: 0x3a as StreamCode,
 	} as const),
 );
 
@@ -354,7 +339,12 @@ export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
 
-function streamCode(err: unknown): StreamCode | undefined {
+/**
+ * The raw code a transport's stream error carries, or undefined for any other error.
+ *
+ * @internal
+ */
+export function streamCode(err: unknown): StreamCode | undefined {
 	if (typeof err !== "object" || err === null) return undefined;
 
 	const { source, streamErrorCode } = err as StreamErrorLike;
@@ -411,21 +401,73 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
- * A group was created at a sequence its track declared skipped.
+ * What a caller does after a request fails, as {@link retry} answers it. Mirrors the Rust `Retry`.
  *
- * A skip says the sequence will never be produced, so it is final. See the track producer's
+ * @public
+ */
+export const Retry = Object.freeze({
+	/**
+	 * The source failed to deliver rather than judging the request, so asking it again may
+	 * succeed: its connection dropped, its session ended, or it is going away.
+	 */
+	Same: "same",
+	/**
+	 * The source lost its route to the content, so only another route continues it. Asking the
+	 * same source again can only replace the withdrawal's cause with a refusal.
+	 */
+	Reroute: "reroute",
+	/**
+	 * The answer judged the request or what it carried, so it repeats on every attempt: refused,
+	 * not found, or malformed.
+	 */
+	Never: "never",
+} as const);
+
+/** One of the {@link Retry} answers. @public */
+export type Retry = (typeof Retry)[keyof typeof Retry];
+
+// Stream codes that report the source failing to deliver rather than judging what it carried.
+const DELIVERY_FAILURES: ReadonlySet<number> = new Set([
+	StreamCode.Internal,
+	StreamCode.Cancel,
+	StreamCode.SessionClosed,
+	StreamCode.GoingAway,
+	StreamCode.ControlTimeout,
+]);
+
+/**
+ * What to do after a request failed with `err`: ask the same source again, find another route,
+ * or give up. Mirrors the Rust `Error::retry`.
+ *
+ * A session closing, whatever its code, is the route failing to deliver: whether the session
+ * comes back is the connection's call, not the request's.
+ *
+ * @public
+ */
+export function retry(err: unknown): Retry {
+	if (err instanceof Stream) {
+		if (err.code === StreamCode.Unroutable) return Retry.Reroute;
+		return DELIVERY_FAILURES.has(err.code) ? Retry.Same : Retry.Never;
+	}
+	return err instanceof Session || sessionClosed(err) ? Retry.Same : Retry.Never;
+}
+
+/**
+ * A group was created at a start its track declared skipped.
+ *
+ * A skip says the start will never be produced, so it is final. See the track producer's
  * `skipGroups`. Mirrors the Rust `Error::Skipped`.
  *
  * @public
  */
 export class Skipped extends Error {
-	/** The sequence that was refused. */
-	readonly sequence: bigint;
+	/** The start that was refused. */
+	readonly start: bigint;
 
-	constructor(sequence: bigint) {
-		super(`sequence ${sequence} was skipped`);
+	constructor(start: bigint) {
+		super(`group start ${start} was skipped`);
 		this.name = "Skipped";
-		this.sequence = sequence;
+		this.start = start;
 	}
 }
 
@@ -583,6 +625,20 @@ export function closeError(quic: WebTransport): Promise<Error> {
  */
 export function sessionClosed(err: unknown): boolean {
 	return typeof err === "object" && err !== null && (err as { source?: unknown }).source === "session";
+}
+
+/**
+ * Whether a stream failed because the peer reset or stopped it without an application code of its
+ * own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw or through
+ * {@link fromTransport}, rather than on a local error, a session close, or a reset with a code.
+ *
+ * @internal
+ */
+export function peerEnded(err: unknown): boolean {
+	const raw = err instanceof Stream ? err.cause : err;
+	if (typeof raw !== "object" || raw === null) return false;
+	const { source, streamErrorCode } = raw as StreamErrorLike;
+	return source === "stream" && (streamErrorCode === 0 || streamErrorCode === null);
 }
 
 /**

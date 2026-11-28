@@ -43,14 +43,17 @@ impl Stream<'_> {
 		let stream = get_or_insert_recv(entry.get_mut(), self.state.initial_stream_receive_window);
 
 		// An eviction already discarded the buffer, leaving the peer and the bytes the reader
-		// took to this stop.
-		let evicted = stream.reader == Reader::Evicted;
-		let (read_credits, stop_sending) = match evicted {
-			true => {
+		// took to this stop. Send STOP_SENDING if the final size is still unknown or if gaps
+		// existed before the evicted high-water mark (so the peer is still retransmitting).
+		let (evicted, read_credits, stop_sending) = match stream.reader {
+			Reader::Evicted { has_gaps } => {
 				stream.reader = Reader::Stopped;
-				(0, stream.final_offset_unknown())
+				(true, 0, stream.final_offset_unknown() || has_gaps)
 			}
-			false => stream.stop()?,
+			_ => {
+				let (read_credits, stop_sending) = stream.stop()?;
+				(false, read_credits, stop_sending)
+			}
 		};
 		let mut lease = std::mem::take(&mut stream.lease);
 		if stop_sending {
@@ -90,25 +93,14 @@ impl Stream<'_> {
 	/// [`Error::Evicted`] until the application stops it, so a reader that watches for a reset
 	/// instead of reading learns it too: bytes it took hold further eviction off until then.
 	pub fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		let hash_map::Entry::Occupied(entry) = self.state.recv.entry(self.id) else {
-			return Err(Error::Closed);
-		};
-		let Some(s) = entry.get().as_deref() else {
-			return Ok(None);
-		};
-		match s.reader {
-			Reader::Reading => {}
-			Reader::Evicted => return Err(Error::Evicted),
-			Reader::Stopped => return Err(Error::Closed),
-		}
-		let Some(code) = s.reset_code() else {
+		let Some(code) = self.reset_code()? else {
 			return Ok(None);
 		};
 
 		// Clean up state after application observes the reset, since there's no reason for the
 		// application to attempt to read or stop the stream once it knows it's reset. A lease still
 		// holding credit returns it here, since nothing is left to release or stop it.
-		let (_, recv) = entry.remove_entry();
+		let recv = self.state.recv.remove(&self.id).flatten();
 		let transmit = self
 			.state
 			.stream_recv_freed(self.id, recv.expect("must have recv on reset"));
@@ -119,6 +111,24 @@ impl Stream<'_> {
 		self.state.waits.wake_transmit();
 
 		Ok(Some(code))
+	}
+
+	/// The peer's reset code, as [`Self::received_reset`] reports it, but keeping the stream
+	///
+	/// A lease that failed with [`Error::Reset`] may still have reliable bytes for a smaller
+	/// `want`, which asking for the code this way leaves leasable.
+	pub fn reset_code(&self) -> Result<Option<VarInt>, Error> {
+		let Some(slot) = self.state.recv.get(&self.id) else {
+			return Err(Error::Closed);
+		};
+		let Some(s) = slot.as_deref() else {
+			return Ok(None);
+		};
+		match s.reader {
+			Reader::Reading => Ok(s.reset_code()),
+			Reader::Evicted { .. } => Err(Error::Evicted),
+			Reader::Stopped => Err(Error::Closed),
+		}
 	}
 
 	/// [`Self::received_reset`], or wait for the peer to reset the stream
@@ -148,11 +158,15 @@ pub(super) struct Recv {
 	pub(super) end: u64,
 	/// The end of the data STREAM frames carried, which on an ordered transport is where the
 	/// next one starts. Unlike `end`, a reset's final size does not raise it.
-	#[cfg(feature = "mux")]
 	pub(super) data_end: u64,
 	pub(super) reader: Reader,
 	/// What a reader leased, which lives as long as the stream does.
 	pub(super) lease: Leased,
+	/// The credit its reader lets the peer send past what it took, when smaller than the
+	/// connection's stream receive window; see [`Stream::set_window`](super::lease).
+	window: Option<u64>,
+	/// Whether a quiesce asked the peer to stop, which leaves the reader reading
+	pub(super) quiesced: bool,
 }
 
 /// Whether the application still reads a receive stream
@@ -161,10 +175,19 @@ pub(super) enum Reader {
 	#[default]
 	Reading,
 	/// Discarded to free a stuck window, with the reader and the peer yet to hear of it from a
-	/// stop; it keeps no data meanwhile, but its lease keeps the credit of bytes the reader took
-	Evicted,
+	/// stop; it keeps no data meanwhile, but its lease keeps the credit of bytes the reader took.
+	/// `has_gaps` records whether the assembler had missing bytes before its high-water mark
+	/// when evicted (e.g. a reordered FIN with missing earlier packets), so `stop()` still sends
+	/// `STOP_SENDING` to halt peer retransmissions even when `final_offset` is known.
+	Evicted { has_gaps: bool },
 	/// The application stopped the stream, which keeps no data
 	Stopped,
+}
+
+impl Reader {
+	pub(super) fn is_evicted(self) -> bool {
+		matches!(self, Self::Evicted { .. })
+	}
 }
 
 impl Recv {
@@ -174,10 +197,11 @@ impl Recv {
 			assembler: Assembler::new(),
 			sent_max_stream_data: initial_max_data,
 			end: 0,
-			#[cfg(feature = "mux")]
 			data_end: 0,
 			reader: Reader::Reading,
 			lease: Leased::default(),
+			window: None,
+			quiesced: false,
 		})
 	}
 
@@ -218,10 +242,7 @@ impl Recv {
 		}
 
 		self.end = self.end.max(end);
-		#[cfg(feature = "mux")]
-		{
-			self.data_end = self.data_end.max(end);
-		}
+		self.data_end = self.data_end.max(end);
 		// A reset stream only still delivers the data below its Reliable Size
 		if let RecvState::ResetRecvd { reliable_size, .. } = self.state {
 			let len = reliable_size.saturating_sub(frame.offset).min(frame.data.len() as u64);
@@ -275,9 +296,19 @@ impl Recv {
 	/// transmission of the value is recommended. If the boolean value is
 	/// `false` the new window should only be transmitted if a previous transmission
 	/// had failed.
-	pub(super) fn max_stream_data(&mut self, stream_receive_window: u64) -> (u64, bool) {
+	pub(super) fn max_stream_data(&self, stream_receive_window: u64) -> (u64, bool) {
+		// Credit runs from what the reader took, not what it leased: a reader that stops taking
+		// holds at most its window of bytes it has not taken. One waiting on a unit larger than
+		// the window gets room for the unit, which the connection window bounds.
+		let taken = self.assembler.bytes_read() - self.lease.untaken();
+		let stream_receive_window = self
+			.window
+			.map_or(stream_receive_window, |window| window.min(stream_receive_window));
+		let window = stream_receive_window.max(self.lease.wanted());
+		// A limit past a varint cannot be encoded, and a peer can never send that far anyway.
+		let limit = |credit: u64| credit.min(VarInt::MAX.into_inner());
 		// A window shrunk since the last announcement cannot take back credit already granted.
-		let max_stream_data = (self.assembler.bytes_read() + stream_receive_window).max(self.sent_max_stream_data);
+		let max_stream_data = limit(taken + window).max(self.sent_max_stream_data);
 
 		// Only announce a window update if it's significant enough
 		// to make it worthwhile sending a MAX_STREAM_DATA frame.
@@ -286,9 +317,35 @@ impl Recv {
 		// less updates. A fixed size would also work - but it would need to be
 		// smaller than `stream_receive_window` in order to make sure the stream
 		// does not get stuck.
+		// A reader waiting on more than the peer may send gets it however small: nothing it
+		// takes in the meantime would add to it.
 		let diff = max_stream_data - self.sent_max_stream_data;
-		let transmit = self.can_send_flow_control() && diff >= (stream_receive_window / 8);
+		let short = self.sent_max_stream_data < limit(taken + self.lease.wanted());
+		// At least a byte, so a tiny window never resends an unchanged limit.
+		let threshold = (stream_receive_window / 8).max(1);
+		let transmit = self.can_send_flow_control() && (diff >= threshold || short);
 		(max_stream_data, transmit)
+	}
+
+	/// Let the peer send at most `window` bytes past what the reader took, or the connection's
+	/// stream receive window if that is smaller.
+	pub(super) fn set_window(&mut self, window: u64) {
+		self.window = Some(window);
+	}
+
+	/// The connection credit this stream may hold under `stream_receive_window`: the bytes that
+	/// arrived and were not released, and those the peer may still send.
+	pub(super) fn credit(&self, stream_receive_window: u64) -> u64 {
+		let (max_stream_data, _) = self.max_stream_data(stream_receive_window);
+		let mut limit = max_stream_data.max(self.sent_max_stream_data);
+		if let Some(size) = self.final_offset() {
+			limit = limit.min(size);
+		}
+		match self.reader {
+			Reader::Reading => limit.saturating_sub(self.end) + self.unread_credit() + self.lease.held,
+			// It keeps no data, and the peer's further bytes return their credit as they arrive.
+			Reader::Evicted { .. } | Reader::Stopped => self.lease.held,
+		}
 	}
 
 	/// Records that a `MAX_STREAM_DATA` announcing a certain window was sent
@@ -465,77 +522,72 @@ impl<'a> Chunks<'a> {
 
 	/// The next contiguous chunk of at most `max_length` bytes, or `None` once the stream finished
 	///
-	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. A finished stream
-	/// whose leased bytes are not all read stays blocked rather than finish without them. Call
-	/// [`Self::finalize()`] when done.
-	pub fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, Error> {
+	/// Pending registers `waiter` until data, a FIN, or a reset arrives. A finished stream whose
+	/// leased bytes are not all read stays pending rather than finish without them. Fails with
+	/// [`Error::Reset`] once the bytes a reset still delivers are read. Data that arrived stays
+	/// readable after the connection is lost, and only then does this fail with
+	/// [`Error::ConnectionLost`]. Call [`Self::finalize()`] when done.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter, max_length: usize) -> Poll<Result<Option<Chunk>, Error>> {
 		let rs = match &mut self.state {
 			ChunksState::Readable(rs) => rs,
-			ChunksState::Reset(error_code) => {
-				return Err(Error::Reset(*error_code));
-			}
-			ChunksState::Finished => {
-				return Ok(None);
-			}
-			ChunksState::Finalized => panic!("must not call next() after finalize()"),
+			ChunksState::Finished => return Poll::Ready(Ok(None)),
+			ChunksState::Finalized => panic!("must not call poll_next() after finalize()"),
 		};
 
 		if let Some(chunk) = rs.assembler.read(max_length) {
 			self.read += chunk.bytes.len() as u64;
-			return Ok(Some(chunk));
+			return Poll::Ready(Ok(Some(chunk)));
 		}
 
 		match rs.state {
-			RecvState::ResetRecvd { reliable_size, .. } if rs.assembler.unread_before(reliable_size) > 0 => {
-				// The data below the Reliable Size is still in flight
-				Err(Error::Blocked)
-			}
-			RecvState::ResetRecvd { error_code, .. } => {
-				let state = mem::replace(&mut self.state, ChunksState::Reset(error_code));
-				// At this point if we have `rs` self.state must be `ChunksState::Readable`
-				let recv = match state {
-					ChunksState::Readable(recv) => recv,
-					_ => unreachable!("state must be ChunkState::Readable"),
+			// The data below the Reliable Size is still in flight.
+			RecvState::ResetRecvd { reliable_size, .. } if rs.assembler.unread_before(reliable_size) > 0 => {}
+			// The stream stays until `received_reset` reports the code, or a stop.
+			RecvState::ResetRecvd { .. } => return Poll::Ready(Err(Error::Reset)),
+			// Leased bytes left the assembler unread, so the end is not reached until they are
+			// read: freeing the stream now would discard them.
+			RecvState::Recv { size }
+				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end && !rs.lease.has_unread() =>
+			{
+				let ChunksState::Readable(recv) = mem::replace(&mut self.state, ChunksState::Finished) else {
+					unreachable!("matched Readable above");
 				};
 				self.pending.max_data |= self.streams.stream_recv_freed(self.id, recv);
-				Err(Error::Reset(error_code))
+				return Poll::Ready(Ok(None));
 			}
-			RecvState::Recv { size } => {
-				// Leased bytes left the assembler unread, so the end is not reached until they
-				// are read: freeing the stream now would discard them.
-				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end && !rs.lease.has_unread() {
-					let state = mem::replace(&mut self.state, ChunksState::Finished);
-					// At this point if we have `rs` self.state must be `ChunksState::Readable`
-					let recv = match state {
-						ChunksState::Readable(recv) => recv,
-						_ => unreachable!("state must be ChunkState::Readable"),
-					};
-					self.pending.max_data |= self.streams.stream_recv_freed(self.id, recv);
-					Ok(None)
-				} else {
-					// We don't need a distinct `ChunksState` variant for a blocked stream because
-					// retrying a read harmlessly re-traces our steps back to returning
-					// `Err(Blocked)` again. The buffers can't refill and the stream's own state
-					// can't change so long as this `Chunks` exists.
-					Err(Error::Blocked)
-				}
-			}
+			RecvState::Recv { .. } => {}
 		}
+
+		// Nothing changes while this `Chunks` borrows the stream, so a retry finds the same.
+		if self.streams.waits.lost().is_some() {
+			return Poll::Ready(Err(Error::ConnectionLost));
+		}
+		self.streams.waits.register(self.id, Wait::Read, waiter);
+		Poll::Pending
 	}
 
-	/// [`Self::next`], or wait for more to arrive
+	/// Whether a read reached the stream's end, which frees the stream once this is finalized
 	///
-	/// Pending registers `waiter` until data, a FIN, or a reset arrives. Data that arrived stays
-	/// readable after the connection is lost, and only then does this fail with
-	/// [`Error::ConnectionLost`].
-	pub fn poll_next(&mut self, waiter: &kio::Waiter, max_length: usize) -> Poll<Result<Option<Chunk>, Error>> {
-		match self.next(max_length) {
-			Err(Error::Blocked) if self.streams.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
-			Err(Error::Blocked) => {
-				self.streams.waits.register(self.id, Wait::Read, waiter);
-				Poll::Pending
-			}
-			result => Poll::Ready(result),
+	/// Every later [`Stream::read()`] of it fails with [`Error::Closed`].
+	pub fn is_finished(&self) -> bool {
+		matches!(self.state, ChunksState::Finished)
+	}
+
+	/// [`Self::poll_next`] without waiting, for tests and the fuzz target.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn try_next(&mut self, max_length: usize) -> Poll<Result<Option<Chunk>, Error>> {
+		self.poll_next(&kio::Waiter::noop(), max_length)
+	}
+
+	/// [`Self::try_next`] when something must be ready, for tests.
+	///
+	/// # Panics
+	/// - when nothing has arrived
+	#[cfg(test)]
+	pub(crate) fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, Error> {
+		match self.try_next(max_length) {
+			Poll::Ready(result) => result,
+			Poll::Pending => panic!("nothing to read"),
 		}
 	}
 
@@ -561,7 +613,7 @@ impl<'a> Chunks<'a> {
 		let mut should_transmit = self.streams.queue_max_stream_id(self.pending);
 
 		// If the stream hasn't finished, we may need to issue stream-level flow control credit
-		if let ChunksState::Readable(mut rs) = state {
+		if let ChunksState::Readable(rs) = state {
 			let (_, max_stream_data) = rs.max_stream_data(self.streams.stream_receive_window);
 			should_transmit |= max_stream_data;
 			if max_stream_data {
@@ -575,6 +627,12 @@ impl<'a> Chunks<'a> {
 		let max_data = self.streams.add_read_credits(self.read);
 		self.pending.max_data |= max_data;
 		should_transmit |= max_data;
+		// The credit may only have paid a shrunk window's debt, and the leasing readers that
+		// would rerun the stuck pass may all be waiting on this read.
+		if let Some(max_data) = self.streams.evict_if_stuck() {
+			self.pending.max_data |= max_data;
+			should_transmit = true;
+		}
 		if should_transmit {
 			self.streams.waits.wake_transmit();
 		}
@@ -589,7 +647,6 @@ impl Drop for Chunks<'_> {
 
 enum ChunksState {
 	Readable(Box<Recv>),
-	Reset(VarInt),
 	Finished,
 	Finalized,
 }
@@ -598,12 +655,11 @@ enum ChunksState {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Nothing more has arrived yet; [`Chunks::poll_next`] and [`Stream::poll_lease`] wait for it
-	#[error("blocked")]
-	Blocked,
-	/// The peer abandoned the stream, with its code
-	#[error("reset by peer: code {0}")]
-	Reset(VarInt),
+	/// The peer abandoned the stream: [`Stream::received_reset()`] gives its code and frees it
+	///
+	/// The stream keeps its state, and its stream ID, until then or a [`Stream::stop()`].
+	#[error("reset by peer")]
+	Reset,
 	/// The connection window was stuck and this stream was discarded to free it
 	///
 	/// The peer has not been told: stop the stream with [`Stream::stop()`] and a code of the
@@ -627,8 +683,7 @@ pub enum Error {
 impl From<Error> for io::Error {
 	fn from(err: Error) -> Self {
 		let kind = match err {
-			Error::Blocked => io::ErrorKind::WouldBlock,
-			Error::Reset(_) | Error::Evicted => io::ErrorKind::ConnectionReset,
+			Error::Reset | Error::Evicted => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
 			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,
 		};

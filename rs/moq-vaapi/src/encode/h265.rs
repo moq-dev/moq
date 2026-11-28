@@ -293,8 +293,8 @@ impl Stream {
 			MAIN,
 			self.level_idc,
 			0, // Main tier
-			config.gop,
-			config.gop,
+			config.gop.get(),
+			config.gop.get(),
 			1, // ip_period: no B pictures
 			bitrate,
 			self.coded.0 as u16,
@@ -859,7 +859,7 @@ mod tests {
 	/// The coded size rounds up to whole minimum coding blocks, and the SPS crops it back.
 	#[test]
 	fn the_coded_size_is_whole_coding_blocks() {
-		let config = Config::new(852, 478, 30, 1_000_000, 30);
+		let config = Config::new(852, 478, 30, 1_000_000, std::num::NonZeroU32::new(30).unwrap());
 		let stream = Stream::with_tools(Tools::FALLBACK, (1, 1), &config).unwrap();
 		assert_eq!(stream.coded(), (864, 480));
 		let tools = Tools {

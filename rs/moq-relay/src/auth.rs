@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use axum::http;
 use moq_auth::{Bytes, Grant, Request, lease};
-use moq_auth::{Pattern, Patterns};
+use moq_auth::{Prefix, Prefixes};
 use moq_net::{Path, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
@@ -26,8 +26,12 @@ use url::Url;
 /// handshake deadline, which a token arriving after the handshake does not.
 const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// This relay's product token, which every auth request carries so the server knows
+/// which grant fields it reads.
+pub(crate) const RELAY: &str = concat!("moq-relay/", env!("CARGO_PKG_VERSION"));
+
 /// Where every session's grant comes from. Exactly one of `url` and the public
-/// patterns is set; [`validate`](Self::validate) refuses anything else.
+/// prefixes is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
 #[derive(usage_rs::Args, Clone, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -43,15 +47,16 @@ pub struct Config {
 	pub url: Option<Url>,
 
 	/// PEM roots used instead of system roots to verify the auth server's hostname.
-	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root")]
+	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root", delimiter = ',')]
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<std::path::PathBuf>,
 
-	/// Patterns an anonymous session may both publish and subscribe to, rooted at
-	/// `/`, such as `anon/**`. Repeatable or comma-separated. Sets a static grant
-	/// with no expiry and no server.
+	/// Prefixes an anonymous session may both publish and subscribe to, rooted at
+	/// `/`, such as `anon`, which covers `anon` and every path beneath it. The empty
+	/// prefix covers everything; a wildcard such as `anon/**` is refused. Repeatable or
+	/// comma-separated. Sets a static grant with no expiry and no server.
 	#[usage(
 		long = "auth-public",
 		env = "MOQ_AUTH_PUBLIC",
@@ -60,9 +65,9 @@ pub struct Config {
 	)]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
-	pub public: Vec<Pattern>,
+	pub public: Vec<Prefix>,
 
-	/// Patterns an anonymous session may subscribe to, rooted at `/`. Repeatable.
+	/// Prefixes an anonymous session may subscribe to, rooted at `/`. Repeatable.
 	#[usage(
 		long = "auth-public-subscribe",
 		env = "MOQ_AUTH_PUBLIC_SUBSCRIBE",
@@ -71,9 +76,9 @@ pub struct Config {
 	)]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
-	pub public_subscribe: Vec<Pattern>,
+	pub public_subscribe: Vec<Prefix>,
 
-	/// Patterns an anonymous session may publish, rooted at `/`. Repeatable.
+	/// Prefixes an anonymous session may publish, rooted at `/`. Repeatable.
 	#[usage(
 		long = "auth-public-publish",
 		env = "MOQ_AUTH_PUBLIC_PUBLISH",
@@ -82,34 +87,7 @@ pub struct Config {
 	)]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
-	pub public_publish: Vec<Pattern>,
-
-	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
-	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
-	#[usage(flatten)]
-	#[serde(skip)]
-	pub(crate) legacy: Legacy,
-
-	// The 0.14 `[auth]` keys #3688 removed, kept only so they refuse with their
-	// replacement named rather than being ignored.
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) key: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) key_dir: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) auth_api: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) domains: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) mtls_tier: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) tls: Option<serde::de::IgnoredAny>,
+	pub public_publish: Vec<Prefix>,
 }
 
 impl std::fmt::Debug for Config {
@@ -130,140 +108,15 @@ impl std::fmt::Debug for Config {
 /// connection, may hold at its decider.
 const VERIFICATIONS: usize = 128;
 
-/// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
-/// deployed through the environment would otherwise ignore them without a word.
-#[derive(Clone, Debug, Default, usage_rs::Args)]
-#[usage(unknown_flags = "error", args_override_self = false)]
-pub(crate) struct Legacy {
-	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
-	key: Option<String>,
-	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
-	key_dir: Option<String>,
-	#[usage(name = "auth-api", long = "auth-api", env = "MOQ_AUTH_API", hide = true)]
-	api: Option<String>,
-	#[usage(
-		name = "auth-public-api",
-		long = "auth-public-api",
-		env = "MOQ_AUTH_PUBLIC_API",
-		hide = true
-	)]
-	public_api: Option<String>,
-	#[usage(name = "auth-domain", long = "auth-domain", env = "MOQ_AUTH_DOMAIN", hide = true)]
-	domain: Vec<String>,
-	#[usage(
-		name = "auth-mtls-tier",
-		long = "auth-mtls-tier",
-		env = "MOQ_AUTH_MTLS_TIER",
-		hide = true
-	)]
-	mtls_tier: Option<String>,
-	#[usage(
-		name = "auth-tls-root",
-		long = "auth-tls-root",
-		env = "MOQ_AUTH_TLS_ROOT",
-		hide = true
-	)]
-	tls_root: Vec<String>,
-	#[usage(
-		name = "auth-tls-cert",
-		long = "auth-tls-cert",
-		env = "MOQ_AUTH_TLS_CERT",
-		hide = true
-	)]
-	tls_cert: Option<String>,
-	#[usage(name = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
-	tls_key: Option<String>,
-	#[usage(
-		name = "auth-tls-disable-verify",
-		long = "auth-tls-disable-verify",
-		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
-		hide = true,
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true
-	)]
-	tls_disable_verify: Option<String>,
-}
-
 impl Config {
-	/// The static grant the public patterns name, or `None` when none is set.
+	/// The static grant the public prefixes name, or `None` when none is set.
 	///
-	/// Its patterns are rooted at `/`, not at a dialed path: each session is granted
+	/// Its prefixes are rooted at `/`, not at a dialed path: each session is granted
 	/// what they reach from where it dialed, as a token with an empty root would be.
 	pub fn public_grant(&self) -> Option<Grant> {
-		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
-		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
+		let publish: Prefixes = self.public.iter().chain(&self.public_publish).cloned().collect();
+		let subscribe: Prefixes = self.public.iter().chain(&self.public_subscribe).cloned().collect();
 		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
-	}
-
-	/// The 0.14 settings in use, each paired with what replaced it. A relay refuses
-	/// to start on any: `key` with `public` would otherwise boot with every JWT
-	/// ignored.
-	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
-		let mut found = moq_tokio::cli::Deprecated::default();
-		let legacy = &self.legacy;
-		for (set, flag, env, toml, new) in [
-			(
-				legacy.key.is_some(),
-				"--auth-key",
-				"MOQ_AUTH_KEY",
-				self.key.is_some().then_some("[auth] key"),
-				"--auth-url to `moq auth serve --key`",
-			),
-			(
-				legacy.key_dir.is_some(),
-				"--auth-key-dir",
-				"MOQ_AUTH_KEY_DIR",
-				self.key_dir.is_some().then_some("[auth] key_dir"),
-				"--auth-url to `moq auth serve --key-dir`",
-			),
-			(
-				legacy.api.is_some(),
-				"--auth-api",
-				"MOQ_AUTH_API",
-				self.auth_api.is_some().then_some("[auth] auth_api"),
-				"--auth-url to a server answering the contract",
-			),
-			(
-				legacy.public_api.is_some(),
-				"--auth-public-api",
-				"MOQ_AUTH_PUBLIC_API",
-				None,
-				"--auth-url to a server answering the contract",
-			),
-			(
-				!legacy.domain.is_empty(),
-				"--auth-domain",
-				"MOQ_AUTH_DOMAIN",
-				self.domains.is_some().then_some("[auth] domains"),
-				"an auth server that reads `server_name`",
-			),
-			(
-				legacy.mtls_tier.is_some(),
-				"--auth-mtls-tier",
-				"MOQ_AUTH_MTLS_TIER",
-				self.mtls_tier.is_some().then_some("[auth] mtls_tier"),
-				"--auth-url to `moq auth serve --tier`",
-			),
-			(
-				!legacy.tls_root.is_empty()
-					|| legacy.tls_cert.is_some()
-					|| legacy.tls_key.is_some()
-					|| legacy.tls_disable_verify.is_some(),
-				"--auth-tls-*",
-				"MOQ_AUTH_TLS_*",
-				self.tls.is_some().then_some("[auth.tls]"),
-				"--connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
-			),
-		] {
-			if set {
-				found.flag(flag, Some(env), new);
-			}
-			if let Some(toml) = toml {
-				found.toml(toml, new, None);
-			}
-		}
-		found
 	}
 
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
@@ -277,36 +130,14 @@ impl Config {
 	/// static grant, or that pairs public rules with a client CA, so the question
 	/// of who decides has one answer. `client_ca` is whether any listener verifies
 	/// client certificates, which public rules would grant what they grant anyone.
-	///
-	/// A public pattern without a wildcard is refused too. 0.14 read `anon` as the
-	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
-	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self, client_ca: bool) -> anyhow::Result<()> {
-		let deprecated = self.deprecated();
-		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		let flags = [
-			("--auth-public", &self.public),
-			("--auth-public-publish", &self.public_publish),
-			("--auth-public-subscribe", &self.public_subscribe),
-		];
-		for (flag, patterns) in flags {
-			for pattern in patterns.iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
 		match (&self.url, self.public_grant()) {
 			(Some(_), Some(_)) => anyhow::bail!("--auth-url and --auth-public cannot both be set; the server decides"),
 			(None, None) => anyhow::bail!(
 				"no --auth-url or --auth-public configured; nobody can authenticate (a client certificate admits nothing on its own)"
 			),
 			(None, Some(_)) if client_ca => anyhow::bail!(
-				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
+				"a client CA (--listen-tls-root, --web-https-root, --cluster-listen-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
 			),
 			_ => {}
 		}
@@ -331,8 +162,8 @@ impl Config {
 			}
 			(None, Some(grant)) => Decider::Public(Arc::new(
 				moq_auth::Claims::default()
-					.with_publish(grant.publish)
-					.with_subscribe(grant.subscribe),
+					.with_publish(grant.publish.path)
+					.with_subscribe(grant.subscribe.path),
 			)),
 			(None, None) => unreachable!("validated above"),
 		};
@@ -353,7 +184,8 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
-	/// A valid grant does not cover the requested direction or path.
+	/// A grant does not cover the requested direction or path, or names something this
+	/// relay cannot read or use.
 	#[error("{0}")]
 	Forbidden(String),
 
@@ -372,6 +204,9 @@ impl From<moq_auth::Error> for Error {
 				refusal.reason = moq_auth::refusal::Reason::Expired;
 				Self::Refused(refusal)
 			}
+			// The server answered a grant this relay cannot read or accept: final, since
+			// asking again gets the same answer, and no fault of the client's credential.
+			err if err.is_final_grant() => Self::Forbidden(err.to_string()),
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -436,30 +271,23 @@ pub struct Token {
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(Path, Path)>,
-	/// Patterns the session may subscribe to, relative to `root`.
-	pub subscribe: moq_auth::Patterns,
-	/// Patterns the session may publish, relative to `root`.
-	pub publish: moq_auth::Patterns,
-	/// The most the session may publish, or no cap when absent.
-	pub publish_rate: Option<moq_auth::Rate>,
-	/// The most the session may receive from its subscriptions, or no cap when absent.
-	pub subscribe_rate: Option<moq_auth::Rate>,
+	/// What the session may subscribe to, relative to `root`, and its cap.
+	pub subscribe: moq_auth::Access,
+	/// What the session may publish, relative to `root`, and its cap.
+	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 	/// The path this session's stats record under, empty when the grant names none.
 	pub label: Path,
-	/// Whether the session is a cluster peer, so its routes entered elsewhere.
-	pub peer: bool,
-	/// Whether the peer is upstream, so it is never offered another upstream's routes.
-	pub upstream: bool,
+	/// How the session links into the cluster, absent for a client: a peer's routes
+	/// entered elsewhere, and an upstream is never offered another upstream's routes.
+	pub link: Option<moq_auth::Link>,
 }
 
 impl Token {
 	/// Reduce `grant` for a session that dialed `path`.
 	///
-	/// The token keeps the patterns the grant yields: the origin scopes by any
-	/// pattern union, so `alice`, `*/chat`, and `alice/**` each mean exactly what
-	/// they say.
+	/// The token keeps the prefixes the grant yields, each covering its whole subtree.
 	///
 	/// The dialed path is a URL path, whose one leading `/` is syntax rather than a
 	/// segment. Fails with [`Error::Request`] if the rest of it is not a valid path,
@@ -483,12 +311,9 @@ impl Token {
 				.map_err(invalid)?,
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
-			publish_rate: grant.publish_rate,
-			subscribe_rate: grant.subscribe_rate,
 			tier: crate::configured_tier(grant.tier.clone()).map_err(invalid)?,
 			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(invalid)?,
-			peer: grant.peer,
-			upstream: grant.upstream,
+			link: grant.link,
 		})
 	}
 
@@ -503,8 +328,8 @@ impl Token {
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.covers(&self.subscribe)
-			&& other.publish.covers(&self.publish)
+			&& other.subscribe.path.covers(&self.subscribe.path)
+			&& other.publish.path.covers(&self.publish.path)
 	}
 }
 
@@ -639,7 +464,7 @@ impl Lease {
 	/// patterns, narrower or wider, and keeps going; the origin handles the session was
 	/// admitted with still bound it, so it never reaches past them. Without an attached
 	/// session a narrower grant ends the lease and a wider one changes nothing.
-	/// A changed root or mounts ends it, and so does a flipped `peer` or `upstream`,
+	/// A changed root or mounts ends it, and so does a changed `link`,
 	/// since the routes it already announced would be misreported as entering here or
 	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
@@ -675,11 +500,8 @@ impl Lease {
 						}
 						// Routes the session already announced were recorded as
 						// entering here or from a peer; a flip would misreport them.
-						if fresh.peer != self.token.peer {
-							return "peer changed".into();
-						}
-						if fresh.upstream != self.token.upstream {
-							return "upstream changed".into();
+						if fresh.link != self.token.link {
+							return "link changed".into();
 						}
 						let caps = Caps::of(&grant);
 						if caps != self.caps {
@@ -690,20 +512,23 @@ impl Lease {
 							pacer.pace(caps);
 							self.caps = caps;
 						}
-						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
+						(self.token.publish.rate, self.token.subscribe.rate) = (fresh.publish.rate, fresh.subscribe.rate);
+						if fresh.publish.path != self.token.publish.path
+							|| fresh.subscribe.path != self.token.subscribe.path
+						{
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish),
-										subscribe = %join(&fresh.subscribe),
+										publish = %join(&fresh.publish.path),
+										subscribe = %join(&fresh.subscribe.path),
 										"grant changed; re-authorizing the session",
 									);
 									let mut grant = moq_net::auth::Grant::default();
-									grant.publish = fresh.publish.clone();
-									grant.subscribe = fresh.subscribe.clone();
+									grant.publish = fresh.publish.path.clone();
+									grant.subscribe = fresh.subscribe.path.clone();
 									session.authorize(&grant);
-									self.token.publish = fresh.publish;
-									self.token.subscribe = fresh.subscribe;
+									self.token.publish.path = fresh.publish.path;
+									self.token.subscribe.path = fresh.subscribe.path;
 								}
 								None if !self.token.covered_by(&fresh) => return lease::Reason::Narrowed,
 								None => {}
@@ -763,11 +588,12 @@ impl Lease {
 	}
 }
 
-/// Patterns as one comma-separated line, for logs.
-fn join(patterns: &Patterns) -> String {
-	patterns
+/// Prefixes as one comma-separated line of quoted strings for logs, so the empty
+/// prefix, which covers everything, still shows.
+fn join(prefixes: &Prefixes) -> String {
+	prefixes
 		.iter()
-		.map(|pattern| pattern.as_str())
+		.map(|prefix| format!("{:?}", prefix.as_str()))
 		.collect::<Vec<_>>()
 		.join(",")
 }
@@ -853,7 +679,7 @@ impl Decider {
 			}
 			// Nothing here can verify a token, so one is refused rather than ignored:
 			// its holder expects it to count, and the public grant is not what it says.
-			Self::Public(_) if presents_token(&request) => {
+			Self::Public(_) if request.token.is_some() => {
 				tracing::debug!(path = ?request.path, "a token was presented to public rules");
 				Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default())))))
 			}
@@ -872,16 +698,6 @@ impl Decider {
 			Self::Refuse => Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default()))))),
 		}
 	}
-}
-
-/// Whether `request` carries a token: a SETUP token of any type, or a non-empty
-/// `jwt` query parameter, form-decoded as `moq auth serve` reads it, so an escaped
-/// key such as `%6Awt` counts too.
-fn presents_token(request: &Request) -> bool {
-	request.token.is_some()
-		|| request.query.as_deref().is_some_and(|query| {
-			url::form_urlencoded::parse(query.as_bytes()).any(|(key, jwt)| key == "jwt" && !jwt.is_empty())
-		})
 }
 
 /// Admits sessions through one admission decider.
@@ -952,7 +768,9 @@ impl Auth {
 
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
-		Request::new(self.node.as_ref(), transport, path)
+		let mut request = Request::new(self.node.as_ref(), transport, path);
+		request.relay = Some(RELAY.to_string());
+		request
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
@@ -1005,8 +823,8 @@ impl Auth {
 		self.decider.decide(request, connection)
 	}
 
-	/// Admit a session on a grant decided locally, bypassing the server: the LAN
-	/// mesh credential, which the relay minted for itself.
+	/// Admit a session on a grant this relay decided for itself, bypassing the server,
+	/// such as a LAN peer whose membership proof it minted.
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Lease {
 		Lease::new(path, lease::Consumer::fixed(grant)).expect("the relay's own grant fits")
 	}
@@ -1263,7 +1081,7 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, role, and implementation carried in SETUP.
-#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
+#[cfg(any(feature = "test-support", uring))]
 pub(crate) fn request_for_setup(
 	auth: &Auth,
 	setup: &moq_net::server::Handshake,
@@ -1291,8 +1109,8 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Tls => moq_auth::Transport::Tls,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
-		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
 		// A transport added to moq-tokio before this mapping learns it still reaches
 		// the decider, named as one it does not recognize.
 		_ => moq_auth::Transport::Unknown,
@@ -1475,7 +1293,7 @@ mod tests {
 		assert!(admissions.next().await.is_none());
 	}
 
-	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
+	fn prefixes(texts: &[&str]) -> moq_auth::Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -1490,18 +1308,14 @@ mod tests {
 	/// An embedder's grant meets the contract an auth server's does.
 	#[test]
 	fn a_lease_refuses_a_grant_the_contract_refuses() {
-		let mut tier = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let mut tier = Grant::new(moq_net::Prefix::all(), moq_net::Prefix::all());
 		tier.tier = Some("a b".into());
-		let mut upstream = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-		upstream.upstream = true;
-		for grant in [tier, upstream] {
-			assert!(Lease::new("/room", lease::Consumer::fixed(grant)).is_err());
-		}
+		assert!(Lease::new("/room", lease::Consumer::fixed(tier)).is_err());
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_label_at_revalidation_ends_the_lease() {
-		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let grant = Grant::new(moq_net::Prefix::all(), moq_net::Prefix::all());
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/room", consumer).unwrap();
 		let mut wildcard = grant;
@@ -1546,7 +1360,7 @@ mod tests {
 	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
-		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix, T::WebRtc] {
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Tls, T::Unix] {
 			assert_eq!(super::transport(transport).as_str(), transport.as_str());
 		}
 	}
@@ -1560,10 +1374,10 @@ mod tests {
 		let rate = moq_auth::Rate::from_bps(8000).unwrap();
 		for transport in [Quic, WebTransport, WebSocket, Http, Rtmp, Srt] {
 			for publish in [false, true] {
-				let mut grant = Grant::new(Pattern::all(), Pattern::all());
+				let mut grant = Grant::new(Prefix::all(), Prefix::all());
 				match publish {
-					true => grant.publish_rate = Some(rate),
-					false => grant.subscribe_rate = Some(rate),
+					true => grant.publish.rate = Some(rate),
+					false => grant.subscribe.rate = Some(rate),
 				}
 				let (auth, mut admissions) = Auth::embedded("test");
 				let request = auth.request(transport, "/room");
@@ -1605,9 +1419,9 @@ mod tests {
 	async fn a_rechecked_cap_reaches_the_connection() {
 		use futures::FutureExt;
 		let rate = moq_auth::Rate::from_bps(8000).unwrap();
-		let uncapped = Grant::new(Pattern::all(), Pattern::all());
+		let uncapped = Grant::new(Prefix::all(), Prefix::all());
 		let mut capped = uncapped.clone();
-		capped.subscribe_rate = Some(rate);
+		capped.subscribe.rate = Some(rate);
 
 		let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
 		let record = applied.clone();
@@ -1636,18 +1450,18 @@ mod tests {
 	#[test]
 	fn exactly_one_source() {
 		assert!(config(None, &[]).validate(false).is_err());
-		assert!(config(Some("http://127.0.0.1:4440/"), &["**"]).validate(false).is_err());
+		assert!(config(Some("http://127.0.0.1:4440/"), &[""]).validate(false).is_err());
 		assert!(config(Some("http://127.0.0.1:4440/"), &[]).validate(false).is_ok());
-		assert!(config(None, &["anon/**"]).validate(false).is_ok());
+		assert!(config(None, &["anon"]).validate(false).is_ok());
 
 		let split = Config {
-			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: prefixes(&["anon"]).into_iter().collect(),
 			..Default::default()
 		};
 		assert!(split.validate(false).is_ok());
 		let grant = split.public_grant().unwrap();
-		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
-		assert!(grant.publish.is_empty());
+		assert_eq!(grant.subscribe.path, prefixes(&["anon"]));
+		assert!(grant.publish.path.is_empty());
 	}
 
 	/// An unknown `[auth]` key, such as the never-released `verifications`, fails to parse.
@@ -1661,7 +1475,7 @@ mod tests {
 	/// needs an auth server, and `init` refuses it like `validate` does.
 	#[test]
 	fn a_client_ca_needs_an_auth_server() {
-		let public = config(None, &["anon/**"]);
+		let public = config(None, &["anon"]);
 		let err = public.validate(true).unwrap_err().to_string();
 		assert!(err.contains("--auth-public ignores"), "{err}");
 		let Err(err) = public.init("relay-1", &moq_tokio::tls::Connect::default(), true) else {
@@ -1671,29 +1485,29 @@ mod tests {
 		assert!(config(Some("http://127.0.0.1:4440/"), &[]).validate(true).is_ok());
 	}
 
-	/// The public rules are rooted at `/`, like a token with an empty root. Bare `**`
-	/// reads the same either way, which is how rooting them at the dialed path went
-	/// unnoticed: `anon/**` at `/rooms/123` granted `rooms/123/anon/**`.
+	/// The public rules are rooted at `/`, like a token with an empty root. The empty
+	/// prefix reads the same either way, which is how rooting them at the dialed path went
+	/// unnoticed: `anon` at `/rooms/123` granted `rooms/123/anon`.
 	#[tokio::test]
 	async fn public_rules_are_rooted_at_slash() {
 		let auth = Config {
-			public_publish: patterns(&["anon/**"]).into_iter().collect(),
-			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
+			public_publish: prefixes(&["anon"]).into_iter().collect(),
+			public_subscribe: prefixes(&["anon", "lobby/chat"]).into_iter().collect(),
 			..Default::default()
 		}
 		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
 
 		for (path, root, publish, subscribe) in [
-			("/", "", &["anon/**"][..], &["anon/**", "*/chat"][..]),
-			("/anon", "anon", &["**"], &["**", "chat"]),
-			("/anon/room", "anon/room", &["**"], &["**"]),
-			("/rooms", "rooms", &[], &["chat"]),
+			("/", "", &["anon"][..], &["anon", "lobby/chat"][..]),
+			("/anon", "anon", &[""], &[""]),
+			("/anon/room", "anon/room", &[""], &[""]),
+			("/lobby", "lobby", &[], &["chat"]),
 		] {
 			let lease = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await.unwrap();
 			assert_eq!(lease.token().root, Path::new(root).unwrap(), "{path}");
-			assert_eq!(lease.token().publish, patterns(publish), "{path}");
-			assert_eq!(lease.token().subscribe, patterns(subscribe), "{path}");
+			assert_eq!(lease.token().publish.path, prefixes(publish), "{path}");
+			assert_eq!(lease.token().subscribe.path, prefixes(subscribe), "{path}");
 		}
 
 		// A path the rules don't reach is refused, never an outage the client retries.
@@ -1706,42 +1520,32 @@ mod tests {
 		}
 	}
 
-	/// Public rules verify nothing, so a token is refused rather than ignored, in
-	/// whichever form it arrives.
+	/// Public rules verify nothing, so a token is refused rather than ignored.
 	#[tokio::test]
 	async fn public_rules_refuse_a_token() {
-		let auth = config(None, &["**"])
+		let auth = config(None, &[""])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
-		query.query = Some("a=1&jwt=eyJ".into());
 		let mut setup = auth.request(moq_auth::Transport::Quic, "/");
 		setup.token = Some(moq_auth::Token {
 			kind: moq_auth::Token::CAT,
 			value: b"anything".to_vec(),
 		});
-		let mut http = auth.request(moq_auth::Transport::Http, "/");
-		http.query = Some("jwt=eyJ".into());
-		// `moq auth serve` form-decodes the key, so an escaped one is a token too.
-		let mut escaped = auth.request(moq_auth::Transport::WebSocket, "/");
-		escaped.query = Some("%6Awt=eyJ".into());
-		for request in [query, setup, http, escaped] {
-			let Err(err) = auth.admit(request).await else {
-				panic!("a token was admitted on the public grant");
-			};
-			assert!(matches!(err, Error::Refused(_)), "{err}");
-		}
+		let Err(err) = auth.admit(setup).await else {
+			panic!("a token was admitted on the public grant");
+		};
+		assert!(matches!(err, Error::Refused(_)), "{err}");
 
-		// An empty `jwt=` is no token.
-		let mut empty = auth.request(moq_auth::Transport::WebSocket, "/");
-		empty.query = Some("jwt=&b=2".into());
-		assert!(auth.admit(empty).await.is_ok());
+		// A query is the client's own: the relay reads no parameter in it as a token.
+		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
+		query.query = Some("jwt=eyJ".into());
+		assert!(auth.admit(query).await.is_ok());
 	}
 
 	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.
 	#[tokio::test]
 	async fn a_public_config_admits_anonymous_and_certificate_alike() {
-		let auth = config(None, &["anon/**"])
+		let auth = config(None, &["anon"])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
 		let anonymous = auth.request(moq_auth::Transport::Quic, "/anon/room");
@@ -1756,7 +1560,7 @@ mod tests {
 		for request in [anonymous, certificate] {
 			let lease = auth.admit(request).await.unwrap();
 			assert_eq!(lease.token().root, Path::from_static("anon/room"));
-			assert_eq!(lease.token().subscribe, patterns(&["**"]));
+			assert_eq!(lease.token().subscribe.path, prefixes(&[""]));
 			assert_eq!(lease.token().tier, Tier::default());
 		}
 	}
@@ -1765,7 +1569,7 @@ mod tests {
 	/// sees it as a bare leaf, which would hide the intermediate a server scopes by.
 	#[tokio::test]
 	async fn an_untraced_certificate_chain_is_refused() {
-		let auth = config(None, &["anon/**"])
+		let auth = config(None, &["anon"])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
 		let mut request = auth.request(moq_auth::Transport::Quic, "/anon/room");
@@ -1807,25 +1611,43 @@ mod tests {
 		assert_eq!(peer.chain, vec![peer.fingerprint.clone(), root]);
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free public pattern refuses to start rather than pick silently.
-	#[test]
-	fn a_public_pattern_without_a_wildcard_refuses_to_start() {
-		for (public, hint) in [("anon", "anon/**"), ("anon/room", "anon/room/**"), ("", "**")] {
-			let err = config(None, &[public]).validate(false).unwrap_err().to_string();
-			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
-		}
-		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
-			..Default::default()
-		};
-		let err = split.validate(false).unwrap_err().to_string();
-		assert!(err.starts_with("--auth-public-subscribe `live`"), "{err}");
-		assert!(config(None, &["anon/*", "*/chat", "**"]).validate(false).is_ok());
+	/// A public prefix covers its path and everything beneath it, but no sibling sharing
+	/// its bytes, and the empty prefix covers everything.
+	#[tokio::test]
+	async fn a_public_prefix_admits_its_whole_subtree() {
+		let auth = config(None, &["anon"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
 
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(config(None, &[&deepest]).validate(false).is_ok());
+		// Dialed at or beneath the prefix, the grant is everything there.
+		for (path, root) in [("/anon", "anon"), ("/anon/room", "anon/room")] {
+			let lease = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await.unwrap();
+			assert_eq!(lease.token().root, Path::new(root).unwrap(), "{path}");
+			assert_eq!(lease.token().publish, prefixes(&[""]).into(), "{path}");
+			assert_eq!(lease.token().subscribe, prefixes(&[""]).into(), "{path}");
+		}
+
+		// Dialed above it, the grant reaches only that prefix.
+		let lease = auth.admit(auth.request(moq_auth::Transport::Quic, "/")).await.unwrap();
+		assert_eq!(lease.token().publish, prefixes(&["anon"]).into());
+
+		// A sibling, even one starting with the same bytes, is not reached.
+		for path in ["/anonymous", "/other"] {
+			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
+				panic!("{path} was admitted");
+			};
+			assert!(matches!(err, Error::Refused(_)), "{path}: {err}");
+		}
+
+		// The empty prefix covers every path.
+		let everything = config(None, &[""])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		let lease = everything
+			.admit(everything.request(moq_auth::Transport::Quic, "/other/room"))
+			.await
+			.unwrap();
+		assert_eq!(lease.token().publish, prefixes(&[""]).into());
 	}
 
 	/// The embedder's answer is the session's verdict; an answer that never comes,
@@ -1838,12 +1660,12 @@ mod tests {
 		let decide = async {
 			let admission = admissions.next().await.expect("an admission");
 			assert_eq!(admission.request.path, "/anon/room");
-			admission.grant(lease::Consumer::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
+			admission.grant(lease::Consumer::fixed(Grant::new(prefixes(&[""]), prefixes(&[""]))));
 			let admission = admissions.next().await.expect("an admission");
 			admission.refuse(Error::Refused(Default::default()));
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
-			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
+			admission.grant(lease::Consumer::fixed(Grant::new(Prefixes::new(), Prefixes::new())));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions
@@ -1887,7 +1709,7 @@ mod tests {
 		use std::time::Duration;
 
 		let start = kio::clock::now();
-		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let mut grant = Grant::new(prefixes(&[""]), prefixes(&[""]));
 		grant.expires = Some(kio::clock::wall() + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
 		for _ in 0..9 {
@@ -1909,7 +1731,7 @@ mod tests {
 	async fn an_expired_grant_ends_at_once() {
 		use std::time::Duration;
 
-		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let mut grant = Grant::new(prefixes(&[""]), prefixes(&[""]));
 		grant.expires = Some(kio::clock::wall() + Duration::from_secs(1));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/room", consumer).unwrap();
@@ -1928,21 +1750,21 @@ mod tests {
 	}
 
 	#[test]
-	fn token_keeps_every_grant_pattern() {
-		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
+	fn token_keeps_every_grant_prefix() {
+		let mut grant = Grant::new(prefixes(&["alice"]), prefixes(&[""]));
 		grant.root = Some("pid/room".into());
 		grant.tier = Some("gold".into());
 		grant.label = Some("project/key/123".into());
 		let token = Token::new("/vanity/room", &grant).unwrap();
 		assert_eq!(token.root, Path::from_static("pid/room"));
-		assert_eq!(token.publish, patterns(&["alice/**"]));
-		assert_eq!(token.subscribe, patterns(&["**"]));
+		assert_eq!(token.publish.path, prefixes(&["alice"]));
+		assert_eq!(token.subscribe.path, prefixes(&[""]));
 		assert_eq!(token.tier, Tier::new(moq_net::Path::from_static("gold")));
 		assert_eq!(token.label, Path::from_static("project/key/123"));
 
-		let patterns = patterns(&["*/chat", "alice", ""]);
-		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new())).unwrap();
-		assert_eq!(token.publish, patterns);
+		let all = prefixes(&["lobby/chat", "alice", ""]);
+		let token = Token::new("/", &Grant::new(all.clone(), Prefixes::new())).unwrap();
+		assert_eq!(token.publish.path, all);
 		assert!(
 			token.label.is_empty(),
 			"an absent label is the empty label, not the root"
@@ -1953,7 +1775,7 @@ mod tests {
 	/// only contains dots is an ordinary segment.
 	#[tokio::test]
 	async fn admit_refuses_dot_segments() {
-		let auth = config(None, &["**"])
+		let auth = config(None, &[""])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
 		for path in ["/tenant-a/../tenant-b", "/..", "/a/.", "/a/%2e%2E/b", "/a/.%2e", "/%2E"] {
@@ -1971,7 +1793,7 @@ mod tests {
 
 	#[test]
 	fn token_refuses_empty_segments() {
-		let all = || Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let all = || Grant::new(prefixes(&[""]), prefixes(&[""]));
 		// The dialed URL path's one leading `/` is syntax; any other empty segment is the client's.
 		assert_eq!(Token::new("/room", &all()).unwrap().root, Path::from_static("room"));
 		for dialed in ["/room/", "//room", "/room//cam"] {
@@ -1986,10 +1808,10 @@ mod tests {
 
 	#[test]
 	fn a_narrower_recheck_is_not_covered() {
-		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
-		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"]))).unwrap();
-		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
-		let mut mounted = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let wide = Token::new("/room", &Grant::new(prefixes(&[""]), prefixes(&[""]))).unwrap();
+		let narrow = Token::new("/room", &Grant::new(prefixes(&["alice"]), prefixes(&[""]))).unwrap();
+		let moved = Token::new("/other", &Grant::new(prefixes(&[""]), prefixes(&[""]))).unwrap();
+		let mut mounted = Grant::new(prefixes(&[""]), prefixes(&[""]));
 		mounted.mounts.insert(".svc".into(), ".svc/room".into());
 		let mounted = Token::new("/room", &mounted).unwrap();
 		assert_eq!(
@@ -2009,29 +1831,29 @@ mod tests {
 	/// flips it closes the session rather than misreport them.
 	#[tokio::test]
 	async fn a_recheck_that_flips_the_link_closes() {
-		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let grant = Grant::new(prefixes(&[""]), prefixes(&[""]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/", consumer).unwrap();
-		assert!(!lease.token().peer);
+		assert_eq!(lease.token().link, None);
 
 		let mut peer = grant;
-		peer.peer = true;
+		peer.link = Some(moq_auth::Link::Peer);
 		producer.update(peer.clone());
-		assert_eq!(lease.ended().await.to_string(), "peer changed");
+		assert_eq!(lease.ended().await.to_string(), "link changed");
 
 		// Routes already offered to (or withheld from) the session were filtered
 		// by whether it is upstream, so flipping that closes it too.
 		let (producer, consumer) = lease::Producer::new(peer.clone());
 		let mut lease = Lease::new("/", consumer).unwrap();
 		let mut upstream = peer;
-		upstream.upstream = true;
+		upstream.link = Some(moq_auth::Link::Upstream);
 		producer.update(upstream);
-		assert_eq!(lease.ended().await.to_string(), "upstream changed");
+		assert_eq!(lease.ended().await.to_string(), "link changed");
 	}
 
 	#[test]
 	fn a_recheck_resolves_a_dropped_root_to_the_dialed_path() {
-		let everything = || Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let everything = || Grant::new(prefixes(&[""]), prefixes(&[""]));
 		let mut aliased = everything();
 		aliased.root = Some("pid/room".into());
 		let token = Token::new("/vanity/room", &aliased).unwrap();
@@ -2044,6 +1866,30 @@ mod tests {
 			token.recheck(&everything()).unwrap().root,
 			Path::from_static("vanity/room")
 		);
+	}
+
+	/// The signer and `Path::new` agree on every root spelled with `a`, `/`, and `\` up to
+	/// seven bytes, so a token is never issued for a root the relay refuses, nor refused for
+	/// one it accepts.
+	#[test]
+	fn a_signer_issues_exactly_the_roots_a_path_accepts() {
+		let key = moq_auth::Key::generate(moq_auth::Algorithm::HS256, None).unwrap();
+		let mut frontier = vec![String::new()];
+		let mut roots = frontier.clone();
+		for _ in 0..7 {
+			frontier = frontier
+				.iter()
+				.flat_map(|root| ['a', '/', '\\'].map(|c| format!("{root}{c}")))
+				.collect();
+			roots.extend(frontier.iter().cloned());
+		}
+		assert_eq!(roots.len(), 3280);
+		for root in roots {
+			let claims = moq_auth::Claims::default()
+				.with_root(&root)
+				.with_publish([moq_auth::Prefix::all()]);
+			assert_eq!(key.sign(&claims).is_ok(), Path::new(&root).is_ok(), "{root:?}");
+		}
 	}
 }
 

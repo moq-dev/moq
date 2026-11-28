@@ -4,7 +4,7 @@
 //! accept side lives in [`crate::listen`].
 
 use crate::Backoff;
-use crate::connection::Goaway;
+use crate::connection::Handover;
 use std::net;
 use url::Url;
 
@@ -87,7 +87,6 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,
@@ -227,7 +226,8 @@ pub(crate) struct Legacy {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		),
 		hide = true
 	)]
@@ -351,7 +351,6 @@ pub enum ConnectError {
 impl ConnectError {
 	/// Only the transports that carry an HTTP status (WebTransport, WebSocket) can
 	/// classify one; qmux over tcp/unix has no such response.
-	#[cfg(any(feature = "quic", feature = "websocket"))]
 	pub(crate) fn from_status_u16(status: u16) -> Option<Self> {
 		match status {
 			401 => Some(Self::Unauthorized),
@@ -367,23 +366,14 @@ impl ConnectError {
 	}
 }
 
-#[cfg(all(test, any(feature = "quic", feature = "websocket")))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
-	/// The dial config offers every extension unless told otherwise, and leaves the
-	/// default out when serialized.
+	/// The SETUP extensions are no setting: a file naming them is refused.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
-		assert!(!config.extensions.solicit);
-		assert!(!config.extensions.ietf);
-		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
-		assert!(
-			!toml::to_string(&Config::default())
-				.expect("serialize")
-				.contains("extensions")
-		);
+	fn extensions_are_not_a_setting() {
+		assert!(toml::from_str::<Config>("[extensions]\nsolicit = false\n").is_err());
 	}
 
 	#[test]
@@ -487,11 +477,6 @@ failover_delay = "1s"
 			Some(Addrs::new(url("moqt://a:4443")).or(url("moqt://b:4443")))
 		);
 	}
-}
-
-/// Whether `extensions` is the default a config leaves out.
-pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
-	*extensions == moq_net::setup::Extensions::default()
 }
 
 /// The dial side of an endpoint: where to connect and how to get there.
@@ -623,6 +608,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-version",
+		delimiter = ',',
 		long = "connect-version",
 		env = "MOQ_CONNECT_VERSION",
 		setting = "connect.version",
@@ -636,15 +622,25 @@ pub struct Config {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// Offer the `ietf` extension on moq-lite-07. Behind the `relay` feature: moq-relay's
+	/// door for its own links, not a setting.
+	#[cfg(feature = "relay")]
 	#[usage(skip)]
-	pub extensions: moq_net::setup::Extensions,
+	#[serde(skip)]
+	pub ietf: bool,
+
+	/// Decline MoQ Solicit, acting as a moq-transport peer without it. Behind the
+	/// `test-support` feature: a test's door, not a setting.
+	#[cfg(feature = "test-support")]
+	#[usage(skip)]
+	#[serde(skip)]
+	pub decline_solicit: bool,
 
 	/// The implementation to advertise in SETUP, as space-separated `name/version`
 	/// product tokens. `None` advertises [`moq_net::IMPLEMENTATION`]; empty advertises
@@ -674,11 +670,10 @@ pub struct Config {
 	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--connect-goaway-*`).
 	#[usage(flatten)]
 	#[serde(default)]
-	pub goaway: Goaway,
+	pub goaway: Handover,
 
 	/// WebSocket fallback settings (`--websocket-*`), used when QUIC is
 	/// blocked.
-	#[cfg(feature = "websocket")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub websocket: crate::websocket::Config,
@@ -728,7 +723,6 @@ impl Config {
 			found.toml("[client.quic]", "[quic]", Some("now applies to both directions"));
 		}
 		found.extend(self.tls.deprecated());
-		#[cfg(feature = "websocket")]
 		found.extend(self.websocket.deprecated());
 		found
 	}

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -81,6 +82,35 @@ test("two handles on one URL share a connection and an origin", async () => {
 	expect(second.status.peek()).toBe("connected");
 
 	second.close();
+});
+
+test("urlAuth: false is the default carrier, so it shares; true needs a private loop", async () => {
+	const dials = stubTransports();
+
+	const first = new Connection({ url, urlAuth: false });
+	const second = new Connection({ url, share: true, urlAuth: false });
+	await advance();
+	expect(dials.count()).toBe(1);
+	expect(second.origin.peek()).toBe(first.origin.peek());
+
+	expect(() => new Connection({ url, share: true, urlAuth: true })).toThrow("urlAuth cannot be shared");
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	expect(() => new Connection({ url, share: true, keepAlive })).toThrow("keepAlive cannot be shared");
+
+	first.close();
+	second.close();
+});
+
+test("one Dials serves one connection", () => {
+	const dials = new Connection.Dials();
+	// A config the connection rejects leaves them free.
+	expect(() => new Connection({ tokens: dials, enabled: false, backoff: { healthy: Duration.ZERO } })).toThrow();
+	const first = new Connection({ tokens: dials, enabled: false });
+	// Even once the first closed: its answerer would sign for the other's dials.
+	first.close();
+	expect(() => new Connection({ tokens: dials, enabled: false })).toThrow(
+		"these dials already serve another connection",
+	);
 });
 
 test("the connection closes after the last handle and the linger window", async () => {
@@ -269,7 +299,7 @@ test("a publish through one handle resolves locally for another", async () => {
 	const origin = publisher.origin.peek();
 	if (!origin) throw new Error("expected an origin");
 	const broadcast = publish(origin, Path.from("mine"));
-	broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI });
+	defined(broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI }));
 
 	// Loopback: the shared origin serves the page's own publish with no round trip, so the
 	// request resolves synchronously instead of waiting on the relay to announce it back.
@@ -338,7 +368,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: null } },
+			{ backoff: { timeout: null } },
 			{ timeout: Duration.millis(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
@@ -373,7 +403,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: null } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, backoff: { timeout: null } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, timeout: Duration.millis(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
@@ -475,7 +505,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
 	});
 	try {
 		await advance(2);
@@ -492,14 +522,14 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 	}
 });
 
-test("a private partial delay keeps the unlimited retry timeout", async () => {
+test("a private partial backoff keeps the unlimited retry timeout", async () => {
 	const relay = stubOutage("throw");
 
 	const handle = new Connection({
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
+		backoff: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
 	});
 	try {
 		await relay.outage(handle);
@@ -517,7 +547,12 @@ test("a private handle with an explicitly undefined timeout outlasts the outage"
 
 	// What a caller building options from optional values produces: the undefined means "the
 	// default", which for a Connection is to retry for as long as the handle is held.
-	const handle = new Connection({ url, share: false, websocket: { enabled: false }, delay: { timeout: undefined } });
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		backoff: { timeout: undefined },
+	});
 	try {
 		await relay.outage(handle);
 		const before = relay.attempts();
@@ -607,6 +642,8 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		stopFirst();
 		await advance(100);
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(pairs).toHaveLength(2);
@@ -674,6 +711,8 @@ test("pooled viewers send their summed target to an Increase peer across a recon
 		expect(peers).toHaveLength(1);
 		expect(peers[0].targets.at(-1)).toBe(5_000_000);
 
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		peers[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(peers).toHaveLength(2);
@@ -864,7 +903,7 @@ test("a private handle's timeout bounds each attempt", async () => {
 		share: false,
 		websocket: { enabled: false },
 		timeout: Duration.millis(50),
-		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 	});
 	try {
 		await relay.outage(handle);

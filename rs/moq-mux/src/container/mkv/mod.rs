@@ -63,6 +63,15 @@ pub enum Error {
 	#[error("invalid Block payload")]
 	InvalidBlock,
 
+	/// A laced Block's lace sizes do not fit its payload.
+	#[error("invalid MKV lacing")]
+	InvalidLacing,
+
+	/// A laced Block has no BlockDuration before it, nor a track DefaultDuration, to time the frames
+	/// after its first.
+	#[error("MKV lacing requires a positive BlockDuration before the Block, or TrackEntry DefaultDuration")]
+	LacingDuration,
+
 	/// The block timestamp precedes the start of the timeline.
 	#[error("negative block timestamp")]
 	NegativeBlockTimestamp,
@@ -129,7 +138,8 @@ pub enum Error {
 	#[error("unsupported spherical video: {0}")]
 	UnsupportedSpatial(&'static str),
 
-	/// The named track joined after the MKV header was emitted.
+	/// The named track joined after the MKV header was emitted, with no failed track of its
+	/// kind to continue.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
 

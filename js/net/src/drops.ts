@@ -1,5 +1,5 @@
 /**
- * A track's drop set: the sequences its publisher gave up, with why, as runs. Mirrors the Rust
+ * A track's drop set: the keys its publisher gave up, with why, as runs. Mirrors the Rust
  * `TrackState::drops` with its change index.
  *
  * Package-internal: not exported from the entrypoint.
@@ -31,10 +31,10 @@ export class Runs<R extends Run> {
 		return this.#runs.length;
 	}
 
-	/** The run holding `sequence`, if any. */
-	at(sequence: bigint): R | undefined {
-		const run = this.#runs[this.#above(sequence)];
-		return run && run.start <= sequence ? run : undefined;
+	/** The run holding `key`, if any. */
+	at(key: bigint): R | undefined {
+		const run = this.#runs[this.#above(key)];
+		return run && run.start <= key ? run : undefined;
 	}
 
 	/** The runs overlapping `[start, end)`, lowest first. */
@@ -108,13 +108,13 @@ export class Runs<R extends Run> {
 		return { removed, added };
 	}
 
-	// The index of the first run ending past `sequence`.
-	#above(sequence: bigint): number {
+	// The index of the first run ending past `key`.
+	#above(key: bigint): number {
 		let lo = 0;
 		let hi = this.#runs.length;
 		while (lo < hi) {
 			const mid = (lo + hi) >>> 1;
-			if (this.#runs[mid].end <= sequence) lo = mid + 1;
+			if (this.#runs[mid].end <= key) lo = mid + 1;
 			else hi = mid;
 		}
 		return lo;
@@ -125,12 +125,19 @@ export class Runs<R extends Run> {
 const LOG_SLACK = 64;
 
 /**
- * The sequences a track's publisher gave up, with why, shared by the track and every reader of
+ * The keys a track's publisher gave up, with why, shared by the track and every reader of
  * it, plus an index of each run's last change, so a reader folds in only what changed since it
  * last looked.
  */
 export class DropSet {
 	readonly #runs = new Runs<DropRun>(sameHole);
+	// The keys in `#runs`, whatever the reason, as coalesced runs, so whether drops cover a span is
+	// one lookup rather than a walk of every run in it. Mirrors the Rust `TrackState::dropped`.
+	readonly #keys = new Runs<Run>(() => true);
+	// The keys in `#runs` no budget takes back, skips and final drops, as coalesced runs: a stale
+	// drop says nothing of a reader wider than the budget it was judged under. Mirrors the Rust
+	// `TrackState::gone`.
+	readonly #gone = new Runs<Run>(() => true);
 	// Each run's last change, oldest first. An entry whose run was since replaced is dead, and
 	// the log is rebuilt once dead entries clearly outnumber live ones.
 	#log: { revision: number; run: DropRun }[] = [];
@@ -159,9 +166,9 @@ export class DropSet {
 		return this.#revision;
 	}
 
-	/** The run holding `sequence`, if any. */
-	at(sequence: bigint): DropRun | undefined {
-		return this.#runs.at(sequence);
+	/** The run holding `key`, if any. */
+	at(key: bigint): DropRun | undefined {
+		return this.#runs.at(key);
 	}
 
 	/** The runs overlapping `[start, end)`, lowest first. */
@@ -169,13 +176,43 @@ export class DropSet {
 		return this.#runs.overlapping(start, end);
 	}
 
+	/** The run of keys given up holding `key`, whatever the reason, coalesced across reasons. */
+	keysAt(key: bigint): Run | undefined {
+		return this.#keys.at(key);
+	}
+
+	/** Where the keys given up from `from` on, whatever the reason, stop: `from` when it isn't given up. */
+	coveredFrom(from: bigint): bigint {
+		return this.#keys.at(from)?.end ?? from;
+	}
+
+	/** Whether every key in `[start, end)` is given up, whatever the reason. An empty run is. */
+	covers(start: bigint, end: bigint): boolean {
+		return start >= end || this.coveredFrom(start) >= end;
+	}
+
+	/**
+	 * Whether every key in `[start, end)` is given up for a reader within `budget` milliseconds:
+	 * skipped, dropped for good, or judged stale under at least that budget. An empty run is.
+	 * Walks the runs only when a stale one lies in it. Mirrors the Rust `TrackState::given_up_for`.
+	 */
+	givenUp(start: bigint, end: bigint, budget: number): boolean {
+		if (start >= end || (this.#gone.at(start)?.end ?? start) >= end) return true;
+		if (!this.covers(start, end)) return false;
+		return this.#runs.overlapping(start, end).every((run) => run.stale === undefined || budget <= run.stale);
+	}
+
 	/** Give up `[start, end)` as `run` says, or forget it when `run` is undefined. */
 	set(start: bigint, end: bigint, run?: Omit<DropRun, "start" | "end">): void {
+		this.#keys.set(start, end, run && { start, end });
+		this.#gone.set(start, end, run && run.stale === undefined ? { start, end } : undefined);
 		this.#apply(this.#runs.set(start, end, run && { ...run, start, end }));
 	}
 
 	/** Forget each of `ranges`, sorted and disjoint, in one pass. */
 	clear(ranges: readonly Run[]): void {
+		this.#keys.clear(ranges);
+		this.#gone.clear(ranges);
 		this.#apply(this.#runs.clear(ranges));
 	}
 

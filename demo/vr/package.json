@@ -1,0 +1,22 @@
+{
+	"name": "@moq/demo-vr",
+	"private": true,
+	"type": "module",
+	"description": "Media over QUIC - VR demo",
+	"license": "(MIT OR Apache-2.0)",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"check": "bun check --no-script"
+	},
+	"dependencies": {
+		"@moq/watch": "workspace:^",
+		"three": "^0.187.0"
+	},
+	"devDependencies": {
+		"@moq/common": "workspace:*",
+		"@types/three": "^0.187.0",
+		"typescript": "7.0.2",
+		"vite": "^8.3.8"
+	}
+}

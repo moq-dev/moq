@@ -35,11 +35,18 @@
 //! | `main_64x64_yellow_5f.h264` | Main | 5 (I P P P I) | 64x64 | CABAC rather than CAVLC entropy coding |
 //! | `seq_100x66_pattern_5f.h264` | Constrained Baseline | 5 (I P P P I) | 100x66 | Non-square and not macroblock-aligned, so the SPS crops 112x80 down and a decoder that ignores that returns the wrong picture |
 //!
+//! `main_poc0_64x64_pattern_5f.h264` is no conformance fixture: the openh264
+//! backend's output-order tests use it. It is moq-vaapi's encoder output rather
+//! than libx264's, captured from a VA-API encode of a 64x64 test pattern, and
+//! it is the one fixture whose SPS rules reordering out with picture order
+//! count type 0 and a VUI `max_num_reorder_frames` of 0 rather than with type 2.
+//! Main, CABAC, one reference frame, 5 pictures (I P P P P), its parameter sets
+//! sent twice ahead of the IDR.
+//!
 //! Every fixture ends on an IDR, which is what keeps the picture counts
 //! assertable. [`Backend`] has no drain, and a decoder that bumps its DPB only
-//! when the buffer fills rather than at the reorder depth the VUI declares (the
-//! VA-API backend does this, and holds `num_ref_frames` pictures for it) would
-//! otherwise still be sitting on most of a short stream when it ended. A closing
+//! when the buffer fills rather than at the reorder depth the VUI declares would
+//! otherwise still be sitting on part of a short stream when it ended. A closing
 //! IDR flushes everything before it, so at most the final picture is ever
 //! outstanding.
 //!
@@ -178,10 +185,11 @@ fn nal_type(nal: &Bytes) -> u8 {
 }
 
 /// One coded picture, framed the way [`Backend::decode`] wants it.
-struct AccessUnit {
-	payload: Bytes,
-	timestamp: Timestamp,
-	keyframe: bool,
+pub(super) struct AccessUnit {
+	pub(super) payload: Bytes,
+	/// The picture's place in decoding order, at the fixtures' 30fps.
+	pub(super) timestamp: Timestamp,
+	pub(super) keyframe: bool,
 }
 
 /// Split an Annex-B elementary stream into one access unit per coded picture.
@@ -192,7 +200,22 @@ struct AccessUnit {
 /// IDR. That is enough for these fixtures: single-slice pictures, no redundant
 /// slices, no access unit delimiters.
 fn access_units(vector: &Vector) -> Vec<AccessUnit> {
-	let mut buf = Bytes::from_static(vector.bitstream);
+	let units = split(vector.bitstream);
+	assert_eq!(
+		units.len(),
+		vector.pictures,
+		"{} splits into {} access units, expected {}",
+		vector.name,
+		units.len(),
+		vector.pictures
+	);
+	units
+}
+
+/// Split an Annex-B elementary stream into access units the way
+/// [`access_units`] does, for a stream that is not one of the vectors here.
+pub(super) fn split(bitstream: &'static [u8]) -> Vec<AccessUnit> {
+	let mut buf = Bytes::from_static(bitstream);
 	let mut iter = annexb::NalIterator::new(&mut buf);
 	let mut nals: Vec<Bytes> = iter
 		.by_ref()
@@ -216,15 +239,6 @@ fn access_units(vector: &Vector) -> Vec<AccessUnit> {
 	if current.iter().any(is_slice) {
 		units.push(access_unit(&current, units.len()));
 	}
-
-	assert_eq!(
-		units.len(),
-		vector.pictures,
-		"{} splits into {} access units, expected {}",
-		vector.name,
-		units.len(),
-		vector.pictures
-	);
 	units
 }
 
@@ -288,7 +302,7 @@ fn pictures(name: &str, vector: &Vector) -> Vec<I420> {
 			// IPPP with no reordering, so pictures come back in the order they were
 			// fed, each carrying the timestamp its access unit went in with.
 			assert_eq!(
-				frame.timestamp.as_micros(),
+				frame.timestamp.as_micros().unwrap(),
 				i as u128 * FRAME_MICROS as u128,
 				"{name}: {} picture {i} lost its timestamp",
 				vector.name
@@ -440,6 +454,50 @@ fn backends_agree() {
 					describe(got, want)
 				);
 			}
+		}
+	}
+}
+
+/// A picture carries the exact timestamp its access unit went in with, on a
+/// timescale whose ticks are not whole microseconds. A backend whose codec holds
+/// microseconds has to give back the instant it was handed, not a truncation of
+/// it, or a frame on a 90 kHz or nanosecond track lands below its group's start.
+#[test]
+#[cfg(feature = "openh264")]
+fn timestamps_keep_their_scale() {
+	let ninety_khz = moq_net::Timescale::new(90_000).unwrap();
+	let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+	// Each tick is off the microsecond grid at its scale, as a real one is.
+	let scales = [(ninety_khz, 3003, 1), (nanos, 33_333_333, 1)];
+
+	for name in decoders() {
+		for (scale, step, offset) in scales {
+			let mut decoder = open(name).expect("backend opened during probing");
+			let mut sent = Vec::new();
+			let mut got = Vec::new();
+			for (i, unit) in access_units(&SEQ_PATTERN).into_iter().enumerate() {
+				let timestamp = Timestamp::new(i as u64 * step + offset, scale).unwrap();
+				assert_ne!(
+					Timestamp::from_micros(timestamp.as_micros().unwrap() as u64).unwrap(),
+					timestamp,
+					"the fixture timestamp must not be a whole microsecond"
+				);
+				sent.push(timestamp);
+				let frames = decoder
+					.decode_all(unit.payload, timestamp, unit.keyframe)
+					.unwrap_or_else(|e| panic!("{name} failed to decode: {e}"));
+				got.extend(frames.into_iter().map(|frame| frame.timestamp));
+			}
+
+			// The tail the group's end drains, which is what a transcode reads next.
+			let tail = decoder
+				.flush_all()
+				.unwrap_or_else(|e| panic!("{name} failed to flush: {e}"));
+			got.extend(tail.into_iter().map(|frame| frame.timestamp));
+
+			// IPPP with no reordering, so pictures come back in the order they were
+			// fed, every one of them once the drain has run.
+			assert_eq!(got, sent, "{name} changed a timestamp at {scale:?}");
 		}
 	}
 }

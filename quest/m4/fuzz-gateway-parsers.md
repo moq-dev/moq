@@ -20,9 +20,12 @@ Agent's choices, for the implementer to revisit:
 
 - Order by exposure: the listeners an unauthenticated peer reaches (WebRTC,
   RTSP, SRT) before the formats read from a trusted publisher or a file.
-- moq-webrtc's parsers are vendored (`rs/moq-webrtc/src/vendor`): fuzz them
-  where they sit, and report a finding upstream as well as fixing it here.
-- The same shape as [the relay parsers](/quest/m1/fuzz-relay-parsers.md).
+- moq-webrtc's SDP, STUN, DTLS, and RTP parsers are upstream str0m, `is`,
+  and dimpl crates: fuzz them through moq-webrtc's entry points (an offer
+  body, a datagram to the mux), and report a finding upstream. str0m fuzzes
+  its own network input (algesten/str0m `54bf16ee`), so start with the
+  parts it does not, such as moq-webrtc's SDP text handling in `sdp.rs`.
+- The same shape as the relay parsers' targets (`rs/qmux/fuzz/`, `rs/moq-auth/fuzz/`).
   Where JS has the same decoder (JSON, the catalog, MSF), commit findings to
   the shared `fixtures/` corpus.
 - If the first runs find more than one PR can fix, land the targets with

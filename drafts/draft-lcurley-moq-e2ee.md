@@ -4,7 +4,7 @@ abbrev: "moq-e2ee"
 category: info
 
 docname: draft-lcurley-moq-e2ee-latest
-submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
+submissiontype: IETF
 number:
 date:
 v: 3
@@ -32,13 +32,12 @@ informative:
 
 --- abstract
 
-This document specifies moq-e2ee-00, a versioned profile for end-to-end encryption of MoQ application payloads.
+This document specifies `moq-e2ee-01-wip`, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
-Each publisher instance mints an epoch and announces it on the route for an opaque broadcast path.
-HKDF-SHA-256 derives per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
-Physical track names are a deterministic AES-128-GCM encryption of the semantic names under an HMAC-derived nonce, so a publisher can serve a name it never declared.
-Media frames and datagrams carry only ciphertext plus a 16-byte tag.
-The profile binds object identity through derivation and the nonce, not an on-wire header.
+Each publisher instance mints an epoch and announces it as the route's Identity for an opaque broadcast path.
+HKDF-SHA-256 derives per-track AES-128-GCM keys from the secret and epoch, with separate domains for grouped frames and datagrams.
+Physical track names deterministically encrypt semantic names under AES-128-GCM with an HMAC-derived nonce, so publishers can recover requested names without pre-declaring them.
+Media frames and datagrams carry only ciphertext plus a 16-byte tag, with no on-wire header.
 
 --- note_Note_to_Readers
 
@@ -52,169 +51,114 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 
 # Introduction
-MoQ relays forward named tracks of groups and frames ({{moql}}, {{moqt}}) without parsing application payloads.
-This profile encrypts those payloads and hides the semantic broadcast and track names that would otherwise describe them, so a relay cannot recover content.
-It reuses AES-128-GCM and the 96-bit group/frame nonce shape of {{secure}} where those identities map, and specifies the moq-lite and datagram bindings that draft does not cover.
+MoQ relays forward named tracks of groups and frames ({{moql}}, {{moqt}}) without inspecting payloads.
+This profile encrypts those payloads and hides semantic broadcast and track names from relays, caches, and control planes.
+It reuses AES-128-GCM and the 96-bit group/frame nonce shape of {{secure}} where models overlap, and defines the {{moql}} and datagram bindings.
 
-The profile does not distribute keys, sign senders, pad payloads, or rotate a key inside an epoch.
-Applications that need those properties terminate this profile and run a different one.
+Key distribution, sender signing, payload padding, and mid-epoch key rotation are out of scope.
 
+## Relationship to Secure Objects {#related}
+Like {{secure}} (and its ancestor SFrame {{sframe}}), this profile uses AES-128-GCM, HKDF-SHA-256, a 96-bit `u64(group) || u32(frame)` nonce shape, and single-use object identities.
+It differs where the transport models diverge:
 
-# Relationship to Other Formats {#related}
-{{secure}} encrypts a MoQ Transport object under a per-track base key.
-Its nonce is a per-track salt XOR `uint64_be(group) || uint32_be(object)`, its AAD includes publisher priority and immutable properties, and the Key ID rides in those properties.
-The object payload is a length-prefixed plaintext plus an optional encrypted-properties list.
-
-This profile keeps AES-128-GCM, HKDF-SHA-256, a 96-bit nonce of `uint64_be(group) || uint32_be(frame)`, and the rule that an identity is used at most once.
-It differs where the models diverge:
-
-- One 32-byte broadcast secret authorizes every track. Per-track keys are derived, not supplied.
-- The Key ID is part of the out-of-band credential. No per-frame header or immutable property carries it.
-- The salt is not derived from the key. The publisher instance's epoch is an input to every derivation announced on the broadcast route ({{epoch}}), so a restarted publisher derives new keys instead of needing a new Key ID.
-- The nonce is the identity counter itself, not a salt XOR. The derived key is already unique per credential, epoch, physical name, and domain.
-- The payload is ciphertext concatenated with the 16-byte tag, with no inner length prefix, encrypted properties, or padding.
-- moq-lite frame indices are implied by position in the group ({{moql}} Section "Frame"), not an on-wire object ID. This profile still uses that index as the 32-bit nonce half, because it is the only canonical end-to-end frame identity on both moq-lite and MoQ Transport.
-- A datagram belongs to a datagram track, which numbers its datagrams with its own sequence and may share its name with a stream track ({{moql}} Section "Datagrams"). A grouped frame 0 and a datagram at that sequence would collide under one AES-GCM key, so datagrams use a separate key domain with frame ID zero.
-
-SFrame {{sframe}} is the cryptographic ancestor of {{secure}}.
-This profile is not SFrame: it has no SFrame header, no CTR field on the wire, and no per-object KID.
-
-The experimental `moq-secure` format (https://github.com/cathode-ray-tube/moq-secure) is prior art only.
-Its independent counter, 17-byte per-frame header, ChaCha20-Poly1305 suite, signing lease, payload padding, and bytes-only processor are not compatibility requirements.
+- One 32-byte broadcast secret authorizes all tracks; per-track keys are derived rather than provisioned.
+- `kid` is part of the out-of-band credential; no per-frame header or immutable property carries it.
+- Each publisher instance mints an epoch announced on the broadcast route ({{epoch}}), so restarts derive fresh keys without rotating `kid`.
+- The nonce is the raw identity counter (no salt XOR), because every key is already unique per `(credential, epoch, semantic_name, domain)`.
+- Payloads are raw `ciphertext || tag` with empty AAD, no inner length prefix, and no encrypted properties.
+- Grouped frames use positional frame index (or contiguous MOQT Object ID) as `frame`; datagrams use a separate key domain (`0x01`) with `frame = 0`.
 
 
 # Profile Version
-This document defines profile `moq-e2ee-00`.
-The profile is named out of band alongside the credential; an application MUST refuse a credential that names any other profile.
-A new profile is a new document; implementations MUST NOT fall back to plaintext or to an older profile because a catalog, announcement, or peer suggested one.
+This document defines profile `moq-e2ee-01-wip` while in progress (`moq-e2ee-01` once finalized).
+The profile is named out of band alongside the credential; an implementation MUST refuse any other profile and MUST NOT fall back to plaintext or another profile based on any catalog, announcement, or peer signal.
 
 
 # Credential {#credential}
-The application supplies an immutable credential:
+The application supplies an immutable credential over its own authenticated channel:
 
 ~~~
 Credential {
-  context (b)
-  kid (u64)
-  secret (32)
+  context (b),
+  kid (u64),
+  secret (32),
 }
 ~~~
 
-**context**:
-Opaque bytes chosen by the application as the broadcast's end-to-end identity.
-Both ends MUST use identical bytes.
-The MoQ broadcast path is visible to relays and may be remounted under another prefix, so it is not this field unless the application copies it in.
+- **context**: Opaque application bytes naming the broadcast end to end (at most 65,535 bytes). Identical at both ends; distinct from the wire broadcast path, which relays may remount.
+- **kid**: Integer in `0..=2^53-1` selecting among retained credentials. Rotating the secret creates a new `kid`.
+- **secret**: Exactly 32 bytes from a CSPRNG (never a password or guessable input).
 
-**kid**:
-Selects among credentials the application retains.
-It never changes in place; rotating the secret is a new kid.
-
-**secret**:
-Exactly 32 bytes from a cryptographically secure random generator.
-It MUST NOT be a password, passphrase, or other guessable input.
-
-`kid` MUST be in `0..=2^53-1` inclusive, the largest integer TypeScript can represent exactly.
-`context`, every `epoch`, and every semantic broadcast or track name MUST be at most 65535 bytes, the `bytes` encoding width.
-An implementation MUST refuse a credential outside those ranges (`identity`) or whose secret is not 32 bytes (`invalid_secret`).
-
-Applications distribute credentials over their own authenticated channel.
-MoQ announcements, catalogs, paths, and relay authorization MUST NOT carry the secret or authenticate it.
-Implementations MUST let the application retain more than one credential and select among them; they MUST NOT infer the kid from the transport.
+Implementations MUST refuse credentials with invalid `kid` or `context` length (`identity`) or a secret not 32 bytes long (`invalid_secret`).
+MoQ announcements, catalogs, paths, and relay authorization MUST NOT carry or authenticate the secret.
+Implementations MUST let applications retain multiple credentials and select among them explicitly; they MUST NOT infer `kid` from the transport.
 
 
 # Epoch and Broadcast Path {#epoch}
-A generation is one credential under one epoch.
-Every derivation and every nonce is scoped to a generation.
+A **generation** is one credential under one epoch.
+Every derivation and nonce is scoped to a generation.
 
 **epoch**:
-The lowercase hyphenated text of a UUID version 7 with the RFC variant ({{RFC9562}}), minted by the publisher instance.
-Noncanonical text and other UUID versions or variants MUST be refused (`identity`).
-Each instance of a broadcast MUST mint an epoch that no other instance under the same credential has used or will use.
-Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
-An encrypting core MUST mint its producing epoch internally.
-Binding a discovered epoch MUST yield a consume-only generation.
-Clones of a producing generation MUST share permanent track claims so reopening a physical track cannot reset its nonce counters.
-Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
+Lowercase hyphenated canonical text of a UUIDv7 with the RFC variant ({{RFC9562}}), minted internally by the producing core.
+Non-canonical text or other UUID versions/variants MUST be refused (`identity`).
+Each publisher instance MUST mint a unique epoch; two instances (including restarts, `fork` without `exec`, or restored VM/process snapshots) MUST NOT share an epoch, or they will reuse nonces under identical keys.
+Binding a discovered epoch MUST yield a consume-only generation, and clones of a producing generation MUST share permanent track claims so reopening a track cannot reset its nonce counters.
 
-A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
-Each instance announces its epoch text as the route's moq-lite Instance; the HKDF `bytes(epoch)` input is the UUID text.
-The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares one path.
-The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
-A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers resolve `<opaque>` and take the epoch from its route's Instance, which relays rank like any other Instance rather than newest first.
-On a wire that cannot carry the route's Instance, where a relay mints one of its own, the application supplies the epoch over its own authenticated channel.
+A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and semantic broadcast name ({{derive}}), without the epoch so all instances share one path.
+Each instance announces its epoch text as the route's {{moql}} Identity, which relays rank like any other Identity rather than newest first; on a wire that cannot carry the route's Identity, where a relay mints one of its own, the application delivers the epoch over its own authenticated channel.
+The path carries no protection marker; a plaintext consumer simply fails to find a plaintext catalog.
 
-The epoch and the path are not secret and are not authenticated.
-A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
-Neither can cause a nonce to repeat, because only the publisher instance chooses the epoch it encrypts under.
-
-A restart or replacement of a publisher is a new instance and mints a new epoch.
-So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
-A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
-Transport sequence numbers therefore restart freely without any coordination between instances.
-An ended instance stays readable only for as long as relays or archives retain it under its epoch; once another instance wins the shared path, subscribers resolve that one.
-
-
-# Canonical Encoding {#encoding}
-HKDF info fields use unique encodings, not varints.
-
-- `u16` / `u32` / `u64`: unsigned big-endian integers of that width.
-- `bytes`: `u16(length) || data`, length at most 65535.
-- ASCII labels are the UTF-8 bytes of the quoted string, with no length prefix of their own.
-
-Integers used as group, frame, or kid identities are refused before encoding if they fail {{bounds}}.
+Epoch and path are neither secret nor authenticated.
+A relay presenting a wrong epoch causes authentication failure, and withholding a newer instance denies service, but neither can cause nonce reuse because only the publisher chooses its encrypting epoch.
+Group starts and datagram sequences restart freely across instances.
 
 
 # Key Derivation {#derive}
-Keys and physical names are derived with HKDF-SHA-256 {{RFC5869}}.
-Let `salt` be the ASCII bytes of `"moq-e2ee-00"`.
+HKDF info inputs use fixed canonical encodings (not varints):
+
+- `u16` / `u32` / `u64`: unsigned big-endian integers.
+- `bytes(x)`: `u16(len(x)) || x`, with `len(x) <= 65535`.
+- Quoted ASCII labels: raw UTF-8 bytes without length prefixes.
+
+All keys and names use HKDF-SHA-256 {{RFC5869}} with `salt = "moq-e2ee-01-wip"`:
 
 ~~~
 prk = HKDF-Extract(salt, secret)
 ~~~
 
-Opaque broadcast path material is 16 bytes:
-
+## Opaque Broadcast Path
 ~~~
-path_info = "moq-e2ee-00 path"
+path_info = "moq-e2ee-01-wip path"
             || bytes(context)
             || u64(kid)
             || bytes(semantic_broadcast)
 opaque    = HKDF-Expand(prk, path_info, 16)
 ~~~
 
-`semantic_broadcast` is the UTF-8 bytes of the application's semantic broadcast name.
-The opaque path segment is the unpadded base64url encoding of `opaque` ({{RFC4648}} Section 5): 22 ASCII characters.
-The epoch is deliberately absent from this derivation, so a subscriber can derive the prefix before discovering an instance.
+The opaque path segment is the unpadded base64url encoding ({{RFC4648, Section 5}}) of `opaque` (22 ASCII characters).
 
-Physical track names encrypt the semantic name deterministically, using only HMAC-SHA-256 and AES-128-GCM:
-
-~~~
-scope     = bytes(context) || bytes(epoch) || u64(kid)
-name_mac  = HKDF-Expand(prk, "moq-e2ee-00 name-mac" || scope, 32)
-name_key  = HKDF-Expand(prk, "moq-e2ee-00 name-key" || scope, 16)
-padded    = semantic_name || 0x80 || 0x00 ... 0x00
-nonce     = HMAC-SHA-256(name_mac, padded)[0..12]
-physical  = nonce || AES-128-GCM(name_key, nonce, padded)
-~~~
-
-`semantic_name` is the UTF-8 bytes of the application's track name (`catalog.json`, `video`, and so on).
-`padded` is `semantic_name`, one `0x80` byte, and the fewest zero bytes that make its length a multiple of 16.
-`nonce` is the first 12 bytes of the HMAC output.
-AES-128-GCM uses an empty AAD and outputs ciphertext followed by its 16-byte tag ({{RFC5116}}).
-The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of `ceil(4 * (28 + len(padded)) / 3)` characters, at least 59.
-The 65535-byte semantic bound does not make that fit a transport request: the transport refuses a request whose physical name is too long for its message, as it refuses any oversized track name, so applications keep semantic names to about three quarters of that budget.
-This function may hide any track-shaped name the application wants a relay not to read; it is not limited to media tracks.
-
-The nonce is a function of the name, so equal semantic names under one generation share one physical name, and relays deduplicate and cache requests for it.
-A publisher recovers the semantic name of a requested physical name by decoding it, opening the ciphertext under `name_key` with the leading 12 bytes as the nonce, and recomputing `nonce` from the result.
-A name that does not decode (`identity`), or that fails to open, has a nonce that differs from the recomputed one, has noncanonical padding, or is not UTF-8 (`authentication`), was not issued under the generation; the publisher MUST answer it as a missing track and MUST NOT retain state for it.
-The nonce check keeps one physical name per semantic name, so two tracks never share the payload keys that semantic name derives.
-
-AEAD keys are 16 bytes, one per semantic name and domain:
+## Physical Track Names
+Physical track names deterministically encrypt the UTF-8 `semantic_name` using HMAC-SHA-256 and AES-128-GCM (empty AAD, ciphertext followed by 16-byte tag per {{RFC5116}}):
 
 ~~~
-key_info = "moq-e2ee-00 key"
+scope    = bytes(context) || bytes(epoch) || u64(kid)
+name_mac = HKDF-Expand(prk, "moq-e2ee-01-wip name-mac" || scope, 32)
+name_key = HKDF-Expand(prk, "moq-e2ee-01-wip name-key" || scope, 16)
+padded   = semantic_name || 0x80 || 0x00 ... 0x00
+nonce    = HMAC-SHA-256(name_mac, padded)[0..12]
+physical = nonce || AES-128-GCM(name_key, nonce, padded)
+~~~
+
+`padded` appends `0x80` and the minimum zero bytes needed to reach a multiple of 16 bytes.
+The physical track name is the unpadded base64url encoding of `physical` (at least 59 characters; applications must keep semantic names short enough that the encoded physical name fits transport message limits).
+
+Because `nonce` is deterministic, equal semantic names in one generation map to one physical name for relay caching and deduplication.
+A publisher recovers `semantic_name` from an incoming subscription by base64url-decoding, opening under `name_key` with the leading 12 bytes as `nonce`, verifying `nonce == HMAC-SHA-256(name_mac, padded)[0..12]`, stripping canonical `0x80 0x00*` padding, and validating UTF-8.
+Any malformed encoding (`identity`) or verification failure (`authentication`) MUST be answered as a missing track without retaining state.
+
+## Payload AEAD Keys
+~~~
+key_info = "moq-e2ee-01-wip key"
            || bytes(context)
            || bytes(epoch)
            || u64(kid)
@@ -223,156 +167,89 @@ key_info = "moq-e2ee-00 key"
 key      = HKDF-Expand(prk, key_info, 16)
 ~~~
 
-`domain` is a single byte: `0x00` for grouped frames, `0x01` for datagrams.
-A stream track and a datagram track of one semantic name share its physical name and differ only in `domain`.
-
-A given `(generation, semantic_name, domain)` tuple has one key and one physical name.
-A subscriber derives both from the semantic name it wants; a publisher derives them from the semantic name it creates or recovers from a request.
+`domain` is `0x00` for grouped frames and `0x01` for datagrams, keeping stream and datagram tracks that share a semantic name in disjoint key spaces.
 
 
 # Object Identity {#identity}
-A protected object is the tuple `(generation, physical_name, domain, group, frame)`.
+A protected object is identified by `(generation, physical_name, domain, group, frame)`.
 
-## Grouped Frames
-A grouped frame uses `domain = 0x00`, the group's sequence as `group`, and the frame index within that group as `frame`.
-moq-lite numbers frames from 0 in write order ({{moql}}).
-On MoQ Transport, `frame` is the explicit Object ID, never its arrival ordinal.
-Publishers supporting both transports MUST assign contiguous Object IDs from zero so that each matches its moq-lite write-order index; relays MUST NOT renumber protected objects.
-An Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
+- **Grouped frames** (`domain = 0x00`): `group` is the group start (moq-lite-07 Group Start, earlier moq-lite Group Sequence, or MOQT Group ID); `frame` is the zero-based write-order frame index within the group. On {{moqt}}, `frame` is the explicit Object ID, never its arrival ordinal: publishers supporting both transports MUST assign contiguous Object IDs from `0` so each matches its {{moql}} write-order index, relays MUST NOT renumber protected objects, and an Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
+- **Datagrams** (`domain = 0x01`): `group` is the datagram sequence (moq-lite-07 Sequence, moq-lite-05/06 Group Sequence, or MOQT `OBJECT_DATAGRAM` Group ID at Object ID `0`); `frame = 0`.
 
-## Datagrams
-A datagram uses `domain = 0x01`, its datagram track's sequence as `group`, and `frame = 0`.
-That sequence is the Sequence of a moq-lite-07 datagram, the Group Sequence of a moq-lite-05 or -06 Group Datagram, and the Group ID of a MoQ Transport OBJECT_DATAGRAM at Object ID 0.
-Shared vectors cover grouped tracks on both transports and datagrams on moq-lite only.
-
-## Nonce
-The 96-bit AES-GCM nonce is:
+The 96-bit AES-128-GCM nonce is:
 
 ~~~
 nonce = u64(group) || u32(frame)
 ~~~
 
-AES-GCM's internal block counter is not `frame`.
-Implementations MUST call a standard AEAD API {{RFC5116}} with this nonce and an empty AAD.
-
-The empty AAD is deliberate: profile version, context, epoch, kid, semantic name, and domain are bound by HKDF; group and frame are bound by the nonce.
-Rewritten timestamps and mutable routing properties are not authenticated.
+Implementations MUST pass this nonce and an empty AAD to a standard AES-128-GCM AEAD implementation {{RFC5116}}.
+All immutable end-to-end fields are bound via HKDF info or the nonce; mutable routing fields and rewritten timestamps are intentionally excluded.
 
 
 # Payload Protection {#payload}
 Let `Nt = 16`.
-AES-128-GCM encrypts the application bytes with `key`, `nonce`, and empty AAD.
-The bytes placed in the MoQ frame or datagram payload are ciphertext concatenated with the 16-byte tag, in the {{RFC5116}} convention.
-There is no inner header.
+Each MoQ frame or datagram payload carries `ciphertext || tag` directly, with no inner header.
 
-Within a generation a publisher MUST allocate each semantic name's group sequences, and separately its datagram sequences, monotonically, and frame indices in write order, so an identity is encrypted at most once.
-Encrypting at an identity the same instance already used is `reuse` and MUST be refused.
-Relays and caches forward ciphertext unchanged, so replay from a cache never re-encrypts.
+Within a generation, a publisher MUST assign strictly increasing group starts per semantic name, monotonic datagram sequences, and write-order frame indices; encrypting an already-used identity MUST be refused (`reuse`).
+Relays forward ciphertext unchanged.
 
 ## Plaintext Ceiling
-Protected payload length is plaintext length plus `Nt`.
-A publisher MUST refuse plaintext that would make the protected payload exceed the transport payload limit for that object (`oversize`), before it touches the network.
+Protected payload length is `len(plaintext) + 16`.
+A publisher MUST refuse plaintext whose protected payload exceeds the transport limit (`oversize`) before transmission:
 
-The interoperable grouped-frame payload cap matching current moq-net implementations is 32 MiB, so grouped plaintext MUST be at most `32 MiB - 16` bytes.
-moq-lite datagram bodies MUST remain at most 1200 bytes including Type, Subscribe ID, Sequence, and Timestamp ({{moql}} Section "Datagrams").
-The moq-lite-07 Type is one byte and each of those three varints at most 9 bytes, the widest header of any moq-lite version, so datagram plaintext MUST be at most `1200 - 28 - 16 = 1156` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
+- **Grouped frames**: at most `32 MiB - 16` bytes (matching the interoperable 32 MiB grouped-frame cap).
+- **Datagrams**: at most `1200 - 28 - 16 = 1156` bytes, reserving 28 bytes for the widest {{moql}} datagram header (1-byte Type plus three 9-byte varints: Subscribe ID, Sequence, Timestamp).
 
 ## Catalogs
-A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
-Hang {{hang}} `catalog.json` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
-The decrypted catalog is unchanged from its plaintext form: every track it references, including rendition-map keys, `track` fields, and application extensions, keeps its semantic name.
-A subscriber derives the physical name of each track it reads; neither side rewrites the catalog, so extensions need no profile support.
-
-If a track is compressed, compression is applied to the plaintext before AEAD and reversed after decryption.
-Encrypting then compressing is forbidden: ciphertext does not compress.
+Catalogs (e.g., {{hang}} `catalog.json` or MSF `catalog`) are ordinary tracks published under their derived physical names.
+Decrypted catalogs retain semantic track names untouched; subscribers derive physical names locally, so catalog extensions need no E2EE awareness.
+If compressed, plaintext MUST be compressed before encryption and inflated after decryption.
 
 
 # Bounds {#bounds}
-Implementations MUST refuse non-integer identities (including NaN and infinities) and identities outside these bounds before encoding or AEAD:
+Implementations MUST reject non-integer or out-of-range inputs before encoding or AEAD:
 
-- `group` (grouped sequence or datagram sequence) and `kid`: `0..=2^53-1`. Above that is `identity`.
-- `frame`: `0..=2^32-1`. `2^32` and above is `identity`.
-- AEAD operations with one key: at most `2^24` invocations and at most `2^36` plaintext bytes (`2^32` 16-byte blocks). Exceeding either is `exhausted`.
-
-`2^53-1` is `Number.MAX_SAFE_INTEGER`.
-It is the strictest exact integer bound across current TypeScript and Rust implementations.
-The 32-bit frame width is the nonce field.
-The `2^24` invocation cap is the interoperable AES-GCM record limit from {{aeadlimits}}.
-GCM authenticity also depends on total processed blocks, so `2^24` frames at the 32 MiB transport ceiling would be about `2^45` blocks; the `2^36`-byte cap is the matching total-block bound.
-Small records hit the invocation cap first; large records hit the byte cap first.
-A receiver counts failed opens too, since each is an AEAD invocation under that key.
-These caps apply to the payload keys of {{derive}}, not `name_key`.
-It encrypts once per distinct semantic name, so `q` names collide on a nonce with probability about `q^2 / 2^97`, and each failed open of a forged name is a forgery attempt whose success probability stays negligible at any rate a relay can send requests.
+- `group` and `kid`: `0..=2^53-1` (`Number.MAX_SAFE_INTEGER`); else `identity`.
+- `frame`: `0..=2^32-1`; else `identity`.
+- Payload key usage: at most `2^24` AEAD invocations ({{aeadlimits}}) and at most `2^36` plaintext bytes (`2^32` 16-byte blocks), counting failed opens on the receiver; exceeding either is `exhausted`. These caps apply to payload keys, not `name_key`.
 
 
 # Failure Behavior {#failure}
-E2EE is an explicit per-broadcast mode.
-There is no plaintext fallback.
-
+E2EE is an explicit per-broadcast mode with no plaintext fallback.
 Typed failures:
 
 - `invalid_secret`: secret is not 32 bytes.
-- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, an epoch is not canonical UUIDv7 text, a physical name is not unpadded base64url decoding to a 12-byte nonce, a valid padded length, and `Nt` bytes, or `domain` is not `0x00`/`0x01`.
-- `exhausted`: the next AEAD operation would exceed `2^24` uses of that key or `2^36` plaintext bytes under that key.
-- `reuse`: encrypting at an identity this instance already used.
-- `oversize`: plaintext plus tag exceeds the transport payload limit, or a ciphertext is shorter than `Nt` or larger than that limit.
-- `authentication`: AEAD open fails. Relocation across context, epoch, kid, physical name, domain, group, or frame is this failure.
-- `duplicate`: a receiver has already opened this datagram sequence inside its retained window. Operational, not a cryptographic event.
+- `identity`: out-of-bounds integer, `bytes` exceeding 65,535, non-canonical UUIDv7 epoch, malformed base64url/length physical name, or invalid `domain`.
+- `exhausted`: next operation exceeds `2^24` invocations or `2^36` plaintext bytes for that key.
+- `reuse`: encrypting an identity already used by this instance.
+- `oversize`: protected payload exceeds transport ceiling, or ciphertext is shorter than `16` bytes or exceeds that ceiling.
+- `authentication`: AEAD open fails (including any relocation across context, epoch, kid, track, domain, group, or frame).
+- `duplicate`: datagram sequence already opened within the receiver's retained window (operational, not cryptographic).
 
-Authentication failure on a grouped track MUST end that track with `authentication`.
-A datagram that fails to open with `identity`, `oversize`, or `authentication` MUST be dropped with that code; the track continues.
-An `exhausted` open instead fails the read.
+Failure propagation:
 
-Grouped frames need no duplicate window: a transport delivers each frame of a group once, in order, at its index.
-Receivers SHOULD suppress datagram sequences they still retain; the window MUST be bounded, and 1024 sequences below the greatest opened is RECOMMENDED.
-The AEAD identity and epoch rules are the security boundary; a relay may still delay, reorder, suppress, or replay ciphertext outside a receiver's window.
-
-A late subscriber MAY start at any group the publisher still holds.
-Gaps are not errors.
-A receiver MUST NOT require group 0 or any prior identity before opening a later authentic object.
+- On a grouped track, `authentication` MUST terminate the track with `authentication`.
+- On a datagram track, `identity`, `oversize`, or `authentication` MUST drop that datagram with that code while the track continues; `exhausted` fails the read.
+- Receivers SHOULD suppress duplicate datagram sequences within a bounded window (1024 sequences below the highest opened is RECOMMENDED).
+- Late joiners MAY start at any group; gaps are normal and never errors.
 
 
 # Test Vectors {#vectors}
-Known-answer and negative vectors live in `moq-e2ee-00.json` beside this draft.
-Hex strings are octet sequences.
-The JSON is authoritative for primitive interop; an implementation of this profile MUST pass every vector.
-Each negative row specifies an `operation`, its inputs, and its expected typed error.
-Non-finite frame inputs use the strings `NaN`, `Infinity`, and `-Infinity`; group inputs in identity tests are decimal strings.
-Implementations whose types cannot represent an invalid input MUST reject it at their input boundary.
-
-The file covers opaque path derivation, key derivation, physical naming and recovery on each side of the padding boundaries, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, physical names that do not open (forged, from another epoch, sealed under a nonce other than their HMAC, noncanonically padded, or not UTF-8), identity bounds, and oversize plaintext.
-
-The shared verifier is stateless.
-It does not verify `reuse`, `exhausted`, `duplicate`, or failure propagation.
-Each language core MUST test those lifecycle requirements, including monotonic allocation, per-key invocation and plaintext-byte accounting, bounded datagram suppression, and that a new instance under a new epoch authenticates while the old epoch does not.
-Passing the primitive vectors alone is not profile conformance.
+Authoritative known-answer and negative vectors live in `moq-e2ee-01-wip.json` alongside this draft (hex octet strings; non-finite frames as `"NaN"`, `"Infinity"`, `"-Infinity"`; group identity tests as decimal strings).
+Shared vectors cover grouped tracks on both transports and datagrams on {{moql}}.
+Every conforming implementation MUST pass all primitive vectors and independently test stateful lifecycle rules (`reuse`, `exhausted`, `duplicate`, failure propagation, monotonic allocation, and epoch isolation).
 
 
 # Security Considerations
-Relays, caches, recorders, and control planes are untrusted for content.
-Authorized endpoints that hold the broadcast secret are trusted.
-Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
+Relays, caches, recorders, and control planes are untrusted for content; endpoints holding the broadcast secret are mutually trusted (sender authentication among secret holders is out of scope).
 
-A relay can still observe the opaque broadcast path, route epoch, opaque physical names and the length of each semantic track name rounded up to 16 bytes, group and frame structure, timestamps, sizes, and traffic patterns.
-A subscription for a physical name the publisher does not serve fails as for any missing track, which tells a relay only that the name is not served.
-A relay cannot mint a physical name that opens, so it cannot make a publisher serve, or hold state for, a name no endpoint derived.
-Padding and metadata-flow confidentiality are out of scope.
+Metadata visible to relays includes the opaque broadcast path, epoch, physical track names (and semantic name lengths rounded up to 16 bytes), group/frame structure, timestamps, payload sizes, and traffic patterns.
+An unserved physical name reveals only that the track does not exist; relays cannot forge valid physical names or force publishers to retain state.
+The opaque broadcast path hides the semantic name only if the application does not expose that name elsewhere in plaintext.
 
-The opaque segment hides the application's semantic broadcast name from a relay only while the application does not publish or otherwise expose the same name in plaintext.
-The epoch remains visible to every relay on the path.
-
-Nonce reuse under one key is catastrophic for AES-GCM.
-The profile prevents it by deriving every key from an epoch that only one publisher instance ever uses, allocating identities monotonically within that instance, separating datagram and grouped domains, and capping invocations and plaintext bytes per key.
-No state survives an instance: nothing needs to be persisted across restarts to stay safe.
-
-Empty AAD does not weaken the binding: every immutable end-to-end field is in the HKDF info or the nonce.
-Timestamps are excluded because relays rewrite them; a relay can therefore shift or reorder authentic objects in time within a receiver's tolerance.
-
-Nothing authenticates where a group ends.
-A relay can end a group after any frame, and a receiver cannot tell the truncated group from a shorter one, so an application MUST NOT rely on group completeness.
-
-The opaque path segment is a deterministic function of the secret and semantic broadcast name; physical track names are deterministic functions of the secret, epoch, and semantic name, so names under different epochs are unlinkable.
-An attacker without the secret cannot predict them; an attacker with the secret can derive every name, which is intended.
+Nonce uniqueness is enforced by publisher-minted per-instance epochs, monotonic identity allocation, separate stream/datagram key domains, and per-key invocation/byte limits, requiring no persistent state across restarts.
+Because timestamps are excluded from AAD, relays can shift or reorder authentic objects within receiver tolerance.
+Because group termination is not authenticated, a relay can truncate a group after any frame; applications MUST NOT rely on group completeness.
 
 
 # IANA Considerations
@@ -381,25 +258,25 @@ This document requests no registrations.
 
 --- back
 
-# Changelog
+# Appendix A: Changelog
 {:numbered="false"}
 
-## draft-lcurley-moq-e2ee-01
+## moq-e2ee-01
 {:numbered="false"}
 
+- Assigned `moq-e2ee-01-wip` as this draft's profile until finalized as `moq-e2ee-01`; every label and the salt follow it.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
-- Require canonical UUIDv7 epochs, carried as the route's Instance rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
+- Require canonical UUIDv7 epochs, carried as the route's Identity rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
 - Drop a datagram that fails to open with its own `identity`, `oversize`, or `authentication` code; an `exhausted` open still fails the read.
 - A datagram belongs to a datagram track with its own sequence, independent of a stream track of the same name; the datagram domain keeps the two apart.
 
-## draft-lcurley-moq-e2ee-00
+## moq-e2ee-00
 {:numbered="false"}
 
 - Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
-
 
 # Acknowledgments
 {:numbered="false"}

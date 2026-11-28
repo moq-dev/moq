@@ -34,7 +34,7 @@ jobs:
         run: nix develop --command just test audio-quality --replays --enforce
         shell: bash -leo pipefail {0}
         env:
-          # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
+          # Somewhere upload-artifact can reach; the harness default is the checkout's .tmp/.
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The harness keeps a failing run's directory: every row's samples and summary.

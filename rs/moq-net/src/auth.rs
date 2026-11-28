@@ -31,7 +31,7 @@
 //! Older moq-lite versions and moq-transport carry no AUTH exchange: there the grant stays
 //! `None`. On moq-transport a [`Credential`] is still answered, with a grant that stays
 //! unknown, since a request that names it carries its token; on moq-lite without AUTH its
-//! answer is [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are, and refuses one
+//! answer is [`Error::Unsupported`]. moq-lite carries a grant's prefixes as they are, and refuses one
 //! too large for a single AUTH_OK rather than trim it.
 
 use std::{
@@ -42,7 +42,7 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::{Error, Patterns, Result, SessionError, time::Instant};
+use crate::{Error, Prefixes, Result, SessionError, time::Instant};
 
 mod tokens;
 
@@ -83,15 +83,16 @@ pub(crate) enum Answer {
 /// What a peer lets this side do, in this side's own paths.
 ///
 /// The paths are relative to the session's root, the same paths the session
-/// announces and subscribes with. `Grant::default()` grants nothing; set the
-/// fields on it to grant more.
+/// announces and subscribes with. Each is a set of prefixes, each covering its whole
+/// subtree: the empty prefix grants everything. `Grant::default()` grants nothing; set
+/// the fields on it to grant more.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grant {
 	/// The broadcasts this side may publish to the peer.
-	pub publish: Patterns,
+	pub publish: Prefixes,
 	/// The broadcasts this side may subscribe to from the peer.
-	pub subscribe: Patterns,
+	pub subscribe: Prefixes,
 	/// When the grant lapses, or `None` for never.
 	pub expires: Option<Instant>,
 }
@@ -100,8 +101,8 @@ impl Grant {
 	/// A grant of everything that never expires.
 	pub fn all() -> Self {
 		Self {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::all(),
+			subscribe: Prefixes::all(),
 			expires: None,
 		}
 	}
@@ -125,18 +126,10 @@ impl Grant {
 	}
 
 	/// The paths both grants allow, lapsing at the earlier expiry.
-	///
-	/// Fails closed: an intersection too large to hold grants nothing, never more.
 	fn intersect(&self, other: &Self) -> Self {
-		let both = |a: &Patterns, b: &Patterns| {
-			a.intersect(b).unwrap_or_else(|err| {
-				tracing::warn!(%err, "grant intersection too large; granting nothing");
-				Patterns::new()
-			})
-		};
 		Self {
-			publish: both(&self.publish, &other.publish),
-			subscribe: both(&self.subscribe, &other.subscribe),
+			publish: self.publish.intersect(&other.publish),
+			subscribe: self.subscribe.intersect(&other.subscribe),
 			expires: earliest(self.expires, other.expires),
 		}
 	}
@@ -156,20 +149,11 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 pub(crate) const RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
-/// Whether a refusal is the acceptor failing to decide rather than its verdict on the
-/// token, such as an unreachable auth server or a full verification queue.
-fn transient(err: &Error) -> bool {
-	matches!(
-		err,
-		Error::Session(SessionError::Internal | SessionError::TooManyRequests | SessionError::Timeout)
-	)
-}
-
-/// Whether a token's stream ending with `err` is the peer's verdict on it: a refusal that
-/// will not pass, [`Error::Unsupported`], or a clean close after a grant. Anything else
-/// left the token undecided.
+/// Whether a token's stream ending with `err` is the peer's verdict on it: a final refusal,
+/// [`Error::Unsupported`], or a clean close after a grant. Anything else left the token
+/// undecided.
 fn verdict(phase: &Phase, err: &Error) -> bool {
-	(matches!(phase, Phase::Refused { .. }) && !transient(err))
+	matches!(phase, Phase::Refused { undecided: false, .. })
 		|| matches!(err, Error::Unsupported)
 		// The peer ended the grant without revoking it.
 		|| (matches!(err, Error::Cancel) && matches!(phase, Phase::Granted(_)))
@@ -239,8 +223,22 @@ struct Attached {
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	/// Whether the peer has accepted the connection, credential included: at once, unless
-	/// the session [awaits the peer's SETUP](Link::await_setup).
-	accepted: bool,
+	/// the session [awaits its answer](Link::await_acceptance) or the version
+	/// [has none](Link::silent).
+	acceptance: Acceptance,
+}
+
+/// Whether a session's peer accepted the connection credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Acceptance {
+	/// With its handshake, or with the answer the session awaited.
+	Accepted,
+	/// Not yet: the peer's SETUP (a client without AUTH) or its AUTH_OK to the connection's
+	/// own credential (a lite-07 client) is still to come, and the peer can still refuse.
+	Awaiting,
+	/// Never said: the version has no answer, so the peer refuses only by closing the
+	/// session (a lite-03/04 client).
+	Silent,
 }
 
 /// One token as one session presents it.
@@ -261,7 +259,9 @@ enum Phase {
 	/// The peer's latest reply on the open stream is this AUTH_OK.
 	Granted(Grant),
 	/// The peer refused the current attempt with an AUTH_ERROR; the driver retries or ends it.
-	Refused { backoff: Option<Duration> },
+	/// `undecided` when its code says the acceptor failed to decide, so the token is
+	/// presented again rather than ended.
+	Refused { backoff: Option<Duration>, undecided: bool },
 	/// The last [`Credential`] clone dropped while its stream was open: the driver closes the
 	/// stream, and any grant holds until then.
 	Withdrawn { grant: Option<Grant> },
@@ -329,7 +329,7 @@ impl Attached {
 			issued: BTreeMap::new(),
 			scope: None,
 			epoch: 0,
-			accepted: true,
+			acceptance: Acceptance::Accepted,
 		};
 		attached.rescope(limit);
 		attached
@@ -429,9 +429,9 @@ impl Attached {
 		}
 	}
 
-	/// The union's and the scope's patterns for `direction`, each `None` while
+	/// The union's and the scope's prefixes for `direction`, each `None` while
 	/// unrestricted.
-	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
+	fn parts(&self, direction: Direction) -> (Option<&Prefixes>, Option<&Prefixes>) {
 		// The peer's grant names what we may do; the scope names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
 		match direction {
@@ -455,7 +455,7 @@ impl Attached {
 		}
 	}
 
-	/// Whether `direction` allows `path` right now, without copying the patterns.
+	/// Whether `direction` allows `path` right now, without copying the prefixes.
 	fn allows(&self, direction: Direction, path: &str) -> bool {
 		let (granted, limit) = self.parts(direction);
 		granted.is_none_or(|granted| granted.matches(path)) && limit.is_none_or(|limit| limit.matches(path))
@@ -562,23 +562,50 @@ impl State {
 /// while unrestricted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Permit {
-	granted: Option<Patterns>,
-	limit: Option<Patterns>,
+	granted: Option<Prefixes>,
+	limit: Option<Prefixes>,
 }
 
 impl Permit {
 	/// A permit limiting the peer to `limit`, with no grant of its own.
 	#[cfg(test)]
-	pub(crate) fn limited(limit: Patterns) -> Self {
+	pub(crate) fn limited(limit: Prefixes) -> Self {
 		Self {
 			granted: None,
 			limit: Some(limit),
 		}
 	}
 
-	/// Whether both allow `path`.
+	/// A permit the peer granted `granted`, with no limit of our own.
+	#[cfg(test)]
+	pub(crate) fn granting(granted: Prefixes) -> Self {
+		Self {
+			granted: Some(granted),
+			limit: None,
+		}
+	}
+
+	/// Whether both allow `path`, and so every path beneath it.
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
+	}
+
+	/// The paths `scope` holds that both allow too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn within(&self, scope: Prefixes) -> Prefixes {
+		[&self.granted, &self.limit]
+			.into_iter()
+			.flatten()
+			.fold(scope, |scope, prefixes| scope.intersect(prefixes))
+	}
+
+	/// The paths `scope` holds that the limit allows too: what the peer may offer us there.
+	#[cfg(feature = "async")]
+	pub(crate) fn limiting(&self, scope: Prefixes) -> Prefixes {
+		match &self.limit {
+			Some(limit) => scope.intersect(limit),
+			None => scope,
+		}
 	}
 
 	/// Whether the peer's grant alone allows `path`.
@@ -592,68 +619,61 @@ impl Permit {
 		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
 	}
 
-	/// Whether this allows every path at or beneath `prefix`, judged pattern by
-	/// pattern, so a `false` may be spurious but a `true` never is.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn covers_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		let covers = |patterns: &Option<Patterns>| patterns.as_ref().is_none_or(|patterns| patterns.contains(&subtree));
-		covers(&self.granted) && covers(&self.limit)
-	}
-
-	/// Whether the limit alone allows every path at or beneath `prefix`, judged
-	/// pattern by pattern, so a `false` may be spurious but a `true` never is.
+	/// The prefixes the peer's grant confines this direction to, or `None` while it
+	/// grants everything: asking for one of them, rather than a prefix above it, is a
+	/// request the peer's floors can certify.
 	#[cfg(feature = "async")]
-	pub(crate) fn within_limit_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		self.limit.as_ref().is_none_or(|limit| limit.contains(&subtree))
+	pub(crate) fn granted_regions(&self) -> Option<Vec<crate::Path>> {
+		confining(self.granted.as_ref()?)
 	}
 
-	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
-	/// heads of the scope's patterns, which grants this side issued. What the peer
-	/// granted this side limits only what this side does, so a client never scopes the
-	/// relay that answered its token.
+	/// The prefixes the grant and the limit together confine this direction to, or `None`
+	/// while neither does: every path both allow lies within one of them.
 	#[cfg(feature = "async")]
 	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
-		let limit = self.limit.as_ref()?;
-		let everything = moq_pattern::Pattern::subtree("").ok()?;
-		if limit.contains(&everything) {
-			return None;
+		// Neither confining anything leaves every path; otherwise what both allow can never
+		// be every path.
+		fn confines(prefixes: &Option<Prefixes>) -> Option<&Prefixes> {
+			prefixes.as_ref().filter(|prefixes| !prefixes.matches(""))
 		}
-		Some(crate::model::interest_prefixes(limit))
+		match (confines(&self.granted), confines(&self.limit)) {
+			(None, None) => None,
+			(Some(one), None) | (None, Some(one)) => confining(one),
+			(Some(granted), Some(limit)) => confining(&granted.intersect(limit)),
+		}
 	}
 
-	/// The one prefix the grant and the limit together confine this direction to, or
-	/// `None` when they confine it to several or to none. A request for it, rather than
-	/// one above it, is one the peer's floors can certify.
+	/// What the peer granted, or `None` when it grants everything.
 	#[cfg(feature = "async")]
-	pub(crate) fn region(&self) -> Option<crate::Path> {
-		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
-		let regions = match (heads(&self.granted), heads(&self.limit)) {
-			(None, None) => return None,
-			(Some(regions), None) | (None, Some(regions)) => regions,
-			(Some(granted), Some(limit)) => {
-				let mut meet: Vec<crate::Path> = (granted.iter())
-					.flat_map(|a| limit.iter().map(move |b| (a, b)))
-					.filter_map(|(a, b)| match () {
-						_ if a.has_prefix(b) => Some(a.clone()),
-						_ if b.has_prefix(a) => Some(b.clone()),
-						_ => None,
-					})
-					.collect();
-				meet.sort();
-				meet.dedup();
-				meet
-			}
+	pub(crate) fn grant(&self) -> Option<&Prefixes> {
+		self.granted.as_ref()
+	}
+
+	/// The prefixes of the grant that `covered` does not cover, each as the path holding
+	/// what it shows. `None` covers everything.
+	#[cfg(feature = "async")]
+	pub(crate) fn beyond(&self, covered: Option<&Prefixes>) -> Vec<(crate::Prefix, crate::Path)> {
+		let Some(covered) = covered else {
+			return Vec::new();
 		};
-		match regions.as_slice() {
-			[region] => Some(region.clone()),
-			_ => None,
-		}
+		let granted = match &self.granted {
+			Some(granted) => granted.clone(),
+			None => Prefixes::all(),
+		};
+		(granted.into_iter())
+			.filter(|prefix| !covered.matches(prefix.as_str()))
+			.filter_map(|prefix| {
+				// A prefix too long for a path covers nothing a peer could name.
+				let region = crate::Path::new(prefix.as_str()).ok()?;
+				Some((prefix, region))
+			})
+			.collect()
+	}
+
+	/// Whether the peer granted both the same, whatever limit either set.
+	#[cfg(feature = "async")]
+	pub(crate) fn same_grant(&self, other: &Self) -> bool {
+		self.granted == other.granted
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -662,15 +682,29 @@ impl Permit {
 		self.limit == other.limit
 	}
 
-	/// Whether this allows everything `other` does, judged part by part, so a `false`
-	/// may be spurious but a `true` never is.
+	/// Whether this allows everything `other` does.
 	pub(crate) fn covers(&self, other: &Self) -> bool {
-		let covers = |this: &Option<Patterns>, other: &Option<Patterns>| match (this, other) {
+		let covers = |this: &Option<Prefixes>, other: &Option<Prefixes>| match (this, other) {
 			(None, _) => true,
 			(Some(_), None) => false,
 			(Some(this), Some(other)) => this.covers(other),
 		};
 		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
+	}
+}
+
+/// The paths `prefixes` confine every path to, or `None` when they allow every path. A
+/// prefix too long for a path confines to nothing a peer could name, so it drops.
+#[cfg(feature = "async")]
+fn confining(prefixes: &Prefixes) -> Option<Vec<crate::Path>> {
+	match prefixes.matches("") {
+		true => None,
+		false => Some(
+			prefixes
+				.iter()
+				.filter_map(|prefix| crate::Path::new(prefix.as_str()).ok())
+				.collect(),
+		),
 	}
 }
 
@@ -1119,7 +1153,7 @@ impl Link {
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
 		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
 		// without an API; the interop harness checks it against the token it minted.
-		let list = |patterns: &Patterns| format!("{:?}", patterns.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+		let list = |prefixes: &Prefixes| format!("{:?}", prefixes.iter().map(|p| p.to_string()).collect::<Vec<_>>());
 		tracing::debug!(
 			publish = %list(&grant.publish),
 			subscribe = %list(&grant.subscribe),
@@ -1133,6 +1167,10 @@ impl Link {
 			// Only an open stream carries a reply, and a withdrawn token's grant no longer widens.
 			if !matches!(slot.phase, Phase::Pending { .. } | Phase::Granted(_)) {
 				return;
+			}
+			// The answer to the connection's own credential accepts the session.
+			if slot.setup && link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
 			}
 			slot.phase = Phase::Granted(grant);
 			link.replied = true;
@@ -1166,17 +1204,22 @@ impl Link {
 
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
+	/// `undecided` is what its code says (see `lite::AuthError::undecided`): the acceptor
+	/// failed to decide, so the token is presented again rather than ended.
 	/// The driver then calls [`retry`](Self::retry), as on every end of the token's stream.
-	pub(crate) fn refused(&self, id: u64) {
+	pub(crate) fn refused(&self, id: u64, undecided: bool) {
 		self.with(|link| {
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
 			link.replied = true;
 			slot.phase = match slot.phase {
-				Phase::Pending { backoff } | Phase::Refused { backoff } => Phase::Refused { backoff },
+				Phase::Pending { backoff } | Phase::Refused { backoff, .. } => Phase::Refused { backoff, undecided },
 				// A refusal after a grant revokes it.
-				Phase::Granted(_) => Phase::Refused { backoff: None },
+				Phase::Granted(_) => Phase::Refused {
+					backoff: None,
+					undecided,
+				},
 				_ => return,
 			};
 			link.recompute();
@@ -1186,8 +1229,8 @@ impl Link {
 	/// The delay before presenting a token again once its stream ended with `err`, or `None`
 	/// when the driver should end it instead.
 	///
-	/// A token still wanted on an active session is presented again when the peer refused it
-	/// for a reason that may pass, or, on a shared handle, when its stream was lost without a
+	/// A token still wanted on an active session is presented again when the peer's refusal
+	/// left it undecided, or, on a shared handle, when its stream was lost without a
 	/// verdict, so the session never runs on without it. A session's own handle ends a lost
 	/// token instead, which tells the application. Both back off from [`RETRY_INITIAL`],
 	/// doubling until a grant resets it.
@@ -1201,7 +1244,7 @@ impl Link {
 			let slot = link.slots.get_mut(&id)?;
 			// Only an open stream is presented again; a grant resets the backoff.
 			let backoff = match slot.phase {
-				Phase::Pending { backoff } | Phase::Refused { backoff } => backoff,
+				Phase::Pending { backoff } | Phase::Refused { backoff, .. } => backoff,
 				Phase::Granted(_) => None,
 				_ => return None,
 			};
@@ -1363,6 +1406,15 @@ impl Link {
 		self.read(|link, _| link.permit(direction))
 	}
 
+	/// Whether the scope set for the peer leaves out no path in either direction, as when
+	/// none was set and only the origin handles bound it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn admits_whole(&self) -> bool {
+		[Direction::Publish, Direction::Subscribe]
+			.into_iter()
+			.all(|direction| self.within_limit(direction, ""))
+	}
+
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
 	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
@@ -1421,19 +1473,48 @@ impl Link {
 		self.read(|link, _| link.closed.clone())
 	}
 
-	/// The peer accepts the connection credential only with its SETUP, which this client
-	/// reads after the session is live, while the server can still refuse it.
-	pub(crate) fn await_setup(&self) {
-		self.with(|link| link.accepted = false);
+	/// The peer accepts the connection credential only with an answer this client reads after
+	/// the session is live, while the server can still refuse it: its SETUP on a version
+	/// without AUTH, or the AUTH_OK to the connection's own credential on one with it.
+	pub(crate) fn await_acceptance(&self) {
+		self.with(|link| link.acceptance = Acceptance::Awaiting);
+	}
+
+	/// The version never answers the connection credential: the peer refuses it only by
+	/// closing the session, however soon.
+	pub(crate) fn silent(&self) {
+		self.with(|link| link.acceptance = Acceptance::Silent);
+	}
+
+	/// Whether the version never answers the connection credential, so only uptime can
+	/// suggest the peer took it.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.read(|link, _| link.acceptance == Acceptance::Silent)
 	}
 
 	/// The peer's SETUP arrived, so it accepted the connection credential.
 	pub(crate) fn accepted(&self) {
 		self.with_state(|state, link| {
-			attached(&mut state.links, link).accepted = true;
+			let link = attached(&mut state.links, link);
+			if link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
+			}
 			// Latch a set this acceptance completed, before a later end can replace its answer.
 			state.record();
 		});
+	}
+
+	/// Ready once the peer said it accepts the connection credential, which a version without
+	/// that answer never does. A close afterward leaves it accepted.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let id = self.id();
+		let _ = ready_or!(self.state().poll(waiter, |state| {
+			match state.links.get(&id).map(|link| link.acceptance) {
+				Some(Acceptance::Accepted) => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		}));
+		Poll::Ready(())
 	}
 
 	/// End the session: fail every pending token here, leaving the handle's tokens for the
@@ -1979,6 +2060,10 @@ impl Request {
 	}
 
 	/// Refuse the token with a session error code and a reason for the peer.
+	///
+	/// [`SessionError::Internal`], [`SessionError::TooManyRequests`], and
+	/// [`SessionError::Timeout`] say this side failed to decide, such as with its auth backend
+	/// down, so a moq-lite peer presents the token again after a backoff; any other code ends it.
 	pub fn reject(mut self, code: SessionError, reason: impl Into<String>) {
 		let issue = self.issue.take().expect("answered once");
 		refuse(&issue, code, reason.into());
@@ -2008,31 +2093,29 @@ fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RequestKind {
 	/// The peer reads a track: a SUBSCRIBE, a FETCH, or a TRACK_STATUS. Covered by the
-	/// grant's `subscribe` patterns.
+	/// grant's `subscribe` prefixes.
 	Subscribe,
 	/// A PUBLISH_NAMESPACE: the peer announces a namespace it will publish under. Its
-	/// `publish` patterns must cover the whole namespace.
+	/// `publish` prefixes must cover the whole namespace.
 	PublishNamespace,
 	/// A SUBSCRIBE_NAMESPACE: the peer discovers only the broadcasts the token allows
 	/// beneath the requested prefix.
 	Discover,
-	/// A PUBLISH: the peer offers a track. Covered by the grant's `publish` patterns.
+	/// A PUBLISH: the peer offers a track. Covered by the grant's `publish` prefixes.
 	Publish,
 }
 
 impl RequestKind {
 	/// Whether `grant`, issued to the peer that presented the token, covers this request at
 	/// `path`. A grant names what its holder may do, so a request to read is covered by its
-	/// `subscribe` patterns and a request to announce by its `publish` patterns. An announce
-	/// routes everything beneath its namespace, so the grant must cover that whole subtree.
+	/// `subscribe` prefixes and a request to announce by its `publish` prefixes. An announce
+	/// routes everything beneath its namespace, which a prefix covering the namespace covers
+	/// too.
 	pub(crate) fn covers(self, grant: &Grant, path: &str) -> bool {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
 			Self::Discover => !grant.subscribe.is_empty(),
-			Self::Publish => grant.publish.matches(path),
-			Self::PublishNamespace => {
-				crate::Pattern::subtree(path).is_ok_and(|subtree| grant.publish.contains(&subtree))
-			}
+			Self::Publish | Self::PublishNamespace => grant.publish.matches(path),
 		}
 	}
 }
@@ -2403,9 +2486,12 @@ impl Issued {
 
 	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), the request it rode on
 	/// to end ([`Error::Cancel`]), or its stream or the session to end.
+	///
+	/// The future holds the issue, not the grant, so dropping the grant still ends it.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| poll_closed(&self.issue, waiter)).await
+	pub fn closed(&self) -> impl Future<Output = Error> + Send + 'static {
+		let issue = self.issue.clone();
+		kio::wait(move |waiter| poll_closed(&issue, waiter))
 	}
 }
 
@@ -2624,7 +2710,7 @@ impl Gate {
 		}
 		let mut permit = permit.expect("a session epoch is never u64::MAX");
 		permit.limit = Some(if ended {
-			Patterns::new()
+			Prefixes::new()
 		} else {
 			match self.direction {
 				Direction::Publish => token.grant.subscribe.clone(),
@@ -2765,7 +2851,7 @@ pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 #[derive(Default)]
 pub(crate) struct Enforce {
 	epoch: u64,
-	permit: Option<Patterns>,
+	permit: Option<Prefixes>,
 	/// Every broadcast admitted so far, still announced.
 	live: std::collections::HashSet<crate::Path>,
 	setup: bool,
@@ -2873,7 +2959,7 @@ mod tests {
 		let handle = Link::new(true);
 		let _token = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&handle);
-		handle.refused(id);
+		handle.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(handle.retry(id, &busy), Some(RETRY_INITIAL));
 
@@ -2977,7 +3063,7 @@ mod tests {
 		{
 			let issue = serving.issue.read();
 			assert_eq!(issue.outbox.len(), 1, "grants piled up");
-			assert!(matches!(issue.outbox.front(), Some(Reply::Grant(grant)) if grant.publish == patterns(&["99"])));
+			assert!(matches!(issue.outbox.front(), Some(Reply::Grant(grant)) if grant.publish == prefixes(&["99"])));
 		}
 		issued.revoke(SessionError::Unauthorized, "revoked");
 		let issue = serving.issue.read();
@@ -3055,61 +3141,86 @@ mod tests {
 		assert!(requests.poll_next(&kio::Waiter::noop()).is_pending());
 	}
 
-	fn patterns(prefixes: &[&str]) -> Patterns {
-		prefixes
+	fn prefixes(texts: &[&str]) -> Prefixes {
+		texts
 			.iter()
-			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.map(|text| crate::Prefix::try_from(*text).unwrap())
 			.collect()
 	}
 
 	fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
 		Grant {
-			publish: patterns(publish),
-			subscribe: patterns(subscribe),
+			publish: prefixes(publish),
+			subscribe: prefixes(subscribe),
 			expires: None,
 		}
 	}
 
-	/// Only a grant this side issued confines the peer's claims: a client scoped by the
-	/// relay that answered its token leaves the relay's own routes unscoped.
+	/// What the peer granted confines the prefixes asked of it, whatever the limit is.
 	#[cfg(feature = "async")]
 	#[test]
-	fn regions_come_from_the_issued_scope_alone() {
-		let earned = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: None,
-		};
-		assert_eq!(earned.regions(), None, "the peer's grant to us scoped the peer");
-
-		let issued = Permit {
-			granted: None,
-			limit: Some(patterns(&[".socket/bob"])),
-		};
-		assert_eq!(issued.regions(), Some(vec![crate::Path::from_static(".socket/bob")]));
-
-		let everything = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: Some(patterns(&[""])),
-		};
-		assert_eq!(everything.regions(), None, "a root grant confines nothing");
-	}
-
-	/// The region is where the grant and the limit meet, and only when that is one prefix.
-	#[cfg(feature = "async")]
-	#[test]
-	fn the_region_is_where_grant_and_limit_meet() {
+	fn the_granted_regions_follow_the_grant_alone() {
 		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
-			granted: granted.map(patterns),
-			limit: limit.map(patterns),
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
 		};
 		let path = crate::Path::from_static;
-		assert_eq!(permit(None, None).region(), None);
-		assert_eq!(permit(Some(&["a"]), None).region(), Some(path("a")));
-		assert_eq!(permit(None, Some(&["a/b"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&["a"]), Some(&["a/b", "c"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&[""]), Some(&["a"])).region(), Some(path("a")));
-		assert_eq!(permit(Some(&["a", "b"]), None).region(), None, "two regions");
-		assert_eq!(permit(Some(&["a"]), Some(&["b"])).region(), None, "they never meet");
+		assert_eq!(permit(None, None).granted_regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).granted_regions(), None);
+		assert_eq!(
+			permit(Some(&[""]), Some(&["a"])).granted_regions(),
+			None,
+			"a root grant"
+		);
+		assert_eq!(permit(Some(&["a"]), None).granted_regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),
+			Some(vec![path("a"), path("b")])
+		);
+	}
+
+	/// What a publisher shows its peer lies within the regions of the grant and the limit
+	/// together, the deeper of any two nested.
+	#[cfg(feature = "async")]
+	#[test]
+	fn the_regions_follow_the_grant_and_the_limit() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
+		};
+		let path = crate::Path::from_static;
+		assert_eq!(permit(None, None).regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).regions(), Some(vec![path("a/b")]));
+		assert_eq!(permit(Some(&[""]), Some(&["a"])).regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "c/d"]), Some(&["a/b", "c", "e"])).regions(),
+			Some(vec![path("a/b"), path("c/d")])
+		);
+		assert_eq!(permit(Some(&[""]), Some(&[""])).regions(), None, "neither confines");
+		assert_eq!(
+			permit(Some(&["a"]), Some(&["b"])).regions(),
+			Some(vec![]),
+			"nothing in both"
+		);
+	}
+
+	/// A permit allows within a scope what the scope, the grant, and the limit all allow:
+	/// the deepest of any nested prefixes.
+	#[test]
+	fn a_permit_allows_what_all_three_allow() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
+		};
+		let within = |permit: Permit, scope: &[&str]| permit.within(prefixes(scope));
+		assert_eq!(within(permit(Some(&["a/b"]), None), &[""]), prefixes(&["a/b"]));
+		assert_eq!(within(permit(None, Some(&["a"])), &["a/b", "c"]), prefixes(&["a/b"]));
+		assert_eq!(
+			within(permit(Some(&["a"]), Some(&["a/b/c"])), &["a/b"]),
+			prefixes(&["a/b/c"])
+		);
+		assert!(within(permit(Some(&["a/x"]), Some(&["a/y"])), &["a"]).is_empty());
+		assert_eq!(within(permit(None, None), &["a"]), prefixes(&["a"]));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version
@@ -3134,6 +3245,26 @@ mod tests {
 		handle.handle().authorize(&Grant::all());
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
+	}
+
+	/// A session admits the whole tree while no scope bounds the peer, or one covers
+	/// every path in both directions, and not once either leaves a path out.
+	#[test]
+	fn a_scope_admits_whole_only_when_it_leaves_nothing_out() {
+		let handle = Link::new(false);
+		assert!(handle.admits_whole());
+
+		handle.handle().authorize(&grant(&["tenant-a"], &["tenant-a"]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&grant(&[""], &["tenant-a"]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&grant(&["tenant-a"], &[""]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&Grant::default());
+		assert!(!handle.admits_whole());
+
+		handle.handle().authorize(&grant(&[""], &[""]));
+		assert!(handle.admits_whole());
 	}
 
 	/// Our own grant does not decide what the peer may offer us, only the limit does.
@@ -3278,7 +3409,7 @@ mod tests {
 
 		let second = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&second), id, "the next session presents it again");
-		second.refused(id);
+		second.refused(id, false);
 		let refused = Error::Session(SessionError::Unauthorized);
 		assert_eq!(second.retry(id, &refused), None);
 		second.ended(id, refused);
@@ -3335,7 +3466,7 @@ mod tests {
 		));
 
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		link.drain_with(std::sync::Arc::new(goaway));
 		assert!(matches!(
 			link.present(Bytes::from_static(b"late"), false),
@@ -3350,7 +3481,7 @@ mod tests {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, false, false).unwrap();
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 		let successor = Link::attach(&handle, true, false).unwrap();
 
@@ -3373,13 +3504,13 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
 		successor.grant(id, Grant::all());
-		draining.refused(id);
+		draining.refused(id, false);
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
@@ -3394,17 +3525,17 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
 		successor.grant(id, Grant::all());
-		successor.refused(id);
+		successor.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(successor.retry(id, &busy), Some(RETRY_INITIAL));
 
-		draining.refused(id);
+		draining.refused(id, false);
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 
@@ -3423,11 +3554,11 @@ mod tests {
 		link.drain_with(goaway.clone());
 		let auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&link);
-		link.refused(id);
+		link.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		assert!(!link.active());
 		let err = link.reopen(id).unwrap_err();
 		assert!(matches!(err, Error::GoingAway), "{err:?}");
@@ -3484,11 +3615,11 @@ mod tests {
 		let _auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let busy = Error::Session(SessionError::TooManyRequests);
-		draining.refused(id);
+		draining.refused(id, true);
 		assert_eq!(draining.retry(id, &busy), None);
 		draining.ended(id, busy);
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
@@ -3505,11 +3636,11 @@ mod tests {
 		let id = opened(&link);
 		let busy = Error::Session(SessionError::TooManyRequests);
 
-		link.refused(id);
+		link.refused(id, true);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 		assert!(auth.poll_answer(&kio::Waiter::noop()).is_pending());
 		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
-		link.refused(id);
+		link.refused(id, true);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL * 2));
 		assert_eq!(link.retry(id, &busy), None, "only a refusal retries");
 
@@ -3909,8 +4040,8 @@ mod request_token_tests {
 
 	fn subscribe_only(prefix: &str) -> Grant {
 		Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
+			publish: Prefixes::new(),
+			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
 		}
 	}
@@ -4002,8 +4133,8 @@ mod request_token_tests {
 
 	fn grant_in(runtime: &crate::time::Deadlines, secs: u64) -> Grant {
 		Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::all(),
 			expires: runtime.now().checked_add(Duration::from_secs(secs)),
 		}
 	}
@@ -4307,13 +4438,13 @@ mod request_token_tests {
 	#[test]
 	fn request_coverage_is_from_the_presenters_side() {
 		let read_only = Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::all(),
 			expires: None,
 		};
 		let write_only = Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: Patterns::new(),
+			publish: Prefixes::all(),
+			subscribe: Prefixes::new(),
 			expires: None,
 		};
 		assert!(RequestKind::Subscribe.covers(&read_only, "room"));
@@ -4322,31 +4453,22 @@ mod request_token_tests {
 		assert!(!RequestKind::PublishNamespace.covers(&read_only, "room"));
 	}
 
-	/// An announce routes its whole namespace, so a grant naming only the namespace itself
-	/// does not cover it, while one naming its subtree does.
+	/// An announce routes its whole namespace, which the prefix naming it covers, and a
+	/// namespace beneath it too, but not one above it or beside it.
 	#[test]
 	fn an_announce_needs_its_whole_subtree() {
-		let exact = Grant {
-			publish: crate::Pattern::literal("room").unwrap().into(),
-			subscribe: Patterns::new(),
+		let room = Grant {
+			publish: crate::Prefix::try_from("room").unwrap().into(),
+			subscribe: Prefixes::new(),
 			expires: None,
 		};
-		let subtree = Grant {
-			publish: crate::Pattern::subtree("room").unwrap().into(),
-			subscribe: Patterns::new(),
-			expires: None,
-		};
-		assert!(!RequestKind::PublishNamespace.covers(&exact, "room"));
-		assert!(RequestKind::PublishNamespace.covers(&subtree, "room"));
-		assert!(RequestKind::PublishNamespace.covers(&subtree, "room/cam"));
-		assert!(!RequestKind::PublishNamespace.covers(&subtree, "other"));
-		// A SUBSCRIBE names one broadcast, which the exact grant's twin covers.
-		let read = Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::literal("room").unwrap().into(),
-			expires: None,
-		};
-		assert!(RequestKind::Subscribe.covers(&read, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&room, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&room, "room/cam"));
+		assert!(!RequestKind::PublishNamespace.covers(&room, ""));
+		assert!(!RequestKind::PublishNamespace.covers(&room, "other"));
+		assert!(!RequestKind::PublishNamespace.covers(&room, "roomy"));
+		// A path no prefix can spell is still covered by the prefix above it.
+		assert!(RequestKind::PublishNamespace.covers(&room, "room/cam-*"));
 	}
 
 	/// An acceptor-side revoke ends the request before the deadline, and does not close the

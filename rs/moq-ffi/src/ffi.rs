@@ -14,6 +14,12 @@ pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
 	duration.min(std::time::Duration::from_nanos(i64::MAX as u64))
 }
 
+/// A gap's length, as [`duration`]. Decoders report gaps only on scaled media, refusing a
+/// scale-less track first, so the zero an unscaled length would take never shows.
+pub(crate) fn gap(length: moq_net::Timestamp) -> std::time::Duration {
+	duration(std::time::Duration::try_from(length).unwrap_or_default())
+}
+
 /// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
@@ -23,7 +29,7 @@ pub(crate) struct Runtime {
 	/// Work submitted by local handles, closed and drained with the root.
 	pending: kio::Shared<Option<Vec<Child>>>,
 	/// The clock a test drives, when the runtime started with one.
-	#[cfg(feature = "testing")]
+	#[cfg(any(test, feature = "testing"))]
 	clock: Option<kio::clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
@@ -66,7 +72,7 @@ pub(crate) fn runtime() -> &'static Runtime {
 /// Start the runtime on a [`kio::clock::Manual`] clock that only a test moves.
 ///
 /// False when the runtime already started, since its timers are armed on the host clock.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn start_test_clock() -> bool {
 	let mut started = false;
 	RUNTIME.get_or_init(|| {
@@ -77,7 +83,7 @@ pub(crate) fn start_test_clock() -> bool {
 }
 
 /// The clock [`start_test_clock`] installed, if it did.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 	RUNTIME.get()?.clock.as_ref()
 }
@@ -85,7 +91,7 @@ pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 impl Runtime {
 	fn new(
 		#[cfg_attr(
-			not(feature = "testing"),
+			not(any(test, feature = "testing")),
 			allow(unused_variables, reason = "only the `testing` feature uses it")
 		)]
 		test_clock: bool,
@@ -97,7 +103,7 @@ impl Runtime {
 			.unwrap();
 		let handle = runtime.handle().clone();
 		// Before any task runs, so every read and timer lands on it.
-		#[cfg(feature = "testing")]
+		#[cfg(any(test, feature = "testing"))]
 		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 		let pending = kio::Shared::new(Some(Vec::new()));
@@ -135,7 +141,7 @@ impl Runtime {
 		Runtime {
 			handle,
 			pending,
-			#[cfg(feature = "testing")]
+			#[cfg(any(test, feature = "testing"))]
 			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
 			stopped: kio::Producer::new(()),
@@ -538,21 +544,24 @@ impl Background {
 		}
 	}
 
+	/// Run a binding call through [`run`], ending it with the owner's failure once it fails.
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
+		run(self.supervise(future)).await
+	}
+
+	/// [`Self::watch`] without [`run`], for a caller already inside one.
+	pub async fn supervise<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		let result = host(async {
-			if self.result.is_some() {
-				tokio::pin!(future);
-				tokio::select! {
-					biased;
-					result = self.finished() => { result?; future.await }
-					result = &mut future => result,
-				}
-			} else {
-				future.await
+		let result = if self.result.is_some() {
+			tokio::pin!(future);
+			tokio::select! {
+				biased;
+				result = self.finished() => { result?; future.await }
+				result = &mut future => result,
 			}
-		})
-		.await;
+		} else {
+			future.await
+		};
 		self.check()?;
 		result
 	}
@@ -919,7 +928,6 @@ impl<T: Send + 'static> Task<T> {
 		}
 	}
 
-	#[cfg(any(feature = "audio", feature = "video"))]
 	pub fn supervised(mut self, driver: Background) -> Self {
 		self.driver = driver;
 		self
@@ -949,10 +957,10 @@ impl<T: Send + 'static> Task<T> {
 		Fut: Future<Output = Result<R, MoqError>>,
 	{
 		self.check()?;
-		let result = run(self
+		let result = self
 			.driver
-			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
-		.await;
+			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f))
+			.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
 		self.check()?;
@@ -1311,6 +1319,25 @@ mod tests {
 	/// Fail the test instead of hanging when a wakeup goes missing.
 	async fn soon<F: Future>(f: F) -> F::Output {
 		kio::clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
+	}
+
+	/// A binding call through `watch` reports a panic as an error instead of unwinding into the
+	/// host, whether or not its handle has an owner, and polls inside the runtime.
+	#[tokio::test]
+	async fn watch_isolates_a_panic_and_enters_the_runtime() {
+		let (_origin, owned, _failed) = panicking_origin();
+		for driver in [Background::default(), owned] {
+			let err = driver
+				.watch(async { panic!("injected watch panic") as Result<(), MoqError> })
+				.await
+				.expect_err("the panic should be reported");
+			assert!(matches!(err, MoqError::Task { .. }), "{err:?}");
+			let entered = driver
+				.watch(async { Ok(tokio::runtime::Handle::current().id() == runtime().handle.id()) })
+				.await
+				.unwrap();
+			assert!(entered, "the call should poll inside the FFI runtime");
+		}
 	}
 
 	#[tokio::test]

@@ -9,7 +9,8 @@
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
 //! sections; only their MPEG-TS identity lands here. A constant-rate source also
 //! records its multiplex rate ([`Mpegts::mux_rate`]), so export can pad the rebuilt
-//! stream back to it.
+//! stream back to it. A multiplex carried whole instead names its one track in
+//! [`Mpegts::passthrough`].
 //!
 //! The section is specified by `drafts/draft-lcurley-moq-mpegts.md` and rides the
 //! root of either catalog: the hang track alongside `video`/`audio`, and the MSF
@@ -46,11 +47,11 @@ pub(super) const SI_PIDS: &[u16] = &[
 
 /// The DVB maximum repetition interval for a known `table_id` (ETSI TS 101 211).
 ///
-/// Export treats the interval as an upper bound, not the source's observed cadence,
-/// which is a property of that multiplexer's bitrate shaping and means nothing
-/// downstream. `None` for a table we don't recognize; export then falls back to its
-/// PSI cadence, so an unknown table degrades to a safe (fast) rate rather than being
-/// dropped. Keyed by `table_id` rather than PID because that is the granularity the
+/// Export treats the interval as an upper bound and repeats at half of it, not at
+/// the source's observed cadence, which is a property of that multiplexer's bitrate
+/// shaping and means nothing downstream. `None` for a table we don't recognize;
+/// export then falls back to its PSI cadence, so an unknown table degrades to a safe
+/// (fast) rate rather than being dropped. Keyed by `table_id` rather than PID because that is the granularity the
 /// spec defines: the EIT PID alone carries tables wanting 2s and 30s.
 pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 	match table_id {
@@ -79,10 +80,11 @@ pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 /// The `mpegts` catalog section.
 ///
 /// Omitted from the catalog when empty, so a broadcast that needs none of it stays
-/// byte-identical to one without the extension.
-#[serde_as]
+/// byte-identical to one without the extension. Reading refuses a section that names its
+/// [`passthrough`](Self::passthrough) track in [`tracks`](Self::tracks) or [`si`](Self::si) too.
+// `remote = "Self"` derives inherent (de)serializers, which the trait impls below wrap.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(remote = "Self", rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Mpegts {
 	/// Per-track MPEG-TS info, keyed by MoQ track name. Media tracks record their
@@ -138,6 +140,32 @@ pub struct Mpegts {
 	/// leaves it absent. Export pads its output with null packets to this rate.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub mux_rate: Option<u64>,
+
+	/// The track carrying the multiplex whole, when a [`Passthrough`](super::Passthrough)
+	/// publishes it rather than demultiplexing it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub passthrough: Option<PassthroughTrack>,
+}
+
+impl Serialize for Mpegts {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		Mpegts::serialize(self, serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for Mpegts {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mpegts = Mpegts::deserialize(deserializer)?;
+		if let Some(passthrough) = &mpegts.passthrough
+			&& mpegts.names(&passthrough.track)
+		{
+			return Err(serde::de::Error::custom(format!(
+				"the passthrough track `{}` is also described as a demultiplexed one",
+				passthrough.track
+			)));
+		}
+		Ok(mpegts)
+	}
 }
 
 impl Mpegts {
@@ -148,18 +176,66 @@ impl Mpegts {
 			&& self.program.is_none()
 			&& self.si.is_empty()
 			&& self.mux_rate.is_none()
+			&& self.passthrough.is_none()
 	}
 
-	/// Whether the section lists a track it carries itself: an undecoded stream or an SI table.
+	/// Whether the section lists a track it carries itself: an undecoded stream, an SI table, or
+	/// the passthrough.
 	pub(crate) fn has_track(&self) -> bool {
-		self.tracks
-			.values()
-			.any(|track| track.verbatim.is_some() || track.pes_packet.is_some())
+		self.passthrough.is_some()
+			|| self
+				.tracks
+				.values()
+				.any(|track| track.verbatim.is_some() || track.pes_packet.is_some())
 			|| self
 				.si
 				.values()
 				.flat_map(BTreeMap::values)
 				.any(|entry| !entry.track.is_empty())
+	}
+
+	/// Whether `tracks` or `si` names `track`.
+	fn names(&self, track: &str) -> bool {
+		self.tracks.contains_key(track)
+			|| self
+				.si
+				.values()
+				.flat_map(BTreeMap::values)
+				.any(|entry| entry.track == track)
+	}
+}
+
+/// A transport stream carried whole, as one track of verbatim packets.
+///
+/// The track's frames are runs of whole 188-byte packets in source order, each in the legacy
+/// container with the PCR time of its first byte. Nothing else about the multiplex is described
+/// for it, because all of it stays in-band: the PAT, PMT, and SI ride the track as authored,
+/// scrambled payloads included. The section's [`mux_rate`](Mpegts::mux_rate) is measured over
+/// every packet of the track.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PassthroughTrack {
+	/// The track carrying the packets, published in the same broadcast as the catalog.
+	pub track: String,
+
+	/// Whether every group starts at a random access point of the multiplex's video stream, or of
+	/// its clock PID when it has none, so a subscriber can decode from the first object of any.
+	///
+	/// Only ever true for a single program with at most one video stream: programs or video
+	/// streams sharing a clock can stagger their GOPs, leaving no packet that starts all of them.
+	/// Always written; a reader treats it as false when absent.
+	#[serde(default)]
+	pub random_access: bool,
+}
+
+impl PassthroughTrack {
+	/// A passthrough on `track`, with no random access promised.
+	pub fn new(track: impl Into<String>) -> Self {
+		Self {
+			track: track.into(),
+			random_access: false,
+		}
 	}
 }
 
@@ -205,7 +281,7 @@ pub struct SiEntry {
 	pub track: String,
 
 	/// Re-emit at least this often. A hint: import fills in the DVB maximum for the
-	/// tables it recognizes, and export is free to clamp it. Absent for an unknown
+	/// tables it recognizes, and export repeats at half of it. Absent for an unknown
 	/// `table_id`, which export then re-emits on its own PSI cadence, so an unknown
 	/// table degrades to a safe rate rather than being dropped.
 	///
@@ -479,6 +555,52 @@ mod test {
 	}
 
 	#[test]
+	fn passthrough_roundtrip() {
+		let mut passthrough = PassthroughTrack::new("0.m2ts");
+		passthrough.random_access = true;
+		let mpegts = Mpegts {
+			passthrough: Some(passthrough),
+			mux_rate: Some(2_499_999),
+			..Default::default()
+		};
+
+		let json = serde_json::to_string(&Ext { mpegts: mpegts.clone() }).unwrap();
+		assert_eq!(
+			json,
+			r#"{"mpegts":{"muxRate":2499999,"passthrough":{"track":"0.m2ts","randomAccess":true}}}"#
+		);
+		assert_eq!(serde_json::from_str::<Ext>(&json).unwrap().mpegts, mpegts);
+
+		// `randomAccess` is always written, and read as false when absent.
+		let json = serde_json::to_string(&PassthroughTrack::new("0.m2ts")).unwrap();
+		assert_eq!(json, r#"{"track":"0.m2ts","randomAccess":false}"#);
+		let read: PassthroughTrack = serde_json::from_str(r#"{"track":"0.m2ts"}"#).unwrap();
+		assert_eq!(read, PassthroughTrack::new("0.m2ts"));
+		serde_json::from_str::<PassthroughTrack>(r#"{"randomAccess":true}"#)
+			.expect_err("a passthrough names its track");
+	}
+
+	/// A track is carried whole or demultiplexed, never both, while the two lanes of one source can
+	/// share the section.
+	#[test]
+	fn a_passthrough_track_described_as_demultiplexed_is_refused() {
+		let passthrough = r#""passthrough":{"track":"0.m2ts","randomAccess":true}"#;
+		for other in [
+			r#""tracks":{"0.m2ts":{"pid":256}}"#,
+			r#""si":{"17":{"66":{"track":"0.m2ts"}}}"#,
+		] {
+			let json = format!("{{{passthrough},{other}}}");
+			serde_json::from_str::<Mpegts>(&json).expect_err(&json);
+		}
+
+		let json = format!(
+			r#"{{{passthrough},"tracks":{{"0.avc3":{{"pid":256}}}},"program":{{"transportStreamId":1,"programNumber":1,"pmtPid":4096}}}}"#
+		);
+		let mpegts: Mpegts = serde_json::from_str(&json).unwrap();
+		assert_eq!(mpegts.passthrough.unwrap().track, "0.m2ts");
+	}
+
+	#[test]
 	fn section_roundtrip() {
 		let mut mpegts = Mpegts::default();
 		// A media track: PID + a language descriptor, no verbatim carriage.
@@ -694,7 +816,7 @@ mod test {
 		)
 		.unwrap();
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(producer.next_timestamp()).unwrap();
 		guard.ext.mpegts.program = Some(Program {
 			transport_stream_id: 0x1234,
 			program_number: 1,

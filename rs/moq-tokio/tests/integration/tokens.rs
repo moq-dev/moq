@@ -1,8 +1,6 @@
 //! Configured tokens reach the server as the connection credential: in SETUP where the
-//! negotiated version carries one, and in the URL query where it might not. A refused
-//! credential is dialed again only once the client has a new one.
-
-#![cfg(feature = "quic")]
+//! negotiated version carries one, and in the URL query where it might not. A refusal of
+//! the first session ends the connection, even once the client has a new credential.
 
 use std::{sync::Arc, time::Duration};
 
@@ -129,27 +127,26 @@ async fn lite_05_presents_the_token_in_the_url() {
 		.expect("the credential was refused");
 }
 
-/// A refused credential the client has since replaced is dialed again with the new one.
+/// A first session refused after it connected ends the connection like a refused dial,
+/// even for a credential the client has since replaced: the app reconnects with it.
 #[tokio::test]
-async fn a_refused_credential_redials_with_its_replacement() {
+async fn a_refused_first_session_ends_the_connection() {
 	let mut server = serve("moq-lite-07-wip", "old").await;
 	let client = client("moq-lite-07-wip", &["old"]);
 	let url: url::Url = format!("moqt://localhost:{}/", server.port).parse().unwrap();
 	let connection = client.connect(url);
 	assert_eq!(next(&mut server).await.token.as_deref(), Some("old"));
 
-	let tokens = connection.tokens();
-	tokens.set(vec!["new".parse().unwrap()]);
+	connection.tokens().set(vec!["new".parse().unwrap()]);
 	server.release.notify_one();
-	assert_eq!(next(&mut server).await.token.as_deref(), Some("new"));
-	kio::clock::timeout(Duration::from_secs(10), tokens.answered())
+	kio::clock::timeout(Duration::from_secs(10), connection.closed())
 		.await
-		.expect("the replacement was never answered")
-		.expect("the replacement was refused");
-	assert!(connection.connected());
+		.expect("the refusal was redialed")
+		.expect_err("the refusal ended the connection cleanly");
+	assert!(server.seen.try_recv().is_err(), "redialed after the refusal");
 }
 
-/// A refused credential is the tokens' answer while the connection keeps redialing.
+/// A refused credential is the tokens' answer.
 #[tokio::test]
 async fn a_refused_credential_answers_the_tokens() {
 	refused_credential_answers(config("moq-lite-07-wip", &["old"])).await;

@@ -10,7 +10,6 @@ use std::rc::Rc;
 use std::task::{Context, Poll, ready};
 
 use bytes::Buf;
-use moq_quic::send::End;
 
 use super::Shared;
 use crate::quic::{Error as ConnectionError, VarInt, stream};
@@ -89,12 +88,20 @@ impl Stream {
 			return Poll::Ready(Err(Error::Connection(err)));
 		}
 		// moq-quic wakes us once the stream is writable again, or stopped.
-		let written = shared.conn.borrow_mut().send_stream(id).poll_write(waiter, buf);
-		match ready!(written) {
-			Ok(written) => Poll::Ready(Ok(written)),
-			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
-			Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
-			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
+		let mut conn = shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(id);
+		let err = match ready!(stream.poll_write(waiter, buf)) {
+			Ok(written) => return Poll::Ready(Ok(written)),
+			Err(err) => err,
+		};
+		// An open stream fails only once the peer stopped it or the connection was lost.
+		if let Ok(Some(code)) = stream.stopped() {
+			return Poll::Ready(Err(Error::Stopped(code)));
+		}
+		drop(conn);
+		match shared.closed() {
+			Some(closed) => Poll::Ready(Err(Error::Connection(closed))),
+			None => unreachable!("an open stream failed to write: {err:?}"),
 		}
 	}
 
@@ -127,7 +134,7 @@ impl Stream {
 
 	/// The offset just past the data written so far.
 	pub fn offset(&self) -> Offset {
-		self.0.shared.conn.borrow_mut().send_stream(self.0.id).offset()
+		self.0.offset()
 	}
 
 	/// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`.
@@ -147,20 +154,20 @@ impl Stream {
 		self.0.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written so far.
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.0.acknowledged()
-	}
-
 	/// How many leading bytes the peer acknowledged.
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.0.acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will.
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_all_acked(waiter)
+	/// Wait for the peer to acknowledge every byte before `offset`.
+	///
+	/// Fails with the peer's stop code once it stopped the stream before acknowledging them, or the
+	/// connection's loss.
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.0.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
@@ -208,9 +215,9 @@ impl Finished {
 		self.0.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.0.acknowledged()
+	/// The offset just past the data written. See [`Stream::offset()`].
+	pub(crate) fn offset(&self) -> Offset {
+		self.0.offset()
 	}
 
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
@@ -218,9 +225,12 @@ impl Finished {
 		self.0.acked_len()
 	}
 
-	/// Wait for every byte to be acknowledged. See [`Stream::poll_all_acked()`].
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_all_acked(waiter)
+	/// Wait for the peer to acknowledge every byte before `offset`. See [`Stream::poll_acked()`].
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.0.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -293,12 +303,8 @@ impl Half {
 			.unwrap_or_default()
 	}
 
-	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
-	fn acknowledged(&self) -> bool {
-		let mut conn = self.shared.conn.borrow_mut();
-		let mut stream = conn.send_stream(self.id);
-		let offset = stream.offset();
-		stream.acked(offset).unwrap_or(false)
+	fn offset(&self) -> Offset {
+		self.shared.conn.borrow_mut().send_stream(self.id).offset()
 	}
 
 	/// How many leading bytes the peer acknowledged, each counted once.
@@ -306,16 +312,23 @@ impl Half {
 		self.shared.conn.borrow_mut().send_stream(self.id).acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will, as after a reset or `STOP_SENDING`.
-	fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Wait for the peer to acknowledge every byte before `offset`.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
-		let offset = stream.offset();
-		match stream.poll_acked(waiter, offset) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		// A stop fails the wait even for bytes the peer already acknowledged, which still count.
+		if ready!(stream.poll_acked(waiter, offset)).is_ok() || stream.acked_len() >= u64::from(offset) {
+			return Poll::Ready(Ok(()));
 		}
+		// A held stream is never released, and a reset consumes its handle, so only the peer's
+		// stop or the connection's loss leaves its bytes unacknowledged.
+		let stopped = stream.stopped().ok().flatten();
+		drop(conn);
+		Poll::Ready(Err(match (stopped, self.shared.closed()) {
+			(Some(code), _) => Error::Stopped(code),
+			(None, Some(err)) => Error::Connection(err),
+			(None, None) => unreachable!("a held stream's acknowledgment failed while the connection lives"),
+		}))
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {
@@ -326,13 +339,15 @@ impl Half {
 
 /// Wait for send stream `id` to end: moq-quic keeps how it ended until its handle releases it.
 fn poll_closed(shared: &Shared, id: stream::Id, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-	let end = shared.conn.borrow_mut().send_stream(id).poll_end(waiter);
-	match ready!(end) {
-		Ok(End::Stopped(code)) => Poll::Ready(Ok(Some(code))),
-		Ok(_) => Poll::Ready(Ok(None)),
-		Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
-		// Only a released ID has no end, and the handle releases it only on drop.
-		Err(err) => unreachable!("a held send stream has no end: {err:?}"),
+	let stopped = shared.conn.borrow_mut().send_stream(id).poll_stopped(waiter);
+	let err = match ready!(stopped) {
+		Ok(stopped) => return Poll::Ready(Ok(stopped)),
+		Err(err) => err,
+	};
+	// Only a released ID has no end, and the handle releases it only on drop.
+	match shared.closed() {
+		Some(closed) => Poll::Ready(Err(Error::Connection(closed))),
+		None => unreachable!("a held send stream has no end: {err:?}"),
 	}
 }
 
@@ -340,10 +355,7 @@ impl Drop for Half {
 	fn drop(&mut self) {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		// A reset fails harmlessly once the connection is gone.
 		let _ = match (&self.state, stopped) {
 			(HalfState::Reset, _) => Ok(()),

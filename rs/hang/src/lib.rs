@@ -24,7 +24,7 @@ pub mod stats;
 /// Solicited viewer feedback and echo broadcast names.
 pub mod echo;
 
-/// Client health graded from two consecutive media reports.
+/// Client health graded from two consecutive stats or feedback reports.
 pub mod health;
 
 /// The catalog is used to describe the available media tracks and codecs.

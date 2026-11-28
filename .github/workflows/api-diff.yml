@@ -52,8 +52,8 @@ jobs:
       - if: ${{ !steps.mode.outputs.skip }}
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       # The JS baseline is rendered from `release`'s source.
       - name: Fetch release
         if: ${{ !steps.mode.outputs.skip }}
@@ -65,7 +65,7 @@ jobs:
         run: nix develop --command just api-diff ${ARGS:+"$ARGS"}
         env:
           ARGS: ${{ steps.mode.outputs.args }}
-          # Lists and downloads the moq-c and moq-ffi release assets.
+          # Lists and downloads the libmoq and moq-ffi release assets.
           GH_TOKEN: ${{ github.token }}
       - name: Keep the report
         if: ${{ !cancelled() && steps.diff.outcome != 'skipped' }}

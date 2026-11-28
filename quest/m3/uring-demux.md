@@ -18,8 +18,8 @@ customer feature, and moq.pro already ranks one-port above its uring
 rollout.
 
 Decided 2026-10-08: the UDP demux shrinks to QUIC plus the WebRTC hook, and
-the public STUN responder belongs to the deferred m4 P2P line, so the ring carries no
-STUN responder class either. An ICE Binding request is WebRTC traffic and
+the relay serves no public STUN responder, so the ring carries no STUN
+responder class either. An ICE Binding request is WebRTC traffic and
 follows that class.
 
 Each worker's endpoint receives a batch and feeds every segment straight to
@@ -55,4 +55,4 @@ off on the ring, from shard steering.
 
 ## Related
 
-- [Stream transports](/quest/m9/stream-transports/README.md) - the TCP half of moving the relay onto the ring
+- [Stream transports](/quest/m4/stream-transports/README.md) - the TCP half of moving the relay onto the ring

@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Consumer } from "./consumer.ts";
+import { Consumer, type Delay } from "./consumer.ts";
 import { Format } from "./legacy.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -11,8 +11,8 @@ for (const count of [1, 16, 256]) {
 	test(`Consumer summarizes ${count} skipped groups once per catch-up`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("tone");
-		const delay = new Signal<Track.Delay>({ max: Duration.millis(30_000) });
-		const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+		const delay = new Signal<Delay>({ max: Duration.millis(30_000) });
+		const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 			format: new Format("data"),
 			delay,
 		});
@@ -61,7 +61,7 @@ for (const open of [true, false]) {
 	test(`a buffered backlog starts within the budget (sixth group ${open ? "open" : "finished"})`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("backlog");
-		const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+		const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 			format: new Format("data"),
 			delay: { max: Duration.millis(1500) },
 		});
@@ -101,7 +101,7 @@ for (const open of [true, false]) {
 test("a backlog start waits on a successor without frames", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("backlog");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("data"),
 		delay: { max: Duration.millis(1500) },
 	});
@@ -145,8 +145,8 @@ test("a backlog start waits on a successor without frames", async () => {
 test("Consumer measures each skip's span over every group left, not just the new oldest", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
-	const delay = new Signal<Track.Delay>({ max: Duration.millis(30_000) });
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const delay = new Signal<Delay>({ max: Duration.millis(30_000) });
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("data"),
 		delay,
 	});
@@ -193,14 +193,15 @@ test("Consumer measures each skip's span over every group left, not just the new
 test("a blocking group is kept until its successor starts a budget behind the newest", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	// An unserved fill owes the groups in flight, as a session's feed would.
+	track.requests();
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(150) },
+		delay: { min: null, max: Duration.millis(150) },
 	});
-	const sent = Time.Timestamp.now();
 	const write = (sequence: bigint, timestamp: number) => {
 		const group = track.createGroup(sequence);
-		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		return group;
 	};
 	try {
@@ -232,19 +233,18 @@ test("a blocking group is kept until its successor starts a budget behind the ne
 test("a blocking group ages out past an unstamped successor", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("data"),
 		delay: { max: Duration.millis(150) },
 	});
-	const sent = Time.Timestamp.now();
 	try {
 		const blocking = track.createGroup(0n);
-		blocking.writeFrame({ payload: Varint.encode(0), timestamp: sent });
+		blocking.writeFrame({ payload: Varint.encode(0), timestamp: Time.Timestamp.fromMicros(0) });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
 		track.createGroup(1n).finish();
 		const later = track.createGroup(2n);
 		for (const timestamp of [1_000_000, 2_000_000])
-			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		await flush();
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 2n });

@@ -13,7 +13,6 @@ use crate::{
 pub mod ack_frequency;
 pub mod datagram;
 pub mod mtu;
-#[cfg(feature = "qlog")]
 pub mod qlog;
 
 /// The expected round trip time the default windows are tuned for, in milliseconds
@@ -63,8 +62,9 @@ pub struct Config {
 	/// Used in place of [`idle_timeout`](Self::idle_timeout) until the handshake completes, so a
 	/// short idle timeout meant to detect a dead peer quickly does not also cut a handshake off
 	/// after a single probe. It applies whether the idle timeout is shorter, longer, or disabled,
-	/// and whatever idle timeout the peer advertises. Defaults to 10 seconds, as msquic's
-	/// `HandshakeIdleTimeoutMs`.
+	/// and whatever idle timeout the peer advertises. Defaults to 30 seconds, the default idle
+	/// timeout: under heavy loss a client backs its probes off past 10 seconds, and a half-open
+	/// handshake costs no more than an idle connection.
 	pub handshake_timeout: Duration,
 
 	/// Period of inactivity before sending a keep-alive packet, `None` (the default) to derive it
@@ -184,7 +184,6 @@ pub struct Config {
 	pub segmentation_offload: bool,
 
 	/// Where to write qlog traces, or `None` (the default) to write none
-	#[cfg(feature = "qlog")]
 	pub qlog: Option<qlog::Stream>,
 
 	/// Whether to advertise support for receiving RESET_STREAM_AT
@@ -211,10 +210,13 @@ impl Config {
 			return Err(ConfigError::IdleTimeout);
 		}
 		let mtu = INITIAL_MTU..=MAX_UDP_PAYLOAD;
-		let discovery = self.mtu.as_ref().map(|mtu| mtu.upper_bound);
 		if !mtu.contains(&self.initial_mtu)
 			|| !mtu.contains(&self.min_mtu)
-			|| discovery.is_some_and(|bound| !mtu.contains(&bound))
+			// A zero step never ends the discovery search.
+			|| self
+				.mtu
+				.as_ref()
+				.is_some_and(|discovery| !mtu.contains(&discovery.upper_bound) || discovery.minimum_change == 0)
 		{
 			return Err(ConfigError::Mtu);
 		}
@@ -254,10 +256,7 @@ impl Config {
 	}
 
 	pub(crate) fn qlog_sink(&self) -> QlogSink {
-		#[cfg(feature = "qlog")]
-		return self.qlog.clone().into();
-		#[cfg(not(feature = "qlog"))]
-		QlogSink::default()
+		self.qlog.clone().into()
 	}
 }
 
@@ -286,7 +285,7 @@ impl Default for Config {
 		Self {
 			limits: Limits::default(),
 			idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
-			handshake_timeout: Duration::from_secs(10),
+			handshake_timeout: DEFAULT_IDLE_TIMEOUT,
 			keep_alive: None,
 			send_fairness: true,
 
@@ -310,7 +309,6 @@ impl Default for Config {
 			crypto_buffer_size: 16 * 1024,
 			allow_spin: true,
 			segmentation_offload: true,
-			#[cfg(feature = "qlog")]
 			qlog: None,
 
 			reset_stream_at: true,
@@ -343,14 +341,13 @@ impl fmt::Debug for Config {
 			crypto_buffer_size,
 			allow_spin,
 			segmentation_offload,
-			#[cfg(feature = "qlog")]
 			qlog,
 			reset_stream_at,
 			#[cfg(test)]
 				deterministic_packet_numbers: _,
 		} = self;
-		let mut s = fmt.debug_struct("Config");
-		s.field("limits", limits)
+		fmt.debug_struct("Config")
+			.field("limits", limits)
 			.field("idle_timeout", idle_timeout)
 			.field("handshake_timeout", handshake_timeout)
 			.field("keep_alive", keep_alive)
@@ -370,9 +367,21 @@ impl fmt::Debug for Config {
 			.field("crypto_buffer_size", crypto_buffer_size)
 			.field("allow_spin", allow_spin)
 			.field("segmentation_offload", segmentation_offload)
-			.field("reset_stream_at", reset_stream_at);
-		#[cfg(feature = "qlog")]
-		s.field("qlog", &qlog.is_some());
-		s.finish_non_exhaustive()
+			.field("reset_stream_at", reset_stream_at)
+			.field("qlog", &qlog.is_some())
+			.finish_non_exhaustive()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn validate_refuses_a_zero_mtu_step() {
+		let mut config = Config::default();
+		assert_eq!(config.validate(), Ok(()));
+		config.mtu.as_mut().unwrap().minimum_change = 0;
+		assert_eq!(config.validate(), Err(ConfigError::Mtu));
 	}
 }

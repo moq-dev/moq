@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::{mem, task::Poll};
 
 use tracing::trace;
 
@@ -47,10 +47,12 @@ impl<'a> Streams<'a> {
 		}
 
 		if self.state.next[dir as usize] >= self.state.max[dir as usize] {
-			self.state.streams_blocked[dir as usize] = true;
-			self.state.open_refused[dir as usize] = true;
-			// STREAMS_BLOCKED
-			self.state.waits.wake_transmit();
+			// One STREAMS_BLOCKED per limit: each refusal past the first would cost a packet of
+			// its own, saying what the peer already heard
+			if !mem::replace(&mut self.state.open_refused[dir as usize], true) {
+				self.state.streams_blocked[dir as usize] = true;
+				self.state.waits.wake_transmit();
+			}
 			return None;
 		}
 
@@ -80,9 +82,12 @@ impl<'a> Streams<'a> {
 
 		let x = self.state.next_reported_remote[dir as usize];
 		self.state.next_reported_remote[dir as usize] = x + 1;
+		self.state.materialize(StreamId::new(!self.state.side, dir, x));
 		if dir == Dir::Bi {
 			self.state.send_streams += 1;
 		}
+		// A quiesce waiting on the stream can end it now.
+		self.state.waits.wake_ended();
 
 		Some(StreamId::new(!self.state.side, dir, x))
 	}

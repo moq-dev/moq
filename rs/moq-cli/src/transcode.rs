@@ -24,7 +24,7 @@ pub struct Args {
 	/// e.g. `--rung 720:2500000 --rung 360:600000`. Short sides and bitrates must
 	/// increase together; input order does not matter. Rungs above the source
 	/// are dropped; a same-size rung needs a lower known bitrate.
-	/// Defaults to a 240p..1080p ladder.
+	/// Defaults to a 240p..1080p ladder capped by the default video cap formula.
 	#[usage(long = "rung")]
 	rungs: Vec<RungArg>,
 
@@ -43,21 +43,31 @@ pub struct Args {
 	#[usage(long, default = "native")]
 	frames: OutputArg,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// Encoder sessions that may serve viewers at once, across live rungs and fetched
+	/// groups; one more opens briefly to probe a new rung. Hardware encoders cap sessions
+	/// per device, so leave room for this plus one. Unlimited by default.
+	#[usage(long)]
+	encoder_sessions: Option<std::num::NonZeroUsize>,
+
+	/// The render node the decoder and encoders open, such as
+	/// `/dev/dri/renderD129`: VA-API opens it, and NVDEC and NVENC the NVIDIA
+	/// GPU behind it. Defaults to the first that encodes, decodes, and scales.
+	/// Linux only.
+	#[usage(
+		long,
+		env = "MOQ_VAAPI_DEVICE",
+		value_hint = usage_rs::ValueHint::FilePath,
+		conflicts("--v4l2-encoder", "--v4l2-decoder")
+	)]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
-	/// that encodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that encodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_encoder: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
-	/// that decodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that decodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
@@ -122,15 +132,11 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.output = args.frames.0;
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	{
-		config.vaapi = args.vaapi_device.clone();
+	if let Some(serving) = args.encoder_sessions {
+		config.sessions = moq_transcode::Sessions::new(serving);
 	}
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	{
-		config.v4l2_encoder = args.v4l2_encoder.clone();
-		config.v4l2_decoder = args.v4l2_decoder.clone();
-	}
+	config.decoder_device = crate::device(&args.vaapi_device, &args.v4l2_decoder);
+	config.encoder_device = crate::device(&args.vaapi_device, &args.v4l2_encoder);
 
 	let source_path = moq_net::Path::try_from(
 		moq.broadcast
@@ -182,7 +188,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	}
 }
 
-/// Each source instance owns a fresh derivative, so its timestamps and track names never
+/// Each source identity owns a fresh derivative, so its timestamps and track names never
 /// describe another publisher's content on an existing broadcast.
 struct Following {
 	origin: moq_net::origin::Consumer,
@@ -194,11 +200,11 @@ struct Following {
 
 impl Following {
 	async fn run(self) -> anyhow::Result<()> {
-		let mut instances = self.origin.follow(&self.source_path, None)?;
+		let mut identities = self.origin.follow(&self.source_path, None)?;
 		let mut running = None;
 		loop {
 			tokio::select! {
-				event = instances.available() => match event? {
+				event = identities.available() => match event? {
 					Some(source) => {
 						let output = self.publish.route(&self.output_path, moq_net::origin::RouteOptions::hidden())?;
 						let transcoder = moq_transcode::Transcoder::new(source, output.broadcast().clone(), self.config.clone())?;
@@ -220,7 +226,7 @@ impl Following {
 					running = None;
 					match result {
 						Ok(()) => {}
-						// The instance ended cleanly before advertising anything to transcode.
+						// The identity ended cleanly before advertising anything to transcode.
 						Err(moq_transcode::Error::NoSource) => {
 							tracing::info!(source = %self.source_path, "ended before its video was ready, waiting for it to return");
 						}
@@ -237,18 +243,18 @@ mod tests {
 	use super::*;
 
 	/// A pending source catalog is a real run even before an encoder is needed. Replacing
-	/// that source must retire the old derivative and announce a fresh instance immediately.
+	/// that source must retire the old derivative and announce a fresh identity immediately.
 	#[tokio::test(start_paused = true)]
 	async fn a_source_restart_replaces_the_derivative_while_its_catalog_is_pending() {
 		restart(true).await;
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_source_restart_under_the_handle_instance_also_creates_a_new_derivative() {
+	async fn a_source_restart_under_the_handle_identity_also_creates_a_new_derivative() {
 		restart(false).await;
 	}
 
-	/// `named` announces each source under an instance its options name, rather than the one
+	/// `named` announces each source under an identity its options name, rather than the one
 	/// its route mints.
 	async fn restart(named: bool) {
 		let origin = moq_tokio::origin::spawn();
@@ -256,7 +262,7 @@ mod tests {
 		let options = || {
 			let options = moq_net::origin::RouteOptions::default();
 			if named {
-				options.with_instance(moq_net::Instance::random(), 0)
+				options.with_identity(moq_net::Identity::random(), 0)
 			} else {
 				options
 			}
@@ -285,7 +291,7 @@ mod tests {
 		let _new_dynamic = new.broadcast().requests();
 		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
-		assert_ne!(first.info().instance, second.info().instance);
+		assert_ne!(first.info().identity, second.info().identity);
 		assert!(first.is_closed(), "the superseded ladder is retired");
 		assert_eq!(
 			next_route(&mut routes).await,
@@ -309,9 +315,9 @@ mod tests {
 	}
 
 	/// A source that finishes its catalog before advertising any video is a clean end, so the
-	/// command keeps following and the next instance still gets a ladder.
+	/// command keeps following and the next identity still gets a ladder.
 	#[tokio::test(start_paused = true)]
-	async fn a_source_ending_before_its_video_waits_for_the_next_instance() {
+	async fn a_source_ending_before_its_video_waits_for_the_next_identity() {
 		let origin = moq_tokio::origin::spawn();
 		let publish = moq_tokio::origin::spawn();
 		let old = origin
@@ -355,17 +361,17 @@ mod tests {
 		event.kind
 	}
 
-	/// The next derivative instance announced at the output path.
-	async fn next(instances: &mut moq_net::origin::Following) -> moq_net::broadcast::Consumer {
+	/// The next derivative identity announced at the output path.
+	async fn next(identities: &mut moq_net::origin::Following) -> moq_net::broadcast::Consumer {
 		let start = async {
 			loop {
-				if let Some(broadcast) = instances.available().await.unwrap() {
+				if let Some(broadcast) = identities.available().await.unwrap() {
 					return broadcast;
 				}
 			}
 		};
 		kio::clock::timeout(std::time::Duration::from_secs(1), start)
 			.await
-			.expect("no derivative instance was announced")
+			.expect("no derivative identity was announced")
 	}
 }

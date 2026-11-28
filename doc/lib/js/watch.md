@@ -63,22 +63,6 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
-A video rendition encoded with intra refresh has no keyframes, and its catalog
-`warmup` says how long a decoder takes to clean up after joining. The player
-decodes such a rendition twice: one decoder holds your delay and may show
-refresh stripes after a join or a skip, while a second starts one group earlier
-and tolerates `warmup` more lateness, so its picture is clean. The clean
-picture shows whenever it has caught up. Each decoder costs its own CPU and
-decoder memory, and both share one subscription. A rendition without `warmup`
-uses one decoder.
-
-An H.264 group of such a rendition opens on a recovery point that is not an
-IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
-an IDR or a recovery point that counts zero frames. So when a decoder opens on
-one, the player inserts a second recovery point with a zero count before its
-first slice. The slices are untouched; the stripes clear as the sweep
-completes.
-
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the
 connection dials, redials, or was refused (`el.connection.error` says why), and until the
@@ -89,9 +73,11 @@ and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. A catalog track that
-ends cleanly keeps playing until the broadcast ends, so a viewer drains a
-finished broadcast's tail. When the exact route
+waits for one to return for as long as it is mounted. A publisher that stops
+cleanly finishes its catalog and media tracks: the player plays the tail it
+received, holding the last picture without a buffering spinner, then reads
+`offline` (`el.video.out.ended` and `el.audio.out.ended` turn true) even while the
+relay still serves the finished broadcast to late subscribers. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
@@ -204,6 +190,12 @@ const player = new Watch.Player({
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
+
+`video.target`'s `width` and `height` cap the picture and, unless the box is
+square, prefer the renditions shown in its orientation, falling back to the
+other only when none can be decoded. `<moq-watch>` sets them from its rendered
+size, so rotating a phone switches between a broadcast's portrait and landscape
+renditions.
 
 `viewer.viewers` claims the broadcast's share of the connection's receive
 estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the

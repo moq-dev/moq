@@ -13,7 +13,7 @@ Found by [moq-dev/moq#7512](https://github.com/moq-dev/moq/pull/7512), which att
 - Keep `HashMap<token, count>` and `HashMap<remote, count>` beside the slots, updated on connect, end, a new token attaching to a known session, and expiry. `Sessions::revalidate` updates them too, since it re-inserts an aged-out or restart-lost slot and appends a token the slot hadn't seen, and it keeps today's rule of enforcing no cap.
 - Age slots from a queue ordered by `seen`, refreshed on each sighting (a re-push with a generation, or an ordered map keyed by `(seen, id)`), so a sweep pops only expired entries. Keep today's rule: a session that missed two cadences is dropped.
 - Keep the semantics the doc comment on the limits describes, including a known id attaching another credential counting only against the new JWT's cap.
-- The per-token count's key is [its own fix](/quest/m1/token-count-signing-input.md), split out 2026-11-12 (maintainer, /quest-audit) because it corrects shipped behavior; index whatever key that leaves.
+- The per-token count is keyed by the hash of the JWT's signing input (`hash` in `serve.rs`), so a malleated ECDSA signature counts as the same token; index that key.
 - Measure with #7512's `verify/sessions` bench before and after; the slope should be flat.
 
 Public API: none. Wire: none.

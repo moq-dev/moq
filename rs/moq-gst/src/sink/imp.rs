@@ -742,8 +742,9 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
-				let pts = lifecycle.media.timeline_pts(&buffer)?;
+			// Once per buffer: an Opus packet's advances the pre-skip it clips.
+			let outcome = lifecycle.media.timeline_pts(&buffer).and_then(|pts| {
+				lifecycle.media.place_wall(&buffer, pts, sample)?;
 				lifecycle
 					.media
 					.push_buffer(data, pts, duration, current_running_time)
@@ -1367,7 +1368,7 @@ mod tests {
 				.wall
 				.place(
 					&gst::Buffer::new(),
-					Duration::ZERO,
+					gst::Signed::Positive(gst::ClockTime::ZERO),
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
 						wall: kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
@@ -1497,9 +1498,9 @@ mod tests {
 			panic!("first catalog")
 		};
 		assert_eq!(
-			first.media.clock.unwrap().wall.as_micros(),
+			first.sync.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
-				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.saturating_duration_since(moq_net::time::EPOCH)
 				.as_micros(),
 		);
 	}
@@ -1536,13 +1537,13 @@ mod tests {
 				let state = control.live.as_ref().unwrap();
 				(
 					state.route.broadcast().consume(),
-					state.catalog.as_ref().unwrap().snapshot().media.clock.unwrap(),
+					state.catalog.as_ref().unwrap().snapshot().sync.clock.unwrap(),
 				)
 			};
 			assert_eq!(
-				clock.wall.as_micros(),
+				clock.wall.as_micros().unwrap(),
 				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
-					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.saturating_duration_since(moq_net::time::EPOCH)
 					.as_micros()
 			);
 			for (name, kind, expected) in [
@@ -1558,7 +1559,7 @@ mod tests {
 				let moq_mux::container::Read::Frame { frame, .. } = read else {
 					panic!("media frame")
 				};
-				assert_eq!(frame.timestamp.as_micros(), expected * 1_000_000, "{name}");
+				assert_eq!(frame.timestamp.as_micros().unwrap(), expected * 1_000_000, "{name}");
 			}
 			run.0.set_state(gst::State::Null).unwrap();
 		}
@@ -2470,7 +2471,11 @@ mod tests {
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
-		track.append_group().unwrap().finish().unwrap();
+		track
+			.append_group(moq_net::Timestamp::unscaled(0))
+			.unwrap()
+			.finish()
+			.unwrap();
 		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
@@ -2585,7 +2590,7 @@ mod tests {
 			"url",
 			"broadcast",
 			"linger",
-			"tls-disable-verify",
+			"connect-tls-insecure",
 			"quic-idle-timeout",
 			"quic-keep-alive",
 			"quic-keylog",
@@ -2661,11 +2666,7 @@ mod tests {
 		sink.set_property("broadcast", "test");
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let config = super::super::session::connect_config(&resolved);
-		assert_eq!(
-			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
-		);
+		assert_eq!(config.backoff.timeout, Some(moq_tokio::cli::Bound::NONE), "no give-up");
 	}
 
 	#[test]

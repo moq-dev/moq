@@ -79,6 +79,8 @@ pub struct Log {
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 	/// Set by [`Self::fail_writes`].
 	writes_fail: Arc<AtomicBool>,
+	/// Set by [`Self::stop_sends`].
+	stop_sends: Arc<Mutex<Option<u32>>>,
 	/// How many leading bytes of each send stream the peer acknowledged, or `None` when the
 	/// transport cannot tell. Only an advance wakes a stream's delivery waiters, as a QUIC
 	/// acknowledgement does: it never wakes `poll_closed`. See [`Self::ack`].
@@ -91,6 +93,11 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+	/// A reset that still delivers the stream's bytes before `offset`.
+	ResetAt {
+		offset: u64,
+		code: u32,
+	},
 }
 
 /// What the streams sent ahead of the first session close. See [`Log::before_close`].
@@ -122,6 +129,12 @@ impl Log {
 	/// them (STOP_SENDING) would.
 	pub fn fail_writes(&self) {
 		self.writes_fail.store(true, Ordering::Relaxed);
+	}
+
+	/// Stop every send stream from now on (STOP_SENDING) with `code`, as a peer that read
+	/// some of each and then stopped would. A stream learns it when next polled.
+	pub fn stop_sends(&self, code: u32) {
+		*self.stop_sends.lock().unwrap() = Some(code);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -238,6 +251,8 @@ pub struct SinkSend {
 	finished: bool,
 	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
 	unacked_fin: bool,
+	/// The peer stopped the stream (STOP_SENDING) with this code before reading it.
+	stopped: Option<u32>,
 	/// The send group the stream joined.
 	group: Option<usize>,
 }
@@ -288,6 +303,7 @@ impl SinkSend {
 			written: 0,
 			finished: false,
 			unacked_fin: false,
+			stopped: None,
 			group: None,
 		}
 	}
@@ -312,6 +328,7 @@ impl SinkSend {
 			written: 0,
 			finished: false,
 			unacked_fin: false,
+			stopped: None,
 			group: None,
 		}
 	}
@@ -320,6 +337,24 @@ impl SinkSend {
 impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 	type Group = SinkGroup;
+	type Offset = u64;
+
+	fn offset(&self) -> u64 {
+		self.written
+	}
+
+	/// Ready at once, as a transport without acknowledgments, until the test acknowledges a
+	/// prefix with [`Log::ack`].
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
+		let answer = |acked: Option<u64>| match acked {
+			Some(acked) if acked < *offset => Poll::Pending,
+			_ => Poll::Ready(()),
+		};
+		match self.log.acked.poll(waiter, |acked| answer(**acked)) {
+			Poll::Ready(_) => Poll::Ready(Ok(())),
+			Poll::Pending => Poll::Pending,
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.log.writes_fail.load(Ordering::Relaxed) {
@@ -394,26 +429,24 @@ impl poll::SendStream for SinkSend {
 		self.log.record(self.id, Sent::Reset(code));
 	}
 
+	/// Recorded like [`reset`](poll::SendStream::reset), its code among [`Log::resets`] too.
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		self.log.resets.lock().unwrap().push(code);
+		self.log.record(self.id, Sent::ResetAt { offset: *offset, code });
+	}
+
 	fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		if let Some(code) = self.stopped.or(*self.log.stop_sends.lock().unwrap()) {
+			return Poll::Ready(Err(SinkError {
+				code,
+				stream: Some(code),
+			}));
+		}
 		match self.finished && !self.unacked_fin {
 			true => Poll::Ready(Ok(())),
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
 		}
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.log.acked.read().map(|acked| acked.min(self.written))
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.log
-			.acked
-			.poll(waiter, |acked| match **acked {
-				Some(acked) if acked >= self.written => Poll::Ready(()),
-				_ => Poll::Pending,
-			})
-			.map(drop)
 	}
 }
 
@@ -635,6 +668,8 @@ pub struct SinkSession {
 	uni_open_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_stopped_unis`].
+	stopped_unis: Option<u32>,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_datagrams`]; zero disables datagrams.
@@ -650,6 +685,8 @@ pub struct SinkSession {
 	probe: Option<crate::transport::Probe>,
 	/// Set by [`Self::with_receive_window`], and widened by `set_limits`.
 	receive_window: Arc<Mutex<Option<crate::transport::ReceiveWindow>>>,
+	/// Set by [`Self::with_plain_reset`].
+	plain_reset: bool,
 }
 
 impl SinkSession {
@@ -660,10 +697,24 @@ impl SinkSession {
 		}
 	}
 
+	/// Reset like a peer without RESET_STREAM_AT, which may discard a reset stream's
+	/// unread prefix; otherwise every reset is reliable.
+	pub fn with_plain_reset(mut self) -> Self {
+		self.plain_reset = true;
+		self
+	}
+
 	/// Never acknowledge a unidirectional stream's FIN, like a congested peer, so a
 	/// finished group stays waiting on it.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Have the peer stop every unidirectional stream with `code` (STOP_SENDING), as a
+	/// subscriber that discarded it before reading its header does.
+	pub fn with_stopped_unis(mut self, code: u32) -> Self {
+		self.stopped_unis = Some(code);
 		self
 	}
 
@@ -822,6 +873,7 @@ impl poll::Session for SinkSession {
 			(None, None) => SinkSend::new(self.log.clone()),
 		};
 		send.unacked_fin = self.unacked_fin;
+		send.stopped = self.stopped_unis;
 		Poll::Ready(Ok(send.opened(options)))
 	}
 
@@ -871,6 +923,10 @@ impl poll::Session for SinkSession {
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		*self.receive_window.lock().unwrap()
+	}
+
+	fn reliable_reset(&self) -> bool {
+		!self.plain_reset
 	}
 
 	/// Set the connection window, on a transport that reports one.
@@ -1013,6 +1069,8 @@ pub struct ScriptedSession {
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
 	send_window: Option<usize>,
+	/// Set by [`Self::with_uni_send_window`].
+	uni_send_window: Option<usize>,
 }
 
 impl ScriptedSession {
@@ -1053,6 +1111,7 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			groups: false,
 			send_window: None,
+			uni_send_window: None,
 		}
 	}
 
@@ -1060,6 +1119,12 @@ impl ScriptedSession {
 	/// like a peer that never grants more send credit.
 	pub fn with_send_window(mut self, bytes: usize) -> Self {
 		self.send_window = Some(bytes);
+		self
+	}
+
+	/// The same for each opened unidirectional stream.
+	pub fn with_uni_send_window(mut self, bytes: usize) -> Self {
+		self.uni_send_window = Some(bytes);
 		self
 	}
 
@@ -1099,6 +1164,11 @@ impl ScriptedSession {
 	pub fn with_incoming_unis(mut self, scripts: Vec<Vec<u8>>) -> Self {
 		self.incoming_unis = Arc::new(Mutex::new(scripts.into_iter().collect()));
 		self
+	}
+
+	/// Have the peer open one more unidirectional stream, after those already scripted.
+	pub fn push_incoming_uni(&self, script: Vec<u8>) {
+		self.incoming_unis.lock().unwrap().push_back(script);
 	}
 
 	/// Have the peer open one bidirectional stream per script, then go quiet.
@@ -1150,6 +1220,16 @@ impl ScriptedSession {
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	/// A stream the peer sends the shared script on.
+	pub fn recv(&self) -> ScriptedRecv {
+		poll::Buffered::new(Script {
+			wake: self.wake.clone(),
+			script: self.script.clone(),
+			close: self.close.clone(),
+			log: self.log.clone(),
+		})
+	}
+
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
 		if let Some(wake) = &self.wake {
@@ -1273,7 +1353,14 @@ impl poll::Session for ScriptedSession {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
-		let mut send = SinkSend::new(self.log.clone());
+		let mut send = match self.uni_send_window {
+			// The gate's producer is gone, so the writes past the prefix park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		};
 		send.unacked_fin = self
 			.unacked_unis
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))

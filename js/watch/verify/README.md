@@ -7,7 +7,7 @@ can hit.
 ## Watching a broadcast
 
 `Watch.tla` follows one `<moq-watch>` through the relay connection (`@moq/net`'s reconnect
-loop), the publisher going live and stopping, the catalog, the media, and pause. What the screen
+loop), the publisher going live, stopping, or finishing cleanly and lingering, the catalog, the media, and pause. What the screen
 shows is derived as `src/ui/components` derives it: the OFFLINE notice, the buffering spinner,
 the unsupported notice, the refusal notice, and the status badge.
 
@@ -16,6 +16,7 @@ the unsupported notice, the refusal notice, and the status badge.
 | `NeverFrozenSilently` | A viewer whose video is not moving, and who did not pause it, is told something. | Holds. |
 | `OfflineMeansOffline` | The player says OFFLINE only when the broadcast is not live. | Holds: the broadcast reads `connecting` until a session's initial announcements arrive, and the badge says CONNECTING or DISCONNECTED meanwhile. |
 | `RefusalIsExplained` | A viewer the relay refused is told so. | Holds: the refusal notice shows the connection's error. |
+| `FinishNeverStalls` | A broadcast whose publisher stopped cleanly never freezes its last picture under the spinner. | Holds: the decoders read the track's finish as its end, and the broadcast reads OFFLINE once the tail played, while it still lingers for late subscribers. |
 
 `src/offline.test.ts` replays both paths.
 
@@ -57,5 +58,5 @@ Rendition selection, audio, captions, the `visible` gate, latency, and manual ca
 announcement's transit: one reaches a synced viewer in the step that makes it. The
 catalog failing mid-stream, a relay refusing the broadcast itself (`refused-indicator.ts`), and
 broadcasts referenced from another's catalog. In `Failover.tla`, a GOAWAY's replacement keeps the
-handle as a route of the same instance does; a lite-06 session mints a new instance, so the player
+handle as a route of the same identity does; a lite-06 session mints a new identity, so the player
 restarts the catalog there (a spinner rather than continuous playback).

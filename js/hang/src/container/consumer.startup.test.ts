@@ -2,18 +2,20 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
+// A consumer at `maxDelay` on a local track, which owes no missing group until a fill handler opens.
 function setup(maxDelay = 100) {
 	const clock = new Manual();
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Duration.ZERO);
-	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const track = new Track.Producer("video").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(maxDelay))), {
 		format: new Format("video"),
-		delay: { max: Duration.millis(maxDelay) },
+		delay: { min: null, max: Duration.millis(maxDelay) },
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -51,10 +53,12 @@ function frames(results: Read[]) {
 	return results.flatMap((read) => (read.kind === "frame" ? [read] : []));
 }
 
+// Stamped by the group's key rather than its media time, so a marker or a bridge sharing its
+// predecessor's media time still starts past it, as a group's first frame has to.
 function write(group: Group.Producer, timestamp: number, marker = false) {
 	group.writeFrame({
 		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Duration.micros(timestamp)),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(Number(group.start)),
 	});
 }
 
@@ -109,13 +113,16 @@ test("Consumer preserves a declared marker before its first media across a hole"
 	expect(warn).not.toHaveBeenCalled();
 });
 
-test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %s)", async (reset) => {
+test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %p)", async (reset) => {
 	const { track, consumer, results, warn, flush } = setup(1000);
 	const first = track.createGroup(16n);
 	write(first, 0);
 	first.finish();
 	await flush();
 	expect(items(results)).toEqual(["16@0"]);
+	// From here its missing groups an unserved fill owes, as a session's feed would, so the ordered
+	// read waits out the max delay for each hole.
+	track.requests();
 
 	if (reset) {
 		const marker = track.createGroup(17n);
@@ -128,10 +135,13 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	const later = track.createGroup(sequence);
 	write(later, 50_000);
 	await flush();
-	expect(consumer.buffered.peek().length).toBeGreaterThan(0);
+	// The ordered read holds the group past the hole until the hole resolves, so none of it is buffered.
+	expect(consumer.buffered.peek()).toEqual([]);
 	expect(frames(results)).toHaveLength(1);
 
-	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives.
+	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives. The key
+	// below it was never produced, as an appending publisher declares.
+	track.skipGroups(sequence - 2n, sequence - 1n);
 	const bridge = track.createGroup(sequence - 1n);
 	write(bridge, 0);
 	bridge.finish();

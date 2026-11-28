@@ -30,7 +30,7 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
-    MoqInstance as Instance,
+    MoqIdentity as Identity,
 )
 from moq_ffi import (
     MoqOrder as Order,
@@ -65,30 +65,30 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
+from moq_ffi import (
+    MoqVideoSurface as VideoSurface,
+)
 
 from ._records import (
-    Anchor,
     Backoff,
     ClientTls,
     ConnectionStats,
     Datagram,
     Delay,
     Frame,
+    FrameHeader,
     Grant,
     QuicConfig,
     Range,
     Subscription,
     Timestamp,
     TrackInfo,
+    TrackRefresh,
     VideoDecodedFrame,
-    VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
 __all__ = [
-    "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -103,9 +103,10 @@ __all__ = [
     "Delay",
     "ErrorScope",
     "Frame",
+    "FrameHeader",
     "FetchGroupOptions",
     "Grant",
-    "Instance",
+    "Identity",
     "Order",
     "Position",
     "ProtocolError",
@@ -117,14 +118,13 @@ __all__ = [
     "Subscription",
     "Timestamp",
     "TrackInfo",
+    "TrackRefresh",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoSurface",
-    "VideoSurfacePixelBuffer",
-    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "WebSocketConfig",
 ]

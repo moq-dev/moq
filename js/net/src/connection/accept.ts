@@ -1,6 +1,7 @@
 import type { Duration } from "@moq/clock";
-import { race } from "@moq/signals";
-import { ConnectTimeout, error, fromClose, ProtocolViolation } from "../error.ts";
+import { type Getter, race } from "@moq/signals";
+import { ConnectTimeout, closeReason, error, fromClose, ProtocolViolation } from "../error.ts";
+import type { Cost } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
@@ -8,9 +9,9 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import { after } from "../util/timer.ts";
-import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { checkCost, DEFAULT_TIMEOUT, exchangeSetup, handsOff, type Link, link } from "./handshake.ts";
+import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 
 /** Options for {@link Connection.accept}. */
@@ -41,14 +42,16 @@ export interface AcceptProps {
 	consume?: OriginProducer;
 
 	/**
-	 * The moq-transport extensions to offer, each on unless set to `false`.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
+	 * Price this link; see the `cost` connect option. Wins over the price the client declares, so
+	 * a server can price a peer it recognizes.
 	 */
-	extensions?: Extensions.Extensions;
+	cost?: Cost;
 
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
 	implementation?: string;
+
+	/** Probe a quiet client and report it through the session's `liveness`; see the `keepAlive` connect option. */
+	keepAlive?: KeepAlive.KeepAlive;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
@@ -56,11 +59,11 @@ type SessionProps = {
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
-	/** The moq-transport extensions this side offers. */
-	extensions: Extensions.Offered;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
-};
+	/** The peer's liveness, under a keep-alive. */
+	liveness?: Getter<KeepAlive.Liveness>;
+} & Link;
 
 /**
  * Server-side handshake: accepts a transport and performs the server half of the SETUP exchange.
@@ -70,6 +73,7 @@ type SessionProps = {
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.signal?.throwIfAborted();
+	checkCost(props.cost);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 	const deadline = new AbortController();
 	const signal = props.signal ? AbortSignal.any([props.signal, deadline.signal]) : deadline.signal;
@@ -87,7 +91,9 @@ export async function accept({ transport, url, ...props }: AcceptProps): Promise
 	} catch (failure) {
 		try {
 			transport.close(
-				failure instanceof ProtocolViolation ? { closeCode: failure.code, reason: failure.message } : undefined,
+				failure instanceof ProtocolViolation
+					? { closeCode: failure.code, reason: closeReason(failure.message) }
+					: undefined,
 			);
 		} catch {
 			/* Already closed. */
@@ -108,6 +114,8 @@ async function acceptInner(
 	url: URL,
 	props: Omit<AcceptProps, "transport" | "url">,
 ): Promise<Session> {
+	// Before reading the protocol, which a qmux session settles by the time its parameters arrive.
+	const liveness = props.keepAlive && (await KeepAlive.start(transport, props.keepAlive));
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol = (transport as { protocol?: string }).protocol;
@@ -115,10 +123,14 @@ async function acceptInner(
 	const wiring: SessionProps = {
 		publish: props.publish,
 		client: false,
-		extensions: Extensions.offered(props.extensions),
 		implementation: props.implementation ?? IMPLEMENTATION,
+		liveness,
+		...link(props),
 	};
 
+	if (protocol === Ietf.ALPN.DRAFT_23) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_23, wiring);
+	}
 	if (protocol === Ietf.ALPN.DRAFT_22) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_22, wiring);
 	}

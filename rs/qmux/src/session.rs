@@ -27,14 +27,21 @@ pub(crate) struct Inner {
 	state: Mutex<State>,
 	/// Updated by the driver, so stats never take the lock.
 	pub(crate) wire: net::Wire,
-	socket_stats: Option<SharedSocketStats>,
 	address: Address,
-	/// From [`Config::fixed_receive_window`].
-	fixed_receive_window: bool,
+}
+
+/// The connection underneath a session, for its metrics
+pub(crate) enum Socket {
+	/// Read through while the driver runs
+	Live(SharedSocketStats),
+	/// Released once the driver ended, so a session handle kept alive holds no descriptor;
+	/// what it last reported, if anything
+	Released { rtt: Option<Duration>, rate: Option<u64> },
 }
 
 pub(crate) struct State {
 	pub(crate) conn: mux::Connection,
+	pub(crate) socket: Socket,
 
 	/// The terminal error, set exactly once. Handles report it in place of the connection's
 	/// own reason once it is set, since it can say more (the transport's I/O error, say).
@@ -145,7 +152,6 @@ pub struct Session {
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
 	/// What the TLS handshake learned about the peer, on a session over TLS.
-	#[cfg(feature = "tls")]
 	pub(crate) tls: Option<Arc<crate::tls::Handshake>>,
 }
 
@@ -183,22 +189,24 @@ impl Session {
 	pub(crate) fn new<T: Transport>(mut transport: T, side: Side, config: Config) -> Result<(Self, Driver<T>), Error> {
 		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		transport.bind(&config);
+		let socket = match transport.socket_stats() {
+			Some(stats) => Socket::Live(stats),
+			None => Socket::Released { rtt: None, rate: None },
+		};
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {
 				conn,
+				socket,
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
 			}),
 			wire: net::Wire::new(),
-			socket_stats: transport.socket_stats(),
 			address: transport.address(),
-			fixed_receive_window: config.fixed_receive_window,
 		});
 		let session = Self {
 			_guard: Arc::new(Guard(inner.clone())),
 			inner: inner.clone(),
 			protocol: config.negotiated_protocol(),
-			#[cfg(feature = "tls")]
 			tls: None,
 		};
 		Ok((session, Driver::new(inner, transport)))
@@ -238,13 +246,9 @@ impl Session {
 	///
 	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
 	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
-	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW) or on a session whose window
-	/// is [fixed](Config::fixed_receive_window), and limits a peer would refuse. A window only
-	/// grows at once: credit already granted cannot be taken back.
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would refuse.
+	/// A window only grows at once: credit already granted cannot be taken back.
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
-		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
-			return Err(Error::InvalidConfig("this session's receive window is fixed"));
-		}
 		crate::config::check_limits(&limits)?;
 		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
 		if capped(limits.receive_rate) || capped(limits.send_rate) {
@@ -353,6 +357,8 @@ impl poll::Session for Session {
 		match state.conn.datagrams().send(payload, to_quic(options)) {
 			Ok(()) => {}
 			Err(send::Error::TooLarge) => return Err(Error::DatagramTooLarge),
+			// Closing: the close goes out, but nothing more may follow it.
+			Err(send::Error::ConnectionLost) => return Err(state.lost()),
 			Err(_) => return Err(Error::DatagramsUnsupported),
 		}
 		Ok(())
@@ -392,10 +398,13 @@ impl poll::Session for Session {
 		let state = self.inner.lock();
 		// The kernel's view of the socket underneath beats a QX_PING sample: it is there
 		// from the first byte and costs no traffic.
-		let socket = self.inner.socket_stats.as_ref();
+		let (rtt, rate) = match &state.socket {
+			Socket::Live(stats) => (stats.rtt(), stats.estimated_send_rate()),
+			Socket::Released { rtt, rate } => (*rtt, *rate),
+		};
 		Metrics {
-			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
-			rate: socket.and_then(|stats| stats.estimated_send_rate()),
+			rtt: rtt.or(state.conn.rtt()),
+			rate,
 			evicted: state.conn.credit_stats().evicted,
 		}
 	}
@@ -412,13 +421,45 @@ impl poll::Session for Session {
 		))
 	}
 
+	/// Only a qmux-02 peer that advertised RESET_STREAM_AT keeps a reset's prefix for its reader.
+	fn reliable_reset(&self) -> bool {
+		self.inner.lock().conn.reset_stream_at()
+	}
+
 	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
-		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
-			return Err(net::LimitsError::Unsupported);
-		}
 		let mut quic = moq_quic::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
+	}
+
+	/// QX_PING probes the peer, so draft-00, which has none, refuses it.
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), net::KeepAliveError> {
+		let keep_alive = moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard);
+		let mut inner = self.inner.lock();
+		if !inner.conn.version().uses_records() {
+			return Err(net::KeepAliveError::Unsupported);
+		}
+		// moq-quic wakes the driver to read the new deadline.
+		inner
+			.conn
+			.set_keep_alive(keep_alive)
+			.map_err(|err| net::KeepAliveError::Refused(err.to_string()))
+	}
+
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.inner
+			.lock()
+			.conn
+			.poll_stale(waiter, stale)
+			.map(|stale| match stale {
+				true => moq_net::transport::Liveness::Stale,
+				false => moq_net::transport::Liveness::Live,
+			})
 	}
 }
 
@@ -514,14 +555,19 @@ impl SendStream {
 		}
 	}
 
-	fn reset_with(&mut self, code: u32) {
+	/// Reset with `code`, still delivering the bytes before `offset` when given.
+	fn reset_with(&mut self, offset: Option<send::Offset>, code: u32) {
 		if self.end == SendEnd::Reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = state.conn.send_stream(self.id).reset(code);
+		let _ = match offset {
+			Some(offset) => stream.reset_at(offset, code),
+			None => stream.reset(code),
+		};
 		self.end = SendEnd::Reset;
 	}
 }
@@ -529,6 +575,26 @@ impl SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
+	type Offset = send::Offset;
+
+	fn offset(&self) -> send::Offset {
+		self.inner.lock().conn.send_stream(self.id).offset()
+	}
+
+	/// Ready once the transport took the bytes, which TCP then delivers unless the link fails.
+	/// A reset or stop keeps the prefix that went out before it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<(), Error>> {
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		if u64::from(*offset) <= stream.acked_len() {
+			return Poll::Ready(Ok(()));
+		}
+		match ready!(stream.poll_acked(waiter, *offset)) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_write_buf(waiter, &mut buf)
@@ -540,12 +606,18 @@ impl poll::SendStream for SendStream {
 		}
 		let mut state = self.inner.lock();
 		// Takes only what the connection accepts, which for a `Bytes` source is no copy at all.
-		match ready!(state.conn.send_stream(self.id).poll_write(waiter, buf)) {
-			Ok(n) => Poll::Ready(Ok(n)),
-			Err(send::Error::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
-			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
-			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
+		let mut stream = state.conn.send_stream(self.id);
+		let err = match ready!(stream.poll_write(waiter, buf)) {
+			Ok(n) => return Poll::Ready(Ok(n)),
+			Err(err) => err,
+		};
+		if let Ok(Some(code)) = stream.stopped() {
+			return Poll::Ready(Err(Error::StreamStop(code.into_inner())));
 		}
+		Poll::Ready(Err(match err {
+			send::Error::ConnectionLost => state.lost(),
+			_ => Error::StreamClosed,
+		}))
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -563,20 +635,27 @@ impl poll::SendStream for SendStream {
 			return Ok(());
 		}
 		let mut state = self.inner.lock();
-		match state.conn.send_stream(self.id).finish() {
-			Ok(()) => {}
-			// A STOP_SENDING beat us here; carry its code like `poll_write` does. No FIN was
-			// queued, so the stream stays open for the drop to answer the stop with a reset.
-			Err(send::Error::Stopped(code)) => return Err(Error::StreamStop(code.into_inner())),
-			// Already finished or reset, so the FIN it wanted is out.
-			Err(_) => {}
+		let mut stream = state.conn.send_stream(self.id);
+		// A STOP_SENDING beat us here; carry its code like `poll_write` does. No FIN was queued,
+		// so the stream stays open for the drop to answer the stop with a reset. Any other
+		// failure means it was already finished or reset, so the FIN it wanted is out.
+		if stream.finish().is_err()
+			&& let Ok(Some(code)) = stream.stopped()
+		{
+			return Err(Error::StreamStop(code.into_inner()));
 		}
 		self.end = SendEnd::Finished;
 		Ok(())
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_with(code);
+		self.reset_with(None, code);
+	}
+
+	/// RESET_STREAM_AT toward a peer that accepts it, otherwise a RESET_STREAM once the link
+	/// took the bytes before `offset`, which lets the peer discard any it has not read.
+	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
+		self.reset_with(Some(*offset), code);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -586,41 +665,14 @@ impl poll::SendStream for SendStream {
 		let mut state = self.inner.lock();
 		// A finish is acknowledged once its FIN goes to the transport, which on a reliable
 		// transport is delivery.
-		match ready!(state.conn.send_stream(self.id).poll_end(waiter)) {
-			Ok(send::End::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
-			Ok(_) => Poll::Ready(Ok(())),
+		match ready!(state.conn.send_stream(self.id).poll_stopped(waiter)) {
+			Ok(Some(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Ok(None) => Poll::Ready(Ok(())),
 			// The end never came. If the session died first, the caller cannot read success
 			// as "every byte arrived".
 			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			// The ID is only released on drop, so this does not happen.
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
-		}
-	}
-
-	/// Whether every byte written so far went to the transport, which acknowledges it on a
-	/// reliable transport.
-	fn acknowledged(&self) -> Option<bool> {
-		if self.end == SendEnd::Reset {
-			return Some(false);
-		}
-		let mut state = self.inner.lock();
-		let mut stream = state.conn.send_stream(self.id);
-		let offset = stream.offset();
-		Some(stream.acked(offset).unwrap_or(false))
-	}
-
-	/// The bytes the transport took, which a reliable transport delivers.
-	fn delivered(&self) -> Option<u64> {
-		Some(self.inner.lock().conn.send_stream(self.id).acked_len())
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut state = self.inner.lock();
-		let mut stream = state.conn.send_stream(self.id);
-		let offset = stream.offset();
-		match stream.poll_acked(waiter, offset) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 		}
 	}
 }
@@ -629,10 +681,7 @@ impl Drop for SendStream {
 	fn drop(&mut self) {
 		let mut state = self.inner.lock();
 		let mut stream = state.conn.send_stream(self.id);
-		let stopped = match stream.end() {
-			Ok(Some(send::End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		// Reset before giving up the ID, which refuses every later call on it. Err means the
 		// stream is already gone, which is what we wanted.
 		let _ = match (self.end, stopped) {
@@ -710,21 +759,20 @@ impl RecvStream {
 		// it evicts.
 		let result = state.conn.recv_stream(self.id).poll_lease(waiter, want);
 		match ready!(result) {
-			Ok(lease) => Poll::Ready(Ok(lease)),
-			Err(recv::Error::Reset(code)) => {
-				// Observing the reset frees the stream and the credit its lease withheld; only
-				// then may later calls skip it.
-				let _ = state.conn.recv_stream(self.id).received_reset();
-				self.end = RecvEnd::Reset(code.into_inner());
-				Poll::Ready(Err(Error::StreamReset(code.into_inner())))
-			}
-			Err(recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
-			Err(recv::Error::TooLarge) => Poll::Ready(Err(Error::LeaseTooLarge)),
-			// The connection was lost, once everything that arrived before it was taken. The
-			// stream being gone means the same, since only a lost connection does that to one
-			// we hold.
-			Err(_) => Poll::Ready(Err(state.lost())),
+			Ok(lease) => return Poll::Ready(Ok(lease)),
+			Err(recv::Error::Evicted) => return Poll::Ready(Err(Error::Evicted)),
+			Err(recv::Error::TooLarge) => return Poll::Ready(Err(Error::LeaseTooLarge)),
+			Err(_) => {}
 		}
+		// Asking for the reset's code frees the stream and the credit its lease withheld; only
+		// then may later calls skip it.
+		if let Ok(Some(code)) = state.conn.recv_stream(self.id).received_reset() {
+			self.end = RecvEnd::Reset(code.into_inner());
+			return Poll::Ready(Err(Error::StreamReset(code.into_inner())));
+		}
+		// The connection was lost, once everything that arrived before it was taken. The stream
+		// being gone means the same, since only a lost connection does that to one we hold.
+		Poll::Ready(Err(state.lost()))
 	}
 }
 
@@ -745,6 +793,13 @@ impl poll::RecvStream for RecvStream {
 			return;
 		}
 		self.inner.lock().conn.recv_stream(self.id).set_priority(priority);
+	}
+
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		if self.end != RecvEnd::Open {
+			return Some(0);
+		}
+		Some(self.inner.lock().conn.recv_stream(self.id).set_window(window))
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -844,6 +899,10 @@ impl poll::Lease for RecvLease<'_> {
 		self.lease().is_fin()
 	}
 
+	fn set_window(&mut self, window: u64) {
+		self.lease_mut().set_window(window);
+	}
+
 	fn release(mut self) {
 		let lease = self.lease.take().expect("only taken to hand it back");
 		let mut state = self.stream.inner.lock();
@@ -872,5 +931,5 @@ impl std::fmt::Debug for RecvLease<'_> {
 	}
 }
 
-#[cfg(all(test, any(feature = "tcp", all(unix, feature = "uds"))))]
+#[cfg(test)]
 mod tests;

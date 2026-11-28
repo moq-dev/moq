@@ -263,12 +263,12 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 
 	/// Convenience function to return a VASurfaceID vector. Useful to interface with the C API
 	/// where a surface array might be needed.
-	pub fn as_id_vec(surfaces: &[Self]) -> Vec<bindings::VASurfaceID> {
+	pub(crate) fn as_id_vec(surfaces: &[Self]) -> Vec<bindings::VASurfaceID> {
 		surfaces.iter().map(|surface| surface.id).collect()
 	}
 
 	/// Wrapper over `vaQuerySurfaceStatus` to find out any pending ops on the render target.
-	pub fn query_status(&self) -> Result<bindings::VASurfaceStatus::Type, VaError> {
+	pub(crate) fn query_status(&self) -> Result<bindings::VASurfaceStatus::Type, VaError> {
 		let mut status: bindings::VASurfaceStatus::Type = 0;
 		// Safe because `self` represents a valid VASurface.
 		va_check(unsafe { bindings::va().vaQuerySurfaceStatus(self.display.handle(), self.id, &mut status) })?;
@@ -276,7 +276,7 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 		Ok(status)
 	}
 
-	pub fn query_error(&self) -> Result<Vec<SurfaceDecodeMBError>, VaError> {
+	pub(crate) fn query_error(&self) -> Result<Vec<SurfaceDecodeMBError>, VaError> {
 		let mut raw: *const bindings::VASurfaceDecodeMBErrors = std::ptr::null();
 
 		// Safe because `self` represents a valid VASurface.
@@ -326,7 +326,7 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 	}
 
 	/// Returns the ID of this surface.
-	pub fn id(&self) -> bindings::VASurfaceID {
+	pub(crate) fn id(&self) -> bindings::VASurfaceID {
 		self.id
 	}
 
@@ -353,14 +353,18 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 		// to create "safe" descriptors outside of this method and thus from made up values,
 		// violating the safety guarantee that our FDs are legit.
 
-		let objects = (0..desc.num_objects as usize)
-			// Make sure we don't go out of bounds.
-			.take(4)
-			.map(|i| desc.objects[i])
+		// Take ownership of every fd the driver exported before validating anything, so
+		// a descriptor we refuse still closes them.
+		let num_objects = desc.num_objects as usize;
+		let objects: Vec<_> = desc
+			.objects
+			.iter()
+			.take(num_objects)
+			.filter(|o| o.fd >= 0)
 			.map(|o| {
 				DrmPrimeSurfaceDescriptorObject {
-					// Safe because `o.fd` is a valid file descriptor returned by
-					// `vaExportSurfaceHandle`.
+					// Safe because `o.fd` is a non-negative file descriptor `vaExportSurfaceHandle`
+					// handed to us, and nothing else owns it.
 					fd: unsafe { OwnedFd::from_raw_fd(o.fd) },
 					size: o.size,
 					drm_format_modifier: o.drm_format_modifier,
@@ -368,9 +372,20 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 			})
 			.collect();
 
-		let layers = (0..desc.num_layers as usize)
-			// Make sure we don't go out of bounds.
-			.take(4)
+		let num_layers = desc.num_layers as usize;
+		let layers_valid = desc.layers.iter().take(num_layers).all(|l| {
+			let planes = l.num_planes as usize;
+			planes <= l.object_index.len() && l.object_index[..planes].iter().all(|&i| (i as usize) < num_objects)
+		});
+		if num_objects > desc.objects.len()
+			|| objects.len() != num_objects
+			|| num_layers > desc.layers.len()
+			|| !layers_valid
+		{
+			return Err(VaError::status(bindings::VA_STATUS_ERROR_OPERATION_FAILED));
+		}
+
+		let layers = (0..num_layers)
 			.map(|i| desc.layers[i])
 			.map(|l| DrmPrimeSurfaceDescriptorLayer {
 				drm_format: l.drm_format,

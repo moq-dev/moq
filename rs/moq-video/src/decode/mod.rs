@@ -24,19 +24,17 @@ pub(crate) mod backend;
 mod conformance;
 mod consumer;
 mod decoder;
-mod select;
 mod sink;
 mod vui;
 
 pub use backend::{Codec, NAMES};
 pub use consumer::{Consumer, Delay, Options, Read, Start};
 pub use decoder::{Config, Decoder, Kind};
-pub use select::{Lane, Next, Selector};
 pub use sink::Sink;
 
 #[cfg(test)]
 mod tests {
-	/// Callers (moq-c, moq-transcode) hold these across `.await`s in spawned
+	/// Callers (libmoq, moq-transcode) hold these across `.await`s in spawned
 	/// tasks and share frames via `Arc` (the transcode fanout), so both must
 	/// stay `Send` and `Frame` also `Sync` even when a platform's frame wraps
 	/// a GPU handle. Compile-time check; fails per-platform if a variant

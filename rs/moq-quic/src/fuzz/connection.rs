@@ -23,7 +23,9 @@ use crate::{
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
-	recv, transport,
+	recv,
+	sim::Rules,
+	transport,
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -309,8 +311,34 @@ struct Pair {
 	server: Peer,
 	/// What each side wrote to each stream, keyed by writer, so a read can be checked.
 	sent: HashMap<(Side, StreamId), Sent>,
+	/// What crosses between the sides.
+	wire: Wire,
+}
+
+/// Everything that watches the datagrams either side sends.
+struct Wire {
 	/// Every datagram either side sent, when collecting seeds.
 	capture: Option<Vec<Vec<u8>>>,
+	/// Judges each datagram against QUIC's rules, panicking on the first that breaks one.
+	rules: Rules,
+}
+
+impl Wire {
+	/// Queue what `from` transmitted toward `to`'s side, split into its datagrams.
+	fn send(&mut self, now: Instant, from: SocketAddr, to: &mut Peer, data: &[u8], segment_size: Option<usize>) {
+		for datagram in data.chunks(segment_size.unwrap_or(data.len()).max(1)) {
+			if let Err(violation) = self.rules.sent(now, from, to.addr, datagram) {
+				panic!("{violation}");
+			}
+			if let Some(capture) = &mut self.capture {
+				capture.push(datagram.to_vec());
+			}
+			to.inbound.push_back(Inbound {
+				data: BytesMut::from(datagram),
+				tampered: None,
+			});
+		}
+	}
 }
 
 impl Pair {
@@ -321,7 +349,10 @@ impl Pair {
 			client: Peer::new(Side::Client, 4433),
 			server: Peer::new(Side::Server, 4434),
 			sent: HashMap::new(),
-			capture: None,
+			wire: Wire {
+				capture: None,
+				rules: Rules::new(),
+			},
 		};
 
 		let mut config = Plaintext::client();
@@ -383,17 +414,14 @@ impl Pair {
 		}
 	}
 
-	/// A side, the other side, and the capture.
-	fn split(&mut self, side: Side) -> (&mut Peer, &mut Peer, &mut Option<Vec<Vec<u8>>>) {
+	/// A side, the other side, and the wire between them.
+	fn split(&mut self, side: Side) -> (&mut Peer, &mut Peer, &mut Wire) {
 		let Self {
-			client,
-			server,
-			capture,
-			..
+			client, server, wire, ..
 		} = self;
 		match side {
-			Side::Client => (client, server, capture),
-			Side::Server => (server, client, capture),
+			Side::Client => (client, server, wire),
+			Side::Server => (server, client, wire),
 		}
 	}
 
@@ -413,12 +441,13 @@ impl Pair {
 	/// Hand up to `count` queued datagrams to `side`'s endpoint.
 	fn deliver(&mut self, side: Side, count: usize) {
 		let now = self.now;
-		let (peer, other, capture) = self.split(side);
+		let (peer, other, wire) = self.split(side);
 		let mut buf = Vec::new();
 		for _ in 0..count {
 			let Some(Inbound { data, tampered }) = peer.inbound.pop_front() else {
 				break;
 			};
+			wire.rules.received(now, other.addr, peer.addr, &data);
 			// Only what the connection takes can deliver frames; the endpoint drops the rest.
 			let tampered = tampered.map(|from| (data.clone(), from));
 			let event = peer.endpoint.handle(
@@ -454,7 +483,7 @@ impl Pair {
 				}
 				Some(DatagramEvent::Response(transmit)) => {
 					let data = &buf[..transmit.size];
-					send(&mut other.inbound, capture, data, transmit.segment_size);
+					wire.send(now, peer.addr, other, data, transmit.segment_size);
 				}
 				None => {}
 			}
@@ -467,7 +496,8 @@ impl Pair {
 	/// whatever it transmits, and consume what it reports.
 	fn poll(&mut self, side: Side) {
 		let now = self.now;
-		let (peer, other, capture) = self.split(side);
+		let (peer, other, wire) = self.split(side);
+		let from = peer.addr;
 		let Some((ch, conn)) = &mut peer.conn else {
 			return;
 		};
@@ -487,12 +517,7 @@ impl Pair {
 			}
 			while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
 				progress = true;
-				send(
-					&mut other.inbound,
-					capture,
-					&buf[..transmit.size],
-					transmit.segment_size,
-				);
+				wire.send(now, from, other, &buf[..transmit.size], transmit.segment_size);
 				buf.clear();
 			}
 			if !progress {
@@ -751,7 +776,7 @@ impl Pair {
 		let data: Vec<u8> = (sent.len..sent.len + len)
 			.map(|offset| stream_byte(side, id, offset))
 			.collect();
-		if let Ok(written) = conn.send_stream(id).write(&mut &data[..]) {
+		if let Poll::Ready(Ok(written)) = conn.send_stream(id).try_write(&mut &data[..]) {
 			sent.len += written as u64;
 		}
 	}
@@ -779,18 +804,6 @@ impl Pair {
 }
 
 /// Queue a transmit for the peer, split into datagrams if it was batched.
-fn send(inbound: &mut VecDeque<Inbound>, capture: &mut Option<Vec<Vec<u8>>>, data: &[u8], segment_size: Option<usize>) {
-	for datagram in data.chunks(segment_size.unwrap_or(data.len()).max(1)) {
-		if let Some(capture) = capture {
-			capture.push(datagram.to_vec());
-		}
-		inbound.push_back(Inbound {
-			data: BytesMut::from(datagram),
-			tampered: None,
-		});
-	}
-}
-
 fn dir(uni: bool) -> Dir {
 	if uni { Dir::Uni } else { Dir::Bi }
 }
@@ -819,9 +832,10 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 
 	let offset = peer.read.entry(id).or_default();
 	let mut budget = max;
+	let mut reset = false;
 	while budget > 0 {
-		match chunks.next(budget) {
-			Ok(Some(chunk)) => {
+		match chunks.try_next(budget) {
+			Poll::Ready(Ok(Some(chunk))) => {
 				let end = *offset + chunk.bytes.len() as u64;
 				if !forged {
 					let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
@@ -834,7 +848,7 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				*offset = end;
 				budget -= chunk.bytes.len();
 			}
-			Ok(None) => {
+			Poll::Ready(Ok(None)) => {
 				let sent = sent.get(&(writer, id));
 				if !forged {
 					assert!(sent.is_some_and(|sent| sent.fin), "finished a stream never finished");
@@ -846,12 +860,24 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				}
 				break;
 			}
-			Err(recv::Error::Blocked | recv::Error::Reset(_)) => break,
-			Err(err) => unreachable!("{err}"),
+			// Nothing more yet, or ever once the connection is lost.
+			Poll::Pending | Poll::Ready(Err(recv::Error::ConnectionLost)) => break,
+			Poll::Ready(Err(recv::Error::Reset)) => {
+				reset = true;
+				break;
+			}
+			Poll::Ready(Err(err)) => unreachable!("{err}"),
 		}
 	}
 
 	chunks.finalize();
+	// Asking for the code frees the stream, as an application learning of the reset would.
+	if reset {
+		assert!(
+			stream.received_reset().expect("reset").is_some(),
+			"a reset read has a code"
+		);
+	}
 }
 
 /// Odd streams are read through leases, since a plain read would skip what a lease holds.
@@ -868,16 +894,16 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	let Some((_, conn)) = &mut peer.conn else {
 		return;
 	};
-	let mut lease = match conn.recv_stream(id).lease(want) {
-		Ok(lease) => lease,
-		Err(recv::Error::Evicted) => {
+	let mut lease = match conn.recv_stream(id).try_lease(want) {
+		Poll::Ready(Ok(lease)) => lease,
+		Poll::Ready(Err(recv::Error::Evicted)) => {
 			conn.recv_stream(id)
 				.stop(0u32.into())
 				.expect("an evicted stream stops once");
 			return;
 		}
 		// Waiting, reset, or stopped: nothing to check yet.
-		Err(_) => return,
+		_ => return,
 	};
 	let offset = peer.read.entry(id).or_default();
 	let n = max.min(lease.remaining());
@@ -952,7 +978,7 @@ pub fn connection(data: &[u8]) -> bool {
 /// Every datagram a handshake and a short exchange put on the wire, for the packet seeds.
 pub(super) fn datagrams() -> Vec<Vec<u8>> {
 	let mut pair = Pair::new();
-	pair.capture = Some(Vec::new());
+	pair.wire.capture = Some(Vec::new());
 	assert!(pair.handshake(), "the seed handshake did not connect");
 
 	let ops = [
@@ -981,7 +1007,7 @@ pub(super) fn datagrams() -> Vec<Vec<u8>> {
 		pair.apply(op);
 	}
 	pair.drain();
-	pair.capture.take().unwrap()
+	pair.wire.capture.take().unwrap()
 }
 
 #[cfg(test)]

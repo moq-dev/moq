@@ -5,9 +5,10 @@
  * @module
  */
 
-import type { Instance, Path } from "@moq/net";
-import type * as Echo from "./echo";
-import type * as Stats from "./stats";
+import { Duration } from "@moq/clock";
+import type { Identity, Path } from "@moq/net";
+import type * as Echo from "./echo.ts";
+import type * as Stats from "./stats.ts";
 
 /** A grade, ordered by severity with `unknown` below every graded one. */
 export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
@@ -19,8 +20,8 @@ export type Role = "publisher" | "viewer";
 export interface Observer {
 	/** The publisher's media broadcast, or the viewer's echo broadcast. */
 	path: Path.Valid;
-	/** The instance of the reporting broadcast's stream, when its route carries one. */
-	instance?: Instance.Valid;
+	/** The identity of the reporting broadcast's stream, when its route carries one. */
+	identity?: Identity.Valid;
 }
 
 /** One snapshot and the broadcast it was read from. */
@@ -37,33 +38,59 @@ export interface Sample<S> {
 	previous?: Report<S>;
 	/** The newest report. */
 	current: Report<S>;
-	/** Milliseconds between the two reports, over which counter deltas become rates. */
-	interval: number;
-	/** Milliseconds since `current` was reported. Past `stale` every verdict is unknown. */
-	age: number;
+	/** The time between the two reports, over which counter deltas become rates. */
+	interval: Duration;
+	/** How long ago `current` was reported. Past `stale` every verdict is unknown. */
+	age: Duration;
 }
 
 /** The values at which an input grades degraded and unhealthy (below them, for `headroom`). */
-export interface Limits {
+export interface Limits<T = number> {
 	/** Degraded from this value on. */
-	degraded: number;
+	degraded: T;
 	/** Unhealthy from this value on. */
-	unhealthy: number;
+	unhealthy: T;
 }
 
 /** Grading limits, nested by the report section they apply to. */
 export interface Thresholds {
 	/**
-	 * Milliseconds past which a report grades unknown, as does a transport sample by its age plus the report's.
+	 * A report older than this grades unknown, as does a transport sample whose age plus the report's exceeds it.
 	 * Loss also needs the previous transport sample's age within it.
 	 */
-	stale: number;
-	/** Limits for the reporting connection: RTT in milliseconds, then loss and headroom (publisher only). */
-	transport: { rtt: Limits; loss: Limits; headroom: Limits };
+	stale: Duration;
+	/** Limits for the reporting connection. */
+	transport: TransportThresholds;
 	/** Limits for a publisher's renditions. */
-	publisher: { skipped: Limits };
+	publisher: PublisherThresholds;
 	/** Limits for a viewer's renditions. */
-	viewer: { late: Limits; errors: Limits; stalled: Limits };
+	viewer: ViewerThresholds;
+}
+
+/** Limits for the reporting connection. */
+export interface TransportThresholds {
+	/** Round-trip time. */
+	rtt: Limits<Duration>;
+	/** Transport bytes lost per media byte sent (publisher only). */
+	loss: Limits;
+	/** Estimated rate over the media bitrate sent (publisher only); lower is worse. */
+	headroom: Limits;
+}
+
+/** Limits for a publisher's renditions. */
+export interface PublisherThresholds {
+	/** Frames skipped before sending, as a share of frames sent or skipped. */
+	skipped: Limits;
+}
+
+/** Limits for a viewer's renditions. */
+export interface ViewerThresholds {
+	/** Frames received too late for playout, per frame received. */
+	late: Limits;
+	/** Decode errors per frame received. */
+	errors: Limits;
+	/** The share of the interval spent stalled. */
+	stalled: Limits;
 }
 
 /**
@@ -73,9 +100,9 @@ export interface Thresholds {
 export function defaultThresholds(): Thresholds {
 	const share = () => ({ degraded: 0.01, unhealthy: 0.05 });
 	return {
-		stale: 5000,
+		stale: Duration.secs(5),
 		transport: {
-			rtt: { degraded: 300, unhealthy: 800 },
+			rtt: { degraded: Duration.millis(300), unhealthy: Duration.millis(800) },
 			loss: { degraded: 0.02, unhealthy: 0.1 },
 			headroom: { degraded: 1.5, unhealthy: 1.0 },
 		},
@@ -138,7 +165,7 @@ export interface Health {
 	verdict: Verdict;
 	/** The report is older than `stale`, so every verdict is unknown. */
 	stale?: true;
-	/** Milliseconds the deltas span; absent without a previous report to diff against. */
+	/** Milliseconds the deltas span, as Rust serializes it; absent without a previous report to diff against. */
 	interval?: number;
 	/** Why the deltas started over instead of spanning the interval. */
 	reset?: Reset;
@@ -170,7 +197,7 @@ interface Snapshot<R> {
 interface Delta<R> {
 	previous: R;
 	current: R;
-	interval: number;
+	interval: Duration;
 }
 
 interface Kind<R> {
@@ -230,7 +257,7 @@ const VIEWER: Kind<Echo.Rendition> = {
 				count(delta, counter),
 				count(delta, (r) => r.frames),
 			);
-		const stalled = delta && count(delta, (r) => r.stalled) / delta.interval;
+		const stalled = delta && count(delta, (r) => r.stalled) / delta.interval.asMillis();
 		return [
 			above(
 				"late",
@@ -248,19 +275,13 @@ const VIEWER: Kind<Echo.Rendition> = {
 };
 
 function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thresholds): Health {
-	const valid = (ms: number) => Number.isFinite(ms) && ms >= 0;
-	if (!valid(sample.interval) || !valid(sample.age)) {
-		throw new Error(
-			`health: interval ${sample.interval} and age ${sample.age} must be finite nonnegative milliseconds`,
-		);
-	}
 	const current = sample.current.snapshot;
 	let previous: Snapshot<R> | undefined;
 	let reset: Reset | undefined;
 	if (sample.previous) {
 		if (!sameObserver(sample.previous.observer, sample.current.observer)) reset = "replaced";
 		else if (decreased(sample.previous.snapshot, current, kind)) reset = "decrease";
-		else if (sample.interval > 0) previous = sample.previous.snapshot;
+		else if (!sample.interval.isZero()) previous = sample.previous.snapshot;
 	}
 	const interval = previous ? sample.interval : undefined;
 
@@ -304,9 +325,10 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 		transport,
 		renditions,
 	};
-	if (interval !== undefined) health.interval = interval;
+	// Whole milliseconds, as Rust truncates the interval it serializes.
+	if (interval !== undefined) health.interval = Math.floor(interval.asMillis());
 	if (reset) health.reset = reset;
-	if (sample.age > thresholds.stale) {
+	if (sample.age.gt(thresholds.stale)) {
 		health.stale = true;
 		forget(transport);
 		for (const rendition of Object.values(renditions)) forget(rendition);
@@ -321,14 +343,18 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 interface Link {
 	current: Stats.Transport;
 	previous?: Stats.Transport;
-	age: number;
+	age: Duration;
 	sent: number;
 	media?: number;
 }
 
 function connection(link: Link, role: Role, thresholds: Thresholds): Connection {
 	const limits = thresholds.transport;
-	const fresh = link.previous && !((link.previous.age ?? 0) > thresholds.stale) ? link.previous : undefined;
+	const previous = link.previous;
+	const fresh =
+		previous && (previous.age === undefined || Duration.millis(previous.age).le(thresholds.stale))
+			? previous
+			: undefined;
 	const lost = (counter: (t: Stats.Transport) => number | undefined) => {
 		const current = counter(link.current);
 		const previous = fresh && counter(fresh);
@@ -337,7 +363,8 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 	const lostBytes = lost((t) => t.lostBytes);
 	const lostPackets = lost((t) => t.lostPackets);
 
-	const evidence = [above("rtt", link.current.rtt, limits.rtt)];
+	const rtt = { degraded: limits.rtt.degraded.asMillis(), unhealthy: limits.rtt.unhealthy.asMillis() };
+	const evidence = [above("rtt", link.current.rtt, rtt)];
 	if (role === "publisher") {
 		const loss = lostBytes === undefined ? undefined : ratio(lostBytes, link.sent);
 		const rate = link.current.rate;
@@ -348,7 +375,7 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 
 	const result: Connection = { verdict: "unknown", evidence };
 	const age = link.current.age;
-	if (age !== undefined && age + link.age > thresholds.stale) {
+	if (age !== undefined && Duration.millis(age).saturatingAdd(link.age).gt(thresholds.stale)) {
 		result.stale = true;
 		for (const e of evidence) e.verdict = "unknown";
 	}
@@ -359,7 +386,7 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 }
 
 function sameObserver(a: Observer, b: Observer): boolean {
-	return a.path === b.path && a.instance === b.instance;
+	return a.path === b.path && a.identity === b.identity;
 }
 
 function decreased<R>(previous: Snapshot<R>, current: Snapshot<R>, kind: Kind<R>): boolean {
@@ -386,8 +413,8 @@ function ratio(count: number, of: number): number | undefined {
 // Rust saturates a bitrate at u64::MAX, which is 2 ** 64 as a double.
 const U64_MAX = 2 ** 64;
 
-function bitrate(bytes: number, interval: number): number {
-	return Math.min(Math.floor((bytes * 8000) / interval), U64_MAX);
+function bitrate(bytes: number, interval: Duration): number {
+	return Math.min(Math.floor((bytes * 8000) / interval.asMillis()), U64_MAX);
 }
 
 function grade(input: Input, value: number | undefined, verdict: Verdict): Evidence {

@@ -70,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
 				.route(&config.broadcast, moq_net::origin::RouteOptions::hidden())
 				.context("failed to create broadcast")?;
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-			let track = route.broadcast().create_track(track, info)?;
+			let track = route
+				.broadcast()
+				.create_track(track, info)
+				.context("the track already exists")?;
 			route.announce().context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 
@@ -97,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let path = moq_net::Path::new(&config.broadcast)?;
 			let scope =
-				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
+				moq_net::Prefixes::from(moq_net::Prefix::try_from(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
 				.scope("", &scope)
 				.context("not allowed to consume broadcast")?
@@ -120,12 +123,7 @@ async fn main() -> anyhow::Result<()> {
 						announce::Event::Absent(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast ended, waiting...");
 						}
-						announce::Event::Offline(update) | announce::Event::Unavailable(update) => {
-							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
-						}
-						announce::Event::Available(update) => {
-							tracing::info!(broadcast = %update.prefix, "broadcast is reachable again");
-						}
+						_ => {}
 					},
 					res = reconnect.closed() => return Ok(res?),
 					// Drops the previous subscriber on each new announce.
@@ -140,22 +138,22 @@ struct Publisher {
 	track: track::Producer,
 }
 
+/// Milliseconds since the Unix epoch: the track's timescale, on this host's clock.
+fn millis(time: DateTime<Utc>) -> anyhow::Result<u64> {
+	Ok(u64::try_from(time.timestamp_millis())?)
+}
+
 impl Publisher {
 	fn new(track: track::Producer) -> Self {
 		Self { track }
 	}
 
 	async fn run(self) -> anyhow::Result<()> {
-		let start = Utc::now();
-		let mut now = start;
-
-		// Just for fun, don't start at zero.
-		let mut sequence = start.minute();
+		let mut now = Utc::now();
 
 		loop {
-			let segment = self.track.create_group(sequence.into()).unwrap();
-
-			sequence += 1;
+			// A group starts at its first frame: the minute, in the track's milliseconds.
+			let segment = self.track.append_group(Timestamp::from_millis(millis(now)?)?)?;
 
 			tokio::spawn(async move {
 				if let Err(err) = Self::send_segment(segment, now).await {
@@ -177,11 +175,11 @@ impl Publisher {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
 
-		segment.write_frame(moq_net::Timestamp::now(), base.clone())?;
+		segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, base.clone())?;
 
 		loop {
 			let delta = now.format("%S").to_string();
-			segment.write_frame(moq_net::Timestamp::now(), delta.clone())?;
+			segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, delta.clone())?;
 
 			let next = now + chrono::Duration::try_seconds(1).unwrap();
 			let next = next.with_nanosecond(0).unwrap();

@@ -6,22 +6,20 @@
 //! boundary rules must stay identical to `moq_net::Path`, which the relay applies to
 //! the same strings. `moq_net::Path` refuses the empty segments [`normalize`] drops, so
 //! a string spelled with one is refused there rather than read as another path. Minting
-//! checks a root with [`validate`] instead, so a token never names a path no peer can spell.
+//! checks a root with [`signable`] instead, so a token never names a path no peer can spell.
 //!
-//! Every function below but [`validate`] assumes its arguments are already [`normalize`]d.
+//! Every function below but [`validate`] and [`signable`] assumes its arguments are already [`normalize`]d.
 
 /// The most bytes a path may hold, matching `moq_net::Path::MAX_BYTES`.
 const MAX_BYTES: usize = 4096;
 
-/// Refuse a root `moq_net::Path::new` would: one longer than 4096 bytes, with a leading,
-/// trailing, or doubled `/`, or with a `\` before anything but `\` or `/`.
+/// Refuse a root longer than 4096 bytes, with a `\` before anything but `\` or `/`, or with
+/// a leading, trailing, or doubled `/` no `\` escapes. Verifying a key's scope checks this,
+/// so keys minted before [`signable`] tightened it still load.
 pub fn validate(root: &str) -> crate::Result<()> {
 	let invalid = |reason: &str| Err(crate::Error::InvalidRoot(format!("{root:?} {reason}")));
 	if root.len() > MAX_BYTES {
 		return invalid("is longer than 4096 bytes");
-	}
-	if !root.is_empty() && (root.starts_with('/') || root.ends_with('/') || root.contains("//")) {
-		return invalid("contains an empty segment");
 	}
 	let mut rest = root.as_bytes();
 	while let Some(i) = rest.iter().position(|&b| b == b'\\') {
@@ -30,13 +28,32 @@ pub fn validate(root: &str) -> crate::Result<()> {
 			_ => return invalid(r"contains a `\` that escapes neither `\` nor `/`"),
 		}
 	}
+	if moq_pattern::parts(root).any(str::is_empty) {
+		return invalid("contains an empty segment");
+	}
+	Ok(())
+}
+
+/// Refuse a root `moq_net::Path::new` would, so a token or key scope is never minted for a
+/// root no session can dial.
+pub fn signable(root: &str) -> crate::Result<()> {
+	validate(root)?;
+	// TEMPORARY MIGRATION, delete with `moq_net::Path`'s at the next version cut: the previous
+	// release splits at every `/`, escaped or not, so `moq_net::Path` refuses a `//` or a
+	// trailing `/` even when a `\` escapes it.
+	if root.ends_with('/') || root.contains("//") {
+		return Err(crate::Error::InvalidRoot(format!(
+			"{root:?} contains a `//` or a trailing `/`, which the previous release re-spells"
+		)));
+	}
 	Ok(())
 }
 
 /// Trim leading and trailing slashes and collapse consecutive ones, so all
-/// slashes are implicit at boundaries and `/foo//bar/` == `foo/bar`.
+/// slashes are implicit at boundaries and `/foo//bar/` == `foo/bar`. An escaped `/`
+/// is part of its segment, so it stays.
 pub fn normalize(path: &str) -> String {
-	path.split('/')
+	moq_pattern::parts(path)
 		.filter(|part| !part.is_empty())
 		.collect::<Vec<_>>()
 		.join("/")
@@ -50,9 +67,11 @@ pub fn strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 	}
 
 	let rest = path.strip_prefix(prefix)?;
+	// A prefix ending in a lone `\` escapes the `/` after it, so it ends inside a segment.
+	let escaped = prefix.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
 	match rest.as_bytes().first() {
 		None => Some(""),
-		Some(b'/') => Some(&rest[1..]),
+		Some(b'/') if !escaped => Some(&rest[1..]),
 		Some(_) => None,
 	}
 }
@@ -68,15 +87,36 @@ mod tests {
 		assert_eq!(normalize("foo"), "foo");
 		assert_eq!(normalize("/foo/bar/"), "foo/bar");
 		assert_eq!(normalize("//foo///bar//"), "foo/bar");
+		assert_eq!(normalize(r"/a\///b\//"), r"a\//b\/");
 	}
 
 	#[test]
 	fn test_validate() {
-		for root in ["", "foo", "foo/bar", r"a\\b", r"a\/b", ".hidden/x"] {
+		for root in [
+			"",
+			"foo",
+			"foo/bar",
+			r"a\\b",
+			r"a\/b",
+			".hidden/x",
+			r"a\/",
+			r"\/",
+			r"a\//b",
+		] {
 			assert!(validate(root).is_ok(), "{root:?}");
 		}
 		let long = "a".repeat(MAX_BYTES + 1);
-		for root in ["/", "/foo", "foo/", "foo//bar", r"a\b", r"a\", long.as_str()] {
+		for root in [
+			"/",
+			"/foo",
+			"foo/",
+			"foo//bar",
+			r"a\b",
+			r"a\",
+			r"a\///b",
+			r"\//",
+			long.as_str(),
+		] {
 			assert!(matches!(validate(root), Err(crate::Error::InvalidRoot(_))), "{root:?}");
 		}
 		assert!(validate(&long[1..]).is_ok());
@@ -89,5 +129,8 @@ mod tests {
 		assert_eq!(strip_prefix("foo/bar", "foo/bar"), Some(""));
 		assert_eq!(strip_prefix("foobar", "foo"), None);
 		assert_eq!(strip_prefix("foo", "bar"), None);
+		assert_eq!(strip_prefix(r"a\/b/c", r"a\/b"), Some("c"));
+		// `a\` ends inside the segment `a\/b`.
+		assert_eq!(strip_prefix(r"a\/b", r"a\"), None);
 	}
 }

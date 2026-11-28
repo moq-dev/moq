@@ -11,11 +11,13 @@
 //! is a virtual sleep.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Timestamp, Version, origin};
+use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -29,9 +31,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 const PATH: &str = "bcast";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Where the observing consumer sits relative to the publisher.
@@ -70,7 +74,7 @@ fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
 /// group's frames and then how the subscription ended. Read continuously, as a
 /// real subscriber would, so the subscription is driven the whole time.
 async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::UnboundedReceiver<String> {
-	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 	let mut sub = broadcast
 		.track(name)
 		.unwrap()
@@ -112,8 +116,8 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
 }
 
 fn write_group(track: &moq_net::track::Producer, payload: &'static str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.as_bytes()).unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload.as_bytes()).unwrap();
 	group.finish().unwrap();
 }
 
@@ -228,7 +232,7 @@ async fn remote_lite_consumer_sees_what_a_local_one_does() {
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
 	// Each request has its own stream, which has to end a finished track the way
 	// moq-lite does.
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		assert_eq!(lifecycle(Observer::Remote(version)).await, EXPECTED, "{version}");
 	}
 }

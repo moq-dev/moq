@@ -5,13 +5,9 @@ use super::{AudioConfig, BinaryConfig, JsonConfig, TextConfig, VideoConfig};
 /// An entry's key in the catalog is its ID. The track it names is `track` when set and the ID
 /// otherwise, in `broadcast` when set and the catalog's own broadcast otherwise. Every reader
 /// subscribes through [`track`](Self::track) so the two never diverge.
-/// [`instance`](Self::instance) optionally names the stream the broadcast must be.
 pub trait Reference {
 	/// The broadcast publishing the track, relative to the catalog's; `None` is the catalog's own.
 	fn broadcast(&self) -> Option<&moq_net::path::Relative>;
-
-	/// The instance the broadcast must have; `None` accepts the first one resolved.
-	fn instance(&self) -> Option<&moq_net::Instance>;
 
 	/// The track's name in its broadcast, given this entry's ID.
 	fn track<'a>(&'a self, id: &'a str) -> &'a str;
@@ -24,10 +20,6 @@ macro_rules! reference {
 				self.broadcast.as_ref()
 			}
 
-			fn instance(&self) -> Option<&moq_net::Instance> {
-				self.instance.as_ref()
-			}
-
 			fn track<'a>(&'a self, id: &'a str) -> &'a str {
 				self.track.as_deref().unwrap_or(id)
 			}
@@ -36,3 +28,9 @@ macro_rules! reference {
 }
 
 reference!(VideoConfig, AudioConfig, TextConfig, JsonConfig, BinaryConfig);
+
+/// moq-hang-04 for a `track` other than the ID: a reader that ignores it subscribes to the ID, a
+/// different track.
+pub(crate) fn renamed_version(config: &impl Reference, id: &str) -> Option<u64> {
+	(config.track(id) != id).then_some(4)
+}

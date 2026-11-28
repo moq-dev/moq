@@ -29,7 +29,7 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 		.map(|index| {
 			let track = source.create_track(format!("track{index}"), info.clone()).unwrap();
 			for sequence in 0..groups {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 				for frame in 0..FRAMES_PER_GROUP {
 					let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 					group.write_frame(pts, vec![0u8; 64]).unwrap();
@@ -44,9 +44,7 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 
 /// Record the broadcast until every track ends, from the producer's start.
 async fn record(source: broadcast::Producer, tracks: Vec<track::Producer>) -> Duration {
-	let config = producer::Config::default()
-		.with_duration(Duration::from_secs(2))
-		.with_max_delay(Duration::from_secs(3600));
+	let config = producer::Config::default().with_duration(Duration::from_secs(2));
 	let store = Store::new(InMemory::new(), "bench");
 	let start = Instant::now();
 	let run = tokio::spawn(Producer::new(store, source.consume(), config).run());

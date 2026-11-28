@@ -16,10 +16,12 @@ on:
     workflows:
       - apt-repo
       - Cache
-      - CodSpeed
+      - Central check
       - Docker
+      - GStreamer CI image
+      - Instructions
       - Interop
-      - moq-c
+      - libmoq
       - moq-cli
       - moq-gst
       - moq-relay
@@ -59,7 +61,10 @@ jobs:
   discord:
     name: Discord
     # `cancelled` is excluded: concurrency groups cancel in-flight runs as a
-    # matter of course, and paging on that would be pure noise.
+    # matter of course, and paging on that would be pure noise. The exception is
+    # the package-repo publishers, whose `queue: max` never cancels a run: one
+    # cancelled there is a dropped publish (a full queue or a person), which
+    # must not pass silently.
     #
     # Note the chained cases (a release tag -> release-brew -> here) sit at the
     # third and final level workflow_run supports; a fourth would never fire.
@@ -67,11 +72,13 @@ jobs:
     # when dispatched manually or chained after another release.
     if: >-
       (github.event.workflow_run.conclusion == 'failure' ||
-      github.event.workflow_run.conclusion == 'timed_out') &&
+      github.event.workflow_run.conclusion == 'timed_out' ||
+      (github.event.workflow_run.conclusion == 'cancelled' &&
+      contains(fromJSON('["apt-repo", "rpm-repo", "release-brew"]'), github.event.workflow_run.name))) &&
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
       (github.event.workflow_run.event == 'schedule' ||
-      !contains(fromJSON('["CodSpeed", "Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
+      !contains(fromJSON('["GStreamer CI image", "Instructions", "Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest
     # The webhook lives in the `alert` Environment, which admits only `main`,
     # where workflow_run runs. It is not a release credential, so it stays out

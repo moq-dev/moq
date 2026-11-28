@@ -8,7 +8,7 @@ use super::{Container, Frame};
 /// This is the group-scoped counterpart to [`Consumer`](super::Consumer). Where that one
 /// subscribes to a track and juggles group ordering, age skipping, and rewinds, this one
 /// reads exactly the group it was handed, in arrival order, and ends. That is what a caller
-/// wants after a FETCH, a group already chosen by sequence, or for a live group taken from
+/// wants after a FETCH, a group already chosen by start, or for a live group taken from
 /// [`recv_group`](moq_net::track::Subscriber::recv_group), whose frames return as they land.
 ///
 /// A batch of frames decoded from one wire frame (a CMAF fragment carrying several samples) is
@@ -22,6 +22,18 @@ pub struct GroupConsumer<F: Container> {
 
 	// How many media frames we have returned, so the first one can be marked a keyframe.
 	index: u64,
+
+	// Whether a read or decode failed, which ends the group.
+	fault: Fault<F::Error>,
+}
+
+enum Fault<E> {
+	// Nothing failed.
+	Clear,
+	// The lookahead failed, returned once the frames before it are.
+	Pending(E),
+	// The failure was returned: nothing past the malformed object is read.
+	Reported,
 }
 
 impl<F: Container> GroupConsumer<F> {
@@ -32,45 +44,65 @@ impl<F: Container> GroupConsumer<F> {
 			format,
 			pending: VecDeque::new(),
 			index: 0,
+			fault: Fault::Clear,
 		}
 	}
 
-	/// The sequence number of this group within its track.
-	pub fn sequence(&self) -> u64 {
-		self.group.sequence
+	/// Where this group starts within its track, in the track's timescale.
+	pub fn start(&self) -> u64 {
+		self.group.start
 	}
 
 	/// Read the next frame, or `None` once the group ends.
+	///
+	/// Frames that precede a failed read or decode are returned before the error, which ends the
+	/// group: nothing after it is read.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Peek past an untimed video frame for a marker or successor that times it, but only
 		// at what has already landed: a live group returns the frame now rather than waiting.
-		while self.pending.front().is_none_or(|frame| {
-			self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
-		}) {
-			let next = match self.group.poll_read_frame(waiter)? {
+		while matches!(self.fault, Fault::Clear)
+			&& self.pending.front().is_none_or(|frame| {
+				self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
+			}) {
+			let next = match self.group.poll_read_frame(waiter) {
 				Poll::Ready(next) => next,
 				Poll::Pending if self.pending.is_empty() => return Poll::Pending,
 				Poll::Pending => break,
 			};
-			match next {
-				Some(frame) => {
-					for frame in self.format.decode(frame)? {
-						if let Some(bound) = self.format.end(&frame) {
-							if self.format.kind() == super::Kind::Video
-								&& let Some(last) = self.pending.back_mut()
-							{
-								super::close_duration(last, bound);
-							}
-						} else {
-							self.pending.push_back(frame);
-						}
-					}
+			let frames = match next.map_err(F::Error::from).and_then(|next| match next {
+				Some(frame) => self.format.decode(frame).map(Some),
+				None => Ok(None),
+			}) {
+				Ok(Some(frames)) => frames,
+				Ok(None) => break,
+				Err(err) => {
+					self.fault = Fault::Pending(err);
+					break;
 				}
-				None => return Poll::Ready(Ok(self.pop_media())),
+			};
+			for frame in frames {
+				if let Some(bound) = self.format.end(&frame) {
+					if self.format.kind() == super::Kind::Video
+						&& let Some(last) = self.pending.back_mut()
+					{
+						super::close_duration(last, bound);
+					}
+				} else {
+					self.pending.push_back(frame);
+				}
 			}
 		}
-		Poll::Ready(Ok(self.pop_media()))
+		match self.pop_media() {
+			Some(frame) => Poll::Ready(Ok(Some(frame))),
+			None => Poll::Ready(match std::mem::replace(&mut self.fault, Fault::Reported) {
+				Fault::Pending(err) => Err(err),
+				fault => {
+					self.fault = fault;
+					Ok(None)
+				}
+			}),
+		}
 	}
 
 	fn pop_media(&mut self) -> Option<Frame> {
@@ -88,9 +120,12 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no max age, so a
+	/// group finished whole stays readable after its span has passed.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	fn frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> Frame {
@@ -114,9 +149,10 @@ mod tests {
 		media.write(frame(1_020_000, b"delta", false)).unwrap();
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
+		// The group starts at its keyframe, a second in, in the track's milliseconds.
+		let group = consumer.track("media").unwrap().fetch_group(1_000, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Data));
-		assert_eq!(group.sequence(), 0);
+		assert_eq!(group.start(), 1_000);
 
 		let first = group.read().await.unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
@@ -129,30 +165,44 @@ mod tests {
 		assert!(group.read().await.unwrap().is_none());
 	}
 
+	/// Data frames round-trip through every container that can write them. Raw has no encoding for
+	/// an empty one, since its zero-byte object is the discontinuity marker, so it refuses that write.
 	#[tokio::test]
-	async fn empty_data_frames_survive_subscription_and_fetch() {
-		for config in [hang::catalog::Container::Legacy, hang::catalog::Container::Loc] {
+	async fn data_frames_survive_subscription_and_fetch() {
+		for config in [
+			hang::catalog::Container::Legacy,
+			hang::catalog::Container::Loc,
+			hang::catalog::Container::Raw,
+		] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast.create_track("data", hang::container::track_info(0)).unwrap();
 			let subscription = track.subscribe(moq_net::track::Subscription::default());
 			let consumer = broadcast.consume();
 			let mut producer =
 				crate::container::Producer::new(track, Hang::new(&config, crate::container::Kind::Data).unwrap());
-			producer.write(frame(0, b"", true)).unwrap();
+			let first: &'static [u8] = match config {
+				hang::catalog::Container::Raw => {
+					let err = producer.write(frame(0, b"", true));
+					assert!(matches!(err, Err(crate::Error::EmptyRawPayload)), "{err:?}");
+					b"cue"
+				}
+				_ => b"",
+			};
+			producer.write(frame(0, first, true)).unwrap();
 			producer.write(frame(10_000, b"data", false)).unwrap();
 			let _finished = producer.finish().unwrap();
 			let mut live = crate::container::Consumer::new(
 				subscription,
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
 			);
-			let first = live.read_frame().await.unwrap().unwrap();
-			assert!(first.payload.is_empty());
-			assert!(first.keyframe);
+			let read = live.read_frame().await.unwrap().unwrap();
+			assert_eq!(read.payload, first, "{config:?}");
+			assert!(read.keyframe);
 			assert_eq!(live.read_frame().await.unwrap().unwrap().payload, b"data".as_slice());
 			assert!(live.read_frame().await.unwrap().is_none());
 			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
 			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());
-			assert!(fetched.read().await.unwrap().unwrap().payload.is_empty());
+			assert_eq!(fetched.read().await.unwrap().unwrap().payload, first);
 			assert_eq!(fetched.read().await.unwrap().unwrap().payload, b"data".as_slice());
 			assert!(fetched.read().await.unwrap().is_none());
 		}
@@ -173,7 +223,7 @@ mod tests {
 			.unwrap();
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
+		let group = consumer.track("media").unwrap().fetch_group(1_000, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Video));
 
 		let first = group.read().await.unwrap().unwrap();
@@ -196,7 +246,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format
@@ -215,6 +265,36 @@ mod tests {
 		assert!(live.read().await.unwrap().is_none());
 	}
 
+	/// A video frame looked ahead of a malformed object is returned before the decode error.
+	#[tokio::test]
+	async fn a_frame_before_a_malformed_object_is_returned_first() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("media", timed()).unwrap();
+		let format = Hang::Legacy(crate::container::Kind::Video);
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
+
+		format
+			.write(&mut group, &[frame(1_000_000, b"keyframe", true)])
+			.unwrap();
+		// A truncated timestamp varint.
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(1_020).unwrap(),
+				bytes::Bytes::from_static(&[0xff]),
+			)
+			.unwrap();
+		// Frames past the malformed object are never returned.
+		format.write(&mut group, &[frame(1_040_000, b"after", false)]).unwrap();
+		group.finish().unwrap();
+
+		let first = live.read().await.unwrap().unwrap();
+		assert_eq!(first.payload, b"keyframe".as_slice());
+		assert!(live.read().await.is_err());
+		assert!(live.read().await.unwrap().is_none());
+		assert!(live.read().await.unwrap().is_none());
+	}
+
 	/// One CMAF fragment decodes to several samples, which are handed back one at a time.
 	#[tokio::test]
 	async fn hands_back_a_cmaf_batch_one_frame_at_a_time() {
@@ -230,6 +310,12 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		// A CMAF track counts in its init's ticks.
 		let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+		// The group starts at its keyframe, two seconds in.
+		let start = moq_net::Timestamp::from_secs(2)
+			.unwrap()
+			.convert(muxer.timescale())
+			.unwrap()
+			.value();
 		let track = broadcast.create_track("video", info).unwrap();
 		let consumer = broadcast.consume();
 
@@ -250,7 +336,7 @@ mod tests {
 		}
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("video").unwrap().fetch_group(0, None).await.unwrap();
+		let group = consumer.track("video").unwrap().fetch_group(start, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::new(&cmaf, crate::container::Kind::Video).unwrap());
 
 		let first = group.read().await.unwrap().unwrap();

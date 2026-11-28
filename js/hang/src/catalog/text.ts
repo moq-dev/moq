@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { ContainerSchema } from "./container";
-import { u53Schema } from "./integers";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { renditions } from "./section";
+import { ContainerSchema } from "./container.ts";
+import { u53Schema } from "./integers.ts";
+import { RelativeBroadcastSchema } from "./path.ts";
+import { renditions } from "./section.ts";
 
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.
@@ -36,11 +36,6 @@ export const TextConfigSchema = z.object({
 	// broadcast that served this catalog (e.g. "../source"). If unset, the track lives in the same
 	// broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The instance of the stream the reference names, when known. Absent accepts whichever stream
-	// resolves first. A route of another instance fails the entry; a route over a wire that
-	// carries no instance has one its session minted, which proves nothing, so there it is best
-	// effort. Without `broadcast`, it names the catalog's own stream.
-	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -60,8 +55,8 @@ export const TextConfigSchema = z.object({
 	// The container format, used to decode the timestamp and frame the payload.
 	container: ContainerSchema,
 
-	// The maximum jitter before the next cue is flushed, in milliseconds. The player's jitter buffer
-	// should be at least this large; absent means each cue is flushed immediately.
+	// The largest media span the publisher hands to the transport behind a cue's timestamp, with
+	// the same meaning as a video rendition's `jitter`. A cue written in timestamp order adds nothing.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -69,10 +64,11 @@ export const TextConfigSchema = z.object({
 		),
 	),
 
-	// How far this rendition's frames reach the transport behind the broadcast's earliest
-	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
-	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
-	// ever grows over the life of a stream.
+	// How far this rendition's frames persistently trail what the broadcast's other renditions
+	// already wrote: the least any frame trails within a window of a second or more, and the
+	// largest of those windows, in whole milliseconds rounded up. A player holds `delay + jitter`
+	// for it and never subtracts one rendition's `delay` from another's. Absent on a rendition that
+	// trails nothing. It only ever grows over the life of a stream.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,

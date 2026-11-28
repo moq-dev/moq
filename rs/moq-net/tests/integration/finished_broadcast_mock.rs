@@ -7,7 +7,7 @@
 //! The track is complete before the broadcast ends, and the session stays open, so
 //! the subscription must conclude normally. moq-lite, ANNOUNCE_END: "Retraction does
 //! not disturb subscriptions already in flight, which conclude normally with
-//! SUBSCRIBE_FINISH." Instead the track is aborted when the broadcast ends, and
+//! SUBSCRIBE_END." Instead the track is aborted when the broadcast ends, and
 //! whatever the session had not sent yet is gone.
 //!
 //! Deterministic: time is paused, the runtime is single-threaded, and the publisher
@@ -15,10 +15,12 @@
 //! nothing when the broadcast ends.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -30,10 +32,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const PAYLOAD: &[u8] = b"frame";
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Publish a one-frame track over one mock session, end it cleanly, and return what
@@ -61,7 +64,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 
 	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
 	// publisher before the subscriber has the TRACK_INFO it accepts the track with.
-	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -90,8 +93,8 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 
 	// One frame and a textbook clean end, innermost first, with no await in between:
 	// nothing is served until the ending is done.
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), PAYLOAD).unwrap();
 	group.finish().unwrap();
 	let track = track.finish().unwrap();
 	drop(track);

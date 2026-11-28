@@ -24,6 +24,7 @@
 //!
 //! The raw lane's equivalents are in [`release_test`](super::release_test).
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -90,9 +91,6 @@ enum Profile {
 	Spliced,
 	/// [`Closed`](Self::Closed) for two minutes.
 	Long,
-	/// MPEG-2 open GOP, carried as whole PES: after the first every group opens on a sequence
-	/// header, behind two B-pictures that reference the group before.
-	Mpeg2,
 }
 
 /// One FFmpeg encode.
@@ -109,8 +107,6 @@ struct Encode {
 enum Video {
 	H264(&'static str),
 	H265(&'static str),
-	/// FFmpeg's `mpeg2video`, a GOP every twelve pictures, each open but the first.
-	Mpeg2,
 }
 
 impl Encode {
@@ -142,16 +138,6 @@ impl Encode {
 				x265 = format!("{params}:pools=none:frame-threads=1:log-level=error");
 				args.extend(["-c:v", "libx265", "-x265-params", &x265]);
 			}
-			Video::Mpeg2 => args.extend([
-				"-c:v",
-				"mpeg2video",
-				"-g",
-				"12",
-				"-bf",
-				"2",
-				"-sc_threshold",
-				"1000000000",
-			]),
 		}
 		args.extend([
 			"-preset",
@@ -256,7 +242,7 @@ struct Clip {
 impl Profile {
 	/// The clip, loaded once per process.
 	fn clip(self) -> &'static Clip {
-		static CLIPS: [std::sync::OnceLock<Clip>; 9] = [const { std::sync::OnceLock::new() }; 9];
+		static CLIPS: [std::sync::OnceLock<Clip>; 8] = [const { std::sync::OnceLock::new() }; 8];
 		CLIPS[self as usize].get_or_init(|| {
 			const CLOSED: &str = "keyint=12:min-keyint=12:scenecut=0";
 			const OPEN: &str = "keyint=12:min-keyint=12:scenecut=0:open-gop=1:bframes=3:b-adapt=0";
@@ -296,7 +282,6 @@ impl Profile {
 					seconds: "120",
 					..encode("320x240", Video::H264(CLOSED), 0)
 				}),
-				Self::Mpeg2 => whole(encode("320x240", Video::Mpeg2, 0)),
 			}
 		})
 	}
@@ -311,7 +296,7 @@ impl Profile {
 
 	/// Whether its leading pictures reference the group before.
 	fn orphans(self) -> bool {
-		matches!(self, Self::Open | Self::Rasl | Self::Mpeg2)
+		matches!(self, Self::Open | Self::Rasl)
 	}
 
 	/// The PCR discontinuities the source declares.
@@ -367,7 +352,7 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 	let ((from, from_pts), (to, to_pts)) = (at(a_packets), at(b_packets));
 
 	// Each PID's last whole PES in `a`: its PTS, and where an unfinished one started.
-	let mut last = std::collections::HashMap::<u16, (Option<u64>, usize, usize, usize)>::new();
+	let mut last = HashMap::<u16, (Option<u64>, usize, usize, usize)>::new();
 	for (index, packet) in a_packets[..from].iter().enumerate() {
 		let (pid, data, start) = payload(packet);
 		let entry = last.entry(pid).or_insert((None, index, 0, 0));
@@ -415,7 +400,7 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 		out.push(packet);
 	}
 
-	let mut counters = std::collections::HashMap::new();
+	let mut counters = HashMap::new();
 	for packet in &out {
 		if packet[3] & 0x10 != 0 {
 			counters.insert(payload(packet).0, packet[3] & 0x0f);
@@ -457,11 +442,13 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 	}
 }
 
-/// One track as the import published it: each group's sequence and frames, in decode order.
+/// One track as the import published it: each group's start and frames, in decode order.
 struct Recorded {
 	name: String,
 	video: bool,
 	groups: Vec<(u64, Vec<moq_net::frame::Frame>)>,
+	/// Where each group ended whole, when the import said.
+	ends: Vec<Option<u64>>,
 }
 
 /// What the import of a clip published.
@@ -474,7 +461,7 @@ struct Recording {
 /// Import `profile`'s clip whole and read back every frame of every track.
 async fn record(profile: Profile) -> Recording {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	// Kept whole, however long the clip, with the `mpegts` section that carries MPEG-2 video.
+	// Kept whole, however long the clip, with the `mpegts` section the export reads.
 	let config = (crate::catalog::Config::default().with_max_age(Duration::from_secs(300)))
 		.with_catalog(Catalog::<Ext>::default());
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
@@ -484,14 +471,7 @@ async fn record(profile: Profile) -> Recording {
 	let _finished = import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 
-	let whole = (snapshot.ext.mpegts.tracks.iter()).filter(|(_, track)| {
-		track
-			.pes_packet
-			.as_ref()
-			.is_some_and(|pes| matches!(pes.stream_type, 0x01 | 0x02))
-	});
-	let names = (snapshot.video.renditions.keys().chain(whole.map(|(name, _)| name)))
-		.map(|name| (name.clone(), true))
+	let names = (snapshot.video.renditions.keys().map(|name| (name.clone(), true)))
 		.chain(snapshot.audio.renditions.keys().map(|name| (name.clone(), false)));
 	let mut tracks = Vec::new();
 	for (name, video) in names {
@@ -499,13 +479,19 @@ async fn record(profile: Profile) -> Recording {
 			.track(&name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(300))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(300)),
+						max: Some(Duration::from_secs(300)),
+					},
+				)]),
 			)
 			.await
-			.unwrap();
+			.unwrap()
+			.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+		let mut ends = Vec::new();
+		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 			.await
 			.unwrap()
 			.unwrap()
@@ -514,9 +500,19 @@ async fn record(profile: Profile) -> Recording {
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);
 			}
-			groups.push((group.sequence, frames));
+			ends.push(group.end());
+			groups.push((group.start, frames));
 		}
-		tracks.push(Recorded { name, video, groups });
+		// The import appends each group, so nothing lies below its first or between two.
+		for run in skips(groups.iter().map(|(start, _)| *start)) {
+			assert!(track.is_skipped(run.clone()), "{name}: the import skips {run:?}");
+		}
+		tracks.push(Recorded {
+			name,
+			video,
+			groups,
+			ends,
+		});
 	}
 	assert_eq!(
 		tracks.iter().map(|track| track.video).collect::<Vec<_>>(),
@@ -534,19 +530,22 @@ async fn record(profile: Profile) -> Recording {
 	}
 }
 
+/// The group starts skipped below the first of `starts` and between each two, which no group holds.
+fn skips(starts: impl IntoIterator<Item = u64>) -> Vec<std::ops::Range<u64>> {
+	let mut runs = Vec::new();
+	let mut next = 0;
+	for start in starts {
+		runs.push(next..start);
+		next = start + 1;
+	}
+	runs
+}
+
 /// The presentation time of a published frame, in microseconds on the catalog clock, and
-/// whether it is the marker of a declared discontinuity. A whole video PES is stamped with its
-/// placement, so its own PTS says when it presents.
+/// whether it is the marker of a declared discontinuity.
 fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
 	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
-	let pts = match frame.payload.get(..4) {
-		Some([0, 0, 1, 0xe0..=0xef]) => {
-			let pts = super::psi::PesStart::parse(&frame.payload).unwrap().pts.unwrap();
-			pts * 100 / 9
-		}
-		_ => frame.timestamp.as_micros() as u64,
-	};
-	(pts, frame.payload.is_empty())
+	(frame.timestamp.as_micros().unwrap() as u64, frame.payload.is_empty())
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock.
@@ -602,8 +601,9 @@ struct Bottleneck {
 }
 
 impl Bottleneck {
-	/// Pass every delivery through the link, in arrival order.
-	fn carry(&self, slots: &[(usize, Slot)], deliveries: &mut [Delivery]) {
+	/// Pass every delivery through the link, in arrival order, and return when each group it cut
+	/// would have delivered the frame that overflowed, which is after the group's last delivery.
+	fn carry(&self, slots: &[(usize, Slot)], deliveries: &mut [Delivery]) -> HashMap<(usize, usize), Duration> {
 		let mut order: Vec<usize> = (0..slots.len())
 			.filter(|&i| deliveries[i] != Delivery::Omitted)
 			.collect();
@@ -612,13 +612,13 @@ impl Bottleneck {
 			Delivery::Omitted => unreachable!(),
 		});
 		let mut free = Duration::ZERO;
-		let mut cut = std::collections::HashSet::new();
+		let mut cut = HashMap::new();
 		for i in order {
 			let (track, slot) = slots[i];
 			let Delivery::At(at) = deliveries[i] else {
 				unreachable!()
 			};
-			if cut.contains(&(track, slot.group)) {
+			if cut.contains_key(&(track, slot.group)) {
 				deliveries[i] = Delivery::Omitted;
 				continue;
 			}
@@ -630,13 +630,14 @@ impl Bottleneck {
 			// The frame is admitted only if all of it fits: the backlog ahead plus its own bytes.
 			let leaves = free.max(at) + Duration::from_nanos(slot.size as u64 * 8 * 1_000_000_000 / self.rate);
 			if leaves - at > self.queue {
-				cut.insert((track, slot.group));
+				cut.insert((track, slot.group), leaves);
 				deliveries[i] = Delivery::Omitted;
 				continue;
 			}
 			free = leaves;
 			deliveries[i] = Delivery::At(free);
 		}
+		cut
 	}
 }
 
@@ -800,9 +801,10 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		}
 	}
 	let mut deliveries: Vec<Delivery> = slots.iter().map(|(_, slot)| (arm.schedule)(*slot)).collect();
-	if let Some(path) = &arm.path {
-		path.carry(&slots, &mut deliveries);
-	}
+	let cut = match &arm.path {
+		Some(path) => path.carry(&slots, &mut deliveries),
+		None => HashMap::new(),
+	};
 
 	// Every frame's delivery, and each group's end: (at, track, group, frame or the end).
 	let mut events = Vec::new();
@@ -862,8 +864,13 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 				let last = events.last().map(|(at, ..)| *at).unwrap();
 				events.push((last, Some((t, g, None))));
 			} else if kept > 0 {
-				// Evicted once its next frame would have arrived, after what it delivered.
-				let next = units[units.len() - frames.len() + kept].nominal + LAG;
+				// Evicted once its next frame would have arrived, after what it delivered, so the
+				// abort never lands with that last frame and takes it before the export reads it.
+				let next = cut
+					.get(&(t, g))
+					.copied()
+					.unwrap_or(units[units.len() - frames.len() + kept].nominal)
+					+ LAG;
 				let last = events.last().map(|(at, ..)| *at).unwrap();
 				events.push((next.max(last), Some((t, g, None))));
 			}
@@ -912,6 +919,16 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	let consumer = broadcast.consume();
 	let groups: Vec<Vec<(u64, Vec<moq_net::frame::Frame>)>> =
 		recording.tracks.iter().map(|track| track.groups.clone()).collect();
+	let ends: Vec<Vec<Option<u64>>> = recording.tracks.iter().map(|track| track.ends.clone()).collect();
+	// The import's skips, which a relay forwards with the first group past each: a group the path
+	// omits is not skipped, so the export sees it missing.
+	let mut skips: Vec<_> = (recording.tracks.iter())
+		.map(|track| {
+			skips(track.groups.iter().map(|(start, _)| *start))
+				.into_iter()
+				.peekable()
+		})
+		.collect();
 	let start = Instant::now();
 	let publisher = tokio::spawn(async move {
 		let _keep = &broadcast;
@@ -922,31 +939,42 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let Some((t, g, step)) = event else {
 				let snapshot = snapshot.clone();
 				catalog
-					.mutate(|catalog| {
-						catalog.video = snapshot.video;
-						catalog.audio = snapshot.audio;
-						catalog.ext = snapshot.ext;
-					})
+					.mutate(
+						|catalog| {
+							catalog.video = snapshot.video;
+							catalog.audio = snapshot.audio;
+							catalog.ext = snapshot.ext;
+						},
+						catalog.next_timestamp(),
+					)
 					.unwrap();
 				continue;
 			};
 			let (sequence, frames) = &groups[t][g];
 			let Some(f) = step else {
 				let group = open[t].take().unwrap();
-				match kept[t] == frames.len() {
-					true => {
+				match (kept[t] == frames.len(), ends[t][g]) {
+					(true, Some(end)) => {
+						group.finish_at(end).unwrap();
+					}
+					(true, None) => {
 						group.finish().unwrap();
 					}
-					false => group.abort(moq_net::Error::Old).unwrap(),
+					(false, _) => group.abort(moq_net::Error::Old).unwrap(),
 				}
 				continue;
 			};
+			if open[t].is_none() {
+				while let Some(run) = skips[t].next_if(|run| run.end <= *sequence) {
+					producers[t].skip_groups(run);
+				}
+			}
 			let group = open[t].get_or_insert_with(|| {
 				kept[t] = 0;
-				let info = moq_net::group::Info { sequence: *sequence };
+				let info = moq_net::group::Info { start: *sequence };
 				producers[t].create_group(info).unwrap()
 			});
-			assert_eq!(group.sequence, *sequence, "a schedule interleaves groups of track {t}");
+			assert_eq!(group.start, *sequence, "a schedule interleaves groups of track {t}");
 			group
 				.write_frame(frames[f].timestamp, frames[f].payload.clone())
 				.unwrap();
@@ -1158,7 +1186,7 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 
 /// Every PID's continuity counter steps by one on each packet with a payload.
 fn assert_continuous(ts: &[u8]) {
-	let mut last = std::collections::HashMap::new();
+	let mut last = HashMap::new();
 	for (at, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
 		let pid = u16::from_be_bytes([packet[1] & 0x1f, packet[2]]);
 		if pid == 0x1fff || packet[3] & 0x10 == 0 {
@@ -1255,7 +1283,7 @@ fn parse(output: &[u8], video_only: bool) -> Result<Decoded, String> {
 }
 
 /// The continuous source decode's pictures, by presentation time on the catalog clock.
-struct Reference(std::collections::HashMap<u64, String>);
+struct Reference(HashMap<u64, String>);
 
 impl Reference {
 	fn new(profile: Profile, video: &Ledger) -> Self {
@@ -1546,7 +1574,7 @@ async fn disjoint_outages_across_both_tracks_keep_the_clock() {
 			let missing = if slot.video {
 				slot.group == 5 && slot.frame == 11
 			} else {
-				(SPLICE - 5 * FRAME..SPLICE - 4 * FRAME).contains(&slot.nominal)
+				outage(slot, SPLICE - 5 * FRAME..SPLICE - 4 * FRAME)
 			};
 			if missing { Delivery::Omitted } else { clean(slot) }
 		})
@@ -1601,11 +1629,19 @@ async fn a_stalled_track_leaves_the_others_running() {
 
 /// Omit the audio due in [2 s, 3.5 s).
 fn stall_audio(slot: Slot) -> Delivery {
-	let (from, until) = (Duration::from_millis(2000), Duration::from_millis(3500));
-	match !slot.video && (from..until).contains(&slot.nominal) {
+	match !slot.video && outage(slot, Duration::from_millis(2000)..Duration::from_millis(3500)) {
 		true => Delivery::Omitted,
 		false => clean(slot),
 	}
+}
+
+/// Whether an audio frame is lost to an outage over `window`: one due in it, or in a group that
+/// began in it, so each group still delivers a prefix of its frames.
+fn outage(slot: Slot, window: Range<Duration>) -> bool {
+	let start = slot.nominal.saturating_sub(Duration::from_nanos(
+		slot.frame as u64 * AUDIO_TICKS * 1_000_000_000 / 90_000,
+	));
+	slot.nominal >= window.start && start < window.end
 }
 
 /// Audio sent 200 ms behind the video, within the delay, survives a skipped video group whole.
@@ -1680,31 +1716,6 @@ async fn open_gop_trims_only_the_orphans() {
 	);
 	assert!(
 		leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
-		"a continuous group keeps them"
-	);
-	assert_eq!(run.stats.release.gaps, 2);
-}
-
-/// MPEG-2 open GOP, whose pictures are stamped with their placement rather than their
-/// presentation: the leading B-pictures a skip or a cut orphans are trimmed, and so are those of
-/// the group the export joins at, while every group after a whole one keeps its own.
-#[tokio::test(start_paused = true)]
-async fn mpeg2_open_gop_trims_only_the_orphans() {
-	let run = recover(Arm {
-		join: Duration::from_millis(1100),
-		..arm(Profile::Mpeg2, skip_and_cut).breaks(0)
-	})
-	.await;
-	let video = run.ledger(true);
-	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
-	assert_eq!(first, 2, "the export joins at the group in flight");
-	assert_eq!(
-		(leading_out(video, 2), leading_out(video, 6), leading_out(video, 9)),
-		(0, 0, 0),
-		"the orphans are trimmed"
-	);
-	assert!(
-		leading_out(video, 3) > 0 && leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
 		"a continuous group keeps them"
 	);
 	assert_eq!(run.stats.release.gaps, 2);

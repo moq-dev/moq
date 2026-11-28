@@ -1,35 +1,21 @@
-# [S] Typecheck with bun check
+# [XS] Typecheck remaining JS benches in check scripts
 
 ## Goal
 
-Every workspace package's `check` script, and the bench typechecks in
-`js/justfile` and `test/json-properties.sh`, run `bun check` instead of
-`tsc --noEmit`. `tsc -b` builds keep TypeScript for declaration emit.
-
-Every package with a `bench/` typechecks it in its `check` script, so a
-removed export breaks the build, not Nightly. On `main` at c681b7a09, `clock`,
-`qmux`, `signals`, and `watch` have bench sources and no `bench/tsconfig.json`,
-and `json` and `publish` typecheck theirs only in the nightly bench recipes
-(`js/justfile`), while `net`, `crypto`, `hang`, `p2p`, and `pattern` already
-check theirs (added 2026-11-12 by /quest-plan, from moq's trimmed Pullfrog
-learnings).
+Every package with a `bench/` directory typechecks it in its `check` script
+using `bun check --no-script`, so a removed export breaks the merge gate instead
+of Nightly.
 
 ## Plan
 
-nixpkgs-unstable carries bun 1.4.4 as of 2026-11-02 (checked in
-/quest-unblock), so start with a `flake.lock` bump; `main`'s dev shell still
-has 1.4.2. `bun check` arrived in 1.4.3, but 1.4.4 adds the `--no-script` the
-`check` scripts below need and fixes 1.4.3's false errors. No bun overlay
-(decided 2026-10-22).
+The `tsc --noEmit` to `bun check --no-script` migration across all workspace
+`check` scripts, `js/justfile`, and `test/json-properties.sh` is complete on
+Bun 1.4.4 (`tsc -b` builds keep TypeScript for declaration emit).
 
-Measured 2026-10-22, bun 1.4.4 against TypeScript 7.0.2 on `main`: identical
-errors and exit codes on all 33 `tsc` invocations in the `check` scripts and
-bench typechecks, including 18 planted errors across 11 codes. The 33 targets
-dropped from 6.7s to 1.9s in total; `js/watch` went from 307 ms to 77 ms with
-2.3x less memory.
+What remains (from `main` at c681b7a09, added 2026-11-12 by `/quest-plan`):
 
-Repeat that diff on the bumped bun and switch only on an exact match: run each
-target under both with `--pretty false` / `--no-pretty` and compare the sorted
-error lines. A `check` script becomes `bun check --no-script`, since a bare
-`bun check` runs the package's `check` script instead. `tsc -b
-examples/tsconfig.json` becomes `bun check -b -p examples/tsconfig.json`.
+- Add `bench/tsconfig.json` and include `bun check --no-script -p bench/tsconfig.json`
+  in the `check` script for `js/clock`, `js/qmux`, `js/signals`, and `js/watch`.
+- Move the `js/json` and `js/publish` bench typechecks into their package
+  `check` scripts alongside the existing checks in `js/net`, `js/e2ee`,
+  `js/hang`, and `js/pattern`.

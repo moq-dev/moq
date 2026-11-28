@@ -36,10 +36,38 @@ public enum Audio {
             track: String? = nil,
             bandwidth: Allocator? = nil
         ) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,
                 options: MoqAudioProducerOptions(
                     input: input, output: output, track: track, bandwidth: bandwidth?.ffi))
+        }
+
+        private init(_ ffi: MoqAudioProducer) {
+            self.ffi = ffi
+        }
+
+        /// Open an audio track on the track a subscriber's `request` asks for, which names it.
+        ///
+        /// This is how an on-demand publisher serves a track asked for again after its producer
+        /// was released while read: pass the settings it was first published with. Settings that
+        /// change the track info its readers hold end the track with `MalformedTrack` and throw here;
+        /// nothing checks the codec settings, which its readers decode with, so keep those too.
+        /// The request must belong to the catalog's broadcast, and a config that can't be encoded
+        /// rejects it with `NotFound`.
+        public static func requested(
+            catalog: Media.CatalogProducer,
+            request: TrackRequest,
+            input: EncoderInput,
+            output: EncoderOutput,
+            bandwidth: Allocator? = nil
+        ) throws -> Producer {
+            try checkDuration(output.frameDuration, "frameDuration")
+            return Producer(
+                try MoqAudioProducer.requested(
+                    catalog: catalog.ffi, request: request.ffi,
+                    options: MoqAudioProducerOptions(
+                        input: input, output: output, track: nil, bandwidth: bandwidth?.ffi)))
         }
 
         /// A watch-only handle to whether the audio track has subscribers.
@@ -88,7 +116,9 @@ public enum Audio {
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
-            Consumer(
+            try checkAudio(rendition)
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqAudioConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -125,7 +155,10 @@ public enum Audio {
         let ffi: MoqAudioEncoder
 
         /// Open a codec-only encoder.
-        public init(output: EncoderOutput) throws { ffi = try MoqAudioEncoder(output: output) }
+        public init(output: EncoderOutput) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
+            ffi = try MoqAudioEncoder(output: output)
+        }
 
         /// Samples per channel each `encode` call takes.
         public var frameSize: UInt64 {

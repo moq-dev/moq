@@ -24,7 +24,7 @@
 //! let info = moq_net::track::Info::default()
 //!     .with_timescale(moq_net::Timescale::MILLI)
 //!     .with_compression(moq_net::track::Compression::Deflate);
-//! let track = broadcast.create_track("chat", info)?;
+//! let track = broadcast.create_track("chat", info).ok_or(moq_net::Error::Duplicate)?;
 //! let mut chat = catalog.json_stream::<Message>(track, moq_mux::json::Config::default())?;
 //! chat.append(&Message { text: "hello".to_string() }, catalog.clock().now())?;
 //! # Ok(())
@@ -80,7 +80,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::Timed;
+use moq_json::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -171,8 +171,9 @@ fn prepare(track: &moq_net::track::Producer, config: &mut impl AsMut<JsonConfig>
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
 /// For a log where every record survives, use [`Stream`].
 pub struct Snapshot<T> {
-	inner: moq_json::snapshot::Producer<T>,
+	// Dropped before the track, so a handler asked for the track again finds the name free.
 	listing: Listing,
+	inner: moq_json::snapshot::Producer<T>,
 }
 
 impl<T: Serialize> Snapshot<T> {
@@ -218,7 +219,7 @@ impl<T: Serialize> Snapshot<T> {
 	/// The value is written at that timestamp and measures the entry's `jitter` and `delay`; one
 	/// ahead of now measures as zero delay. An unchanged value writes nothing and measures nothing.
 	pub fn update(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		match self.inner.update(Timed::from(value).at(timestamp))? {
+		match self.inner.update(value, timestamp)? {
 			Some(size) => self.listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
@@ -247,13 +248,14 @@ impl<T: Serialize> Snapshot<T> {
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value document,
 /// use [`Snapshot`].
 pub struct Stream<T> {
-	inner: moq_json::stream::Producer<T>,
-	name: String,
-
 	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
-	/// discovers it afterwards.
+	/// discovers it afterwards. Dropped before the track, so a handler asked for the track again
+	/// finds the name free.
 	listing: Option<Listing>,
+
+	inner: moq_json::stream::Producer<T>,
+	name: String,
 }
 
 impl<T: Serialize> Stream<T> {
@@ -299,7 +301,7 @@ impl<T: Serialize> Stream<T> {
 	/// error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		let size = match self.inner.append(Timed::from(value).at(timestamp)) {
+		let size = match self.inner.append(value, timestamp) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
 			Err(
@@ -421,7 +423,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Errors if the entry declares a mode this build doesn't implement.
 	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
-		let binding = source.bind(self.config().broadcast.as_ref(), self.config().instance.as_ref())?;
+		let binding = source.bind(self.config().broadcast.as_ref())?;
 		let mut subscribe = EntrySubscribe::Binding {
 			binding,
 			name: self.config().track(self.name()).to_string(),
@@ -615,14 +617,14 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
-		let published = catalog.snapshot().media.clock;
+		let published = catalog.snapshot().sync.clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().media.clock, published, "the clock never moves");
+		assert_eq!(catalog.snapshot().sync.clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
 		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();
@@ -633,13 +635,13 @@ mod test {
 			let mut stamps = Vec::new();
 			while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
 				while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-					stamps.push(frame.timestamp.unwrap().as_millis());
+					stamps.push(frame.timestamp.as_millis().unwrap());
 				}
 			}
 			assert_eq!(stamps.len(), 1);
 			assert!(
 				// The track stores milliseconds.
-				first.as_millis() <= stamps[0] && stamps[0] <= after.as_millis(),
+				first.as_millis().unwrap() <= stamps[0] && stamps[0] <= after.as_millis().unwrap(),
 				"{first:?} {stamps:?} {after:?}"
 			);
 		}
@@ -664,9 +666,12 @@ mod test {
 
 		let mut full_track = full.consume();
 		let mut delta_track = delta.consume();
-		for value in [json!({ "n": 1 }), json!({ "n": 2 })] {
-			full.update(&value, catalog.clock().now()).unwrap();
-			delta.update(&value, catalog.clock().now()).unwrap();
+		// A millisecond apart: a group starts at its value's time, and starts strictly increase.
+		let now = catalog.clock().now();
+		for (ms, value) in [json!({ "n": 1 }), json!({ "n": 2 })].into_iter().enumerate() {
+			let at = moq_net::Timestamp::from_micros(now.as_micros().unwrap() as u64 + ms as u64 * 1_000).unwrap();
+			full.update(&value, at).unwrap();
+			delta.update(&value, at).unwrap();
 		}
 		full.finish().unwrap();
 		delta.finish().unwrap();
@@ -718,6 +723,43 @@ mod test {
 			!catalog.snapshot().json.tracks.contains_key("chat"),
 			"a track with no publisher must not stay advertised"
 		);
+	}
+
+	/// A snapshot dropped while read retires its entry before its track is asked for again, so a
+	/// handler serving the renewal can publish it anew under the same name.
+	#[test]
+	fn dropping_a_read_snapshot_retires_the_entry_before_the_renewal() {
+		struct Listed {
+			catalog: crate::catalog::Producer,
+			at_wake: std::sync::Mutex<Option<bool>>,
+		}
+		impl std::task::Wake for Listed {
+			fn wake(self: std::sync::Arc<Self>) {
+				let listed = self.catalog.snapshot().json.tracks.contains_key("status");
+				*self.at_wake.lock().unwrap() = Some(listed);
+			}
+		}
+
+		let (mut broadcast, catalog) = catalog();
+		let mut requests = broadcast.requests();
+		let listed = std::sync::Arc::new(Listed {
+			catalog: catalog.clone(),
+			at_wake: Default::default(),
+		});
+		let status = catalog
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
+			.unwrap();
+		let _reader = status.consume();
+		let waiter = kio::Waiter::new(std::task::Waker::from(listed.clone()));
+		assert!(requests.poll_requested_track(&waiter).is_pending());
+
+		drop(status);
+		assert_eq!(
+			*listed.at_wake.lock().unwrap(),
+			Some(false),
+			"the entry outlived the renewal"
+		);
+		assert!(requests.poll_requested_track(&kio::Waiter::noop()).is_ready());
 	}
 
 	/// `finish` consumes the handle, so the entry goes with it: an entry advertising a closed track

@@ -1,6 +1,6 @@
 // moq-lite-07 TRACKS both ways. `answer`: the JS publisher answers a Rust-encoded TRACKS request
-// with its listing, through a removal and the broadcast's end. `echo`: JS decodes Rust-encoded
-// listing events and encodes them back.
+// with its listing of both kinds, through a removal, a datagram track's finish, and the broadcast's
+// end. `echo`: JS decodes Rust-encoded listing events and encodes them back.
 import { Duration } from "@moq/clock";
 import { randomHop } from "../../js/net/src/hop.ts";
 import { Publisher } from "../../js/net/src/lite/publisher.ts";
@@ -25,8 +25,16 @@ if (input.mode === "answer") {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a", { timescale: Timescale.MILLI, maxAge: Duration.millis(3000), priority: 9, refresh: 4 });
+	broadcast.createTrack("a", {
+		timescale: Timescale.MILLI,
+		maxAge: Duration.millis(3000),
+		priority: 9,
+		refresh: { ratio: 4, interval: Duration.millis(1500) },
+	});
 	broadcast.createTrack("b");
+	// A namespace apart from the track of the same name.
+	const datagrams = broadcast.createDatagrams("a", { timescale: Timescale.MILLI, priority: 2 });
+	if (!datagrams) throw new Error("the track already exists");
 
 	const publisher = new Publisher(createMockTransportPair().server, version, randomHop(), origin.consume());
 	const stream = new Stream({
@@ -41,6 +49,7 @@ if (input.mode === "answer") {
 	// Past SYNCED before the removal, so the removal is not folded into the initial set.
 	await settle();
 	broadcast.removeTrack("a");
+	datagrams.finish();
 	await settle();
 	broadcast.close();
 	await listing;

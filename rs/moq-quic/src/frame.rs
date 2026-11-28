@@ -226,6 +226,9 @@ pub(crate) enum Close {
 }
 
 impl Close {
+	/// Bound on either variant's size, excluding the reason
+	pub(crate) const SIZE_BOUND: usize = ConnectionClose::SIZE_BOUND;
+
 	pub(crate) fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
 		match self {
 			Self::Connection(x) => x.encode(out, max_len),
@@ -296,13 +299,18 @@ impl ConnectionClose {
 		out.write(self.error_code); // <= 8 bytes
 		let ty = self.frame_type.map_or(0, |x| x.0);
 		out.write_var(ty); // <= 8 bytes
-		let max_len = max_len
-			- 3 - VarInt::from_u64(ty).unwrap().size()
-			- VarInt::from_u64(self.reason.len() as u64).unwrap().size();
+		// Below the header, the reason is dropped rather than the frame
+		let header = 1 + var_size(self.error_code.into()) + var_size(ty) + var_size(self.reason.len() as u64);
+		let max_len = max_len.saturating_sub(header);
 		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
 		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
 	}
+}
+
+/// Encoded size of `x` as a VarInt
+fn var_size(x: u64) -> usize {
+	VarInt::from_u64(x).map_or(8, VarInt::size)
 }
 
 /// Reason given by an application for closing the connection
@@ -336,7 +344,7 @@ impl ApplicationClose {
 	pub(crate) fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
 		out.write(FrameType::APPLICATION_CLOSE); // 1 byte
 		out.write(self.error_code); // <= 8 bytes
-		let max_len = max_len - 1 - self.error_code.size() - VarInt::from_u64(self.reason.len() as u64).unwrap().size();
+		let max_len = max_len.saturating_sub(1 + self.error_code.size() + var_size(self.reason.len() as u64));
 		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
 		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
@@ -423,6 +431,12 @@ impl Ack {
 
 	pub(crate) fn iter(&self) -> AckIter<'_> {
 		self.into_iter()
+	}
+
+	/// The ACK Delay in microseconds, given the sender's `ack_delay_exponent`, saturating so a huge
+	/// field never wraps to a small delay
+	pub(crate) fn delay_micros(&self, exponent: u64) -> u64 {
+		self.delay.saturating_mul(1 << exponent)
 	}
 
 	/// The receive timestamps it reports, newest arrival first, or `None` for a plain ACK
@@ -776,7 +790,7 @@ impl Iter {
 			| FrameType::ACK_RECEIVE_TIMESTAMPS_ECN => {
 				let largest = self.bytes.get_var()?;
 				let delay = self.bytes.get_var()?;
-				let extra_blocks = self.bytes.get_var()? as usize;
+				let extra_blocks = self.bytes.get_var()?;
 				let n = scan_ack_blocks(&self.bytes, largest, extra_blocks)?;
 				let additional = self.bytes.split_to(n);
 				let ecn = match ty {
@@ -879,7 +893,6 @@ impl Iter {
 	}
 
 	/// The payload past the frames parsed so far, so the mux can interleave its own frame types
-	#[cfg(feature = "mux")]
 	pub(crate) fn into_rest(self) -> Bytes {
 		self.bytes
 	}
@@ -920,7 +933,7 @@ impl From<InvalidFrame> for TransportError {
 }
 
 /// Validate exactly `n` ACK ranges in `buf` and return the number of bytes they cover
-fn scan_ack_blocks(mut buf: &[u8], largest: u64, n: usize) -> Result<usize, IterErr> {
+fn scan_ack_blocks(mut buf: &[u8], largest: u64, n: u64) -> Result<usize, IterErr> {
 	let total_len = buf.remaining();
 	let first_block = buf.get_var()?;
 	let mut smallest = largest.checked_sub(first_block).ok_or(IterErr::Malformed)?;
@@ -1282,6 +1295,29 @@ mod test {
 		}
 	}
 
+	/// A budget below the header drops the reason instead of underflowing
+	#[test]
+	fn close_encoding_below_header() {
+		let closes = [
+			Close::Connection(ConnectionClose {
+				error_code: TransportErrorCode::crypto(0x2a),
+				frame_type: Some(FrameType::RESET_STREAM),
+				reason: "transport closed".into(),
+			}),
+			Close::Application(ApplicationClose {
+				error_code: VarInt::from_u32(0x4000),
+				reason: "application closed".into(),
+			}),
+		];
+		for close in closes {
+			for max_len in 0..Close::SIZE_BOUND + 4 {
+				let mut buf = Vec::new();
+				close.encode(&mut buf, max_len);
+				assert_eq!(frames(buf).len(), 1, "budget {max_len}");
+			}
+		}
+	}
+
 	/// The out-of-order example from draft-ietf-quic-receive-ts-03 section 8
 	#[test]
 	fn receive_timestamps_coding() {
@@ -1336,6 +1372,22 @@ mod test {
 			4
 		);
 		assert_eq!(short, [1, 5, 4, 0x41, 0x8b, 1, 2, 2]);
+	}
+
+	/// An ACK Delay too large to scale reads as the longest delay, not a wrapped short one
+	#[test]
+	fn ack_delay_saturates() {
+		let mut ranges = ArrayRangeSet::new();
+		ranges.insert_one(0);
+		for (delay, exponent, micros) in [(100, 3, 800), (1 << 61, 3, u64::MAX), (VarInt::MAX.0, 20, u64::MAX)] {
+			let mut buf = Vec::new();
+			Ack::encode(delay, &ranges, None, false, &mut buf);
+			let frames = frames(buf);
+			let [Frame::Ack(ack)] = &frames[..] else {
+				panic!("incorrect frames {frames:?}");
+			};
+			assert_eq!(ack.delay_micros(exponent), micros, "{delay} << {exponent}");
+		}
 	}
 
 	/// A delta that steps back past the basis, or a range below packet zero, is malformed

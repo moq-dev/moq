@@ -255,8 +255,12 @@ async fn import_opus_frames() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -289,7 +293,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
@@ -302,7 +306,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	let _finished = import.finish().unwrap();
 	published.extend(clocks.drain());
 
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first PES anchors the clock");
 	assert!(!published.is_empty(), "the catalog publishes");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
@@ -537,8 +541,12 @@ async fn survives_midstream_join() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -595,8 +603,12 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -728,7 +740,7 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 	}
 }

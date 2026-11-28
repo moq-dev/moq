@@ -57,7 +57,8 @@ const AV1_SEQUENCE_HEADER_MAX_LEN: u64 = (3139 + 1u64).div_ceil(8);
 /// - FLAC (`A_FLAC`)
 /// - MP3 (`A_MPEG/L3`)
 ///
-/// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
+/// Laced blocks space their frames by a BlockDuration that precedes the Block in its BlockGroup,
+/// else by the track's positive DefaultDuration; a block with neither fails the import.
 ///
 /// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
 ///
@@ -113,6 +114,11 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	numbers: HashSet<u64>,
 	/// Whether a ReferenceBlock preceded the current BlockGroup's Block.
 	referenced: bool,
+	/// The current BlockGroup's BlockDuration, in Matroska ticks, once read.
+	block_duration: Option<u64>,
+	/// An audio Block whose group may close once its BlockGroup ends, since a BlockDuration can
+	/// follow it.
+	ended: Option<Ended>,
 	/// The SimpleBlock or Block streaming in.
 	block: Option<Block>,
 	/// The hvcC CodecPrivate streaming in.
@@ -155,6 +161,18 @@ struct MkvTrack {
 	default_duration: Option<std::time::Duration>,
 	kind: TrackKind,
 	track: Media,
+	/// An H.264/H.265 record held unpublished until the track's first keyframe commits, whose
+	/// bytes say whether the parameter sets also ride in band. The rendition withholds the catalog
+	/// meanwhile.
+	record: Option<Record>,
+	/// Where an audio track's open group closes.
+	join: crate::container::Join,
+}
+
+struct Record {
+	config: VideoConfig,
+	/// The scan of the first keyframe's bytes so far, once it opens.
+	keyframe: Option<crate::codec::video::InBand>,
 }
 
 enum Media {
@@ -176,6 +194,13 @@ impl Media {
 		}
 	}
 
+	fn needs_keyframe(&self) -> bool {
+		match self {
+			Self::Video(track) => track.needs_keyframe(),
+			Self::Audio(track) => track.needs_keyframe(),
+		}
+	}
+
 	fn commit(&mut self, frame: Streamed) -> crate::Result<()> {
 		match self {
 			Self::Video(track) => track.commit(frame),
@@ -190,10 +215,10 @@ impl Media {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	fn seek(&mut self, start: u64) -> crate::Result<()> {
 		match self {
-			Self::Video(track) => track.seek(sequence),
-			Self::Audio(track) => track.seek(sequence),
+			Self::Video(track) => track.seek(start),
+			Self::Audio(track) => track.seek(start),
 		}
 	}
 
@@ -208,6 +233,14 @@ impl Media {
 		match self {
 			Self::Video(track) => track.abort(err),
 			Self::Audio(track) => track.abort(err),
+		}
+	}
+
+	/// Publish a video track's config.
+	fn configure(&mut self, config: VideoConfig) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.set(config),
+			Self::Audio(_) => unreachable!("only a video track holds a record"),
 		}
 	}
 }
@@ -254,6 +287,16 @@ enum BlockState {
 	Frames(Box<Frames>),
 	/// A skipped track's payload, or the rest of a failed block, discarded.
 	Skip,
+}
+
+/// Where an audio block's frames start, waiting to learn where they end.
+#[derive(Clone, Copy)]
+struct Ended {
+	track: u64,
+	/// The first frame's presentation time, in nanoseconds.
+	pts_ns: u64,
+	/// For a laced block, nanoseconds from its first frame to where its last ends.
+	laced: Option<u64>,
 }
 
 /// What a block header says.
@@ -310,12 +353,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
-			timebase: reserved.timebase(),
+			timebase: reserved.producer().timebase(),
 			initial_reservation: Some(reserved),
 			reader: ebml::Reader::new(),
 			fields: Vec::new(),
 			numbers: HashSet::new(),
 			referenced: false,
+			block_duration: None,
+			ended: None,
 			block: None,
 			hvcc: None,
 			seek: None,
@@ -325,6 +370,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			cluster_timestamp: 0,
 			tracks: HashMap::default(),
 		}
+	}
+
+	/// Shift this input's timestamps through `timebase`, a timestamp base of the catalog `reserved`
+	/// belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.timebase = timebase;
+		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -418,6 +472,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			(Some(CLUSTER), SIMPLE_BLOCK) => Action::Stream,
 			(Some(CLUSTER), BLOCK_GROUP) => Action::Descend,
 			(Some(BLOCK_GROUP), BLOCK) => Action::Stream,
+			(Some(BLOCK_GROUP), BLOCK_DURATION) => Action::Read,
 			_ => Action::Skip,
 		};
 		// A number is at most 8 bytes, so a larger one is refused before its bytes are held.
@@ -512,7 +567,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		match header.id {
 			id::CLUSTER => self.cluster_timestamp = 0,
-			id::BLOCK_GROUP => self.referenced = false,
+			id::BLOCK_GROUP => {
+				self.referenced = false;
+				self.block_duration = None;
+			}
 			_ => {}
 		}
 		Ok(())
@@ -525,6 +583,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::TimestampScale(scale) => self.timestamp_scale_ns = scale,
 			// Within a Cluster, this is the cluster timestamp (in Matroska ticks).
 			MatroskaSpec::Timestamp(timestamp) => self.cluster_timestamp = timestamp,
+			MatroskaSpec::BlockDuration(duration) => self.block_duration = Some(duration),
 			value => set(
 				self.fields.last_mut().expect("a read field has a collecting parent"),
 				value,
@@ -565,6 +624,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			id::SIMPLE_BLOCK | id::BLOCK => self.block_end()?,
+			id::BLOCK_GROUP => {
+				self.settle()?;
+				self.block_duration = None;
+			}
 			id::CODEC_PRIVATE => {
 				let hvcc = self.hvcc.take().expect("only a filtered CodecPrivate is streamed");
 				set(
@@ -637,10 +700,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::StreamedCmaf.into());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(suffix, self.catalog.track_info(kind.priority()));
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
@@ -651,16 +713,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TrackKind::Audio => crate::container::Kind::Audio,
 			},
 		)?;
-		let media = match kind {
+		let (media, record) = match kind {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Video(reserved.video(track, wire, config)?)
+				match config.codec {
+					VideoCodec::H264(_) | VideoCodec::H265(_) => {
+						let record = Record { config, keyframe: None };
+						(Media::Video(reserved.video(track, wire, None)?), Some(record))
+					}
+					_ => (Media::Video(reserved.video(track, wire, config)?), None),
+				}
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Audio(reserved.audio(track, wire, config)?)
+				(Media::Audio(reserved.audio(track, wire, config)?), None)
 			}
 		};
 
@@ -670,6 +738,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				default_duration,
 				kind,
 				track: media,
+				record,
+				join: crate::container::Join::default(),
 			},
 		);
 
@@ -737,7 +807,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					chunk = rest;
 					block.remaining -= 1;
-					let Some(sizes) = lacing.push(byte, block.remaining).map_err(anyhow::Error::new)? else {
+					let Some(sizes) = lacing.push(byte, block.remaining)? else {
 						continue;
 					};
 					let fixed = lacing.block;
@@ -782,13 +852,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 
-		let duration = match laced {
-			true => Some(
-				track
-					.default_duration
-					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
+		// A BlockDuration that precedes the Block spans all of its frames.
+		let block_duration = match (grouped, self.block_duration) {
+			(Some(_), Some(ticks)) => Some(
+				ticks
+					.checked_mul(self.timestamp_scale_ns)
+					.ok_or(Error::TimestampOverflow)?,
 			),
-			false => None,
+			_ => None,
+		};
+		// Laced frames split it evenly, else each lasts the track's default. An audio packet lasts it,
+		// else the track's default, which bounds its group's measured end; video's follows its cadence.
+		let duration = match (laced, track.kind) {
+			(true, _) => Some(
+				block_duration
+					.map(|ns| std::time::Duration::from_nanos(ns / sizes.len() as u64))
+					.or(track.default_duration)
+					.filter(|step| !step.is_zero())
+					.ok_or(Error::LacingDuration)?,
+			),
+			(false, TrackKind::Audio) => block_duration
+				.map(std::time::Duration::from_nanos)
+				.or(track.default_duration),
+			(false, TrackKind::Video) => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
 		let step = duration.map(|duration| duration.as_nanos()).unwrap_or_default();
@@ -834,19 +920,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
 					self.initial_reservation = None;
 					let keyframe = match frames.kind {
-						TrackKind::Audio => frames.index == 0,
+						// Any audio frame can open a group; the join decides where one closes.
+						TrackKind::Audio => {
+							let opens = track.track.needs_keyframe();
+							if opens {
+								track.join.reset();
+							}
+							opens
+						}
 						TrackKind::Video => frames.keyframe,
 					};
 					let size = usize::try_from(size).map_err(|_| moq_net::Error::FrameTooLarge)?;
 					frames.index += 1;
-					frames
-						.open
-						.insert(track.track.open(timestamp, keyframe, frames.duration, size)?)
+					let frame = track.track.open(timestamp, keyframe, frames.duration, size)?;
+					if keyframe && let Some(record) = &mut track.record {
+						// A keyframe a failed block cut short starts over.
+						record.keyframe = Some(crate::codec::video::InBand::new(&record.config)?);
+					}
+					frames.open.insert(frame)
 				}
 			};
 			let (bytes, rest) = chunk.split_at(frame.remaining().min(chunk.len()));
 			if !bytes.is_empty() {
 				frame.write(bytes)?;
+				if let Some(Record {
+					keyframe: Some(scan), ..
+				}) = &mut track.record
+				{
+					scan.scan(bytes);
+				}
 			}
 			chunk = rest;
 			if frame.remaining() > 0 {
@@ -854,6 +956,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			let frame = frames.open.take().expect("a frame is open");
 			track.track.commit(frame)?;
+			if let Some(Record {
+				mut config,
+				keyframe: Some(scan),
+			}) = track.record.take_if(|record| record.keyframe.is_some())
+			{
+				scan.apply(&mut config);
+				track.track.configure(config)?;
+			}
 		}
 		Ok(total - chunk.len())
 	}
@@ -871,37 +981,74 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				.into());
 			}
-			BlockState::Lacing(_) => return Err(anyhow::Error::new(LacingError::Invalid).into()),
+			BlockState::Lacing(_) => return Err(Error::InvalidLacing.into()),
 			BlockState::Frames(frames) => {
 				// The frame sizes add up to the body, so every frame was written as its bytes arrived.
 				debug_assert!(frames.open.is_none() && frames.index == frames.sizes.len());
-				if frames.kind == TrackKind::Audio
-					&& let Some(track) = self.tracks.get_mut(&frames.track)
-				{
-					track.track.cut(None)?;
+				if frames.kind == TrackKind::Audio {
+					self.ended = Some(Ended {
+						track: frames.track,
+						pts_ns: frames.pts_ns,
+						laced: (frames.sizes.len() > 1).then(|| frames.step.saturating_mul(frames.sizes.len() as u64)),
+					});
 				}
 			}
 			BlockState::Skip => {}
 		}
-		if let Some(sequence) = self.seek.take() {
-			self.seek(sequence)?;
+		// A Block's BlockGroup may still hold its BlockDuration.
+		if block.grouped.is_none() {
+			self.settle()?;
 		}
 		Ok(())
 	}
 
-	/// Close the current group on every track and open the next one at `sequence`.
+	/// The last block's duration is known: close its audio group if it fills a join, then run a
+	/// seek that waited for it.
+	fn settle(&mut self) -> Result<()> {
+		if let Some(ended) = self.ended.take()
+			&& let Some(track) = self.tracks.get_mut(&ended.track)
+		{
+			// Laced frames were already stamped by their spacing, so a BlockDuration after them can't
+			// end the block below its last; an unlaced packet lasts its BlockDuration, else the default.
+			let duration = match (ended.laced, self.block_duration) {
+				(Some(laced), _) => Some(laced),
+				(None, Some(ticks)) => Some(
+					ticks
+						.checked_mul(self.timestamp_scale_ns)
+						.ok_or(Error::TimestampOverflow)?,
+				),
+				(None, None) => track.default_duration.map(|duration| duration.as_nanos() as u64),
+			};
+			// An audio group closes at the end of the block that brings it to a join, so a block's
+			// frames stay in one group and the relay sees it finish without waiting for the next.
+			let start = Timestamp::from_nanos(ended.pts_ns)?;
+			let end = Timestamp::from_nanos(ended.pts_ns.saturating_add(duration.unwrap_or_default()))?;
+			if let Some(end) = track.join.fill(start, end) {
+				// The frames were shifted onto the catalog clock, so their end is too.
+				let end = duration.map(|_| self.timebase.shift(end)).transpose()?;
+				track.track.cut(end)?;
+			}
+		}
+		if let Some(start) = self.seek.take() {
+			self.seek(start)?;
+		}
+		Ok(())
+	}
+
+	/// Close the current group on every track and open the next one at `start`.
 	///
 	/// Broadcast-wide: every track inside this MKV import advances together; per-track
 	/// control is intentionally not exposed. While a block streams in, the seek waits for it to end,
 	/// since its later frames continue its group.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
-		if self.block.is_some() {
-			self.seek = Some(sequence);
+		// A seek already waiting runs at that boundary, so a later one waits with it and replaces it.
+		if self.block.is_some() || self.ended.is_some() || self.seek.is_some() {
+			self.seek = Some(start);
 			return Ok(());
 		}
 		for track in self.tracks.values_mut() {
-			track.track.seek(sequence)?;
+			track.track.seek(start)?;
 		}
 		Ok(())
 	}
@@ -932,7 +1079,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
 			self.abort_block(err.reason());
 		}
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// No frame follows to anchor the clock, so publish the declared track set now, with a track
+		// whose record no keyframe followed as the record stands.
+		for track in self.tracks.values_mut() {
+			if let Some(record) = track.record.take() {
+				result = result.and_then(|()| track.track.configure(record.config));
+			}
+		}
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			// End every track even on refusal, keeping the first error. A track whose finish fails
@@ -989,8 +1142,8 @@ pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it; see
-	/// [`Import::abort`].
+	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
+	/// clean end instead once every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}
@@ -1502,21 +1655,13 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	Ok(config)
 }
 
-#[derive(Debug, thiserror::Error)]
-enum LacingError {
-	#[error("invalid MKV lacing")]
-	Invalid,
-	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
-	MissingDuration,
-}
-
 impl Lacing {
 	/// Take the next lace header byte, returning every frame's size once the header ends.
 	/// `remaining` counts the body bytes after `byte`; the last frame takes what the others leave.
 	// webm-iterable's splitter uses unchecked indexing and size arithmetic on malformed laces, so
 	// sizes and signed EBML deltas stay checked here.
-	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, LacingError> {
-		let invalid = LacingError::Invalid;
+	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, Error> {
+		let invalid = Error::InvalidLacing;
 		let Some(count) = self.count else {
 			let count = usize::from(byte) + 1;
 			if count < 2 {
@@ -1573,8 +1718,8 @@ impl Lacing {
 			.sizes
 			.iter()
 			.try_fold(0u64, |sum, size| sum.checked_add(*size))
-			.ok_or(LacingError::Invalid)?;
-		let last = remaining.checked_sub(sum).ok_or(LacingError::Invalid)?;
+			.ok_or(Error::InvalidLacing)?;
+		let last = remaining.checked_sub(sum).ok_or(Error::InvalidLacing)?;
 		let mut sizes = std::mem::take(&mut self.sizes);
 		sizes.push(last);
 		Ok(Some(sizes))
@@ -1700,8 +1845,15 @@ mod tests {
 
 	/// A SimpleBlock header for a keyframe on `track` declaring `size` payload bytes.
 	fn simple_block(track: u8, size: u64) -> Vec<u8> {
+		simple_block_at(track, size, 0)
+	}
+
+	/// A keyframe block `timecode` ticks past its cluster's.
+	fn simple_block_at(track: u8, size: u64, timecode: i16) -> Vec<u8> {
 		let mut block = header(&[0xa3], size + 4);
-		block.extend_from_slice(&[0x80 | track, 0, 0, 0x80]);
+		block.push(0x80 | track);
+		block.extend_from_slice(&timecode.to_be_bytes());
+		block.push(0x80);
 		block
 	}
 
@@ -2029,6 +2181,8 @@ mod tests {
 					assert!(hvcc.retained() <= 2 * canonical.len(), "{}", hvcc.retained());
 				}
 			}
+			// No keyframe follows, so the record publishes as it stands at finish.
+			let _finished = import.finish().unwrap();
 			let config = catalog.snapshot().video.renditions.into_values().next().unwrap();
 			assert_eq!(config.description.as_deref(), Some(canonical.as_slice()));
 		}
@@ -2128,9 +2282,11 @@ mod tests {
 		let (mut import, _catalog, _consumer) = import();
 		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
 		let payload = vec![3; 1024 * 1024];
-		// Twice the most a track holds.
-		for _ in 0..64 {
-			import.decode(&simple_block(1, payload.len() as u64)).unwrap();
+		// Twice the most a track holds, one group a millisecond.
+		for timecode in 0..64 {
+			import
+				.decode(&simple_block_at(1, payload.len() as u64, timecode))
+				.unwrap();
 			import.decode(&payload).unwrap();
 		}
 		let _import = import.finish().unwrap();
@@ -2162,7 +2318,8 @@ mod tests {
 
 		let data = include_bytes!("test_data/opus.webm");
 		// The last packet is followed by 10 bytes of BlockGroup metadata: cut inside its payload,
-		// or inside the metadata after all six packets were accepted.
+		// which fails the group it opened after five 20 ms packets filled the first, or inside the
+		// metadata after all six were accepted.
 		for (missing, expected) in [(11, 5), (1, 6)] {
 			let data = &data[..data.len() - missing];
 			for chunk in [1, 7, 64, data.len()] {
@@ -2177,8 +2334,12 @@ mod tests {
 				));
 				let snapshot = catalog.snapshot();
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
-				let subscription = moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1)));
+				let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(std::time::Duration::from_secs(1)),
+						max: Some(std::time::Duration::from_secs(1)),
+					},
+				)]);
 				let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 				let mut reader =
 					crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());

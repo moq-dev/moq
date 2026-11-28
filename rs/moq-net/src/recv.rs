@@ -10,7 +10,7 @@ use crate::{Error, frame, group};
 /// A received group that aborts if its handler is cancelled before finishing or handing it off.
 pub(crate) struct Group {
 	writer: Option<group::Producer>,
-	pub sequence: u64,
+	pub key: u64,
 	handle: group::Handle,
 	armed: bool,
 }
@@ -26,9 +26,47 @@ impl Group {
 		self.handle.frame_count()
 	}
 
-	/// Whether the parent track compresses, readable while a frame holds the writer.
+	/// Whether frames arrive as compressed slices, readable while a frame holds the writer.
 	pub fn compressed(&self) -> bool {
 		self.handle.compressed()
+	}
+
+	/// Whether this is a metadata copy, whose frames arrive as their headers alone.
+	pub fn is_meta(&self) -> bool {
+		self.handle.is_meta()
+	}
+
+	/// Write a metadata copy's next frame header, as [`group::Producer::write_header`].
+	#[cfg(feature = "async")]
+	pub fn write_header(&mut self, header: frame::Header) -> Result<(), Error> {
+		self.writer
+			.as_mut()
+			.expect("group writer is available between frames")
+			.write_header(header)
+	}
+
+	/// The relay state of the group, readable while a frame holds the writer.
+	#[cfg(feature = "async")]
+	pub fn wire(&self) -> Option<group::Wire> {
+		self.handle.wire()
+	}
+
+	/// Set the relay state, as [`group::Handle::set_wire`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn set_wire(&self, wire: group::Wire) -> Result<(), Error> {
+		self.handle.set_wire(wire)
+	}
+
+	/// Mark a gap, as [`group::Handle::mark_gap`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<(), Error> {
+		self.handle.mark_gap(id, gap)
+	}
+
+	/// Set the END_OF_GROUP object, as [`group::Handle::set_end_object`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn set_end_object(&self, fields: crate::model::object::Fields) -> Result<(), Error> {
+		self.handle.set_end_object(fields)
 	}
 
 	/// Move the writer and cancellation cleanup into its next frame.
@@ -48,7 +86,25 @@ impl Group {
 		self.writer
 			.as_ref()
 			.expect("group writer is available between frames")
-			.poll_paced(waiter, header.info.size.saturating_add(metadata), window)
+			.poll_paced(waiter, self.payload(header).saturating_add(metadata), window)
+	}
+
+	/// The payload bytes the frame `header` opens stores: none on a metadata copy, whatever
+	/// size it declares.
+	pub fn payload(&self, header: &frame::Header) -> u64 {
+		match self.is_meta() {
+			true => 0,
+			false => header.info.size,
+		}
+	}
+
+	/// How many more bytes the writer may take, a frame's included, before
+	/// [`Self::poll_admit`] holds it at `window`, or `None` while nothing would.
+	pub fn room(&self, window: u64) -> Option<u64> {
+		self.writer
+			.as_ref()
+			.expect("group writer is available between frames")
+			.room(0, window)
 	}
 
 	/// Restore the writer returned by a completed frame.
@@ -60,7 +116,7 @@ impl Group {
 	/// Own a group for the lifetime of its receive handler.
 	pub fn new(producer: group::Producer) -> Self {
 		Self {
-			sequence: producer.sequence,
+			key: producer.start,
 			handle: producer.handle(),
 			writer: Some(producer),
 			armed: true,
@@ -73,11 +129,45 @@ impl Group {
 		self.writer.take().expect("group owned until consumed")
 	}
 
-	/// Finish receiving without running cancellation cleanup.
+	/// Finish receiving a group ended without saying where it ends, as a bare FIN does,
+	/// without running cancellation cleanup.
 	pub fn finish(mut self) -> Result<(), Error> {
 		self.writer.take().expect("group owned until consumed").finish()?;
 		self.armed = false;
 		Ok(())
+	}
+
+	/// Finish receiving a whole group that ends at `end`, as GROUP_END says, without running
+	/// cancellation cleanup. An `end` the group refuses (see [`group::Producer::finish_at`]) is
+	/// [`Error::MalformedTrack`], which aborts the group; one already aborted stays so.
+	pub fn finish_at(mut self, end: u64) -> Result<(), Error> {
+		if self.check_end(end).is_err() {
+			let _ = self.abort(Error::MalformedTrack);
+			return Err(Error::MalformedTrack);
+		}
+		let _ = self.writer.take().expect("group owned until consumed").finish_at(end);
+		self.armed = false;
+		Ok(())
+	}
+
+	/// Finish receiving as the stream ended: whole at a GROUP_END's `end`, else without one.
+	/// Only an `end` the group refuses fails (see [`Self::finish_at`]).
+	pub fn end(self, end: Option<u64>) -> Result<(), Error> {
+		match end {
+			Some(end) => self.finish_at(end),
+			None => {
+				let _ = self.finish();
+				Ok(())
+			}
+		}
+	}
+
+	/// Close a lite-07 group that ended with bare FIN (no GROUP_END) under a mid-group
+	/// Position End cap, marking it back-cut so a later switch-back fetches the remaining
+	/// frames rather than reusing the truncated slice.
+	pub fn end_slice(self) -> Result<(), Error> {
+		self.handle.bound_back();
+		self.finish()
 	}
 
 	/// Abort with the receive error instead of cancellation.
@@ -115,14 +205,14 @@ mod tests {
 
 	#[test]
 	fn receive_frame_cancellation_keeps_a_terminal() {
-		let producer = group::Info { sequence: 0 }.produce();
+		let producer = group::Info { start: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)
@@ -136,14 +226,14 @@ mod tests {
 	}
 	#[test]
 	fn receive_frame_cancellation_preserves_an_explicit_abort() {
-		let producer = group::Info { sequence: 0 }.produce();
+		let producer = group::Info { start: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)
