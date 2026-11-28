@@ -255,6 +255,17 @@ impl Grouping {
 		Some(end.and(full))
 	}
 
+	/// Whether a voiced packet at `pts` resumes speech after a DTX silence long enough that the open
+	/// group of DTX packets can't take it, so the caller closes that group before writing it: a live
+	/// join that skips the stale group would otherwise skip the resumed audio with it.
+	fn resumes(&mut self, pause: bool, pts: Option<moq_net::Timestamp>) -> bool {
+		let resumes = !pause && !self.speaking && pts.is_some_and(|pts| self.join.opens(pts));
+		if resumes {
+			self.reset();
+		}
+		resumes
+	}
+
 	/// Forget the open group, which closed some other way.
 	fn reset(&mut self) {
 		self.join.reset();
@@ -421,6 +432,9 @@ impl Track {
 			}
 			TrackKind::Opus(ref mut import) => {
 				let pause = frame.as_ref().len() <= 2;
+				if self.audio.resumes(pause, pts) {
+					import.close(None)?;
+				}
 				let written = import.write(frame.into_bytes(), pts)?;
 				if let Some(end) = self.audio.fill(written, pause) {
 					import.close(end)?;
@@ -1238,8 +1252,8 @@ mod tests {
 	}
 
 	/// The first DTX packet after audio closes its group instead of leaving it open through the
-	/// silence, while an encoder that keeps sending DTX packets still gets 100 ms groups, not one
-	/// per packet.
+	/// silence, an encoder that keeps sending DTX packets still gets 100 ms groups, not one per
+	/// packet, and speech resuming after the silence starts a group of its own.
 	#[tokio::test(start_paused = true)]
 	async fn a_dtx_packet_closes_its_audio_group() {
 		let (mut broadcast, catalog) = new_broadcast();
@@ -1253,7 +1267,7 @@ mod tests {
 				.unwrap();
 		}
 		// Header-only 20 ms packets: the first closes its group, the rest fill their own.
-		for index in 5..11 {
+		for index in 5..10 {
 			import
 				.decode(b"a", Some(Timestamp::from_micros(index * 20_000).unwrap()))
 				.unwrap();
@@ -1265,7 +1279,8 @@ mod tests {
 		}
 		let _finished = import.finish().unwrap();
 
-		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 5, 2]);
+		// Speech resuming after the silence closes the open DTX group rather than joining it.
+		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 4, 2]);
 	}
 
 	/// A group closed on a frame of unknown length declares no end, so the producer doesn't
