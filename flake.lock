@@ -50,6 +50,38 @@
         "type": "github"
       }
     },
+    "nixpkgs-bun_2": {
+      "locked": {
+        "lastModified": 1795187554,
+        "narHash": "sha256-5q5/viwCcXSA4S2cSaKdjdYrHhk64qFbjLhCMlJnyeM=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "9996594bd38077de6a018ec17453ba3d99182787",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1795187554,
+        "narHash": "sha256-5q5/viwCcXSA4S2cSaKdjdYrHhk64qFbjLhCMlJnyeM=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "9996594bd38077de6a018ec17453ba3d99182787",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "quest": {
       "inputs": {
         "flake-utils": [
@@ -83,6 +115,48 @@
         "owner": "kixel-ai",
         "repo": "quest",
         "rev": "8bb9506515a99a2002ee596df6ab2b294948210c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kixel-ai",
+        "repo": "quest",
+        "type": "github"
+      }
+    },
+    "quest-pinned_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795840975,
+        "narHash": "sha256-wTFrHEBy+vErfFGDlgcbVbdMJzi3yo7bBB6Fan2IN70=",
+        "owner": "kixel-ai",
+        "repo": "quest",
+        "rev": "bfbed11d2157375acc5c2768149ddf2d313660e3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kixel-ai",
+        "repo": "quest",
+        "type": "github"
+      }
+    },
+    "quest_2": {
+      "inputs": {
+        "flake-utils": [
+          "swole",
+          "flake-utils"
+        ],
+        "nixpkgs": "nixpkgs_2",
+        "nixpkgs-bun": "nixpkgs-bun_2",
+        "quest-pinned": "quest-pinned_2",
+        "token-max": "token-max_2",
+        "treefmt-nix": "treefmt-nix_2"
+      },
+      "locked": {
+        "lastModified": 1795853080,
+        "narHash": "sha256-BtOr3Wv2/Ku86UeV4iUgtcKLELPUERtVoX/CoYvs5cE=",
+        "owner": "kixel-ai",
+        "repo": "quest",
+        "rev": "55f254d49d4873a89472b4750e5a1bed9baac53c",
         "type": "github"
       },
       "original": {
@@ -154,9 +228,7 @@
           "quest",
           "nixpkgs"
         ],
-        "quest": [
-          "quest"
-        ],
+        "quest": "quest_2",
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
@@ -216,9 +288,62 @@
         "type": "github"
       }
     },
+    "token-max_2": {
+      "inputs": {
+        "flake-utils": [
+          "swole",
+          "quest",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "swole",
+          "quest",
+          "nixpkgs"
+        ],
+        "quest": [
+          "swole",
+          "quest"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795488772,
+        "narHash": "sha256-/GnevX/eNInFQjVjNyUtoxv4bvQvHTxdGnSKMEk8yJc=",
+        "owner": "kixel-ai",
+        "repo": "token-max",
+        "rev": "ae533b8de79be21d5019f4098e96a302fabcaff2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kixel-ai",
+        "repo": "token-max",
+        "type": "github"
+      }
+    },
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795615686,
+        "narHash": "sha256-/C0FK2Fwq0aWE/GADYyYbAIdQeGfYBbWMin3tfks1NA=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "b7b56d3c8833016c650ca542b1230e6130299741",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "treefmt-nix_2": {
+      "inputs": {
+        "nixpkgs": [
+          "swole",
           "quest",
           "nixpkgs"
         ]

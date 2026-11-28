@@ -22,7 +22,11 @@ bench=(nix run --inputs-from . swole --)
 shift
 case "$command" in
     fingerprint) exec "${bench[@]}" fingerprint sim "$@" ;;
-    help | -h | --help) exec "${bench[@]}" --help ;;
+    help | -h | --help)
+        echo "$usage"
+        echo "Options are swole sim's, below:"
+        exec "${bench[@]}" --help
+        ;;
     run | compare) ;;
     *)
         echo "$usage" >&2
@@ -95,7 +99,11 @@ for target in $(printf '%s\n' "${benches[@]}" | sort -u); do
 done
 
 if [[ $command == compare ]]; then
-    base=${1:?compare takes a base commit}
+    base=${1:-}
+    if [[ -z $base || $base == -* ]]; then
+        echo "instructions.sh: compare takes a base commit first; $usage" >&2
+        exit 2
+    fi
     shift
     exec "${bench[@]}" sim "$base" "$@" -- "${cargo[@]}"
 fi

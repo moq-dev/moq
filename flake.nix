@@ -42,8 +42,9 @@
     # count differently.
     swole = {
       url = "github:kixel-ai/swole";
+      # No `quest` follows: swole's nixpkgs follows its quest, so a bump of moq's quest
+      # would move Valgrind and restart every series.
       inputs.flake-utils.follows = "flake-utils";
-      inputs.quest.follows = "quest";
     };
   };
 
