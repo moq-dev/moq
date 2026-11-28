@@ -23,77 +23,27 @@ wire protocol or `moq-auth`.
 
 ## Plan
 
-Decided 2026-11-26 (maintainer, /quest-plan via kixel-ai/kixel.ai):
+Implemented in [moq-dev/moq#9838](https://github.com/moq-dev/moq/pull/9838) (draft):
+reversible lite-07 `Peer.stale`, reversible lite-05/06 and moq-transport route
+draining driven by `Session` liveness, `RouteInfo::draining()` in Rust and
+`RouteInfo.draining` in `@moq/net`, `[quic] keep_alive_soft`/`keep_alive_hard`,
+and `[limits.peer.quic]` mirrors applied to accepted peers and dialed links.
 
-- ✅ Demote stale sessions automatically inside `moq-net` using the existing
-  reversible `draining` rank, replacing `Grant::cost` and `Lease::update` live
-  repricing (rejected: keeping `Grant::cost` in
-  [moq-dev/moq#9696](https://github.com/moq-dev/moq/pull/9696); adding a local
-  `Session::price()` handle plus a `moq-relay::Admission` session handle).
-  `Offer.draining` (`DRAINING = 0x2`) already propagates across multi-hop
-  `lite-07` meshes and is Agda-verified convergent; it recovers cleanly on
-  `Live`, outranks all priorities and costs (including multi-hop and
-  two-uplink paths) without a `STALE_COST` sentinel, and needs zero wire or
-  `moq-auth` changes.
-- ✅ On `lite-07` (`rs/moq-net/src/route/relay.rs`), track a per-link
-  reversible `stale: bool` on `Peer` feeding `Offer.draining`
-  (`peer.draining || peer.stale`) in `Here::arrive` and dynamically during
-  route ranking and `restate` (storing only the peer-advertised draining bit on
-  `Claim::adopted` so `Live` recovery clears local staleness without waiting
-  for a re-announcement), without sending
-  `Msg::Drain { node }` (rejected: emitting `Msg::Drain`, which permanently
-  poisons all paths through `node` for GOAWAY).
-- ✅ On `lite-05/06` (`rs/moq-net/src/lite/subscriber.rs`) and `moq-transport`
-  (`rs/moq-net/src/ietf/subscriber.rs`), live-update the existing `draining`
-  flag on routes learned from the session on `Stale`/`Live` (reversible on
-  `Live` while `going_away` is unset).
-- ✅ Expose `pub fn draining(&self) -> bool` on `moq_net::origin::RouteInfo`
-  and its `@moq/net` `RouteInfo` counterpart per Cross-Package Sync (rejected:
-  keeping `RouteInfo.draining` crate-private).
-- ✅ Expose `keep_alive` (`soft`, `hard`) config on `moq_tokio::quic::Config`
-  (`[quic]`) and `moq-relay`'s `[limits.peer.quic]` (rejected: LAN-only
-  config; forcing probing on all `[quic]` sessions including local clients;
-  smuggling `keep_alive` into `moq-auth::Grant`).
-- ✅ m1, since all changes are additive.
+Remaining before it lands:
 
-Guidance:
+- A `moq-relay` drill (`rs/moq-relay/tests/drills.rs`) that collapses a peer link
+  into a full queue and watches its routes drain and recover. End-to-end coverage
+  today is `moq-tokio`'s simulator test `sim::stale_routes_drain`.
+- A full `just check` on the final head, and `/quest-review`.
 
-- `lite-07` (`rs/moq-net/src/route/relay.rs`): add a reversible `stale: bool`
-  field beside `draining: bool` on `Peer`. Pass `peer.draining || peer.stale`
-  into `Here::arrive`, and keep local staleness out of the persisted bit inside
-  `Claim::adopted`: store only the peer-advertised draining bit on the adopted
-  claim and apply the peer's current `peer.draining || peer.stale` dynamically
-  when ranking or restating (`restate` and local ways), so returning to `Live`
-  clears demotion without waiting for another announcement. Re-select affected
-  origins and restate affected local claims when `stale` changes; keep
-  `Msg::Drain { node }` exclusive to GOAWAY. A peer that also sent GOAWAY stays
-  draining even if its liveness returns to `Live`.
-- `lite-05/06`, `moq-transport`, and JS `lite-07`: drive
-  `route.draining = going_away || stale` on liveness changes in
-  `rs/moq-net/src/lite/subscriber.rs` and `rs/moq-net/src/ietf/subscriber.rs`,
-  and mirror the reversible `draining` update in `@moq/net`
-  (`js/net/src/lite/subscriber.ts`, `js/net/src/lite/routed.ts` including JS
-  `lite-07` multi-session route ranking, and `js/net/src/ietf/subscriber.ts`).
-- `RouteInfo::draining`: add `pub fn draining(&self) -> bool` on
-  `moq_net::origin::RouteInfo` (`rs/moq-net/src/model/origin.rs`) and
-  `readonly draining: boolean` on `RouteInfo` in `js/net/src/hop.ts` (included
-  by `routeInfo` and no longer stripped in `js/net/src/origin.ts`). Deliver
-  `draining` transitions to ordinary `origin.routes()` readers (updating
-  `draining_is_invisible_to_readers`), while keeping wire forwarding unchanged
-  for older protocols (`lite-05/06` and `moq-transport` still advertise real
-  cost without a draining flag; only `lite-07` carries `DRAINING`).
-- `moq-tokio` and `moq-relay` config: `moq_tokio::quic::Config`
-  (`rs/moq-tokio/src/quic.rs`) already has `keep_alive: Option<cli::Duration>`
-  for the single-duration NAT-binding ping interval (`--quic-keep-alive`).
-  Keep the new `soft`/`hard` probing config additive so it coexists cleanly
-  with `quic.keep_alive`, align its option shape with
-  [Session keep-alive](https://github.com/moq-dev/moq/pull/9698), and mirror it on `moq-relay`'s
-  `[limits.peer.quic]` (`rs/moq-relay/src/limits.rs` and `settings.rs`) so
-  peer and dialed links can enable probing without touching local clients.
-- Test multi-hop `lite-07` demotion, recovery to `Live`, and coexistence with
-  GOAWAY; `lite-05/06` and `moq-transport` route re-ranking and recovery;
-  `origin.routes()` observing `RouteInfo::draining()` transitions in Rust and
-  JS; and `moq-relay` config merging and drill coverage for peer-link probing.
+## Waiting
+
+- Maintainer: should `@moq/net` also flip routes' `draining` on stale sessions, as the plan asked, when JS has no keep-alive or liveness signal to drive it?
+  - Skip until JS gains a keep-alive (Recommended) - nothing in JS can report staleness, so the plumbing would be dead code; `RouteInfo.draining` is mirrored already
+  - Add the reversible plumbing now - ready for a future JS keep-alive, at the cost of untested code
+- Maintainer: should the bindings (`moq-ffi` `MoqRouteInfo`, libmoq) expose `draining` too?
+  - Not until a binding user asks (Recommended) - it touches every SDK wrapper and libmoq's C ABI, and binding listings report only present/absent
+  - Add it in this PR - keeps every language in step with Rust and JS
 
 ## Related
 
