@@ -39,13 +39,12 @@ impl Container for Wire {
 		_group: &mut moq_net::group::Producer,
 		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
-		// CTS encoding requires a separate DTS per frame (not yet carried by `container::Frame`).
+		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
 
 	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
-		// CTS needs each frame's DTS as the transport timestamp, which `container::Frame`
-		// does not carry yet; writing CTS = 0 with the PTS would mislabel reordered video.
+		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
 

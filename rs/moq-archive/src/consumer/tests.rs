@@ -335,6 +335,26 @@ async fn a_decreasing_stored_group_is_refused() {
 	assert_eq!(reader.finished().await.unwrap(), Position::group(4001));
 }
 
+/// A live group whose head was pruned can't be shown never to decrease, so it reads as gone,
+/// as a fill reads it.
+#[tokio::test(start_paused = true)]
+async fn a_live_group_with_a_pruned_head_is_not_served() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive.object("video", 2, vec![frames(true, 5, 2..4)]).await;
+	archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+	archive.complete().await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let mut reader = subscribe(&broadcast, "video").await;
+	let mut group = group(&mut reader).await.unwrap();
+	assert_eq!(group.start, 5);
+	let read = timeout(Duration::from_secs(10), group.read_frame()).await.unwrap();
+	assert!(matches!(read, Err(moq_net::Error::NotFound)), "{read:?}");
+	assert!(next(&mut reader).await.is_none());
+	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+}
+
 /// Whether a read failed because its group's timestamps decrease.
 fn refused(result: &moq_net::Result<Vec<String>>) -> bool {
 	matches!(
