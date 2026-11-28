@@ -9062,6 +9062,9 @@ impl Subscribing {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.outcome.aborted().cloned().unwrap_or(Error::Dropped))??;
+		if info.legacy && self.subscription.read().names_key() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -9309,6 +9312,10 @@ impl Fetching {
 		if let Some(resume) = &mut self.resume {
 			let group = ready!(kio::Task::poll(&mut **resume, waiter))?;
 			return Poll::Ready(Ok(group.with_meter(self.stats.meter())));
+		}
+		// Whatever the cache holds, as a cold copy could never ask its upstream.
+		if self.state.read().info.as_ref().is_some_and(|info| info.legacy) {
+			return Poll::Ready(Err(Error::Unsupported));
 		}
 		let (state, fills, key, frame_start, result) = (
 			&self.state,
@@ -14632,6 +14639,9 @@ impl Subscriber {
 		since: impl IntoIterator<Item = (u64, u64)>,
 		retune: bool,
 	) -> Result<()> {
+		if self.info.legacy && subscription.ranges.iter().any(Range::names_key) {
+			return Err(Error::Unsupported);
+		}
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
@@ -14667,6 +14677,9 @@ impl Subscriber {
 	/// [`Self::edit`], each live join keyed in `since` noted as added at its tick before the
 	/// window places it: see [`Preferences::stamp`].
 	pub(super) fn edit_stamped(&mut self, edit: Edit, since: impl IntoIterator<Item = (u64, u64)>) -> Result<()> {
+		if self.info.legacy && edit.add.iter().any(|(_, range)| range.names_key()) {
+			return Err(Error::Unsupported);
+		}
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),

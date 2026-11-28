@@ -422,6 +422,14 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_maybe(waiter, true, |r| r.varint())
 	}
 
+	/// The next varint without consuming it, or `None` if the stream closes cleanly first.
+	pub fn poll_varint_peek_maybe(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with_maybe(waiter, false, |r| r.varint())
+	}
+
 	/// The next varint without consuming it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_varint_peek(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64, Error>>

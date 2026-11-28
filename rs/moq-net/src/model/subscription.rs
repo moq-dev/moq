@@ -278,6 +278,12 @@ impl Range {
 		matches!((self.start, self.end), (Start::Time(start), Some(end)) if end < start)
 	}
 
+	/// Whether this range names a group by key, which a [legacy](crate::track::Info::legacy)
+	/// copy's upstream can't be asked by: a time start or an end.
+	pub(crate) fn names_key(&self) -> bool {
+		!self.is_empty() && (self.time().is_some() || self.end.is_some())
+	}
+
 	/// The time this range starts from, `None` when it doesn't name one.
 	pub(crate) fn time(&self) -> Option<u64> {
 		match self.start {

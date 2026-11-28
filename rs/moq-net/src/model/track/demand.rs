@@ -805,6 +805,11 @@ impl Prefs {
 
 	/// The group each placed join was placed at, by its index in key order, as
 	/// [`Subscription::placed`] holds it.
+	/// Whether any range names a group by key; see [`Range::names_key`].
+	pub(in crate::model) fn names_key(&self) -> bool {
+		self.ranges.values().any(Range::names_key)
+	}
+
 	fn placed_by_index(&self) -> BTreeMap<u64, u64> {
 		(0..)
 			.zip(self.ranges.keys())

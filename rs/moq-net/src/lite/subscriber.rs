@@ -208,6 +208,78 @@ struct TrackEntry {
 	/// Lite-05/06: the broadcast and name whose datagram track takes the datagrams this
 	/// subscription carries.
 	legacy: Option<(Path, String)>,
+	/// Lite-05/06: the keys its sequence-numbered groups took.
+	rekey: Rekey,
+}
+
+/// Lite-05/06 numbers a subscription's groups by sequence, and the copy keys each by its frame
+/// 0's timestamp as it arrives. The subscription's tail still counts sequence numbers, which is
+/// what the publisher's drops, start, and end name.
+#[derive(Default)]
+struct Rekey {
+	/// The highest sequence number keyed so far, and its key.
+	last: Option<(u64, u64)>,
+	/// Lite-06: the exclusive sequence number SUBSCRIBE_END named, until the group before it
+	/// arrives to key it.
+	end: Option<u64>,
+	/// The empty spans found before the copy was accepted, which it skips on accept.
+	skips: Vec<std::ops::Range<u64>>,
+}
+
+/// What keying one group says of the copy.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Keyed {
+	/// The keys between the group and the one numbered just before it, which hold no group.
+	skipped: Option<std::ops::Range<u64>>,
+	/// The track's exclusive end, once the group SUBSCRIBE_END named last arrives.
+	end: Option<u64>,
+}
+
+impl Rekey {
+	/// Key the group numbered `seq` at `key`. Keys must rise with sequence numbers, so a group
+	/// out of order with the one numbered highest is refused, and consecutive groups prove the
+	/// keys between them empty.
+	fn insert(&mut self, seq: u64, key: u64) -> Result<Keyed, Error> {
+		let mut keyed = Keyed::default();
+		match self.last {
+			None => self.last = Some((seq, key)),
+			Some((last, at)) if seq == last && key != at => return Err(Error::TimestampMismatch),
+			Some((last, _)) if seq == last => {}
+			Some((last, at)) if seq > last => {
+				if key <= at {
+					return Err(Error::TimestampMismatch);
+				}
+				if seq == last + 1 {
+					keyed.skipped = Some(at + 1..key).filter(|span| !span.is_empty());
+				}
+				self.last = Some((seq, key));
+			}
+			Some((_, at)) if key >= at => return Err(Error::TimestampMismatch),
+			Some(_) => {}
+		}
+		if self.end.is_some_and(|end| end.checked_sub(1) == Some(seq)) {
+			self.end = None;
+			keyed.end = Some(key.saturating_add(1));
+		}
+		Ok(keyed)
+	}
+
+	/// The track's exclusive end for SUBSCRIBE_END's exclusive sequence number `end`, once the
+	/// group before it is keyed, or `None` until it is. Lite-05's end may be inclusive, so the
+	/// FIN ends that copy instead.
+	fn end(&mut self, version: Version, end: u64) -> Option<u64> {
+		if version == Version::Lite05 {
+			return None;
+		}
+		let last = end.checked_sub(1)?;
+		match self.last {
+			Some((seq, key)) if seq == last => Some(key.saturating_add(1)),
+			_ => {
+				self.end = Some(end);
+				None
+			}
+		}
+	}
 }
 
 /// Target for a single-group one-shot SUBSCRIBE fill (`SubFillRun`).
@@ -352,6 +424,7 @@ impl TrackEntry {
 			start: None,
 			first: None,
 			legacy: None,
+			rekey: Rekey::default(),
 		}
 	}
 
@@ -398,9 +471,10 @@ impl TrackEntry {
 	}
 
 	/// Park a group stream whose `hdr` arrived before the copy, opening its [`Reading`] now so
-	/// `hdr.key` is accounted for in the tail even if reset or evicted before `TRACK_INFO` lands.
-	fn park(&mut self, hdr: &lite::Group, now: crate::time::Instant) -> (kio::Consumer<Parked>, u64) {
-		let reading = Reading::open(&self.tail, Some(hdr.key), now);
+	/// `wire`, its key on the wire, is accounted for in the tail even if reset or evicted before
+	/// `TRACK_INFO` lands.
+	fn park(&mut self, hdr: &lite::Group, wire: u64, now: crate::time::Instant) -> (kio::Consumer<Parked>, u64) {
+		let reading = Reading::open(&self.tail, Some(wire), now);
 		let parked = self.parked.get_or_insert_with(Default::default);
 		let ticket = match parked.write() {
 			Ok(mut state) => {
@@ -416,6 +490,9 @@ impl TrackEntry {
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
+		for skipped in std::mem::take(&mut self.rekey.skips) {
+			copy.producer.skip_groups(skipped);
+		}
 		self.target = TrackTarget::Copy(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;
@@ -473,11 +550,12 @@ impl TrackEntry {
 		}
 	}
 
-	/// Open the group of a stream whose header is `hdr` in the copy or fill.
-	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
+	/// Open the group of a stream whose header is `hdr` in the copy or fill, `wire` its key on
+	/// the wire, which the tail counts.
+	fn open(&mut self, hdr: &lite::Group, wire: u64, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
 		let producer = match &mut self.target {
 			TrackTarget::Fill(_) => {
-				let reading = Reading::open(&self.tail, Some(hdr.key), now);
+				let reading = Reading::open(&self.tail, Some(wire), now);
 				return Ok(Open::Fill(reading));
 			}
 			TrackTarget::Copy(Accepted { producer, .. }) => producer,
@@ -493,8 +571,41 @@ impl TrackEntry {
 		// opens (a resubscribe resends a cached group), and only after the
 		// cache holds the group, so a fetch held for the feed that sees it
 		// accounted also finds it.
-		let reading = Reading::open(&self.tail, Some(hdr.key), now);
+		let reading = Reading::open(&self.tail, Some(wire), now);
 		self.finish_open(hdr, version, received, reading, now)
+	}
+
+	/// Lite-05/06: key the group of the stream whose header is `wire` by its frame 0's
+	/// timestamp, from `lead`, the zigzag delta from 0 leading the stream, `None` if it ended
+	/// first. `None` for a stream holding no frame 0, which the copy can't key: an empty group,
+	/// or a slice past frame 0. Its arrival is still accounted for.
+	fn rekey(
+		&mut self,
+		mut wire: lite::Group,
+		lead: Option<u64>,
+		now: crate::time::Instant,
+	) -> Result<Option<lite::Group>, Error> {
+		let Some(lead) = lead.filter(|_| wire.frame_start == 0) else {
+			drop(Reading::open(&self.tail, Some(wire.key), now));
+			return Ok(None);
+		};
+		let key = u64::try_from(crate::coding::varint::unzigzag(lead)).map_err(|_| Error::TimestampMismatch)?;
+		let keyed = self.rekey.insert(wire.key, key)?;
+		wire.key = key;
+		match &mut self.target {
+			TrackTarget::Copy(Accepted { producer, .. }) => {
+				if let Some(skipped) = keyed.skipped {
+					producer.skip_groups(skipped);
+				}
+				if let Some(end) = keyed.end
+					&& let Err(err) = producer.end_at(Position::group(end), None)
+				{
+					tracing::warn!(group = end, %err, "subscribe end below a received group");
+				}
+			}
+			_ => self.rekey.skips.extend(keyed.skipped),
+		}
+		Ok(Some(wire))
 	}
 
 	/// Open the group for a parked stream whose [`Reading`] was already opened on arrival.
@@ -565,7 +676,8 @@ impl TrackEntry {
 				group: hdr.key,
 				frame: hdr.frame_start,
 			};
-			if !version.has_track_stream() {
+			// Nor does a Lite05/06 copy, whose answer names a sequence number.
+			if !version.has_track_stream() || version.rekeys() {
 				producer.set_live_from(first, None);
 			} else if !version.has_largest() {
 				self.first = self.first.or(Some(first));
@@ -632,8 +744,10 @@ impl TrackEntry {
 			// copy's own stream did for its subscription, as with a duplicate of a copy still
 			// arriving once it settles.
 			Err(err) => {
-				let end = producer.consume().span_end(hdr.key.saturating_add(1));
-				reading.account(hdr.key..end, now);
+				if !version.rekeys() {
+					let end = producer.consume().span_end(hdr.key.saturating_add(1));
+					reading.account(hdr.key..end, now);
+				}
 				return Err(err);
 			}
 		};
@@ -1551,7 +1665,25 @@ impl GroupRecv {
 		// Decode GROUP before waiting on SETUP or TRACK_INFO: `lite::Group` does not depend on
 		// SETUP, and reading it first lets us account for `hdr.key` in the subscription's tail
 		// before parking, so a reset or eviction while parked never drops the group unaccounted.
-		let hdr: lite::Group = wait!(Header => self.reader.poll_decode::<lite::Group>(waiter))?;
+		let received: lite::Group = wait!(Header => self.reader.poll_decode::<lite::Group>(waiter))?;
+		// Lite05/06 key a group by its frame 0's timestamp, which leads the stream.
+		let lead: Option<u64> = wait!(Lead => match self.subscriber.version.rekeys() && received.frame_start == 0 {
+			true => self.reader.poll_varint_peek_maybe(waiter),
+			false => Poll::Ready(Ok(None)),
+		})?;
+		// The key the tail counts: the group's sequence number before lite-07.
+		let wire: u64 = received.key;
+		let hdr: lite::Group = match self.subscriber.version.rekeys() {
+			true => {
+				let mut subs = self.subscriber.subscribes.lock();
+				let entry = subs.get_mut(&received.subscribe).ok_or(Error::Cancel)?;
+				match entry.rekey(received, lead, self.subscriber.runtime.now())? {
+					Some(hdr) => hdr,
+					None => return Poll::Ready(Ok(())),
+				}
+			}
+			false => received,
+		};
 		// A SUBSCRIBE sent alongside its TRACK may be served before the TRACK_INFO that says
 		// how to read it: the stream parks, unread, until the accept opens its group.
 		let parked: Option<(kio::Consumer<Parked>, u64)> = {
@@ -1560,7 +1692,7 @@ impl GroupRecv {
 				Some(entry) if !entry.is_ready() => {
 					self.park_wait = Some(ParkWait::new(&self.subscriber.park_waits));
 					self.reader.set_priority(crate::priority::RECV_PARKED);
-					Some(entry.park(&hdr, self.subscriber.runtime.now()))
+					Some(entry.park(&hdr, wire, self.subscriber.runtime.now()))
 				}
 				_ => None,
 			}
@@ -1591,7 +1723,7 @@ impl GroupRecv {
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 			match &parked {
 				Some((_, ticket)) => entry.unpark(*ticket),
-				None => entry.open(&hdr, self.subscriber.version, self.subscriber.runtime.now()),
+				None => entry.open(&hdr, wire, self.subscriber.version, self.subscriber.runtime.now()),
 			}
 		};
 		let mut open: Option<Open> = Some(open?);
@@ -1622,7 +1754,9 @@ impl GroupRecv {
 				// holds no other start, which this subscription accounts for as the copy's own
 				// stream did for its subscription.
 				Poll::Ready(Ok(())) => {
-					if let Some(end) = duplicate.arriving.arriving().end() {
+					if let Some(end) = duplicate.arriving.arriving().end()
+						&& !self.subscriber.version.rekeys()
+					{
 						duplicate
 							.reading
 							.account(hdr.key..end, self.subscriber.runtime.now());
@@ -8710,9 +8844,9 @@ mod tests {
 		};
 		let now = crate::time::sim().now();
 		let mut entry = TrackEntry::new(None, Default::default());
-		let (_early_wait, early) = entry.park(&header(1), now);
-		let (_late_wait, late) = entry.park(&header(2), now);
-		let (_kept_wait, kept) = entry.park(&header(3), now);
+		let (_early_wait, early) = entry.park(&header(1), 1, now);
+		let (_late_wait, late) = entry.park(&header(2), 2, now);
+		let (_kept_wait, kept) = entry.park(&header(3), 3, now);
 		entry.withdraw(early, &Error::Cancel);
 
 		let track = crate::track::Producer::new(
@@ -13677,6 +13811,12 @@ impl TrackServe {
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
 		}
+		// Lite05/06 number groups by sequence, which no key here names: ask for the live feed,
+		// within the one max age. A copy refuses its readers' history (see `Info::legacy`).
+		if self.subscriber.version.rekeys() {
+			subscription = subscription.with_start(None).with_end(None);
+			subscription.resume = None;
+		}
 		let ranges = wire_ranges(&subscription, ranged)?;
 		Some(Request {
 			subscription,
@@ -14265,6 +14405,11 @@ impl FinishedServe {
 		let Some(serving) = &self.serving else {
 			return;
 		};
+		// Lite05/06 can't be asked by key.
+		if serve.subscriber.version.rekeys() {
+			fill.refuse(Error::Unsupported);
+			return;
+		}
 		let ranged = serve.subscriber.version.has_ranges();
 		let use_range_fills = match ranged {
 			true => whole_groups(&fill),
@@ -14667,7 +14812,10 @@ impl TrackServeRun {
 					// SUBSCRIBE via RangeFills once TRACK_INFO lands) and single whole-group fills
 					// when a pipelined SUBSCRIBE is already opening (so they deduplicate onto it).
 					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
-						if self.serve.subscriber.version.has_ranges()
+						// Lite05/06 can't be asked by key.
+						if self.serve.subscriber.version.rekeys() {
+							fill.refuse(Error::Unsupported);
+						} else if self.serve.subscriber.version.has_ranges()
 							&& whole_groups(&fill)
 							&& (spans_groups(&fill) || pipelined.is_some())
 						{
@@ -15333,6 +15481,11 @@ impl ServeLoop {
 	/// - On lite-05/06: multi-group fills use `range_fills`, single groups / slices use FETCH.
 	/// - Before lite-05: wait on the live feed.
 	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
+		// Lite05/06 can't be asked by key.
+		if serve.subscriber.version.rekeys() {
+			fill.refuse(Error::Unsupported);
+			return;
+		}
 		if serve.subscriber.version.has_ranges() {
 			let has_active_sub = !matches!(self.sub, Sub::None) || matches!(self.mode, ServeMode::Establish(_));
 			let within_live = self
@@ -15656,7 +15809,16 @@ impl ServeLoop {
 				// finish the track. Later drafts made it exclusive, so
 				// the publisher contradicted its own end.
 				let error = end.error.clone().map(Error::from);
-				if let Err(err) = self.serving.end_at(Position::group(end.group), error) {
+				// A Lite05/06 end names a sequence number, which keys the copy's end only once
+				// the group before it arrives.
+				let group = match serve.subscriber.version.rekeys() {
+					true => (serve.subscriber.subscribes.lock().get_mut(&active.id))
+						.and_then(|entry| entry.rekey.end(serve.subscriber.version, end.group)),
+					false => Some(end.group),
+				};
+				if let Some(group) = group
+					&& let Err(err) = self.serving.end_at(Position::group(group), error)
+				{
 					match serve.subscriber.version {
 						Version::Lite05 => {
 							tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")
@@ -15712,7 +15874,11 @@ impl ServeLoop {
 				let live = &active.live;
 				active.fill_ids.retain(|id| live.get(*id).is_some());
 				active.probe_ids.retain(|id| live.get(*id).is_some());
+				// A Lite05/06 start names a sequence number, which says nothing of the copy's keys:
+				// it goes live from its first group instead.
+				let rekeys = serve.subscriber.version.rekeys();
 				if active.demand.is_some()
+					&& !rekeys
 					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
 				{
 					entry.answered(served, None);
@@ -15723,7 +15889,7 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				if active.start == active.requested && active.demand.is_some() {
+				if active.start == active.requested && active.demand.is_some() && !rekeys {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
@@ -15752,6 +15918,10 @@ impl ServeLoop {
 				let error = dropped.error(serve.subscriber.version);
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
+				}
+				// Lite05/06 name sequence numbers, which key nothing in the copy.
+				if serve.subscriber.version.rekeys() {
+					return Ok(());
 				}
 				if serve.subscriber.version.has_skip() && error == crate::StreamError::Skip {
 					// A fill owing them is answered: the source never had them.

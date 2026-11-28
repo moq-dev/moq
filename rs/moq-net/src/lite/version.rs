@@ -384,6 +384,14 @@ impl Version {
 		)
 	}
 
+	/// Whether a received copy keys each group by its frame 0's timestamp rather than the
+	/// group's wire key: Lite05/06 number groups by sequence while stamping every frame, so a
+	/// group's key is the timestamp leading its stream. Earlier versions carry no timestamps,
+	/// keying every frame by its group, and later ones key groups by time.
+	pub(crate) fn rekeys(self) -> bool {
+		matches!(self, Self::Lite05 | Self::Lite06)
+	}
+
 	/// Whether discovery streams end their initial set with SYNCED rather than a count.
 	pub(crate) fn has_synced(self) -> bool {
 		!matches!(
