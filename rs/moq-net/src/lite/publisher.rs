@@ -6942,6 +6942,7 @@ impl TrackRun {
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
 			let mut opening = self.opening.take().expect("polled above");
+			self.track.hold(None);
 			match res {
 				Ok(()) => {
 					self.children.push(opening);
@@ -7846,13 +7847,7 @@ impl TrackRun {
 	/// higher-ranked group may preempt where it may not. A finished stream waiting for its
 	/// acknowledgement can't be taken over, so it isn't ranked.
 	fn stuck(&self) -> Option<(i8, i64)> {
-		let opening = self.opening.as_ref()?;
-		// Its served mark folded into the record's settled prefix can't be taken back, so it
-		// keeps its place rather than go back to the cache told.
-		if self.answer.emits_range() && self.track.record().folded(opening.key) {
-			return None;
-		}
-		let waiting = opening.rank();
+		let waiting = self.opening.as_ref()?.rank();
 		let mut held = (self.children.iter())
 			.filter(|serve| serve.serving())
 			.map(GroupServe::rank);
@@ -7877,6 +7872,7 @@ impl TrackRun {
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "giving way to a higher-ranked group");
 		waiting.give_way();
 		if self.answer.emits_range() {
+			debug_assert!(!self.track.record().folded(key), "a held group stays above the fold");
 			self.track.record_mut().untell(key..key + 1);
 		}
 		self.track.give_back(key);
@@ -7909,6 +7905,8 @@ impl TrackRun {
 		let mut ctx = self.ctx.group_context();
 		ctx.groups = self.groups.clone();
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
+		// Held out of the record's fold, so giving way can take back its served mark.
+		self.track.hold(Some(key));
 		self.opening = Some(GroupServe::new(ctx, key, frame_start, end, rank, group).covered_by(covers));
 	}
 }
@@ -12536,6 +12534,48 @@ mod serve_group_test {
 			},
 			order: Order::Descending,
 		});
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)], "group 0 aged out");
+		drop(open);
+	}
+
+	/// A group that gave way, refused while the group that took its place waits for credit, wakes
+	/// the run when it ages out, so its OLD drop goes out without anything else happening first.
+	#[kio::test]
+	async fn lite07_a_refused_group_aging_out_wakes_the_run() {
+		let version = Version::Lite07;
+		let gate = kio::Producer::new(false);
+		let pool = crate::cache::Pool::unbounded();
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"test",
+			crate::track::Info::timed(),
+		);
+		// Driven, so a wall-clock deadline is collected.
+		pool.poll(kio::clock::now(), &kio::Waiter::noop());
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
+		let woken = Arc::new(Woken::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+
+		let mut open = vec![write_open(&mut track, 0)];
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		kio::clock::sim::advance(Duration::from_millis(500)).await;
+		open.push(write_open(&mut track, 500));
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(
+			run.opening.as_ref().map(|serve| serve.key),
+			Some(500),
+			"group 0 gave way"
+		);
+
+		woken.0.store(false, Ordering::Relaxed);
+		kio::clock::sim::advance(Duration::from_secs(3)).await;
+		pool.poll(kio::clock::now(), &kio::Waiter::noop());
+		assert!(woken.0.load(Ordering::Relaxed), "group 0 aging out wakes the run");
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)], "group 0 aged out");
 		drop(open);

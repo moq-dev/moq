@@ -6848,6 +6848,7 @@ impl Producer {
 			_stats_sub: stats::Subscription::default(),
 			largest: Reported::default(),
 			parks: false,
+			held: None,
 		}
 	}
 
@@ -9001,6 +9002,7 @@ impl Subscribing {
 			_stats_sub: self.stats.subscribe(),
 			largest: Reported::default(),
 			parks: false,
+			held: None,
 		}))
 	}
 
@@ -9373,6 +9375,9 @@ pub struct Subscriber {
 	/// Whether a read past a bounded window's end parks rather than ending: a wire
 	/// publisher's, whose peer would read the end of its stream as the track's.
 	parks: bool,
+	/// A group handed out that its publisher holds waiting for stream credit (see
+	/// [`Self::hold`]), which the record's fold leaves above it.
+	held: Option<u64>,
 }
 
 /// What a [`Subscriber`]'s `largest` stream last reported.
@@ -12113,6 +12118,16 @@ impl Cursor {
 		Poll::Ready(())
 	}
 
+	/// Park `waiter` on what can make the budget skip group `key`: a group landing above it,
+	/// or the clock crossing its deadline.
+	fn watch_stale(&self, key: u64, waiter: &kio::Waiter) {
+		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter) else {
+			return;
+		};
+		let state = self.state.read();
+		state.poll_drifted(key, &drift.edge.servable, drift.budget.at(key), None, waiter);
+	}
+
 	/// Whether the drift budget says to skip group `key`, against a [`Drift`] already resolved
 	/// for this poll.
 	fn poll_stale(&self, key: u64, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
@@ -12123,10 +12138,15 @@ impl Cursor {
 
 	/// Take back `key`, handed out and never read: it is owed again where it came from, the
 	/// arrivals or a fill, so a read hands it out while it is cached and wanted, as one never
-	/// handed out.
+	/// handed out. One the cursor no longer reads, its ranges or cap having moved off it
+	/// meanwhile, is owed nowhere: ranges widening over it again ask for it afresh.
 	#[cfg(feature = "async")]
 	fn give_back(&mut self, key: u64) {
 		self.record.delivered.remove(key..key + 1);
+		// Judged by the window last synced: a later move clips what it owes then.
+		if key < self.floor() || !self.admits(key) {
+			return;
+		}
 		let arrived = (self.state.read().lookup.get(&key)).is_none_or(Slot::is_read);
 		match &mut self.misses {
 			Some(misses) if !arrived => misses.refill(key),
@@ -13472,7 +13492,11 @@ impl Subscriber {
 		let res = match self.poll_peek_group(ordered, pick, waiter) {
 			Poll::Ready(Ok(Some(reserved))) => match admit(self, &reserved) {
 				true => return Poll::Ready(self.take(reserved).map(Some)),
-				false => Poll::Ready(Ok(Some(reserved))),
+				// Refused, it may age out with nothing else to wake the read, which then passes it.
+				false => {
+					self.watch_stale(&reserved, waiter);
+					Poll::Ready(Ok(Some(reserved)))
+				}
 			},
 			res => res,
 		};
@@ -13484,6 +13508,15 @@ impl Subscriber {
 			// either: by rank for a ranked read, or in the subscription's order.
 			Poll::Ready(Ok(Some(_))) => Poll::Pending,
 			res => res.map(|res| res.map(|_| None).map_err(Error::from)),
+		}
+	}
+
+	/// Park `waiter` on group `reserved` going stale, as the read that reserved it judges it.
+	pub(super) fn watch_stale(&mut self, reserved: &Reserved, waiter: &kio::Waiter) {
+		match (&mut self.inner, reserved) {
+			(Inner::Plain(cursor), _) => cursor.watch_stale(reserved.key(), waiter),
+			(Inner::Resume(resume, _), Reserved::Resume(candidate)) => resume.watch_stale(candidate, waiter),
+			(Inner::Resume(..), Reserved::Plain(_)) => unreachable!("a resumed read reserves through a copy"),
 		}
 	}
 
@@ -13709,12 +13742,21 @@ impl Subscriber {
 		}
 	}
 
+	/// Keep group `key`, handed out and waiting on its publisher for stream credit, out of the
+	/// record's fold until it is released with `None` or given back: a group that outranks it
+	/// may still take its place, which takes back what its publisher told its wire of it.
+	#[cfg(feature = "async")]
+	pub(crate) fn hold(&mut self, key: Option<u64>) {
+		self.held = key;
+	}
+
 	/// Take back group `key`, handed out by an unordered read and never read, so a read hands
 	/// it out again while it is cached and wanted, as one never handed out. A publisher whose
 	/// stream for it waited for credit leaves it to the cache this way when a higher-ranked
 	/// group takes the stream's place.
 	#[cfg(feature = "async")]
 	pub(crate) fn give_back(&mut self, key: u64) {
+		self.held.take_if(|held| *held == key);
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.give_back(key),
 			Inner::Resume(resume, logical) => {
@@ -13770,12 +13812,14 @@ impl Subscriber {
 	/// can of the debt its track left its readers.
 	pub(super) fn settle_record(&mut self, handed: Option<u64>) {
 		let from = self.floor().unwrap_or(0);
+		let held = self.held;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let window = &cursor.filter.window;
 				let reader = Standing {
 					from,
 					handed,
+					held,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
 				};
 				let state = &cursor.state;
@@ -13788,6 +13832,7 @@ impl Subscriber {
 				let reader = Standing {
 					from,
 					handed,
+					held,
 					ranges: resume.ranges(),
 				};
 				let state = &logical.state;
@@ -33257,6 +33302,38 @@ mod test {
 		assert!(producer.state.read().drops.overlapping(&(8..10)).next().is_none());
 	}
 
+	/// A filled group given back once the ranges moved off it is owed nowhere: the read never
+	/// hands it out again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_given_back_outside_the_ranges_is_not_offered_again() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let descending = |groups: Range| replay().with_ranges([groups]).ordered(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		write_filled(fill.accept(9, None), 9);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the filled group is read");
+		};
+		assert_eq!(group.start, 9);
+
+		// Read since, so the cursor took the narrowing in before the group comes back.
+		subscriber.update(descending(Range::groups(0..8))).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		subscriber.give_back(9);
+		assert!(
+			subscriber.poll_recv_group(&waiter).is_pending(),
+			"no range reads group 9 now"
+		);
+	}
+
 	/// A group the fill accepted stays wanted until its reader takes it, even once the rest of
 	/// the fill is answered, so its source keeps writing it meanwhile; narrowing past it
 	/// before then leaves it.
@@ -38066,6 +38143,62 @@ mod test {
 			"{}",
 			pool.used()
 		);
+	}
+
+	/// A group its publisher holds waiting for stream credit stays above the record's fold, so
+	/// giving way still takes back what its publisher told its wire of it: a fold over it would
+	/// leave it told, never offered again nor reported.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_stays_above_the_fold() {
+		const RUNS: u64 = 1000;
+		let (producer, pool) = pooled_producer(1 << 30);
+		producer.received();
+		let waiter = kio::Waiter::noop();
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(60))
+				.with_range(0..),
+		);
+		for run in 0..RUNS {
+			producer.give_up(2 * run..2 * run + 1, Hole::drop(StreamError::Cancel));
+			producer.give_up(2 * run + 1..2 * run + 2, Hole::Skip);
+		}
+		while subscriber.poll_drop(&waiter).is_ready() {}
+		let write = |key: u64| {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			(group.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; 16 * 1024])).unwrap();
+			group
+		};
+
+		// Handed out and told as served, it waits for credit.
+		let held = 2 * RUNS;
+		let _first = write(held);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the group is read");
+		};
+		assert_eq!(group.start, held);
+		subscriber.record_mut().tell(held..held + 1, Report::Settled);
+		subscriber.hold(Some(held));
+
+		// The pool shrinks, and the reads of the groups that land after it accrue the debt they
+		// pay, as one taking its place would.
+		pool.resize(64 * (RUN_OVERHEAD + BORN_OVERHEAD));
+		let mut writing = Vec::new();
+		for key in held + 1..held + 64 {
+			writing.push(write(key));
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+				panic!("group {key} is read");
+			};
+			assert_eq!(group.start, key);
+			if subscriber.record().folded(held - 1) {
+				break;
+			}
+		}
+		assert!(subscriber.record().folded(held - 1), "the flood folded");
+
+		subscriber.record_mut().untell(held..held + 1);
+		assert!(!subscriber.record().told(held), "its served mark is taken back");
 	}
 
 	/// A flood a reader reported, fragmented into runs alternating with upstream skips,

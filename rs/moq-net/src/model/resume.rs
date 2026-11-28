@@ -1410,6 +1410,17 @@ impl Subscriber {
 			.collect()
 	}
 
+	/// Park `waiter` on the group `candidate` reserved going stale, as its copy judges it.
+	pub(super) fn watch_stale(&self, candidate: &Candidate, waiter: &kio::Waiter) {
+		let mut reader = self.reader();
+		let copy = (reader.copies.iter_mut())
+			.find(|copy| Arc::ptr_eq(&copy.lease, &candidate.lease))
+			.expect("the candidate's lease retains its copy");
+		if let Sub::Ready(sub) = &mut copy.sub {
+			sub.watch_stale(&candidate.reserved, waiter);
+		}
+	}
+
 	/// Take back group `key` from every copy, so whichever holds it hands it out again; see
 	/// [`track::Subscriber::give_back`].
 	#[cfg(feature = "async")]
@@ -8156,8 +8167,8 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let newest_first = Subscription::default()
-			.with_ranges([track::Range::ALL.with_order(track::Order::Descending)]);
+		let newest_first =
+			Subscription::default().with_ranges([track::Range::ALL.with_order(track::Order::Descending)]);
 		let mut sub = logical
 			.consume()
 			.subscribe(newest_first)
