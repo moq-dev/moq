@@ -10,7 +10,7 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the `moq-quic` audit + packet-c
 
 - ✅ Goal confirmed: cut UDP packet and RX/TX CPU cost via configurable `max_ack_delay` / `ack_eliciting_threshold` and tail-room ACK piggybacking without hurting live-media tail-loss recovery (rejected: piggybacking only with 25 ms default; drop).
 - ✅ Default `max_ack_delay = 50 ms` (configurable), reserve tail room to piggyback ACKs at `max_ack_delay / 2`, pair with PTO `STREAM` duplication so +25 ms `max_ack_delay` doesn't cost an extra full RTT on tail loss, and expose `ack_eliciting_threshold` keeping its default at `1` (rejected: keeping 25 ms default; raising default `ack_eliciting_threshold` to 10/cwnd-scaled now).
-- Joins `m1` as additive config fields on `#[non_exhaustive] pub struct transport::Config` + internal packet-packing and PTO improvements.
+- Additive config fields on `#[non_exhaustive] pub struct transport::Config` + internal packet-packing and PTO improvements. Moved from `m1` to `m3` on 2026-11-28, since it need not block `0.22.0`.
 
 Guidance:
 

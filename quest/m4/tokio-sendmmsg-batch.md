@@ -37,6 +37,6 @@ Public API: additive (`moq_sock::udp::UdpSocketState` batched send method). Wire
 
 ## Related
 
-- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m1/quic-ack-packing-and-pto-duplication.md) - cutting standalone ACKs unlocks the larger -14% CPU win from `sendmmsg`
+- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m3/quic-ack-packing-and-pto-duplication.md) - cutting standalone ACKs unlocks the larger -14% CPU win from `sendmmsg`
 - [QUIC I/O boundary](/quest/m5/quic-io-boundary.md) - buffer ownership contract for transmit APIs
 - [Packet, ACK, and syscall count tracking](/quest/m4/quic-packet-count-metrics.md) - tracks `datagrams / ios` batch ratios
