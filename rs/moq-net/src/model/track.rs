@@ -13456,6 +13456,15 @@ impl Subscriber {
 			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some())
 	}
 
+	/// Forget every parked group read here, a front's copies' included: a group landed that
+	/// the caller saw before its wake reached them.
+	pub(super) fn disarm(&mut self) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => idle::Idle::disarm(&mut cursor.idle),
+			Inner::Resume(resume, _) => resume.disarm_all(),
+		}
+	}
+
 	/// Pass groups another route copy handed out, preserving the arrival cursor and bounds.
 	pub(super) fn skip_ordered(&mut self, floor: u64) {
 		match &mut self.inner {

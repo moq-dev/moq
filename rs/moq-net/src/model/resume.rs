@@ -823,6 +823,17 @@ struct Span {
 	resume: Option<Position>,
 }
 
+/// What the fills an ordered hand-out passes say of the groups below it; see
+/// [`Reader::fill_owes_below`].
+enum Below {
+	/// None owes one.
+	Clear,
+	/// One still owes a group there.
+	Owed,
+	/// A group landed on one since its read parked: walk again.
+	Landed,
+}
+
 impl Copy {
 	/// The parts of `groups` under this copy's bound that its publisher declared skipped:
 	/// through its subscriber once ready, which for another front's track counts every route
@@ -1364,6 +1375,17 @@ impl Subscriber {
 	/// notifies.
 	pub(super) fn disarm(&mut self) {
 		Idle::disarm(&mut self.idle);
+	}
+
+	/// [`Self::disarm`], and the parked reads of every copy it holds, so the next read walks
+	/// each copy whatever its wakes have reached so far.
+	pub(super) fn disarm_all(&mut self) {
+		self.disarm();
+		for copy in &mut self.reader().copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.disarm();
+			}
+		}
 	}
 
 	/// The parts of `groups` this reader knows were skipped, by any copy it holds. A skip is
@@ -3000,7 +3022,7 @@ impl Reader {
 		floor: u64,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> bool {
+	) -> Below {
 		let (start, cap) = self.groups;
 		for &(index, arrivals) in waiting {
 			let copy = &self.copies[index];
@@ -3024,17 +3046,20 @@ impl Reader {
 				Sub::Ready(sub) => sub.owes(gap.clone(), waiter),
 			};
 			if open.iter().any(owes) {
-				return true;
+				return Below::Owed;
 			}
 			// A group landing on another thread after the read parked is no longer owed, but it
-			// counts as arrived before it stops being owed: checked after, a landing at any point
-			// shows. Walk again to read it.
-			if self.copies[index].track.poll_arrived(arrivals, waiter).is_ready() {
-				waiter.waker().wake_by_ref();
-				return true;
+			// counts as arrived in the same step: checked after, a landing at any point shows.
+			// Its wake may not have reached the fill's read yet, so that read walks past its gate.
+			let copy = &mut self.copies[index];
+			if copy.track.poll_arrived(arrivals, waiter).is_ready() {
+				if let Sub::Ready(sub) = &mut copy.sub {
+					sub.disarm();
+				}
+				return Below::Landed;
 			}
 		}
-		false
+		Below::Clear
 	}
 
 	fn deliverable(copy: &Copy, key: u64, delivered: &Delivered) -> bool {
@@ -3309,9 +3334,11 @@ impl Reader {
 				if !resumed && self.resumed.is_some() && self.window().floor().is_some() {
 					return None;
 				}
-				// The fill's answer, its track giving the group up, or the budget wakes the read.
-				if self.fill_owes_below(&waiting, &first, floor, delivered, waiter) {
-					return Some(Poll::Pending);
+				match self.fill_owes_below(&waiting, &first, floor, delivered, waiter) {
+					Below::Clear => {}
+					// The fill's answer, its track giving the group up, or the budget wakes the read.
+					Below::Owed => return Some(Poll::Pending),
+					Below::Landed => return None,
 				}
 			}
 			return Some(Poll::Ready(Ok(Some(first))));
