@@ -261,9 +261,7 @@ impl Mux {
 		let local = socket.local_addr()?;
 		let candidates = advertised_candidates(ice_candidates, local)?;
 
-		moq_crypto::cpu::check()?;
-		// rind-str0m repeats the check above, so its error is unreachable here.
-		let crypto = rind_str0m::default_provider().expect("the CPU check passed");
+		let crypto = rind_str0m::default_provider();
 		let registry = Arc::new(Mutex::new(Registry {
 			hmac: crypto.sha1_hmac_provider,
 			by_ufrag: HashMap::new(),
@@ -572,12 +570,9 @@ mod tests {
 		let now = Instant::now().into_std();
 		let (creds, inbound, _registration) = mux.register();
 		let session = creds.clone();
-		let mut answerer = crate::session::rtc_config()
-			.unwrap()
-			.set_local_ice_credentials(creds)
-			.build(now);
+		let mut answerer = crate::session::rtc_config().set_local_ice_credentials(creds).build(now);
 		answerer.add_local_candidate(Candidate::host(local, "udp").unwrap());
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		offerer.add_local_candidate(Candidate::host(real_addr, "udp").unwrap());
 		let mut api = offerer.sdp_api();
 		api.add_media(

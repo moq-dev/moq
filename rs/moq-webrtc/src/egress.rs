@@ -1458,8 +1458,8 @@ mod tests {
 		let bill = subscriber.bill();
 
 		let now = kio::clock::now().into_std();
-		let mut server = crate::session::rtc_config().unwrap().build(now);
-		let mut client = crate::session::rtc_config().unwrap().build(now);
+		let mut server = crate::session::rtc_config().build(now);
+		let mut client = crate::session::rtc_config().build(now);
 		let mut offer = server.sdp_api();
 		let mid = offer.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
 		let (offer, pending) = offer.apply().unwrap();

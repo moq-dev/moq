@@ -1,6 +1,6 @@
 [package]
 name = "moq-crypto"
-description = "Cryptography the MoQ crates share: the rind provider and the CPU check."
+description = "Cryptography the MoQ crates share: the rind provider and its DIT guard."
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -16,7 +16,7 @@ categories = ["cryptography", "multimedia", "network-programming"]
 all-features = true
 
 [features]
-# CPU support and its shared error need only rind.
+# rind's DIT guard needs only rind.
 cpu = ["dep:rind"]
 # The rustls provider adds TLS without needing `moq-net`.
 provider = ["cpu", "dep:rind-rustls", "dep:rustls"]
@@ -25,7 +25,6 @@ provider = ["cpu", "dep:rind-rustls", "dep:rustls"]
 rind = { workspace = true, optional = true }
 rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../workspace-hack" }

@@ -120,7 +120,7 @@ async fn serve(accept: Accept) -> anyhow::Result<()> {
 		.collect::<Result<Vec<_>, _>>()
 		.context("parse /certs/cert.pem")?;
 	let key = PrivateKeyDer::from_pem_file("/certs/priv.key").context("parse /certs/priv.key")?;
-	let mut tls = rustls::ServerConfig::builder_with_provider(moq_tokio::crypto::provider()?)
+	let mut tls = rustls::ServerConfig::builder_with_provider(moq_tokio::crypto::provider())
 		.with_protocol_versions(&[&rustls::version::TLS13])?
 		.with_no_client_auth()
 		.with_single_cert(chain, key)?;

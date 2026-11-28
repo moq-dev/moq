@@ -76,7 +76,6 @@ impl Client {
 		addr: impl ToSocketAddrs,
 		server_name: &str,
 	) -> Result<(Session, Driver<Stream<tokio_rustls::client::TlsStream<TcpStream>>>), Error> {
-		moq_crypto::cpu::check()?;
 		let deadline = self.session.handshake_deadline();
 		let server_name = rustls::pki_types::ServerName::try_from(server_name)
 			.map_err(|_| Error::InvalidServerName)?
@@ -275,14 +274,12 @@ mod tests {
 	async fn a_silent_tls_client_times_out_the_handshake() {
 		use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key).unwrap();
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
-		));
-		let config = rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider().unwrap())
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+		let config = rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider())
 			.with_safe_default_protocol_versions()
 			.unwrap()
 			.with_no_client_auth()

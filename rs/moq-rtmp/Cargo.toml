@@ -32,7 +32,6 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
-moq-crypto = { workspace = true, features = ["cpu"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 rand = { workspace = true }

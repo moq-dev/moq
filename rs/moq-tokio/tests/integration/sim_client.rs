@@ -157,7 +157,7 @@ struct Server {
 
 /// A fresh served identity for `localhost`
 fn identity() -> moq_tokio::tls::Serve {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut listen = moq_tokio::tls::Listen::default();
 	listen.generate = vec!["localhost".into()];
 	listen.load().expect("generate identity")

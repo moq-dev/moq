@@ -105,7 +105,7 @@ pub fn parse(argv: &[&std::ffi::OsStr]) -> anyhow::Result<Args> {
 /// Publish and follow until interrupted, then close the session so the relay sees the source end.
 pub async fn run(args: Args) -> anyhow::Result<()> {
 	args.log.init()?;
-	moq_tokio::crypto::install_default()?;
+	moq_tokio::crypto::install_default();
 	let url = args
 		.client
 		.url

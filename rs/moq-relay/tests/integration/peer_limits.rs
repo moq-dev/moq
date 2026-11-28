@@ -19,7 +19,7 @@ pub(crate) const BARE_IDLE: Duration = Duration::from_secs(300);
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -32,7 +32,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -159,7 +159,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 
 #[tokio::test]
 async fn tokio_peer_session_widens_quic_limits() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let relay = Relay::load(config(dir.path()))
 		.await
@@ -184,7 +184,7 @@ async fn refused_at_load(set: impl FnOnce(&mut Config)) -> String {
 /// and `[quic]` alike, rather than wedging the peer or the handshake later.
 #[tokio::test]
 async fn unadvertisable_quic_limits_are_refused_at_load() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let err = refused_at_load(|config| {
 		config.limits.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
 	})
@@ -228,7 +228,7 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 /// limit is a transport parameter, so the handshake alone shows it. Its idle
 /// timeout is far past any test's, so only a close ends a link in time.
 pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpoint::Endpoint {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -241,7 +241,7 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpo
 		.with_no_client_auth()
 		.with_single_cert(
 			vec![cert.der().clone()],
-			rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+			rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
 		)
 		.expect("server tls");
 	tls.alpn_protocols = connect
@@ -291,7 +291,7 @@ async fn static_dial(
 /// `[quic]` settings still advertises the peer limits from the handshake on.
 #[tokio::test]
 async fn cluster_dials_widen_a_plain_client() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let server = bare_server(&connect);
@@ -317,7 +317,7 @@ async fn cluster_dials_widen_a_plain_client() {
 /// admits cluster traffic by source port keeps working.
 #[tokio::test]
 async fn static_peer_dials_from_the_configured_bind() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	// Borrow a free port from the OS, then hand it to the dial template.
@@ -341,7 +341,7 @@ async fn static_peer_dials_from_the_configured_bind() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn tokio_worker_peer_session_widens_quic_limits() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
@@ -354,7 +354,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 #[cfg(uring)]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
 		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {

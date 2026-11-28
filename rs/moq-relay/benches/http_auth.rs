@@ -28,7 +28,7 @@ impl Drop for Fixture {
 
 impl Fixture {
 	async fn new(connections: usize, streams: usize, server: bool) -> Self {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let waiting = kio::Shared::new(0usize);
 		let (auth, decider) = if server {
 			let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -58,7 +58,7 @@ impl Fixture {
 		};
 
 		let pem = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;

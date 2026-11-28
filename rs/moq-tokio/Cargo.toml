@@ -44,7 +44,7 @@ humantime-serde = { workspace = true }
 kio = { workspace = true, features = ["async", "runtime"] }
 mdns-sd = { workspace = true }
 moq-congestion = { workspace = true }
-# rind's rustls provider and the `UnsupportedCpu` error, re-exported as `crypto`. Needs no moq-net.
+# rind's rustls provider, re-exported as `crypto`. Needs no moq-net.
 moq-crypto = { workspace = true, features = ["provider"] }
 moq-net = { workspace = true, features = ["async"] }
 # The QUIC state machine `quic::driver` drives; rind supplies its cryptography.

@@ -201,7 +201,6 @@ impl Client<Conn> {
 	/// `rtmps://`, then the RTMP handshake and `connect` for its app, advertising a
 	/// `tcUrl` of its scheme, host, port if it names one, and app.
 	pub async fn connect(connect: Connect) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		let target = Target::parse(&connect.url)?;
 		let tls = match (target.secure, connect.tls) {
 			(true, None) => return Err(anyhow::anyhow!("rtmps:// needs a TLS client configuration").into()),
@@ -247,7 +246,6 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and any
 	/// TLS) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, url: &Url) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		let target = Target::parse(url)?;
 		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,

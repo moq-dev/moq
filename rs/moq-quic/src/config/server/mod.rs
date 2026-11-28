@@ -108,7 +108,9 @@ impl Config {
 		let rng = &mut crate::entropy::rng();
 		let mut master_key = [0u8; 64];
 		rng.fill_bytes(&mut master_key);
-		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[])
+			.extract(&master_key)
+			.expect("rind's HKDF never fails");
 
 		Self {
 			transport: transport::Config::default(),
@@ -126,9 +128,6 @@ impl Config {
 	}
 
 	/// Present `cert_chain`, signed for by `key`, with the default settings
-	///
-	/// A CPU that rind cannot run on arrives in [`rustls::Error::Other`]: downcast it to
-	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu).
 	pub fn with_single_cert(
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,

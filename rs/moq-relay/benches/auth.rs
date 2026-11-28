@@ -31,7 +31,7 @@ impl Drop for Fixture {
 
 impl Fixture {
 	async fn new(sessions: usize, tokens: usize) -> Self {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
 		let decider = tokio::spawn(async move {
@@ -161,7 +161,7 @@ impl Drop for Queue {
 
 impl Queue {
 	async fn new() -> Self {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());

@@ -115,7 +115,7 @@ pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster
 
 /// A QUIC listener on `addr`, with a generated certificate
 async fn listen(network: &Network, addr: SocketAddr) -> (moq_tokio::Listener, Relay) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut config = moq_tokio::server::Config::default();
 	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
 	config.listen.tls.generate = vec!["localhost".into()];

@@ -50,18 +50,18 @@ impl fmt::Debug for Credential {
 }
 
 impl Credential {
-	/// Check the CPU and bounds, then extract the HKDF PRK.
+	/// Check the bounds, then extract the HKDF PRK.
 	///
 	/// # Errors
 	///
-	/// [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) if this CPU lacks a feature the crypto needs.
 	/// [`Error::Identity`](crate::Error::Identity) if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
 	pub fn new(config: Config) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		check_bytes(config.context.len())?;
 		check_u53(config.kid)?;
 		let secret = Secret(config.secret);
-		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, PROFILE.as_bytes()).extract(&secret.0);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, PROFILE.as_bytes())
+			.extract(&secret.0)
+			.expect("rind's HKDF never fails");
 		Ok(Self(Arc::new(Inner {
 			context: config.context,
 			kid: config.kid,
@@ -120,15 +120,18 @@ impl Credential {
 		let mut out = [0u8; N];
 		self.0
 			.prk
-			.expand(&[info], N)
-			.fill(&mut out)
+			.fill(&[info], &mut out)
 			.expect("HKDF length within the limit");
 		out
 	}
 
 	/// HKDF-Expand `info` into the key `algorithm` names.
 	pub(crate) fn derive<A: hkdf::KeyType, K: for<'a> From<hkdf::Okm<'a, A>>>(&self, info: &[u8], algorithm: A) -> K {
-		self.0.prk.expand(&[info], algorithm).into()
+		self.0
+			.prk
+			.expand(&[info], algorithm)
+			.expect("rind's HKDF never fails")
+			.into()
 	}
 
 	#[cfg(test)]

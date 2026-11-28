@@ -99,10 +99,6 @@ pub enum Error {
 	#[error(transparent)]
 	Io(Arc<std::io::Error>),
 
-	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
-
 	/// The WebSocket failed.
 	#[error(transparent)]
 	WebSocket(WebSocketError),

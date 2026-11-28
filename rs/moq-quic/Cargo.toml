@@ -36,7 +36,7 @@ indexmap = { workspace = true }
 kio = { workspace = true }
 lru-slab = "0.1.2"
 moq-congestion = { workspace = true }
-# rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
+# rind's rustls provider, which the transport crates share.
 moq-crypto = { workspace = true, features = ["provider"] }
 qlog = { workspace = true }
 rand = { workspace = true }

@@ -212,7 +212,7 @@ async fn spawn_relay_config(
 	cluster: cluster::Cluster,
 	mut config: moq_tokio::listen::Config,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
 	config.version = moq_net::Versions::all()
@@ -249,7 +249,7 @@ async fn spawn_ws_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let mut web_config = web::Config::default();
 	web_config.ws = true;
@@ -409,7 +409,7 @@ async fn spawn_quic_relay_with(
 	root: Option<std::path::PathBuf>,
 	cluster: cluster::Cluster,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
@@ -1337,7 +1337,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 /// with a client certificate, and over WebSocket where none can be presented.
 #[tokio::test]
 async fn a_certificate_admits_only_what_the_server_grants() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1435,7 +1435,7 @@ async fn an_mtls_client_ingests_here() {
 /// asks nobody for a certificate, so the same peer dialing it arrives anonymous.
 #[tokio::test]
 async fn the_cluster_listener_requires_a_certificate() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1449,7 +1449,7 @@ async fn the_cluster_listener_requires_a_certificate() {
 	tokio::spawn(async move { server.serve(listener).await });
 
 	// The cluster listener serves its own identity, apart from the public one.
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let served = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -1463,7 +1463,7 @@ async fn the_cluster_listener_requires_a_certificate() {
 	std::fs::write(&cert, served.pem()).expect("write cert");
 	std::fs::write(
 		&cert_key,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 
@@ -1558,7 +1558,7 @@ async fn the_cluster_listener_requires_a_certificate() {
 /// entering from, admitted by `moq auth serve` with the peer link role when requested,
 /// or `None` when it entered here.
 async fn mtls_route_source(mtls_peer: bool) -> Option<u64> {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1608,7 +1608,7 @@ async fn mtls_route_source(mtls_peer: bool) -> Option<u64> {
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let ca_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
 	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -1622,7 +1622,7 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
 	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -1640,7 +1640,7 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write client key");
 	(root_path, cert_path, key_path)
@@ -1859,7 +1859,7 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 /// decider's grant admits sessions through the assembled relay.
 #[tokio::test]
 async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let config = || {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
@@ -1902,7 +1902,7 @@ async fn connect_through_embedded_admission(
 	auth::Admissions,
 	tokio::task::JoinHandle<moq_tokio::Result<moq_tokio::Connection>>,
 ) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.listen.timeout = Some((timeout).into());

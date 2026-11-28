@@ -123,16 +123,18 @@ impl Config {
 		use crate::cid_generator::HashedConnectionIdGenerator;
 
 		self.validate()?;
-		moq_crypto::cpu::check()?;
 
 		let (reset_key, cid_key, min_reset_interval): (Arc<dyn HmacKey>, _, _) = match &self.reset_secret {
 			Some(secret) => {
-				let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(secret);
-				let reset_key = prk.expand(&[b"moq-quic reset key"], &hmac::HMAC_SHA256);
+				let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[])
+					.extract(secret)
+					.expect("rind's HKDF never fails");
+				let reset_key = prk
+					.expand(&[b"moq-quic reset key"], &hmac::HMAC_SHA256)
+					.expect("rind's HKDF never fails");
 
 				let mut cid_key = [0; 8];
-				prk.expand(&[b"moq-quic cid key"], cid_key.len())
-					.fill(&mut cid_key)
+				prk.fill(&[b"moq-quic cid key"], &mut cid_key)
 					.expect("8 bytes fit HKDF-SHA256");
 				(
 					Arc::new(hmac::Key::from(reset_key)),

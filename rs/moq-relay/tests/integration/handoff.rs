@@ -27,7 +27,7 @@ fn quic() -> moq_tokio::quic::Config {
 /// A self-signed certificate on disk, which both relays load: workers refuse
 /// `listen.tls.generate`.
 fn certificate(dir: &Path) -> (PathBuf, PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
 	params.serial_number = Some(1u64.into());
 	let cert = params.self_signed(&key).expect("self-signed cert");
@@ -36,7 +36,7 @@ fn certificate(dir: &Path) -> (PathBuf, PathBuf) {
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -172,7 +172,7 @@ async fn a_relay_takes_over_across_backends() {
 /// third relay take over.
 async fn takes_over(from: Backend, to: Backend) {
 	kio::clock::host_time(); // real relays on real sockets
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 
@@ -258,7 +258,7 @@ async fn takes_over(from: Backend, to: Backend) {
 #[tokio::test]
 async fn the_old_relay_outlives_a_new_one_that_dies() {
 	kio::clock::host_time(); // real relays on real sockets
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	// Neither an idle session nor the drain deadline ends a session (see `NEVER`), so
@@ -471,7 +471,7 @@ fn relay(dir: &Path, cert: &Path, key: &Path, port: u16, notify: &Path) -> tokio
 #[tokio::test]
 async fn a_killed_relay_s_clients_are_reset_by_the_one_it_replaced() {
 	kio::clock::host_time(); // real relays in real processes
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	std::fs::write(dir.path().join("reset.key"), "ab".repeat(32)).unwrap();

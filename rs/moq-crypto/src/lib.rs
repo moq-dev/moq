@@ -1,7 +1,6 @@
-//! Cryptography the MoQ crates share: the provider and the CPU check.
+//! Cryptography the MoQ crates share: the provider and the DIT guard.
 //!
-//! [`provider`] is rind's rustls provider; [`cpu`] holds the CPU check and [`cpu::UnsupportedCpu`]
-//! error that moq-quic, moq-tokio, and the other transport crates report.
+//! [`provider`] is rind's rustls provider; [`cpu`] re-exports rind's DIT guard.
 //!
 //! Both are off by default: `provider` gates the rustls provider and enables `cpu`, which needs
 //! only rind.

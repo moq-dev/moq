@@ -407,7 +407,9 @@ mod test {
 		let token = Token::new(payload, rng);
 		let mut master_key = [0; 64];
 		rng.fill_bytes(&mut master_key);
-		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[])
+			.extract(&master_key)
+			.expect("rind's HKDF never fails");
 		let encoded = token.encode(&prk);
 		let decoded = Token::decode(&prk, &encoded).expect("token didn't decrypt / decode");
 		assert_eq!(token.nonce, decoded.nonce);
@@ -491,7 +493,9 @@ mod test {
 		let mut master_key = [0; 64];
 		rng.fill_bytes(&mut master_key);
 
-		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[])
+			.extract(&master_key)
+			.expect("rind's HKDF never fails");
 
 		let mut invalid_token = Vec::new();
 

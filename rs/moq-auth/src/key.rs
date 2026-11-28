@@ -4,7 +4,7 @@ use crate::{Algorithm, Claims};
 use base64::Engine;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use pkcs1::der::Encode;
-use rind::signature::{EcdsaKeyPair, Ed25519KeyPair, sign};
+use rind::{ecdsa, ed25519};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -296,7 +296,7 @@ impl Jwk {
 	/// is discoverable from here, and `import`/`export` rather than `validate` because the
 	/// `validate` methods elsewhere in this crate check without converting.
 	pub fn import(self) -> crate::Result<Key> {
-		crate::crypto::init()?;
+		crate::crypto::init();
 
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
@@ -548,7 +548,7 @@ impl Key {
 
 		// `Jwk::import` already matched the algorithm, curve, and coordinates to the material.
 		let decoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => DecodingKey::from_secret(secret),
+			KeyMaterial::OCT { ref secret } => DecodingKey::from_secret(secret)?,
 			KeyMaterial::EC { ref x, ref y, .. } => DecodingKey::from_ec_components(
 				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
 				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
@@ -570,7 +570,7 @@ impl Key {
 		}
 
 		let encoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => EncodingKey::from_secret(secret),
+			KeyMaterial::OCT { ref secret } => EncodingKey::from_secret(secret)?,
 			KeyMaterial::EC {
 				ref curve,
 				ref x,
@@ -579,21 +579,21 @@ impl Key {
 			} => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 				let algorithm = match curve {
-					EllipticCurve::P256 => &sign::ECDSA_P256_SHA256_FIXED,
-					EllipticCurve::P384 => &sign::ECDSA_P384_SHA384_FIXED,
+					EllipticCurve::P256 => &ecdsa::sign::P256_SHA256_FIXED,
+					EllipticCurve::P384 => &ecdsa::sign::P384_SHA384_FIXED,
 					_ => return Err(KeyError::InvalidCurve("EC").into()),
 				};
 
 				// rind refuses a `d` whose public key is not this `x` and `y`.
 				let point = [&[0x04][..], x.as_slice(), y.as_slice()].concat();
 				let pair =
-					EcdsaKeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
+					ecdsa::KeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::OKP { ref d, ref x, .. } => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
-				let pair = Ed25519KeyPair::from_seed_and_public_key(d, x).map_err(crate::Error::crypto)?;
+				let pair = ed25519::KeyPair::from_seed_and_public_key(d, x).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ed_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::RSA {

@@ -37,7 +37,7 @@ pub(crate) fn supported() -> bool {
 /// A CA on disk plus a certificate it signed, for the mTLS test. Returns the
 /// root, the client's certificate, and its key.
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let ca_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
 	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -51,7 +51,7 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
 	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -69,7 +69,7 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write client key");
 	(root_path, cert_path, key_path)
@@ -77,7 +77,7 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -90,7 +90,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -139,7 +139,7 @@ async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connect
 /// shared origin.
 #[tokio::test]
 async fn uring_workers_serve_webtransport_and_raw_quic() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -240,7 +240,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 /// each of which must negotiate exactly the version it was pinned to.
 #[tokio::test]
 async fn uring_workers_serve_every_configured_version() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -337,7 +337,7 @@ async fn uring_workers_serve_every_configured_version() {
 /// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -399,7 +399,7 @@ async fn uring_workers_report_link_facts() {
 /// the whole window, and the arrival only what is left of it.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -546,7 +546,7 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
 /// The advertised fingerprint pins fresh handshakes before and after rotation.
 #[tokio::test]
 async fn workers_publish_their_rotated_certificate_fingerprint() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -612,7 +612,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 /// A generated worker identity is advertised once and accepted by pinned clients.
 #[tokio::test]
 async fn workers_share_a_generated_identity() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -663,7 +663,7 @@ async fn workers_share_a_generated_identity() {
 /// nothing else, so only the mTLS path can carry the round trip through.
 #[tokio::test]
 async fn an_mtls_client_authenticates_without_a_token() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -857,7 +857,7 @@ async fn traced_session(congestion: Option<moq_tokio::quic::CongestionControl>) 
 /// the test covers capture on the io_uring data path and the final flush.
 #[tokio::test]
 async fn uring_workers_write_qlog_traces() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -873,7 +873,7 @@ fn reports(records: &[serde_json::Value], field: &str) -> bool {
 /// reports a slow-start threshold and no pacing rate, BBR v3 the reverse.
 #[tokio::test]
 async fn uring_workers_run_the_configured_congestion_control() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -892,7 +892,7 @@ async fn uring_workers_run_the_configured_congestion_control() {
 /// refuses, over WebTransport and raw QUIC alike.
 #[tokio::test]
 async fn uring_refusals_reach_metrics() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -990,7 +990,7 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 async fn uring_forwards_the_setup_token() {
 	use moq_tokio::quic::{driver, web};
 
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -1082,7 +1082,7 @@ async fn uring_forwards_the_setup_token() {
 /// The embedded auth decider receives the same transport facts as the Tokio path.
 #[tokio::test]
 async fn uring_auth_reports_distinct_quic_and_webtransport() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -1142,7 +1142,7 @@ fn uring_workers_bound_stalled_handshakes() {
 
 	const LISTEN: Duration = Duration::from_millis(200);
 
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -1270,7 +1270,7 @@ async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::ones
 /// The harness keeps only the connection target, including its span on worker and shared tasks.
 #[tokio::test]
 async fn uring_sessions_log_their_close_under_a_connection_span() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}
@@ -1338,7 +1338,7 @@ async fn uring_startup_reports_a_refused_ring() {
 	if !test_env::Env::default().set("MOQ_TEST_REFUSE_RING", "1").isolate() {
 		return;
 	}
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
 		return;
 	}

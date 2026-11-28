@@ -164,7 +164,7 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 
 	let client = std::thread::spawn(move || {
 		// rustls has no implicit default provider; the client builder needs one installed.
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

@@ -14,7 +14,10 @@ impl crypto::HmacKey for hmac::Key {
 
 impl crypto::HandshakeTokenKey for hkdf::Prk {
 	fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn crypto::AeadKey> {
-		Box::new(aead::Key::from(self.expand(&[random_bytes], &aead::AES_256_GCM)))
+		Box::new(aead::Key::from(
+			self.expand(&[random_bytes], &aead::AES_256_GCM)
+				.expect("rind's HKDF never fails"),
+		))
 	}
 }
 

@@ -345,7 +345,7 @@ mod tests {
 	/// Answer `offer` as the WHIP server does, with one local candidate.
 	fn answer(offer: &str) -> String {
 		let (offer, refused) = parse_offer(offer, super::Lines::Every).unwrap();
-		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Opus]).unwrap();
+		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Opus]);
 		let candidate = Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap();
 		rtc.add_local_candidate(candidate);
 		let answer = rtc.sdp_api().accept_offer(offer).unwrap();
@@ -358,7 +358,7 @@ mod tests {
 	#[test]
 	fn an_offered_data_channel_is_answered_rejected() {
 		let now = kio::clock::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		let mut api = offerer.sdp_api();
 		let audio = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 		api.add_channel("chat".into());
@@ -389,7 +389,7 @@ mod tests {
 	#[test]
 	fn a_data_channel_offered_first_is_answered_first() {
 		let now = kio::clock::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		let mut api = offerer.sdp_api();
 		let audio = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 		let (offer, _) = api.apply().unwrap();
@@ -425,7 +425,7 @@ mod tests {
 	#[test]
 	fn a_data_channel_tagging_the_bundle_keeps_its_transport() {
 		let now = kio::clock::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		offerer.add_local_candidate(Candidate::host(([2, 2, 2, 2], 2000).into(), "udp").unwrap());
 		let mut api = offerer.sdp_api();
 		let audio = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
@@ -465,14 +465,14 @@ mod tests {
 	#[test]
 	fn candidates_skip_a_rejected_first_section() {
 		let now = kio::clock::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		let mut api = offerer.sdp_api();
 		api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
 		let video = api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
 		let (offer, pending) = api.apply().unwrap();
 
 		let (offer, refused) = parse_offer(&offer.to_sdp_string(), super::Lines::Every).unwrap();
-		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Vp8]).unwrap();
+		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Vp8]);
 		rtc.add_local_candidate(Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap());
 		let answer = render_answer(&rtc.sdp_api().accept_offer(offer).unwrap(), &refused);
 
@@ -494,7 +494,7 @@ mod tests {
 		use str0m::format::Codec;
 
 		let now = kio::clock::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut offerer = crate::session::rtc_config().build(now);
 		let mut api = offerer.sdp_api();
 		let kinds = [
 			MediaKind::Video,
@@ -511,7 +511,7 @@ mod tests {
 
 		let answer = |lines| {
 			let (offer, refused) = parse_offer(&offer, lines).unwrap();
-			let mut rtc = crate::session::rtc_with_codecs(&[Codec::Opus, Codec::Vp8]).unwrap();
+			let mut rtc = crate::session::rtc_with_codecs(&[Codec::Opus, Codec::Vp8]);
 			rtc.add_local_candidate(Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap());
 			render_answer(&rtc.sdp_api().accept_offer(offer).unwrap(), &refused)
 		};

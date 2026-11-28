@@ -249,9 +249,7 @@ mod tests {
 
 		let local = udp.local_addr().unwrap();
 		let socket = crate::ice::Socket::new(udp.clone(), vec![local], crate::ice::reader(udp)).unwrap();
-		let mut rtc = crate::session::rtc_config()
-			.unwrap()
-			.build(kio::clock::now().into_std());
+		let mut rtc = crate::session::rtc_config().build(kio::clock::now().into_std());
 		for addr in socket.locals() {
 			rtc.add_local_candidate(str0m::Candidate::host(*addr, "udp").unwrap());
 		}

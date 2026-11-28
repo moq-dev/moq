@@ -82,10 +82,6 @@ pub enum Error {
 	#[error("invalid quic config: {0}")]
 	Config(#[from] driver::ConfigError),
 
-	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
-
 	/// The qlog trace file couldn't be created, usually a missing directory.
 	#[error("failed to create qlog file")]
 	CreateQlog(#[source] std::io::Error),
@@ -494,7 +490,7 @@ impl Client {
 
 				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
 				// process default when another crate in the graph builds it as `rustls-no-provider`.
-				crate::crypto::install_default()?;
+				crate::crypto::install_default();
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await

@@ -174,7 +174,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// and a guard the session task holds for its lifetime (unregisters on exit).
 	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
-	let mut rtc = session::rtc_config()?
+	let mut rtc = session::rtc_config()
 		.set_local_ice_credentials(creds)
 		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
@@ -246,7 +246,7 @@ mod tests {
 
 	/// An encoder's offer to send one Opus track.
 	fn offer() -> String {
-		let mut rtc = session::rtc_with_codecs(&[Codec::Opus]).unwrap();
+		let mut rtc = session::rtc_with_codecs(&[Codec::Opus]);
 		let mut api = rtc.sdp_api();
 		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 		let (offer, _pending) = api.apply().expect("an offer");

@@ -427,11 +427,7 @@ mod tests {
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
-		Agent::new(
-			crate::session::rtc_config().unwrap().build(Instant::now().into_std()),
-			socket,
-		)
-		.unwrap()
+		Agent::new(crate::session::rtc_config().build(Instant::now().into_std()), socket).unwrap()
 	}
 
 	#[tokio::test]
@@ -448,7 +444,7 @@ mod tests {
 	/// connects, which reports as ICE never connecting rather than a DTLS failure.
 	#[tokio::test(start_paused = true)]
 	async fn a_handshake_giving_up_before_ice_connects_is_a_timeout() {
-		let mut offerer = crate::session::rtc_config().unwrap().build(Instant::now().into_std());
+		let mut offerer = crate::session::rtc_config().build(Instant::now().into_std());
 		let mut api = offerer.sdp_api();
 		api.add_media(
 			str0m::media::MediaKind::Audio,
@@ -459,7 +455,6 @@ mod tests {
 		);
 		let (offer, pending) = api.apply().unwrap();
 		let answer = crate::session::rtc_config()
-			.unwrap()
 			.build(Instant::now().into_std())
 			.sdp_api()
 			.accept_offer(offer)
@@ -498,7 +493,7 @@ mod tests {
 	async fn an_ice_lite_offerers_candidate_is_checked_unprompted() {
 		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let now = Instant::now().into_std();
-		let mut offerer = crate::session::rtc_config().unwrap().set_ice_lite(true).build(now);
+		let mut offerer = crate::session::rtc_config().set_ice_lite(true).build(now);
 		offerer.add_local_candidate(str0m::Candidate::host(peer.local_addr().unwrap(), "udp").unwrap());
 		let mut api = offerer.sdp_api();
 		api.add_media(
@@ -521,7 +516,7 @@ mod tests {
 
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let local = socket.local_addr().unwrap();
-		let mut answerer = crate::session::rtc_config().unwrap().build(now);
+		let mut answerer = crate::session::rtc_config().build(now);
 		answerer.add_local_candidate(str0m::Candidate::host(local, "udp").unwrap());
 		answerer.sdp_api().accept_offer(offer).unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
@@ -549,8 +544,8 @@ mod tests {
 		const FRAMES: u64 = 50;
 
 		let now = Instant::now().into_std();
-		let mut sender = crate::session::rtc_config().unwrap().build(now);
-		let mut receiver = crate::session::rtc_config().unwrap().build(now);
+		let mut sender = crate::session::rtc_config().build(now);
+		let mut receiver = crate::session::rtc_config().build(now);
 		// Candidates go into the SDP, so bind before the exchange.
 		let sender_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let receiver_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());

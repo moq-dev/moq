@@ -74,7 +74,6 @@ percent-encoding = { version = "2" }
 pkcs8 = { version = "0.11", default-features = false, features = ["pem"] }
 portable-atomic = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
-rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls-no-provider", "stream"] }
@@ -85,6 +84,7 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
+signature = { version = "3", default-features = false, features = ["alloc", "rand_core"] }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
@@ -166,7 +166,6 @@ portable-atomic = { version = "1" }
 proc-macro2 = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 quote = { version = "1" }
-rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls-no-provider", "stream"] }
@@ -177,6 +176,7 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
+signature = { version = "3", default-features = false, features = ["alloc", "rand_core"] }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
@@ -231,6 +231,7 @@ objc2-metal = { version = "0.3" }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["fs", "termios"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -262,6 +263,7 @@ objc2-metal = { version = "0.3" }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["fs", "termios"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -290,6 +292,7 @@ quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
@@ -318,6 +321,7 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -332,6 +336,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 regex = { version = "1" }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -350,6 +355,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 regex = { version = "1" }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -383,6 +389,7 @@ quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
@@ -411,6 +418,7 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }

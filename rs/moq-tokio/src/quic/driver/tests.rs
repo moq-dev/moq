@@ -48,7 +48,7 @@ async fn handshake_timeout() {
 
 	// Avoid NoRootAnchors error
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
@@ -90,7 +90,7 @@ async fn close_endpoint() {
 
 	// Avoid NoRootAnchors error
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
@@ -133,7 +133,7 @@ async fn driver_panic_fails_connecting() {
 
 	// Avoid NoRootAnchors error
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
@@ -280,7 +280,7 @@ impl EndpointFactory {
 	fn new() -> Self {
 		Self {
 			cert: (|| -> std::result::Result<_, rcgen::Error> {
-				let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+				let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 				let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 				params.serial_number = Some(1u64.into());
 				let cert = params.self_signed(&signing_key)?;
@@ -296,7 +296,7 @@ impl EndpointFactory {
 	}
 
 	fn server_config(&self, transport_config: transport::Config) -> server::Config {
-		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
+		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
 		server_config.transport = transport_config;
@@ -449,8 +449,8 @@ fn blocking_server_pair(
 	server_socket: Box<dyn AsyncUdpSocket>,
 ) -> (Endpoint, Endpoint, Arc<HandshakeBlocker>) {
 	let factory = EndpointFactory::new();
-	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
-	let provider = Arc::new(default_provider().unwrap());
+	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
+	let provider = Arc::new(default_provider());
 	let key = rustls::sign::CertifiedKey::from_der(vec![factory.cert.cert.der().clone()], key, &provider).unwrap();
 	let blocker = Arc::new(HandshakeBlocker::default());
 	let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
@@ -481,7 +481,7 @@ fn blocking_server_pair(
 	// One classical key share keeps the ClientHello in the first Initial, so a handshake failure
 	// surfaces from `accept` itself. rind's default post-quantum share spills it into a
 	// second packet, which only reaches the connection after it is registered.
-	let mut provider = default_provider().unwrap();
+	let mut provider = default_provider();
 	provider
 		.kx_groups
 		.retain(|group| group.name() == rustls::NamedGroup::X25519);
@@ -692,14 +692,14 @@ async fn specific_v6_addr() {
 	let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
 
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
 		Ok(rcgen::CertifiedKey { cert, signing_key })
 	})()
 	.unwrap();
-	let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 	let cert = CertificateDer::from(cert.cert);
 	let server_config = server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
 	let server = server_endpoint(server_config, addr).unwrap();
@@ -802,14 +802,14 @@ fn run_echo(args: EchoArgs) {
 		// We don't use the `endpoint` helper here because we want two different endpoints with
 		// different addresses.
 		let cert = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
 			Ok(rcgen::CertifiedKey { cert, signing_key })
 		})()
 		.unwrap();
-		let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
+		let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 		let cert = CertificateDer::from(cert.cert);
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
@@ -825,7 +825,7 @@ fn run_echo(args: EchoArgs) {
 
 		let mut roots = RootCertStore::empty();
 		roots.add(cert).unwrap();
-		let mut client_crypto = rustls::ClientConfig::builder_with_provider(default_provider().unwrap().into())
+		let mut client_crypto = rustls::ClientConfig::builder_with_provider(default_provider().into())
 			.with_safe_default_protocol_versions()
 			.unwrap()
 			.with_root_certificates(roots)
@@ -990,14 +990,14 @@ async fn rebind_recv() {
 	let _guard = subscribe();
 
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
 		Ok(rcgen::CertifiedKey { cert, signing_key })
 	})()
 	.unwrap();
-	let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 	let cert = CertificateDer::from(cert.cert);
 
 	let mut roots = RootCertStore::empty();
@@ -2474,7 +2474,7 @@ async fn unroutable_dial_fails_with_no_viable_path() {
 	let client = Endpoint::new(endpoint::Config::default(), UdpSocket::from(socket)).unwrap();
 
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
@@ -2551,7 +2551,7 @@ async fn unreachable_handshake_drains_while_held() {
 	let _guard = subscribe();
 
 	let factory = EndpointFactory::new();
-	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
+	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
 	let server_config =
 		crate::quic::driver::server::Config::with_single_cert(vec![factory.cert.cert.der().clone()], key).unwrap();
 	let outage = Arc::new(Outage::default());

@@ -24,7 +24,6 @@ async = ["kio/async"]
 base64 = { workspace = true }
 bytes = { workspace = true }
 kio = { workspace = true }
-moq-crypto = { workspace = true, features = ["cpu"] }
 moq-net = { workspace = true }
 rind = { workspace = true }
 thiserror = { workspace = true }

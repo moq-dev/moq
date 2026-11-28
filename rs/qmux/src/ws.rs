@@ -338,7 +338,7 @@ fn platform_tls() -> Result<std::sync::Arc<rustls::ClientConfig>, Error> {
 	if let Some(tls) = TLS.get() {
 		return Ok(tls.clone());
 	}
-	let provider = moq_crypto::provider::provider()?;
+	let provider = moq_crypto::provider::provider();
 	let config = rustls::ClientConfig::builder_with_provider(provider)
 		.with_safe_default_protocol_versions()
 		.map_err(std::io::Error::other)?
@@ -626,14 +626,12 @@ mod tests {
 		let tls = platform_tls().unwrap();
 		assert!(std::sync::Arc::ptr_eq(&tls, &platform_tls().unwrap()), "built again");
 
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key).unwrap();
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
-		));
-		let server = rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider().unwrap())
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+		let server = rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider())
 			.with_safe_default_protocol_versions()
 			.unwrap()
 			.with_no_client_auth()

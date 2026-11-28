@@ -263,7 +263,6 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -481,7 +480,6 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 /// `play`. The handshake must finish in five seconds; wrap the call in
 /// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
-	moq_crypto::cpu::check()?;
 	Ok(accept_until_request(stream, peer).await?)
 }
 
@@ -3163,7 +3161,7 @@ mod tests {
 			}
 		}
 
-		let provider = Arc::new(rind_rustls::default_provider().unwrap());
+		let provider = Arc::new(rind_rustls::default_provider());
 
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];

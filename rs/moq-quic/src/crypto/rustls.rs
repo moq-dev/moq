@@ -288,7 +288,7 @@ impl QuicServerConfig {
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
 	) -> Result<rustls::ServerConfig, rustls::Error> {
-		rustls::ServerConfig::builder_with_provider(provider()?)
+		rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider())
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap() // The default providers support TLS 1.3
 			.with_no_client_auth()
@@ -369,15 +369,6 @@ pub(crate) fn initial_suite(provider: &rustls::crypto::CryptoProvider) -> Option
 
 fn no_initial_suite() -> rustls::Error {
 	rustls::Error::General("the provider lacks TLS13_AES_128_GCM_SHA256, which QUIC Initial packets need".into())
-}
-
-/// rind's provider, with a CPU it cannot run on reported as a rustls error.
-///
-/// The convenience constructors return rustls errors already; the refusal stays typed inside
-/// [`rustls::Error::Other`], so a caller can downcast it to
-/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu).
-pub(crate) fn provider() -> Result<Arc<rustls::crypto::CryptoProvider>, rustls::Error> {
-	moq_crypto::provider::provider().map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))
 }
 
 fn to_vec(params: &TransportParameters) -> Vec<u8> {
@@ -482,7 +473,7 @@ mod tests {
 	#[test]
 	fn supplied_configs_reject_early_data_and_keep_resumption() {
 		let identity = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -492,7 +483,7 @@ mod tests {
 		let cert = identity.cert.der().clone();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.clone()).unwrap();
-		let mut client = rustls::ClientConfig::builder_with_provider(provider().unwrap())
+		let mut client = rustls::ClientConfig::builder_with_provider(moq_crypto::provider::provider())
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap()
 			.with_root_certificates(roots)
@@ -500,7 +491,7 @@ mod tests {
 		client.enable_early_data = true;
 		let mut server = QuicServerConfig::inner(
 			vec![cert],
-			PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+			PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
 		)
 		.unwrap();
 		server.max_early_data_size = u32::MAX;
@@ -529,13 +520,13 @@ mod tests {
 	/// another provider's suite.
 	#[test]
 	fn provider_without_initial_suite_fails_connections() {
-		let mut provider = (*super::provider().unwrap()).clone();
+		let mut provider = (*moq_crypto::provider::provider()).clone();
 		provider
 			.cipher_suites
 			.retain(|suite| suite.suite() != rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);
 		let provider = Arc::new(provider);
 		let identity = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -559,7 +550,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![identity.cert.der().clone()],
-				PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+				PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
 			)
 			.unwrap();
 		let server = QuicServerConfig::new(Arc::new(server));

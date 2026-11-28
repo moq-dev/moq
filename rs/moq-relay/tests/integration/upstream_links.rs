@@ -106,7 +106,7 @@ async fn node(connect: Vec<Peer>) -> Node {
 
 /// A node that accepts the versions `accepts` and dials with `dial`, newest first.
 async fn node_on(connect: Vec<Peer>, accepts: &[&str], dial: &[&str]) -> Node {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
 	let mut listen = moq_tokio::listen::Config::default();

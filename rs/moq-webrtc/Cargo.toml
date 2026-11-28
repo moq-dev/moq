@@ -28,7 +28,7 @@ bytes = { workspace = true }
 hang = { workspace = true }
 # Drives each WebRTC connection over its UDP socket.
 kio = { workspace = true, features = ["runtime"] }
-# Refuses a CPU rind can't run on, and gives the WHIP/WHEP client rind's rustls provider.
+# Gives the WHIP/WHEP client rind's rustls provider.
 moq-crypto = { workspace = true, features = ["provider"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }

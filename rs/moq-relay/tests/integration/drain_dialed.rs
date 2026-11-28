@@ -164,7 +164,7 @@ struct Mesh {
 impl Mesh {
 	async fn start(drain: Duration) -> Self {
 		kio::clock::host_time(); // real relays on real sockets
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 
 		// A and C first, until each learns the other's broadcast over the one link between
 		// them: their route exchange is then up, so each forwards L's routes to the other as
