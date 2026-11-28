@@ -1558,9 +1558,10 @@ impl Cluster {
 	}
 }
 
-/// The rest of a [`Cluster`]'s state, held once: the handle is cloned for every
-/// connection and every task serving it, and these fields are about a kilobyte.
-#[doc(hidden)]
+/// The state a [`Cluster`] handle shares among its clones, which has no public fields.
+///
+/// Held once because the handle is cloned for every connection and every task serving it,
+/// and these fields are about a kilobyte.
 #[derive(Clone)]
 pub struct Shared {
 	client_limits: moq_net::session::Limits,
