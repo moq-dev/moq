@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
+import type { Producer as GroupProducer } from "./group.ts";
 import { ProtocolViolation, StreamCode, StreamError } from "./error.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -33,13 +34,17 @@ async function forward(
 	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
-			const out = video.createGroup(group.start);
+			// A group is created with its first frame.
+			let out: GroupProducer | undefined;
 			try {
-				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
-				out.finish();
+				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
+					if (out) out.writeFrame(frame);
+					else out = video.createGroup(frame);
+				}
+				out?.finish();
 			} catch (err: unknown) {
 				failed(err);
-				out.abort(asError(err));
+				out?.abort(asError(err));
 			}
 		}
 	})().catch((err: unknown) => video.abort(asError(err)));
@@ -105,9 +110,9 @@ async function chain() {
 		nextFailure,
 		/** The good broadcast still delivers on the downstream session. */
 		async goodFlows(key: bigint) {
-			const group = defined(goodTrack).createGroup(key);
-			group.writeFrame({ payload: enc.encode("good"), timestamp: Timestamp.unscaled(key) });
-			group.finish();
+			defined(goodTrack)
+				.createGroup({ payload: enc.encode("good"), timestamp: Timestamp.unscaled(key) })
+				.finish();
 			const received = await defined(goodReader).recvGroup();
 			expect(dec.decode((await received?.readFrame())?.payload)).toBe("good");
 			received?.close();
@@ -134,9 +139,7 @@ test("a group a JS hop cannot decode ends only that group downstream", async () 
 		// Lite-05 stamps a scale-less track's frames with milliseconds, which a JS hop decodes only
 		// below 2^53: a frame past it is a decode error on that hop's Group Stream.
 		for (const key of [2n ** 53n + 1n, 2n ** 53n + 2n]) {
-			const bad = c.badTrack.createGroup(key);
-			bad.writeFrame({ payload: enc.encode("bad"), timestamp: Timestamp.unscaled(key) });
-			bad.finish();
+			c.badTrack.createGroup({ payload: enc.encode("bad"), timestamp: Timestamp.unscaled(key) }).finish();
 			// The hop reads it as a malformed track, which is all it forwards. A second one arriving
 			// proves the first left the track itself up.
 			malformedTrack(await c.nextFailure());
@@ -151,9 +154,7 @@ test("a violation on a forwarded track ends only that track downstream", async (
 	const c = await chain();
 	try {
 		// A group through the hop proves its copy exists.
-		const first = c.badTrack.createGroup(0n);
-		first.writeFrame({ payload: enc.encode("first"), timestamp: Timestamp.unscaled(0n) });
-		first.finish();
+		c.badTrack.createGroup({ payload: enc.encode("first"), timestamp: Timestamp.unscaled(0n) }).finish();
 		(await c.badReader.recvGroup())?.close();
 
 		// Another session's verdict on the track, as a group past its declared end gives.
