@@ -19,9 +19,8 @@ size is its allocation, in jemalloc size classes:
 | `Connection::start`'s boxed `supervise` future | 7.0 | 4.0 |
 | the task around `Request::ok`'s driver | 3.0 | 0.75 |
 | `lite::session::Driver` | 7.0 | 3.5 |
-| the relay connection task (`Lifecycle` held `Cluster` inline) | 1.7 | 0.6 |
+| the relay connection task (`Lifecycle` held `Cluster` inline) | 1.7 | 0.9 |
 | `web::Session::run_recv` task | 2.0 | 1.0 |
-| `AnnouncePrefix` occupant `Vec` (first slot reserved alone; not re-measured) | 1.5 | 0.4 expected |
 
 Sampled live heap on loopback macOS (2,000 idle connections) fell from about
 105 KiB to about 99 KiB per connection, and RSS from 116-118 to 106-109 KiB.
@@ -36,6 +35,7 @@ What remains, with the profile's figures:
 | `moq_net::session::Session::new` channels | 1.2 |
 | `moq_relay::session::Registry` table | 1.0 |
 | `transport::boxed::bi` stream boxes | 1.0 |
+| `lite::subscriber` `AnnouncePrefix` occupant `Vec` growth (a `kio::Tasks` reserves four slots for a machine under 1 KiB; a first-slot reservation costs a second allocation for sets that reach two, so measure churn first) | 1.5 |
 | `supervise` is 3.9 KiB, just over the 3.5 KiB class: `Lease` is 2 KiB inline, the select's futures 1 KiB | 0.5 |
 
 Method notes for the rest: an `async fn` stores each argument twice (as a

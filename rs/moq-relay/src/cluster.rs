@@ -1528,25 +1528,39 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a PeerToken) -> impl FnMut(DialTarg
 /// cluster without a dial template can serve local sessions but cannot dial
 /// remote peers.
 #[derive(Clone)]
-pub struct Cluster(Arc<Shared>);
+pub struct Cluster {
+	/// All broadcasts, local and remote. Downstream sessions read from here
+	/// (filtered by their auth token) and remote dials both read and write here.
+	pub origin: origin::Producer,
+
+	/// Stats registry. One instance per relay; sessions pick a billing tier via
+	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
+	/// (the default tier unless configured otherwise, or any label the auth API
+	/// returns) so traffic classes land in separate counter sets. A disabled
+	/// (no-op) registry unless [`Options::stats`] enabled publishing.
+	pub stats: moq_net::stats::Registry,
+
+	shared: Arc<Shared>,
+}
 
 impl std::ops::Deref for Cluster {
 	type Target = Shared;
 
 	fn deref(&self) -> &Shared {
-		&self.0
+		&self.shared
 	}
 }
 
-/// Configuring a handle copies the state it shares, so it never changes its clones.
-impl std::ops::DerefMut for Cluster {
-	fn deref_mut(&mut self) -> &mut Shared {
-		Arc::make_mut(&mut self.0)
+impl Cluster {
+	/// The shared state to configure, copied first so no clone changes.
+	pub(crate) fn shared_mut(&mut self) -> &mut Shared {
+		Arc::make_mut(&mut self.shared)
 	}
 }
 
-/// The state behind a [`Cluster`] handle, held once: the handle is cloned for every
-/// connection and every task serving it, and the fields are over a kilobyte.
+/// The rest of a [`Cluster`]'s state, held once: the handle is cloned for every
+/// connection and every task serving it, and these fields are about a kilobyte.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct Shared {
 	client_limits: moq_net::session::Limits,
@@ -1592,17 +1606,6 @@ pub struct Shared {
 	/// Certificate reload: a panic stops
 	/// [`Relay::run`](crate::Relay::run).
 	pub(crate) critical: crate::critical::Critical,
-
-	/// All broadcasts, local and remote. Downstream sessions read from here
-	/// (filtered by their auth token) and remote dials both read and write here.
-	pub origin: origin::Producer,
-
-	/// Stats registry. One instance per relay; sessions pick a billing tier via
-	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
-	/// (the default tier unless configured otherwise, or any label the auth API
-	/// returns) so traffic classes land in separate counter sets. A disabled
-	/// (no-op) registry unless [`Options::stats`] enabled publishing.
-	pub stats: moq_net::stats::Registry,
 
 	/// Keeps the stats publisher alive while any cluster handle lives and its
 	/// driver runs. The publisher holds only a `Weak` to its producer, so it stops
@@ -1747,31 +1750,34 @@ impl Cluster {
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.node(), "cluster initialized");
-		let cluster = Cluster(Arc::new(Shared {
-			client_limits: client.resolve(),
-			peer_limits: peer.resolve(),
-			peer_quic: peer.quic,
-			config,
-			connect: None,
-			quic: None,
-			#[cfg(feature = "test-support")]
-			network,
-			#[cfg(feature = "test-support")]
-			sim,
-			dial: None,
-			dialers: Dialers::new(),
-			shutdown: shutdown.unwrap_or_else(crate::shutdown::Observer::disabled),
-			advertise: None,
-			lan_auth: Arc::new(std::sync::OnceLock::new()),
-			nodes,
-			refusals: crate::refusals::Refusals::new(&stats),
-			connection_ids: Arc::default(),
-			critical: Default::default(),
+		let refusals = crate::refusals::Refusals::new(&stats);
+		let cluster = Cluster {
 			origin,
 			stats,
-			stats_paths,
-			stats_producer,
-		}));
+			shared: Arc::new(Shared {
+				client_limits: client.resolve(),
+				peer_limits: peer.resolve(),
+				peer_quic: peer.quic,
+				config,
+				connect: None,
+				quic: None,
+				#[cfg(feature = "test-support")]
+				network,
+				#[cfg(feature = "test-support")]
+				sim,
+				dial: None,
+				dialers: Dialers::new(),
+				shutdown: shutdown.unwrap_or_else(crate::shutdown::Observer::disabled),
+				advertise: None,
+				lan_auth: Arc::new(std::sync::OnceLock::new()),
+				nodes,
+				refusals,
+				connection_ids: Arc::default(),
+				critical: Default::default(),
+				stats_paths,
+				stats_producer,
+			}),
+		};
 		Ok((cluster, Driver { work }))
 	}
 
@@ -1904,8 +1910,8 @@ impl Cluster {
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
-		self.connect = Some(Arc::new(connect));
-		self.quic = Some(Arc::new(quic));
+		self.shared_mut().connect = Some(Arc::new(connect));
+		self.shared_mut().quic = Some(Arc::new(quic));
 		self
 	}
 
@@ -1915,7 +1921,7 @@ impl Cluster {
 	/// error otherwise. The fingerprint is set when the certificate was
 	/// generated or supplied in-memory, so peers can pin it.
 	pub fn with_advertise(mut self, advertise: LanAdvertise) -> Self {
-		self.advertise = Some(advertise);
+		self.shared_mut().advertise = Some(advertise);
 		self
 	}
 
@@ -2178,7 +2184,7 @@ impl Cluster {
 		let client = self
 			.peer_client(!shared, None)
 			.context("cluster peers configured but the dial template is unusable")?;
-		self.dial = shared.then(|| Arc::new(client));
+		self.shared_mut().dial = shared.then(|| Arc::new(client));
 
 		// After everything fallible, so a failed start leaves no credential behind.
 		if let Some(discovery) = &discovery {

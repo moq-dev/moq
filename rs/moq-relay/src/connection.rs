@@ -419,6 +419,8 @@ pub fn supervise(
 	let mut shutdown = serving.shutdown.clone();
 	// An async block, not an async fn: an async fn stores each argument twice, as a capture and
 	// as a local, and this future lives as long as the session.
+	// The arguments above are bound when this is called, not on the first poll: any setup that
+	// can panic belongs inside the block, where the caller's isolation catches it.
 	async move {
 		let reported = lease.reported();
 		let result = loop {
