@@ -280,6 +280,15 @@ for unsigned lite timestamp deltas, so lite-07's
 `FRAME` timestamp deltas freeze unsigned, so the timestamps they produce never
 decrease (rejected: the next wip version after the cut).
 
+Decided 2026-11-27 (maintainer, on
+[moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ lite-07
+freezes with a group stream's first `FRAME` carrying no timestamp delta, since
+frame 0 sits at the group's start, and every later delta unsigned (rejected: a
+zigzag first delta letting frame 0 precede its start). ✅ Every first-party
+decoder reads `cts` while lite-07 publishers keep writing `legacy`; publishers
+switch to `cts` with [lite-08](/quest/m4/cts-encoders.md) (rejected:
+first-party encoders on `cts` for lite-07).
+
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07

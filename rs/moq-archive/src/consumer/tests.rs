@@ -295,10 +295,10 @@ async fn groups_come_from_cached_objects_and_span_them() {
 	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected(true, 2, 0..5));
 }
 
-/// A stored group whose timestamps decrease, recorded before groups refused it, replays
-/// with each raised to the newest before it, live and fetched alike.
+/// A stored group whose timestamps decrease, recorded before groups refused it, is refused
+/// with `TimestampMismatch`, live and fetched alike, while the track goes on to its end.
 #[tokio::test(start_paused = true)]
-async fn a_decreasing_stored_group_replays_raised() {
+async fn a_decreasing_stored_group_is_refused() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
 	// Stamped in decode order with presentation times, as a `legacy` B-frame track was.
@@ -311,21 +311,36 @@ async fn a_decreasing_stored_group_replays_raised() {
 			})
 			.into(),
 	};
-	let raised = |start: u64| -> Vec<String> {
-		[(0, "a"), (2000, "b"), (2000, "c"), (3000, "d")]
-			.map(|(pts, payload)| format!("{}@{payload}", start + pts))
-			.into()
-	};
 	// Group 0 is filled on request; group 4000, the newest, is the live feed's.
 	archive.object("video", 0, vec![stored(0), stored(4000)]).await;
 	archive.end("video", End::Finish(At { group: 4001, frame: 0 })).await;
 	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), raised(0));
+	let fetched = fetch(&broadcast, "video", 0).await;
+	assert!(refused(&fetched), "{fetched:?}");
+
+	// A subscription moves past the refused fill and gets the live group, which ends refused.
 	let mut reader = subscribe(&broadcast, "video").await;
-	assert_eq!(next(&mut reader).await.unwrap(), (0, raised(0)));
-	assert_eq!(next(&mut reader).await.unwrap(), (4000, raised(4000)));
+	let mut group = group(&mut reader).await.unwrap();
+	assert_eq!(group.start, 4000);
+	let read = loop {
+		match timeout(Duration::from_secs(10), group.read_frame()).await.unwrap() {
+			Ok(Some(_)) => continue,
+			done => break done.map(|_| Vec::new()),
+		}
+	};
+	assert!(refused(&read), "{read:?}");
+	assert!(next(&mut reader).await.is_none());
+	assert_eq!(reader.finished().await.unwrap(), Position::group(4001));
+}
+
+/// Whether a read failed because its group's timestamps decrease.
+fn refused(result: &moq_net::Result<Vec<String>>) -> bool {
+	matches!(
+		result,
+		Err(moq_net::Error::TimestampMismatch | moq_net::Error::Stream(moq_net::StreamError::TimestampMismatch))
+	)
 }
 
 /// A group every reader narrowed past stops its GET, so the groups the fill still owes are read

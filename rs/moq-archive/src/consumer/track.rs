@@ -24,7 +24,8 @@ pub(super) struct Live {
 }
 
 struct Open {
-	group: group::Producer,
+	/// `None` once refused: its stored timestamps went down, and the rest of it is skipped.
+	group: Option<group::Producer>,
 	sequence: u64,
 	/// The index of the next frame it takes.
 	next: u64,
@@ -82,31 +83,39 @@ impl Live {
 				open
 			}
 			None => {
-				let group = self.producer.create_group(group::Info { start: sequence })?;
-				let open = self.open.insert(Open {
-					group,
-					sequence,
-					next: first,
-				});
+				let mut group = self.producer.create_group(group::Info { start: sequence })?;
 				if first > 0 {
 					// Its head was pruned.
-					open.group.start_at(first)?;
+					group.start_at(first)?;
 				}
-				open
+				self.open.insert(Open {
+					group: Some(group),
+					sequence,
+					next: first,
+				})
 			}
 		};
 		for frame in &entry.frames {
-			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
-			let timestamp = replayed(timestamp, open.group.latest());
-			open.group.write_frame(timestamp, frame.payload.clone())?;
 			open.next += 1;
+			let Some(group) = &mut open.group else {
+				continue;
+			};
+			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
+			if decreases(timestamp, group.latest()) {
+				tracing::warn!(sequence, "archived group's timestamps decrease, refusing it");
+				if let Some(group) = open.group.take() {
+					let _ = group.abort(moq_net::Error::TimestampMismatch);
+				}
+				continue;
+			}
+			group.write_frame(timestamp, frame.payload.clone())?;
 		}
 		Ok(())
 	}
 
 	fn close(&mut self) -> Result<()> {
-		if let Some(open) = self.open.take() {
-			open.group.finish()?;
+		if let Some(group) = self.open.take().and_then(|open| open.group) {
+			group.finish()?;
 		}
 		Ok(())
 	}
@@ -114,8 +123,8 @@ impl Live {
 	/// End the feed with `err` when serving the archive failed, the open group included, so
 	/// readers see why rather than a dropped producer.
 	pub fn abort(self, err: moq_net::Error) {
-		if let Some(open) = self.open {
-			let _ = open.group.abort(err.clone());
+		if let Some(group) = self.open.and_then(|open| open.group) {
+			let _ = group.abort(err.clone());
 		}
 		let _ = self.producer.abort(err);
 	}
@@ -258,8 +267,8 @@ async fn serve_group<S: ObjectStore>(
 	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
-		// From the group's first object even for a tail: replay raises each timestamp to the
-		// newest before it, which only the whole stored prefix gives.
+		// From the group's first object even for a tail: a group whose stored timestamps
+		// decrease anywhere is refused, which only the whole stored prefix shows.
 		let (holding, after) = index.holding(sequence, 0);
 		(holding, after, index.timed(), index.timescale)
 	};
@@ -349,23 +358,30 @@ async fn serve_group<S: ObjectStore>(
 	if !fill.is_wanted(key) {
 		return;
 	}
+	// Checked from the group's first stored frame on, skipped ones included, so a read
+	// starting mid-group refuses what a whole read does.
+	let mut latest = None;
+	for (_, stored) in &stored {
+		let Ok(timestamp) = timestamp(stored.timestamp, timescale, sequence) else {
+			break;
+		};
+		if decreases(timestamp, latest) {
+			tracing::warn!(sequence, "archived group's timestamps decrease, refusing it");
+			fill.refuse_groups(key..key + 1, moq_net::Error::TimestampMismatch);
+			return;
+		}
+		latest = Some(timestamp);
+	}
 	let Ok(Some(mut producer)) = fill.accept(sequence, None) else {
 		return;
 	};
-	// Raised from the group's first stored frame on, skipped ones included, so a read
-	// starting mid-group serves each frame the timestamp a whole read does.
-	let mut latest = None;
 	for (index, stored) in stored {
+		if index < frame {
+			continue;
+		}
 		let written = timestamp(stored.timestamp, timescale, sequence)
 			.map_err(|_| moq_net::Error::ProtocolViolation)
-			.and_then(|timestamp| {
-				let timestamp = replayed(timestamp, latest);
-				latest = Some(timestamp);
-				if index < frame {
-					return Ok(());
-				}
-				producer.write_frame(timestamp, stored.payload.clone())
-			});
+			.and_then(|timestamp| producer.write_frame(timestamp, stored.payload.clone()));
 		if let Err(err) = written {
 			tracing::warn!(sequence, %err, "archived group is malformed");
 			let _ = producer.abort(err);
@@ -391,14 +407,11 @@ pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
 		.transpose()
 }
 
-/// A stored frame's timestamp, raised to the newest before it in its group: an archive
-/// recorded before groups refused decreasing timestamps, or from an unchecked lite-05/06
-/// copy, may hold one, which a `legacy` payload's own presentation time makes harmless.
-fn replayed(timestamp: Timestamp, latest: Option<Timestamp>) -> Timestamp {
-	match latest {
-		Some(latest) if timestamp < latest => latest,
-		_ => timestamp,
-	}
+/// Whether a stored frame's timestamp is below the newest before it in its group. An archive
+/// recorded before groups refused that, or from an unchecked lite-05/06 copy, may hold one;
+/// its group is refused rather than replayed with times the transport cannot carry.
+fn decreases(timestamp: Timestamp, latest: Option<Timestamp>) -> bool {
+	latest.is_some_and(|latest| timestamp < latest)
 }
 
 /// A stored timestamp on its track, which must be timed exactly when the frame is.
