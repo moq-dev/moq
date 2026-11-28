@@ -26,14 +26,12 @@ async function main() {
 async function publishTrack(track: Moq.Track.Producer) {
 	console.log("Publishing to track:", track.name);
 
-	// Create a group (e.g., keyframe boundary), starting at its first frame's time
-	const start = Moq.Time.Timestamp.now();
-	const group = track.appendGroup(start);
+	// Create a group (e.g., keyframe boundary) from its first frame, which is where it starts
+	const encoder = new TextEncoder();
+	const group = track.appendGroup({ payload: encoder.encode("Hello"), timestamp: Moq.Time.Timestamp.now() });
 
-	// Write two frames to the group
-	for (const text of ["Hello", "MoQ!"]) {
-		group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Moq.Time.Timestamp.now() });
-	}
+	// Write the rest of the group's frames
+	group.writeFrame({ payload: encoder.encode("MoQ!"), timestamp: Moq.Time.Timestamp.now() });
 
 	// Mark the group as complete
 	group.finish();

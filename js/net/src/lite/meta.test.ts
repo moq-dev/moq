@@ -102,7 +102,7 @@ async function chain(up: Version, down: Version, via: (typeof VIA)[number], info
 		track,
 		// A group at `at` ms of one big frame and an empty one after it.
 		write(key: bigint, at: number) {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			group.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(at) });
 			group.writeFrame({ payload: new Uint8Array(0), timestamp: Timestamp.fromMillis(at + 1) });
 			group.finish();
@@ -284,10 +284,10 @@ test("a payload lookup never gets the metadata copy", async () => {
 	const payloadTrack = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Each copy's groups are its own: payload frames for the payload reader, headers for the other.
-	const written = payloadTrack.createGroup(0n);
+	const written = hooks.createEmpty(payloadTrack, 0n);
 	written.writeFrame({ payload: new Uint8Array(5), timestamp: Timestamp.fromMillis(0) });
 	written.finish();
-	const header = metaTrack.createGroup(0n);
+	const header = hooks.createEmpty(metaTrack, 0n);
 	expect(() => header.writeFrame({ payload: new Uint8Array(5), timestamp: Timestamp.fromMillis(0) })).toThrow();
 	hooks.writeGroupHeader(header, Timestamp.fromMillis(0), 7);
 	header.finish();
@@ -306,7 +306,7 @@ test("a payload lookup never gets the metadata copy", async () => {
 test("a metadata lookup reads the payload copy where none is kept apart", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame({ payload: new Uint8Array(9), timestamp: Timestamp.fromMillis(0) });
 	group.finish();
 	const reader = trackMetaOf("video", broadcast.consume()).subscribe();
@@ -369,7 +369,7 @@ test("a payload subscription continues from a metadata position", async () => {
 	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, "session");
 	try {
 		const reader = chained.remote.meta("video").subscribe();
-		const written = chained.track.createGroup(0n);
+		const written = hooks.createEmpty(chained.track, 0n);
 		for (const at of [0, 1])
 			written.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(at) });
 		const group = defined(await clock.drive(timeout(TIMEOUT, reader.recvGroup())));
@@ -438,7 +438,7 @@ test("metadata names a compressed frame by its plain size", async () => {
 		const remote = chained.remote.meta("video").subscribe();
 		const near = local.consume().meta("video").subscribe();
 		for (const producer of [chained.track, track]) {
-			const group = producer.createGroup(0n);
+			const group = hooks.createEmpty(producer, 0n);
 			group.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(0) });
 			group.finish();
 		}
@@ -460,7 +460,7 @@ test("a metadata subscription updates and finishes like a payload one", async ()
 	const reader = broadcast.consume().meta("video").subscribe({ ranges: [] });
 	expect((await reader.info()).timescale).toEqual(Timescale.MILLI);
 	for (const key of [0n, 1n]) {
-		const group = track.createGroup(key);
+		const group = hooks.createEmpty(track, key);
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.fromMillis(Number(key)) });
 		group.finish();
 	}

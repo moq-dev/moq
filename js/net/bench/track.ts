@@ -6,6 +6,7 @@ import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../sr
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
 import { GivenUp } from "../src/util/given_up.ts";
+import { hooks } from "../src/internal.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
 const subscriberCounts = [1, 4, 16];
@@ -61,7 +62,7 @@ async function measure(
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
 		clock += held > 0 ? 1 : DEFAULT_EXPIRY.asMillis() / retained;
-		const group = producer.createGroup(BigInt(sequence));
+		const group = hooks.createEmpty(producer, BigInt(sequence));
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
 		if (close) group.finish();
 		return group;

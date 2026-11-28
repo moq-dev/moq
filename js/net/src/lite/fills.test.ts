@@ -23,7 +23,7 @@ const enc = new TextEncoder();
 async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: FillGroups; close(): void }> {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
-	const group = track.createGroup(4n);
+	const group = hooks.createEmpty(track, 4n);
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
@@ -122,7 +122,7 @@ test("range fills: a fill of more than one group joins the subscription's ranges
 test("range fills: a drained run goes once nobody reads", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
-	const arriving = track.createGroup(0n);
+	const arriving = hooks.createEmpty(track, 0n);
 	arriving.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(0n) });
 	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: null } }));
 	const { recover } = recoveries();

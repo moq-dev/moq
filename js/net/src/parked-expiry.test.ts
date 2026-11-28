@@ -17,6 +17,7 @@ import { Producer as Origin } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
+import { hooks } from "./internal.ts";
 
 const protocols = [
 	{ kind: "lite", version: Lite.DRAFT_05, alpn: ALPN_05 },
@@ -41,7 +42,7 @@ for (const protocol of protocols) {
 			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
 			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge }));
 			const write = (key: bigint) => {
-				const group = track.createGroup(key);
+				const group = hooks.createEmpty(track, key);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			};
@@ -165,7 +166,7 @@ for (const protocol of protocols) {
 		// closes the stream of a group gone stale instead of resetting it.
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: bigint, frames: number) => {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({
 					payload: new Uint8Array([frame]),

@@ -184,7 +184,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		const alone = new Producer(0n);
 		const track = new TrackProducer("test");
 		const subscriber = track.subscribe();
-		const live = track.createGroup(0n);
+		const live = hooks.createEmpty(track, 0n);
 		live.writeFrame(textFrame("a"));
 		clock.jump(Duration.millis(1000));
 

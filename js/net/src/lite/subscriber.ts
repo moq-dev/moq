@@ -3604,6 +3604,7 @@ export class Subscriber {
 					scale: entry.timescale,
 					compress: entry.compress,
 					lengthFirst: hasLengthFirst(this.version),
+					frameStart: group.frameStart,
 				};
 				const end = await untilAbandoned(target.producer, readFrames(stream, target.producer, format));
 				if (end === undefined) target.producer.finish();
@@ -3680,7 +3681,12 @@ export class Subscriber {
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 
-			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
+			const format = {
+				scale: timescale,
+				compress: entry.compress,
+				lengthFirst: hasLengthFirst(this.version),
+				frameStart: group.frameStart,
+			};
 			const frames = readFrames(stream, producer, format);
 			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
 

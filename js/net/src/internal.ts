@@ -975,6 +975,16 @@ export const hooks: {
 	 */
 	appendNext: (producer: Producer) => GroupProducer;
 	/**
+	 * Create group `key` with no frame yet, as a received GROUP header opens it: for tests that
+	 * write its frames themselves. Mirrors the Rust `create_empty`.
+	 */
+	createEmpty: (producer: Producer, key: bigint) => GroupProducer;
+	/**
+	 * Append a group at `start` with no frame yet, as a received GROUP header opens it: for tests
+	 * that write its frames themselves. Mirrors the Rust `append_empty`.
+	 */
+	appendEmpty: (producer: Producer, start: Timestamp) => GroupProducer;
+	/**
 	 * Forget every run a received copy holds as stale: a new upstream subscription opened, whose
 	 * terms are new, so those groups are unknown again. Mirrors the Rust `supersede_stale`.
 	 */
@@ -1721,6 +1731,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	appendNext: () => {
+		throw new Error("track.ts not loaded");
+	},
+	createEmpty: () => {
+		throw new Error("track.ts not loaded");
+	},
+	appendEmpty: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

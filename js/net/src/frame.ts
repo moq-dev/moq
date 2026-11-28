@@ -7,7 +7,7 @@ import type { Instant } from "@moq/clock";
 import { type Getter, Once, race, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
 import { stored } from "./flate/group.ts";
-import type { Frame } from "./group.ts";
+import type { Frame, Producer as GroupProducer } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
@@ -150,7 +150,7 @@ export function evicted(): Error {
 export interface Ops {
 	written(): number;
 	write(chunk: Uint8Array): void;
-	finish(): void;
+	finish(): GroupProducer;
 	abort(error: Error): void;
 }
 
@@ -196,12 +196,12 @@ export class Producer {
 		if (chunk.byteLength > 0) this.#ops.write(chunk);
 	}
 
-	/** Commit the frame once every declared byte is written. */
-	finish(): void {
+	/** Commit the frame once every declared byte is written, returning its group to write the rest. */
+	finish(): GroupProducer {
 		if (this.#done) throw new Error("frame is closed");
 		if (this.remaining !== 0) throw new RangeError(`frame is ${this.remaining} bytes short of its declared size`);
 		this.#done = true;
-		this.#ops.finish();
+		return this.#ops.finish();
 	}
 
 	/** Fail the frame and its group with `error`. A no-op once the frame finished or aborted. */

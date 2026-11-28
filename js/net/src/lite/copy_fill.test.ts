@@ -129,7 +129,7 @@ const NARROW: Subscription = withMax({ delay: { max: Duration.millis(500) } });
 const WIDE: Subscription = withMax({ delay: { max: null }, order: "ascending" });
 
 function populate(track: Producer): void {
-	for (let key = 0n; key < 5n; key++) write(track.createGroup(key), key, "live");
+	for (let key = 0n; key < 5n; key++) write(hooks.createEmpty(track, key), key, "live");
 }
 
 // What `take` read, in sequence order.
@@ -168,7 +168,7 @@ function joining(ms: number): Subscription {
 // track's groups are: a live join measures back from the newest in the same time.
 function populateTimed(track: Producer): void {
 	for (let key = 0n; key < 5_000n; key += 1_000n) {
-		const group = track.createGroup(key);
+		const group = hooks.createEmpty(track, key);
 		group.writeFrame({ payload: enc.encode(`live ${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
 		group.finish();
 	}
@@ -317,7 +317,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				order: "ascending",
 			});
 			const first = peer.remote.track("video").subscribe(history);
-			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+			for (let key = 0n; key < 4n; key++) write(hooks.createEmpty(peer.track, key), key, "live");
 			// Before lite-07 a subscription carries no order and is served newest first, so only
 			// the set of groups is fixed.
 			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
@@ -325,7 +325,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
 			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
-			write(peer.track.createGroup(4n), 4n, "live");
+			write(hooks.createEmpty(peer.track, 4n), 4n, "live");
 			expect((await first.recvGroup())?.start).toBe(4n);
 			const before = peer.fetches();
 
@@ -371,12 +371,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 	try {
 		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
 		const first = peer.remote.track("video").subscribe(history);
-		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		for (let key = 0n; key < 4n; key++) write(hooks.createEmpty(peer.track, key), key, "live");
 		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 
 		// Both caches age out what nobody touched; only the live edge stays.
 		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
-		write(peer.track.createGroup(4n), 4n, "live");
+		write(hooks.createEmpty(peer.track, 4n), 4n, "live");
 		expect((await first.recvGroup())?.start).toBe(4n);
 
 		// The run goes out on a recovery the archive holds, and the publisher ends the track.
@@ -422,14 +422,14 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s ends a copy while its rec
 	try {
 		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
 		const first = peer.remote.track("video").subscribe(history);
-		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		for (let key = 0n; key < 4n; key++) write(hooks.createEmpty(peer.track, key), key, "live");
 		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 		const datagrams = peer.remote.datagrams("video");
 		await datagrams.info();
 
 		// Both caches age out what nobody touched; only the live edge stays.
 		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
-		write(peer.track.createGroup(4n), 4n, "live");
+		write(hooks.createEmpty(peer.track, 4n), 4n, "live");
 		expect((await first.recvGroup())?.start).toBe(4n);
 
 		// The run goes out on a recovery the archive holds, and the publisher ends the track.
@@ -479,12 +479,12 @@ test("copy fill: a finished lite-07 copy asks for a time it cannot place", async
 	try {
 		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
 		const first = peer.remote.track("video").subscribe(history);
-		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		for (let key = 0n; key < 4n; key++) write(hooks.createEmpty(peer.track, key), key, "live");
 		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 
 		// Both caches age out what nobody touched; only the live edge stays.
 		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
-		write(peer.track.createGroup(4n), 4n, "live");
+		write(hooks.createEmpty(peer.track, 4n), 4n, "live");
 		expect((await first.recvGroup())?.start).toBe(4n);
 
 		// A run the copy evicted goes out on a recovery the archive holds, and the publisher ends the
@@ -524,12 +524,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		try {
 			const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
 			const first = peer.remote.track("video").subscribe(history);
-			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+			for (let key = 0n; key < 4n; key++) write(hooks.createEmpty(peer.track, key), key, "live");
 			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 
 			// Both caches age out what nobody touched; only the live edge stays.
 			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
-			write(peer.track.createGroup(4n), 4n, "live");
+			write(hooks.createEmpty(peer.track, 4n), 4n, "live");
 			peer.track.finish();
 			expect((await first.recvGroup())?.start).toBe(4n);
 			expect(await first.recvGroup()).toBeUndefined();
@@ -563,7 +563,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	]);
 	const publication = origin.route(Path.from("room"));
 	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	write(track.createGroup(1n), 1n, "live");
+	write(hooks.createEmpty(track, 1n), 1n, "live");
 	// The archive answers group 0 with one frame and keeps it open.
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
@@ -628,7 +628,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	]);
 	const publication = origin.route(Path.from("room"));
 	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	write(track.createGroup(1n), 1n, "live");
+	write(hooks.createEmpty(track, 1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
@@ -662,7 +662,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		// source loses its last reader.
 		group?.close();
 		history.close();
-		write(track.createGroup(2n), 2n, "live");
+		write(hooks.createEmpty(track, 2n), 2n, "live");
 		expect((await live.nextGroup())?.start).toBe(2n);
 		await clock.drive(
 			timeout(
@@ -699,7 +699,7 @@ test("copy fill: a group reset to make room ends", async () => {
 	]);
 	const publication = origin.route(Path.from("room"));
 	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	write(track.createGroup(2n), 2n, "live");
+	write(hooks.createEmpty(track, 2n), 2n, "live");
 	// The archive answers group 0 with one frame and keeps it open, so its stream is still open, and
 	// group 1 whole.
 	const requests = track.requests();
@@ -803,7 +803,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		]);
 		const broadcast = origin.route(Path.from("room")).broadcast;
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-		write(track.createGroup(3n), 3n, "live");
+		write(hooks.createEmpty(track, 3n), 3n, "live");
 		// The archive has group 2 once `archived`, and never refuses it as lost.
 		let archived = false;
 		const requests = track.requests();
@@ -918,7 +918,7 @@ test.each([
 		for (const frame of [3, 4])
 			tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 		tail.finish();
-		write(track.createGroup(3n), 3n, "live");
+		write(hooks.createEmpty(track, 3n), 3n, "live");
 		const requests = track.requests();
 		void (async () => {
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
@@ -1024,7 +1024,7 @@ test.each([
 			// Created rather than appended: like a publisher that cannot say, the track never
 			// declares the keys between its group starts skipped.
 			const start = index * GROUP;
-			const group = track.createGroup(BigInt(start));
+			const group = hooks.createEmpty(track, BigInt(start));
 			for (let frame = 0; frame < FRAMES; frame++) {
 				group.writeFrame({
 					payload: enc.encode("frame"),

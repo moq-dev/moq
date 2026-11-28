@@ -3082,7 +3082,10 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n, frameStart }), await groupStream(1000, version));
+		await subscriber.runGroup(
+			new Group({ subscribe: 0n, key: 0n, frameStart }),
+			await groupStream(1000, version, frameStart),
+		);
 		const late = consumer.subscribe({ ranges: [{}] });
 		try {
 			for (const reader of [early, late]) {
@@ -3102,8 +3105,10 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 	}
 });
 
-// A group stream carrying one frame at `timestamp` (zigzag delta from 0) in the track's scale.
-async function groupStream(timestamp: number, version: Version = Version.DRAFT_07): Promise<Reader> {
+// A group stream carrying one frame at `timestamp` in the track's scale: a zigzag delta from 0
+// before lite-07, and on lite-07 none from frame 0, which sits at its group's start, or else an
+// unsigned delta from that start (0 here).
+async function groupStream(timestamp: number, version: Version = Version.DRAFT_07, frameStart = 0): Promise<Reader> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
@@ -3112,7 +3117,8 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 	// Lite-07 leads with the size plus one; earlier versions end the header with the size.
 	const lengthFirst = hasLengthFirst(version);
 	if (lengthFirst) await writer.u53(2);
-	await writer.u62(BigInt(timestamp) * 2n);
+	if (!lengthFirst) await writer.u62(BigInt(timestamp) * 2n);
+	else if (frameStart !== 0) await writer.u62(BigInt(timestamp));
 	if (!lengthFirst) await writer.u53(1);
 	await writer.write(new Uint8Array([0]));
 	return new Reader(
@@ -3158,30 +3164,6 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 		]);
 		expect((await track.info()).timescale).toBe(Timescale.MILLI);
 		expect(track.closed.peek()).toBeUndefined();
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07 timestamps are media time, so a received group is checked like a local write.
-test("a lite-07 rewind is refused", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, key: 4n }), await groupStream(1000, version));
-		// Starts before the group below it, so its stream is stopped with the refusal.
-		const rewound = await groupStream(500, version);
-		const stop = spyOn(rewound, "stop");
-		await subscriber.runGroup(new Group({ subscribe: 0n, key: 5n }), rewound);
-		expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(TimestampMismatch);
 	} finally {
 		track.close();
 		broadcast.close();
@@ -3723,7 +3705,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		expect(entry.tail.covers(1n, 3n)).toBe(true);
 		expect(entry.tail.covers(4n, 5n)).toBe(true);
 		// Still skipped after the update.
-		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
+		expect(() => hooks.createEmpty(entry?.track as Producer, 1n)).toThrow(Skipped);
 	} finally {
 		responses.mockRestore();
 		track.close();
@@ -3772,7 +3754,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
 		]);
 		if (!entry) throw new Error("no subscription");
-		entry.track.createGroup(5n).finish();
+		hooks.createEmpty(entry.track, 5n).finish();
 
 		await send([
 			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.Skip }) },
@@ -3781,8 +3763,8 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			// Group 5 arrived, so the skip names only 4 and 6.
 			{ drop: new SubscribeDrop({ start: 4n, end: 7n, error: StreamCode.Skip }) },
 		]);
-		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
-		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
+		expect(() => hooks.createEmpty(entry?.track as Producer, 1n)).toThrow(Skipped);
+		expect(() => hooks.createEmpty(entry?.track as Producer, 2n)).toThrow(Skipped);
 		expect(entry.tail.covers(4n, 7n)).toBe(true);
 		expect(warn).toHaveBeenCalledTimes(1);
 

@@ -100,11 +100,17 @@ export interface FrameFormat {
 	/** The wire timescale; non-zero means every frame carries a delta timestamp. */
 	scale: number;
 	/**
-	 * The group's start, which a lite-07 stream's first timestamp delta counts from and a
-	 * GROUP_END's End counts from when the stream carries no timestamp. Before lite-07 the first
-	 * delta counts from 0.
+	 * The group's start: lite-07's frame 0 sits there, a later stream's first timestamp delta counts
+	 * from it, and so does a GROUP_END's End when the stream carries no timestamp. Before lite-07
+	 * the first delta counts from 0.
 	 */
 	start?: bigint;
+	/**
+	 * The index of the stream's first frame, from its GROUP header: on lite-07, frame 0 carries no
+	 * delta, and a GROUP_END before any frame is malformed only for a stream from frame 0.
+	 * {@link readFrames} defaults it to where its group begins.
+	 */
+	frameStart?: number;
 	/** Whether every frame declares its plain size ahead of a stored slice. */
 	compress?: boolean;
 	/**
@@ -127,15 +133,15 @@ export interface FrameFormat {
  * closes the group; before it the size ends the header, and stream end at the frame's first field
  * ends the group.
  *
- * On lite-07 the first delta is a zigzag offset from the group's `start`, whatever frame the
- * stream starts at, since a group's first frame may precede its key, later deltas are unsigned
- * offsets from the prior frame, and GROUP_END's End
- * counts from the last frame's timestamp, or from `start` when the stream carried none. Mirrors
- * the Rust `FrameIngest`.
+ * On lite-07 frame 0 carries no delta, sitting at the group's `start`; every other delta is an
+ * unsigned offset from the prior frame, or from `start` for a stream that begins later, and
+ * GROUP_END's End counts from the last frame's timestamp, or from `start` when the stream carried
+ * none. Before lite-07 every delta is zigzagged, the first from 0. Mirrors the Rust `FrameIngest`.
  */
 export function frameDecoder({
 	scale,
 	start = 0n,
+	frameStart = 0,
 	compress = false,
 	lengthFirst = false,
 	meta = false,
@@ -143,19 +149,23 @@ export function frameDecoder({
 	if (meta && !lengthFirst) throw new Error("a metadata Group Stream needs moq-lite-07");
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = lengthFirst ? start : 0n;
-	let first = true;
+	// Lite-07's frame 0 sits at the group's start, so it carries no delta.
+	let implicit = lengthFirst && frameStart === 0;
 	return (c) => {
 		let size = 0;
 		if (lengthFirst) {
 			const length = c.u53();
 			if (length === 0) {
+				// A group starts at its first frame, so a stream from frame 0 carries one.
+				if (implicit) throw malformed("GROUP_END before frame 0");
 				const end = prevTs + c.u62();
 				if (end > RESERVED) throw malformed(`GROUP_END at ${end}, past the largest group end`);
 				return { end };
 			}
 			size = length - 1;
 		}
-		const delta = timescale !== undefined ? (lengthFirst && !first ? c.u62() : unzigzag(c.u62())) : 0n;
+		const delta =
+			timescale === undefined || implicit ? 0n : lengthFirst ? c.u62() : unzigzag(c.u62());
 		const inflated = compress && !meta ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,
@@ -165,7 +175,7 @@ export function frameDecoder({
 		const payload = meta ? undefined : compress ? c.read(size) : decodePayload(c, size);
 		const header = meta || undefined;
 		// Commit the delta only after the last read: an incomplete decode gets retried.
-		first = false;
+		implicit = false;
 		if (timescale === undefined) return { size, payload, inflated, header };
 		prevTs += delta;
 		return { size, payload, inflated, header, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };
@@ -183,7 +193,12 @@ export async function readFrames(
 	producer: netGroup.Producer,
 	format: FrameFormat,
 ): Promise<bigint | undefined> {
-	const decode = frameDecoder({ ...format, start: producer.start, meta: hooks.groupMeta(producer) });
+	const decode = frameDecoder({
+		...format,
+		start: producer.start,
+		frameStart: format.frameStart ?? hooks.groupOffset(producer),
+		meta: hooks.groupMeta(producer),
+	});
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once
