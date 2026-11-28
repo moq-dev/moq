@@ -34,12 +34,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_DELAY: Duration = Duration::from_secs(5);
 const GROUPS: u64 = 4;
 
-const VERSIONS: &[&str] = &[
-	"moq-lite-03",
-	"moq-lite-07-wip",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());

@@ -6486,8 +6486,11 @@ impl OpenGroup {
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`. A group the copy already holds arrived twice,
 		// and the model has one producer per group, so the second stream is refused.
-		let create =
-			|track: &mut track::Producer| track.claim_unopened(group::Info { start: key })?.ok_or(Error::Duplicate);
+		let create = |track: &mut track::Producer| {
+			track
+				.claim_unopened(group::Info { start: key })?
+				.ok_or(Error::Duplicate)
+		};
 
 		loop {
 			match self.step {
@@ -17305,10 +17308,7 @@ mod stitch_tests {
 			.unwrap()
 			.unwrap();
 		let read = group.read_frame().now_or_never();
-		assert!(
-			matches!(read, Some(Err(Error::TimestampMismatch))),
-			"{res:?} {read:?}"
-		);
+		assert!(matches!(read, Some(Err(Error::TimestampMismatch))), "{res:?} {read:?}");
 		assert!(h.track.closed().now_or_never().is_none());
 	}
 

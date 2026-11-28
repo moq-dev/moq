@@ -1417,7 +1417,9 @@ mod tests {
 		};
 		let mut reader = track.subscribe(ascending(7));
 		track.start_at(10).unwrap();
-		let live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		let live = track
+			.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
+			.unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1539,7 +1541,6 @@ mod tests {
 		drop(video);
 	}
 
-
 	/// A reader's time start inside a source group gets that whole group, from its start, rather
 	/// than a drop because no group starts at the time itself, which would start it past the group.
 	#[tokio::test]
@@ -1568,9 +1569,7 @@ mod tests {
 				.with_order(Order::Ascending),
 		);
 		track.start_at(60 * FRAME).unwrap();
-		stand_in(&track, 60 * FRAME)
-			.finish()
-			.unwrap();
+		stand_in(&track, 60 * FRAME).finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let std::task::Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.unwrap();
@@ -1618,13 +1617,9 @@ mod tests {
 		let track = output.create_track("video/120p", info).unwrap();
 		let fills = track.requests();
 		// The reader's cache already holds an older group at 0.
-		stand_in(&track, 0)
-			.finish()
-			.unwrap();
+		stand_in(&track, 0).finish().unwrap();
 		let time = 40 * FRAME;
-		stand_in(&track, 60 * FRAME)
-			.finish()
-			.unwrap();
+		stand_in(&track, 60 * FRAME).finish().unwrap();
 		let mut reader = track
 			.subscribe(
 				Subscription::default()
@@ -1668,9 +1663,7 @@ mod tests {
 		// Media-timed groups at two seconds and an hour, with nothing below two seconds held.
 		let held = media_group(&video, Open::Create, frames(60, 1));
 		held.finish().unwrap();
-		stand_in(&video, HOUR)
-			.finish()
-			.unwrap();
+		stand_in(&video, HOUR).finish().unwrap();
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut track = output.create_track("video/120p", info).unwrap();
@@ -1684,9 +1677,7 @@ mod tests {
 				.with_order(Order::Descending),
 		);
 		track.start_at(HOUR).unwrap();
-		stand_in(&track, HOUR)
-			.finish()
-			.unwrap();
+		stand_in(&track, HOUR).finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let start = fills.requested_fill().await.unwrap();
@@ -1733,7 +1724,9 @@ mod tests {
 			.unwrap();
 		let empty = held == Held::Empty;
 		if !empty {
-			let first = video.append_group(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new()).unwrap();
+			let first = video
+				.append_group(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
+				.unwrap();
 			match held {
 				Held::Paused => drop(first.finish_at(1_000_000).unwrap()),
 				_ => drop(first.finish().unwrap()),
@@ -1759,9 +1752,7 @@ mod tests {
 				.with_order(order),
 		);
 		track.start_at(HOUR).unwrap();
-		stand_in(&track, HOUR)
-			.finish()
-			.unwrap();
+		stand_in(&track, HOUR).finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let start = fills.requested_fill().await.unwrap();
@@ -1839,7 +1830,9 @@ mod tests {
 				.with_order(moq_net::track::Order::Ascending),
 		);
 		track.start_at(10).unwrap();
-		let live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		let live = track
+			.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
+			.unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1851,7 +1844,9 @@ mod tests {
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 
 		// The live path delivers group 7, and the reader never reads again to pick it up.
-		let seven = track.create_group(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..]).unwrap();
+		let seven = track
+			.create_group(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..])
+			.unwrap();
 		seven.finish().unwrap();
 
 		let (finished, mut finishing) = tokio::sync::watch::channel(false);

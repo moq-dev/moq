@@ -199,9 +199,8 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 		let mut source = track.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
-			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
+			let group = source.create_group(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
@@ -231,7 +230,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = reader.recv_group().await.unwrap() {
-			let sequence = group.start;
+			let sequence = group.start / INTERVAL.as_millis() as u64;
 			let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 			assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
 			assert!(
@@ -373,12 +372,14 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 
 	let write = |mut track: moq_net::track::Producer| async move {
 		while track.subscription_changed().await.unwrap().is_none() {}
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track
+			.append_group(moq_net::Timestamp::unscaled(0), vec![0u8; chunk])
+			.unwrap();
 		let info = moq_net::frame::Info {
 			size: chunk as u64,
 			timestamp: moq_net::Timestamp::unscaled(0),
 		};
-		for index in 0..BULK / chunk {
+		for index in 1..BULK / chunk {
 			group.ready(&info).await;
 			group
 				.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; chunk])

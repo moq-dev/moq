@@ -65,7 +65,11 @@ impl Clock {
 		let delta = match (self.implicit, self.unsigned) {
 			(true, _) if timestamp != self.prev => return Err(crate::Error::TimestampMismatch),
 			(true, _) => None,
-			(false, true) => Some(timestamp.checked_sub(self.prev).ok_or(crate::Error::TimestampMismatch)?),
+			(false, true) => Some(
+				timestamp
+					.checked_sub(self.prev)
+					.ok_or(crate::Error::TimestampMismatch)?,
+			),
 			(false, false) => {
 				let signed = (timestamp as i128 - self.prev as i128)
 					.try_into()

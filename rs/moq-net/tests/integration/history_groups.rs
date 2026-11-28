@@ -22,12 +22,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A budget no group outlives, on both the publisher and the subscriber.
 const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 
-const VERSIONS: &[&str] = &[
-	"moq-lite-03",
-	"moq-lite-07-wip",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());

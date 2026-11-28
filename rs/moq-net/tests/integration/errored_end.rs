@@ -75,10 +75,7 @@ fn history() -> Vec<(u64, Vec<Vec<u8>>)> {
 /// also beat its TRACK_INFO, so they park on it and the end lands as the accept unparks them.
 #[kio::test]
 async fn an_errored_end_keeps_its_history_across_a_hop() {
-	for (name, subscribe_first) in [
-		("moq-lite-07-wip", false),
-		("moq-lite-07-wip", true),
-	] {
+	for (name, subscribe_first) in [("moq-lite-07-wip", false), ("moq-lite-07-wip", true)] {
 		let label = format!("{name} subscribe_first={subscribe_first}");
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);

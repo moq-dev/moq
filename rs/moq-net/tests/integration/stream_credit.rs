@@ -151,10 +151,7 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 /// `ietf` extension changes nothing for a moq-lite track.
 #[kio::test]
 async fn a_reset_group_is_fetched_whole() {
-	for (version, ietf) in [
-		("moq-lite-07-wip", false),
-		("moq-lite-07-wip", true),
-	] {
+	for (version, ietf) in [("moq-lite-07-wip", false), ("moq-lite-07-wip", true)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);

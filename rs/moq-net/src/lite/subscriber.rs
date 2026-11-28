@@ -555,7 +555,13 @@ impl TrackEntry {
 
 	/// Open the group of a stream whose header is `hdr` in the copy or fill, `wire` its key on
 	/// the wire, which the tail counts.
-	fn open(&mut self, hdr: &lite::Group, wire: u64, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
+	fn open(
+		&mut self,
+		hdr: &lite::Group,
+		wire: u64,
+		version: Version,
+		now: crate::time::Instant,
+	) -> Result<Open, Error> {
 		let producer = match &mut self.target {
 			TrackTarget::Fill(_) => {
 				let reading = Reading::open(&self.tail, Some(wire), now);
@@ -5602,9 +5608,7 @@ mod tests {
 		.encode(&mut encoder, version)
 		.unwrap();
 		if version.rekeys() {
-			encoder
-				.varint(crate::coding::varint::zigzag(key as i64))
-				.unwrap();
+			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
 			encoder.bytes(b"x").unwrap();
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
@@ -15798,8 +15802,7 @@ impl ServeLoop {
 				// it goes live from its first group instead, with no floor below.
 				let rekeys = serve.subscriber.version.rekeys();
 				if active.demand.is_some()
-					&& !rekeys
-					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
+					&& !rekeys && let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
 				{
 					entry.answered(served, None);
 				}

@@ -12903,10 +12903,7 @@ mod serve_group_test {
 						remote
 							.track("test")
 							.unwrap()
-							.subscribe(
-								track::Subscription::default()
-									.with_max(Duration::from_secs(60)),
-							)
+							.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)))
 							.await
 							.unwrap(),
 					),

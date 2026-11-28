@@ -154,11 +154,7 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 #[kio::test]
 async fn a_backlog_is_served_in_the_subscription_order() {
 	let mut failures = Vec::new();
-	for version in [
-		"moq-lite-07-wip",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		for relay in [false, true] {
 			for order in [Order::Ascending, Order::Descending] {
 				let got = round(version, relay, order).await;

@@ -192,12 +192,7 @@ async fn a_finished_track_ends_clean_while_its_session_lives() {
 
 /// Every wire the session-death rule covers: lite before and after the track and
 /// subscribe-response streams, and IETF on its shared and per-request control streams.
-const DEATH_VERSIONS: &[&str] = &[
-	"moq-lite-03",
-	"moq-lite-07-wip",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const DEATH_VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 /// The error the publisher's session is aborted with, carried in the close code.
 const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);

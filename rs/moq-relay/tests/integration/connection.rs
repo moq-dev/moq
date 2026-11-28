@@ -64,7 +64,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				true => moq_net::Timestamp::unscaled(sequence),
 				false => moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap(),
 			};
-			let mut group = track.create_group(timestamp, b"ladder".as_ref()).unwrap();
+			let group = track.create_group(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();
 			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
@@ -98,12 +98,12 @@ fn publish(
 		.expect("create broadcast");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.broadcast().create_track("video", info).expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			name.as_bytes(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), name.as_bytes())
-		.expect("write frame");
 	group.finish().expect("finish group");
 	(origin, broadcast, track)
 }
