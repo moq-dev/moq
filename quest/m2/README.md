@@ -86,7 +86,7 @@ cutting first and deleting in the next breaking release).
 
 Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
 subscribe/fetch audit): ✅ the cut waits on
-[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md),
+the lite-07 subscribe and fetch redesign (finished with [moq-dev/moq#9719](https://github.com/moq-dev/moq/pull/9719)),
 which adds `Previous Delta` to `GROUP` headers, requires `RESET_STREAM_AT` for
 opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
 `Priority` and `Group Order` onto per-range wire fields and public

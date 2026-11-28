@@ -6,6 +6,8 @@ A lite-07 group stream already open re-ranks when the ranges covering its group 
 
 ## Plan
 
+Decided 2026-11-28 (maintainer): ✅ m3, shipped as a patch after the lite-07 cut, since it changes no API or wire (rejected: keep it blocking lite-07 in the m2 subscribe epic).
+
 - Rust (`rs/moq-net/src/lite/publisher.rs`): `TrackRun::update` refreshes `Steer::inflight` (the Range IDs covering each group in flight, including the waiting and deferred groups) only after an edit. Recompute it when the subscriber's window places a range too. Learn of the placement through the track subscriber, as a placement revision the run loop polls with its other track events (`AGENTS.md`: no polling endpoint or timer loop), then write the steer only if a group's covering IDs changed.
 - JS (`js/net/src/lite/publisher.ts`): `rankingOf` re-reads `servingCovering` on each rank; have the ranking listen to the subscription's `startChanged` so a placement re-ranks open streams.
 - Test in both languages, failing first: a relay copy with a provisional live join and a history range, a history group's stream open and backpressured, then upstream places the join past it; the stream's rank falls to the history range's at once.

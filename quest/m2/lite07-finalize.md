@@ -251,7 +251,7 @@ PR).
 
 Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
 subscribe/fetch audit): ✅ the cut waits on
-[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md)
+the lite-07 subscribe and fetch redesign (finished with [moq-dev/moq#9719](https://github.com/moq-dev/moq/pull/9719))
 (rejected: bugfixes only without wire changes; drop). That epic freezes
 `Previous Delta` on `GROUP` headers, requires `RESET_STREAM_AT` for opened
 Group Streams (superseding the 2026-11-14 `SUBSCRIBE_DROP` note for publisher
@@ -297,7 +297,6 @@ Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit)
 
 ## Required
 
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 - [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 - [Route every lite-07 SUBSCRIBE through TrackRun and check expiry while restaging](/quest/m2/lite07-single-subscribe-engine.md) - eliminates the `OneShotFetch` vs `TrackRun` `FIN` timing race and Rust/JS `Largest` divergence before lite-07 freezes
 - [Lite-07 timestamp mismatch egress, proven ledger bounds, and finish_at binding parity](/quest/m2/lite07-timestamp-mismatch-and-ledger.md) - sends terminal `TIMESTAMP_MISMATCH` (`0x39`) in Rust and JS, stops proven ledgers from forging gap proof, and closes draft/binding parity

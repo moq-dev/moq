@@ -6,6 +6,8 @@ A ranked read (`Pick::Ranked`, which a lite-07 publisher uses while a group wait
 
 ## Plan
 
+Decided 2026-11-28 (maintainer): ✅ m3, shipped as a patch after the lite-07 cut, since it changes no API or wire (rejected: keep it blocking lite-07 in the m2 subscribe epic).
+
 - `Cursor::best_unread` (`rs/moq-net/src/model/track.rs`) calls `first_unread` once per range on every read, and `first_unread` walks the range's run past every group `wants` rejects. Remember, per range, how far a scan proved the run stale, and resume from there on the next read. A group's staleness can only change when its successor changes (a later group arrives, or the successor aborts and a newer one takes its place), the edge moves, or the range's budget changes, so reset the mark on any of those: late arrivals and aborts below the mark, a range edit or retune, and a drift edge change.
 - Recommended over a partition search by age, which needs an ordered index the cache does not keep.
 - Test, failing first on a cost counter: a backlog of N groups stale for the live range and owed to history, drained by ranked reads, checks O(N) groups in all. Two more land a late group inside the proven-stale stretch, and abort the successor of a group in it, each expecting the group that turns fresh to be picked.
@@ -15,4 +17,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Re-rank in-flight groups when a relay places a provisional live join](/quest/m2/lite07-subscribe/inflight-placement-rank.md) - the other ranked-scheduling follow-up from the same PR
+- [Re-rank in-flight groups when a relay places a provisional live join](/quest/m3/inflight-placement-rank.md) - the other ranked-scheduling follow-up from the same PR
