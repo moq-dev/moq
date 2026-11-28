@@ -145,6 +145,32 @@ per 20 ms group. The child quest was deleted, since its failures no longer
 occur (decided 2026-11-28, AFK recommendation; rejected: profiling the player's per-group cost
 against a 20 ms publisher, and building the media lane's relay in release).
 
+Scheduled runs [45873739689](https://github.com/moq-dev/moq/actions/runs/45873739689)
+(2026-11-26, at `b50932876b`) and [46045301725](https://github.com/moq-dev/moq/actions/runs/46045301725)
+(2026-11-27, at `9d3f43268a`) failed `Stream credit in browsers`, which passed every scheduled run
+from 2026-11-22 to 2026-11-25. Every failing cell was lite-07; both lite-06 cells passed each night.
+Three causes, plus one media flake:
+
+- 11-26 Firefox: `144 subscriptions still open`. Caused by
+  [moq-dev/moq#9686](https://github.com/moq-dev/moq/pull/9686) (a reset trusted as reliable over
+  WebTransport, with the grace period gone) and fixed by
+  [moq-dev/moq#9743](https://github.com/moq-dev/moq/pull/9743), merged before the 11-27 run.
+- 11-27 Chromium: `mid-12: group 6 ... fetched "0 frames, then Stream: remote error: 52"` (52 is
+  OLD): the relay answered a budget-less fetch with its live-edge copy's stale verdict. Fixed by
+  [moq-dev/moq#9768](https://github.com/moq-dev/moq/pull/9768), merged after that run; 48 cells on
+  hosted runners at `main` since had no fetch failure.
+- 11-27 Firefox: `high-1..8: missed groups 28`. The 4-vCPU hosted runner saturates: measured there
+  with per-process samples, the debug-built relay takes about 1.4 cores, the Bun publisher one, and
+  the browser the rest, idle under 5% in 40% of samples, so the high tier misses its 500 ms
+  budget. On `main` at `02752605b1`, 4 of 36 lite-07 cells failed with a debug relay and 0 of 36
+  with a release one (half a core, saturated in 5% of samples); with extra relay logging, 20 of
+  48 failed. Fixed in this quest's PR: the step builds the relay in release, about 4 minutes more
+  when cold. The same PR gives the step the run directory and results file the other harness
+  steps have, so a failing cell uploads its relay log and report.
+- 11-26 Chromium media: `volume scales the output: volume 0.25: only 27/31 samples carried audio`,
+  seen once. A flake, owned by [the volume check child](/quest/m0/test-flakes-5/volume-check-audio-gap.md)
+  of the test flakes epic.
+
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
 - ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).

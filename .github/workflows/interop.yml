@@ -82,6 +82,12 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test stream-credit
         shell: bash -leo pipefail {0}
+        env:
+          # A debug relay takes about 1.4 of the runner's 4 vCPUs here, which starves the
+          # high tier past its 500 ms budget; release takes about half a core.
+          STREAM_CREDIT_PROFILE: release
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
       - name: Relay fills
         id: relay-fill

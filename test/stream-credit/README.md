@@ -19,7 +19,11 @@ just test stream-credit --version moq-lite-07-wip --engine chromium --timeout 12
 Each run covers lite-07 and lite-06 in Chromium and Firefox, about 15 seconds
 per cell. `cargo build -p moq-relay` builds the relay from this checkout.
 `STREAM_CREDIT_PROFILE` picks its cargo profile, and `RELAY_BIN` points at a
-prebuilt relay instead. A failing run keeps its run directory: the relay log
+prebuilt relay instead. The scheduled Interop run uses `release`: on its 4-vCPU
+runner a debug relay takes about 1.4 cores, the host saturates, and the high tier
+misses groups past its 500 ms budget (4 of 36 cells, against 0 of 36 in release).
+A run on a starved host fails the same way, so check the host's load before
+reading a high-tier miss as a scheduling bug. A failing run keeps its run directory: the relay log
 (with the publisher's scheduling at debug level), and per cell the page's
 console, `report.json` with every group each track read, or `pending.json`
 with the tracks still open.
