@@ -513,7 +513,7 @@ test("a late subscriber replays the cached window", async () => {
 	expect(await late.readString()).toBe("later");
 });
 
-test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
+test("a read skips a group whose front was shed, as it does any failed group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const sub = broadcast
@@ -531,9 +531,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.fromMillis(1) });
 	g1.finish();
 
-	// The reader hits the shed front in group 0, then the next
-	// read resyncs from group 1.
-	await expect(sub.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	// The reader hits the shed front in group 0, a gap it reads past to group 1.
 	expect(await sub.readString()).toBe("ok");
 });
 

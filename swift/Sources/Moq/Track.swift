@@ -29,8 +29,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
 
     /// Read the first raw frame of the next group. Convenience for
     /// one-frame-per-group tracks (status/command style). Completed empty groups
-    /// are skipped. `nil` only once the track ends. Cancelling one call keeps
-    /// the current group so a later `readFrame` or `nextGroup` still sees it.
+    /// are skipped, and so are failed ones. `nil` only once the track ends, and
+    /// it throws only when the track ends with an error. Cancelling one call
+    /// keeps the current group so a later `readFrame` or `nextGroup` still sees it.
     public func readFrame() async throws -> Frame? {
         try await ffi.readFrame()
     }

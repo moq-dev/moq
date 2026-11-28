@@ -402,14 +402,13 @@ test("a lagging consumer is told what it missed", async () => {
 	}
 });
 
+// A failed group is that group's gap, whatever it failed with, including a publisher's own abort.
 test("consumer resumes at a checkpoint after losing a group", async () => {
 	for (const error of [
 		new NetError.TooFarBehind(),
-		new NetError.GroupTooLarge(),
-		new NetError.Stream(StreamCode.TooFarBehind),
-		new NetError.Stream(StreamCode.GroupTooLarge),
 		new NetError.Stream(StreamCode.Old),
-		new NetError.Stream(StreamCode.Evicted),
+		new NetError.Stream(StreamCode.Internal),
+		new Error("cut"),
 	]) {
 		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 		const consumer = new Consumer<Rec>({ track: track.subscribe() });

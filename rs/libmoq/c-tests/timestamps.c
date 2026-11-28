@@ -138,13 +138,14 @@ int main(void) {
     WAIT_FOR(&c, c.value);
 
     // Each timestamp points into its own read, so both stay intact until freed.
-    moq_frame first, second;
-    CHECK(moq_consume_track_frame((uint32_t)c.frames[0], &first) == 0);
-    CHECK(moq_consume_track_frame((uint32_t)c.frames[1], &second) == 0);
-    CHECK(same(first.timestamp, zero));
-    CHECK(same(second.timestamp, tick));
-    CHECK(moq_consume_track_frame_free((uint32_t)c.frames[0]) == 0);
-    CHECK(moq_consume_track_frame_free((uint32_t)c.frames[1]) == 0);
+    moq_raw_read first, second;
+    CHECK(moq_consume_track_read((uint32_t)c.frames[0], &first) == 0);
+    CHECK(moq_consume_track_read((uint32_t)c.frames[1], &second) == 0);
+    CHECK(first.kind == MOQ_RAW_READ_FRAME && second.kind == MOQ_RAW_READ_FRAME);
+    CHECK(same(first.frame.timestamp, zero));
+    CHECK(same(second.frame.timestamp, tick));
+    CHECK(moq_consume_track_read_free((uint32_t)c.frames[0]) == 0);
+    CHECK(moq_consume_track_read_free((uint32_t)c.frames[1]) == 0);
 
     moq_datagram datagram;
     CHECK(moq_consume_datagram((uint32_t)c.datagram, &datagram) == 0);

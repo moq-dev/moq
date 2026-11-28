@@ -1,16 +1,9 @@
 import { Duration } from "@moq/clock";
+import type * as Moq from "@moq/net";
 import type { Timed } from "@moq/net";
-import * as Moq from "@moq/net";
 
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
-
-const GAPS: Moq.StreamCode[] = [
-	Moq.StreamCode.TooFarBehind,
-	Moq.StreamCode.Old,
-	Moq.StreamCode.Evicted,
-	Moq.StreamCode.GroupTooLarge,
-];
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -128,11 +121,12 @@ export class Consumer<T> {
 			let frame: Moq.Group.Frame | undefined;
 			try {
 				frame = await group.readFrame();
-			} catch (err) {
+			} catch {
 				if (this.#closed) return undefined;
-				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
-				// The group was reset or we fell behind its eviction window. Resync from the next
-				// group, which begins with a fresh snapshot (frame 0), so no partial state is presented.
+				// A failed group is that group's gap. Resync from the next group, which begins with
+				// a fresh snapshot (frame 0), so no partial state is presented; only the track's own
+				// error, from the next group read, ends the consumer.
+				group.close();
 				this.#group = undefined;
 				continue;
 			}
@@ -146,8 +140,18 @@ export class Consumer<T> {
 
 			this.#apply(frame.payload);
 			if (skip) {
-				// Apply the rest of the backlog but yield only the head.
-				for (let more = group.tryReadFrame(); more; more = group.tryReadFrame()) {
+				// Apply the rest of the backlog but yield only the head. A group that fails here is
+				// a gap too: yield what it held, and the next read resyncs from the next group.
+				for (;;) {
+					let more: Moq.Group.Frame | undefined;
+					try {
+						more = group.tryReadFrame();
+					} catch {
+						group.close();
+						this.#group = undefined;
+						break;
+					}
+					if (!more) break;
 					this.#apply(more.payload);
 					frame = more;
 				}

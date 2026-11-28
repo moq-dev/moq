@@ -35,7 +35,7 @@ fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = pull({ cancel() }) { 
 /**
  * Stream of timestamped raw frames from one-frame-per-group tracks.
  *
- * Completed empty groups are skipped. The flow ends when the track ends.
+ * Completed empty groups are skipped, and so are failed ones. The flow ends when the track ends.
  */
 fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 
