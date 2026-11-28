@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** raw and metadata reads are typed. `moq_consume_track_read` fills a `moq_raw_read` whose `kind` is `MOQ_RAW_READ_FRAME` (the payload in `frame`) or `MOQ_RAW_READ_GAP` (the groups read past in `gap`, with the failure's negative `code` and its `reason`), and `moq_consume_track_read_free` frees it; they replace `moq_consume_track_frame` and `moq_consume_track_frame_free`. `moq_consume_meta` takes a `moq_meta_callback` that gets a `moq_meta_read` in place of a `moq_header_callback`.
+- A group that fails, whatever with, reaches a raw or metadata reader as a gap, and the reader reads on: a publisher's group abort no longer ends the track. A raw reader also reports the groups it skipped as gaps. A terminal callback means only that the track ended.
+
 ## [0.6.12](https://github.com/moq-dev/moq/compare/libmoq-v0.6.11...libmoq-v0.6.12) - 2026-10-06
 
 ### Other

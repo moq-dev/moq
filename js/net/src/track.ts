@@ -11,7 +11,6 @@ import { Delivered } from "./delivered.ts";
 import { answered, type Change, type Edit, type JoinAsk, joinTick, Prefs, Subscriptions } from "./demand.ts";
 import { DropSet, Runs } from "./drops.ts";
 import {
-	GroupTooLarge,
 	ProtocolViolation,
 	Skipped,
 	StreamCode,
@@ -7161,9 +7160,9 @@ export class Subscriber {
 	 *
 	 * Groups are acquired through the same key cursor as {@link Ordered.nextGroup},
 	 * so frames never run backwards: a late lower-key group is skipped, and so is
-	 * one every frame of which its live range's {@link Live.max} proves is too old. A group the budget abandons
-	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
-	 * group still surfaces as `Evicted`, {@link TooFarBehind}, or {@link GroupTooLarge}.
+	 * one every frame of which its live range's {@link Live.max} proves is too old. A group that
+	 * fails, for any reason, is a gap the cursor reads past, resyncing from the next group; only
+	 * the track's own end throws.
 	 */
 	async #readFrame(): Promise<({ group: bigint; frame: number } & Frame) | undefined> {
 		for (;;) {
@@ -7176,17 +7175,11 @@ export class Subscriber {
 			let next: ({ index: number } & Frame) | undefined;
 			try {
 				next = await group.readFrameIndex();
-			} catch (err) {
-				// The group failed underneath us: resync from the next one, surfacing
-				// only what the caller can act on (a gap, or the track's own abort).
+			} catch {
+				// A failed group is that group's gap: resync from the next one. Only the track's
+				// own abort ends the read.
 				this.#frameGroup = undefined;
 				group.close();
-				if (
-					err instanceof TooFarBehind ||
-					err instanceof GroupTooLarge ||
-					(err instanceof StreamError && err.code === StreamCode.Evicted)
-				)
-					throw err;
 				const closed = this.#state.closed.peek();
 				if (closed instanceof Error) throw closed;
 				continue;
@@ -7521,7 +7514,10 @@ export class Ordered {
 	 *
 	 * Rides the same cursor as {@link nextGroup} and shares this handle's contract: a
 	 * buffered backlog is drained in full up to the point a {@link Live.max} proves it useless.
-	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 * A group that fails is a gap this read continues past, so it throws only once the track
+	 * itself ends with an error; read with {@link nextItem} and each group's own `readFrame` to
+	 * learn why a group failed. Treat the returned frame bytes as read-only; they are shared with
+	 * other consumers.
 	 */
 	readFrame(): Promise<({ group: bigint; frame: number } & Frame) | undefined> {
 		return ordered_.readFrame(this.#subscriber);

@@ -781,14 +781,22 @@ test("snapshot consumer skips a group the publisher dropped mid-read", async () 
 	expect((await next)?.value).toEqual({ v: 1 });
 });
 
-// A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
-test("snapshot consumer propagates a non-gap frame failure", async () => {
+// A failed group is that group's gap, whatever it failed with: the consumer resyncs from the next
+// snapshot, and only the track's own error ends it.
+test("snapshot consumer reads past any failed group and ends only with the track", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
 	const group = track.appendGroup(Time.Timestamp.fromMillis(1));
 	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.fromMillis(1) });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
+
+	const next = consumer.next();
 	group.abort(new NetError.Stream(StreamCode.Internal));
+	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
+	second.writeFrame({ payload: new TextEncoder().encode('{"ok":false}'), timestamp: Time.Timestamp.fromMillis(2) });
+	expect((await next)?.value).toEqual({ ok: false });
+
+	track.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 

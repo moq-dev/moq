@@ -28,6 +28,39 @@ fn read_timestamp(timestamp: *const moq_timestamp) -> moq_timestamp {
 	*unsafe { timestamp.as_ref() }.expect("a read always carries a timestamp")
 }
 
+/// Fill `dst` with a raw read's frame, failing the test on a gap. Its pointers borrow the read.
+///
+/// # Safety
+/// `dst` must point to a writable [moq_frame].
+unsafe fn raw_frame(read: u32, dst: *mut moq_frame) -> i32 {
+	let mut raw: moq_raw_read = unsafe { std::mem::zeroed() };
+	let code = unsafe { moq_consume_track_read(read, &mut raw) };
+	if code == 0 {
+		assert_eq!(
+			raw.kind,
+			moq_raw_read_kind::MOQ_RAW_READ_FRAME,
+			"a gap where a frame was due"
+		);
+		unsafe { dst.write(raw.frame) };
+	}
+	code
+}
+
+/// A raw read's gap, failing the test on a frame, and the read freed.
+fn raw_gap(read: u32) -> (std::ops::Range<u64>, i32) {
+	let mut raw: moq_raw_read = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_consume_track_read(read, &mut raw) }, 0);
+	assert_eq!(
+		raw.kind,
+		moq_raw_read_kind::MOQ_RAW_READ_GAP,
+		"a frame where a gap was due"
+	);
+	assert!(!raw.gap.reason.is_null() && raw.gap.reason_len > 0, "a gap says why");
+	let gap = (raw.gap.start..raw.gap.end, raw.gap.code);
+	assert_eq!(moq_consume_track_read_free(read), 0);
+	gap
+}
+
 /// The broadcast clock's current time, which every write on the broadcast is stamped from.
 fn catalog_now(broadcast: u32) -> moq_timestamp {
 	let mut now = moq_timestamp::default();
@@ -2158,9 +2191,9 @@ fn timestamps_round_trip_exactly() {
 			timestamp: &tick,
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 		assert_eq!(read_timestamp(frame.timestamp), written, "{name} frame");
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 		// The datagram consumer is live once its subscription is answered.
 		wait_datagram_reader(datagram_track);
@@ -2322,12 +2355,12 @@ fn raw_track_publish_consume() {
 		timestamp: std::ptr::null(),
 		keyframe: true, // should be overwritten with false
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
 	assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	// Multi-frame group via the explicit group API, starting at a time converted to the
 	// track's microseconds. A start that doesn't move past the last group is refused.
@@ -2359,11 +2392,11 @@ fn raw_track_publish_consume() {
 			timestamp: std::ptr::null(),
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, expected);
 		assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
@@ -2679,12 +2712,12 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// A publisher's abort of a group a raw reader is mid-way through ends the track with it, so the
-/// truncation is never silent.
+/// A publisher's abort of a group a raw reader is mid-way through is that group's gap: the reader
+/// is told which group and why, then reads on until the track itself ends.
 #[test]
-fn raw_track_ends_on_an_aborted_group() {
+fn raw_track_reads_past_an_aborted_group() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"raw-track-ends-on-an-aborted-group");
+	let broadcast = publish_broadcast(origin, b"raw-track-reads-past-an-aborted-group");
 	let name = b"cut";
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
@@ -2697,30 +2730,76 @@ fn raw_track_ends_on_an_aborted_group() {
 		unsafe { moq_publish_group_frame(group, b"cut".as_ptr(), 3, &micros(0)) },
 		0
 	);
-	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+	assert_eq!(moq_consume_track_read_free(id(frame_cb.recv())), 0);
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
-	assert!(frame_cb.recv() < 0, "the abort ends the track");
+	assert_eq!(raw_gap(id(frame_cb.recv())), (0..1, MOQ_ERROR_MOQ));
+
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, b"next".as_ptr(), 4, &micros(1)) },
+		0
+	);
+	let read = id(frame_cb.recv());
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { raw_frame(read, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		b"next"
+	);
+	assert_eq!(moq_consume_track_read_free(read), 0);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "only the track's end ends the read");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// What [header_callback] forwards: a header's group, frame, size, and timestamp, or the terminal code.
-type HeaderEvent = Result<(u64, u64, u64, u64), i32>;
+/// What [meta_callback] forwards: a header's group, frame, size, and timestamp, a gap's groups and
+/// code, or the terminal code.
+#[derive(Debug, PartialEq, Eq)]
+enum MetaEvent {
+	Header(u64, u64, u64, u64),
+	Gap(std::ops::Range<u64>, i32),
+	End(i32),
+}
 
-extern "C" fn header_callback(user_data: *mut c_void, header: *const moq_header, code: i32) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<HeaderEvent>) }.clone();
-	let event = match unsafe { header.as_ref() } {
-		Some(h) => Ok((h.group, h.frame, h.size, h.timestamp.value)),
-		None => Err(code),
+extern "C" fn meta_callback(user_data: *mut c_void, read: *const moq_meta_read, code: i32) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<MetaEvent>) }.clone();
+	let event = match unsafe { read.as_ref() } {
+		Some(read) => match read.kind {
+			moq_raw_read_kind::MOQ_RAW_READ_FRAME => {
+				let h = read.header;
+				MetaEvent::Header(h.group, h.frame, h.size, h.timestamp.value)
+			}
+			moq_raw_read_kind::MOQ_RAW_READ_GAP => {
+				assert!(!read.gap.reason.is_null() && read.gap.reason_len > 0, "a gap says why");
+				MetaEvent::Gap(read.gap.start..read.gap.end, read.gap.code)
+			}
+		},
+		None => MetaEvent::End(code),
 	};
 	let _ = tx.send(event);
 }
 
+/// A metadata subscription to `name` on `consume`, its events, and the sender to free once it ends.
+fn consume_meta(consume: u32, name: &[u8]) -> (u32, mpsc::Receiver<MetaEvent>, *mut mpsc::Sender<MetaEvent>) {
+	let (tx, rx) = mpsc::channel::<MetaEvent>();
+	let tx = Box::into_raw(Box::new(tx));
+	let meta = id(unsafe {
+		moq_consume_meta(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(meta_callback),
+			tx as *mut c_void,
+		)
+	});
+	(meta, rx, tx)
+}
+
 /// A metadata subscription delivers each frame's position, declared size, and timestamp, an
-/// empty frame as size 0, then ends cleanly with the track on a NULL header.
+/// empty frame as size 0, then ends cleanly with the track on a NULL read.
 #[test]
 fn meta_reads_headers() {
 	let origin = id(moq_origin_create());
@@ -2729,18 +2808,7 @@ fn meta_reads_headers() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let consume = consume_local(broadcast);
-	let (tx, rx) = mpsc::channel::<HeaderEvent>();
-	let tx = Box::into_raw(Box::new(tx));
-	let meta = id(unsafe {
-		moq_consume_meta(
-			consume,
-			name.as_ptr() as *const c_char,
-			name.len(),
-			std::ptr::null(),
-			Some(header_callback),
-			tx as *mut c_void,
-		)
-	});
+	let (meta, rx, tx) = consume_meta(consume, name);
 
 	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 	for (payload, at) in [(&b"key"[..], 0), (b"", 1)] {
@@ -2752,10 +2820,48 @@ fn meta_reads_headers() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 
 	let headers: Vec<_> = (0..2).map(|_| rx.recv().expect("header")).collect();
-	assert_eq!(headers, [Ok((0, 0, 3, 0)), Ok((0, 1, 0, 1))]);
+	assert_eq!(headers, [MetaEvent::Header(0, 0, 3, 0), MetaEvent::Header(0, 1, 0, 1)]);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(rx.recv().expect("terminal"), Err(0), "the track finished");
+	assert_eq!(rx.recv().expect("terminal"), MetaEvent::End(0), "the track finished");
+	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
+	drop(unsafe { Box::from_raw(tx) });
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A group aborted partway through a metadata read is that group's gap, and the read goes on.
+#[test]
+fn meta_reads_past_an_aborted_group() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"meta-reads-past-an-aborted-group");
+	let name = b"video";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let consume = consume_local(broadcast);
+	let (meta, rx, tx) = consume_meta(consume, name);
+
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, b"key".as_ptr(), 3, &micros(0)) },
+		0
+	);
+	assert_eq!(rx.recv().expect("header"), MetaEvent::Header(0, 0, 3, 0));
+	assert_eq!(moq_publish_group_abort(group, 409), 0);
+	assert_eq!(rx.recv().expect("gap"), MetaEvent::Gap(0..1, MOQ_ERROR_MOQ));
+
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, b"next".as_ptr(), 4, &micros(1)) },
+		0
+	);
+	assert_eq!(rx.recv().expect("header"), MetaEvent::Header(1, 0, 4, 1));
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(
+		rx.recv().expect("terminal"),
+		MetaEvent::End(0),
+		"only the track's end ends it"
+	);
 	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
 	drop(unsafe { Box::from_raw(tx) });
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -2847,11 +2953,11 @@ fn raw_track_subscription_options_and_update() {
 			timestamp: std::ptr::null(),
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, payload);
 		assert_eq!(read_timestamp(frame.timestamp), micros(at));
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	};
 	expect(b"one", 20_000);
 	expect(b"two", 40_000);
@@ -2950,10 +3056,10 @@ fn raw_track_time_start() {
 			timestamp: std::ptr::null(),
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, expected);
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
@@ -3027,10 +3133,10 @@ fn raw_track_joins_the_latest_group_without_a_stated_min() {
 		timestamp: std::ptr::null(),
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"two", "joined at the latest group, not the oldest");
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -3139,7 +3245,7 @@ fn raw_track_update_refuses_a_scaled_range_time() {
 	// The first frame proves the subscription is established.
 	write(b"zero");
 	let frame_id = id(frame_cb.recv());
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	let ranges = [moq_range {
 		start: micros(0),
@@ -3167,10 +3273,10 @@ fn raw_track_update_refuses_a_scaled_range_time() {
 		timestamp: std::ptr::null(),
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"one");
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -3610,9 +3716,9 @@ fn json_window_refreshes_a_bounded_checkpoint() {
 			timestamp: std::ptr::null(),
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 		payload = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	}
 	let header: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 	assert_eq!(header["records"], serde_json::json!([{ "n": 38 }, { "n": 39 }]));
@@ -4040,10 +4146,10 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timestamp: std::ptr::null(),
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	// The track finished, so the subscription ends cleanly on its own, racing any cancel.
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
@@ -4805,7 +4911,7 @@ fn cancel_track(consumer: u32, cb: &Callback) {
 			assert_eq!(code, 0);
 			return;
 		}
-		assert_eq!(moq_consume_track_frame_free(id(code)), 0);
+		assert_eq!(moq_consume_track_read_free(id(code)), 0);
 	}
 }
 
@@ -4918,7 +5024,7 @@ fn track_refresh_fires_once_sent() {
 			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
 			0
 		);
-		assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
+		assert_eq!(moq_consume_track_read_free(id(track_cb.recv())), 0);
 	}
 
 	// Nothing reads the demand yet, so a cancelled request is never sent.
@@ -5103,7 +5209,7 @@ fn free_ends_on_demand(
 		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(0)) },
 		0
 	);
-	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+	assert_eq!(moq_consume_track_read_free(id(frame_cb.recv())), 0);
 
 	// The watcher follows the track, not the freed handle, so it is stopped here.
 	assert_eq!(moq_publish_demand_cancel(watcher), 0);
@@ -5293,13 +5399,13 @@ fn dynamic_serves_track_requests() {
 		timestamp: std::ptr::null(),
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(
 		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
 		payload
 	);
 	assert_eq!(read_timestamp(frame.timestamp), micros(42));
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	// A second request is aborted, and its subscriber sees the application code.
 	let denied_cb = ProtocolCallback::new();
@@ -5382,7 +5488,7 @@ fn dynamic_track_request_publishes_media() {
 		0
 	);
 	let frame_id = id(frame_cb.recv());
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -8987,6 +9093,125 @@ fn a_minted_identity_pins_request_and_follow() {
 	}
 }
 
+/// A group an on-demand track's dropped producer left open while a raw reader across a session
+/// held it is that group's gap on moq-lite and moq-transport alike, so the reader reads on to
+/// the next producer's group instead of ending the track.
+#[test]
+fn raw_track_reads_past_a_group_a_drop_left_open() {
+	let info = || moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+	let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+	let payload = |frame_id: u32| {
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp: std::ptr::null(),
+			keyframe: false,
+		};
+		assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
+		let payload = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
+		assert_eq!(moq_consume_track_read_free(frame_id), 0);
+		payload
+	};
+
+	for version in ["moq-lite-06", "moq-transport-22"] {
+		let source = id(moq_origin_create());
+		let sink = id(moq_origin_create());
+		// Announced before the session syncs discovery, so the request below finds it.
+		let route = publish(source, "live", moq_net::origin::RouteOptions::default());
+		let mut requests = route.broadcast().requests();
+		let server_cb = Callback::new();
+		let (server, addr, fingerprint) = listen(&server_cb);
+		let url = format!("https://{addr}/");
+		let fingerprints = [moq_str(&fingerprint)];
+		let versions = [moq_str(version)];
+		let mut config = client_config();
+		config.tls_fingerprints = fingerprints.as_ptr();
+		config.tls_fingerprints_len = fingerprints.len();
+		config.tls_host_name = "localhost".as_ptr() as *const c_char;
+		config.tls_host_name_len = "localhost".len();
+		config.versions = versions.as_ptr();
+		config.versions_len = versions.len();
+		let client_cb = States::new();
+		let client = id(unsafe {
+			moq_session_connect(
+				url.as_ptr() as *const c_char,
+				url.len(),
+				&config,
+				source,
+				0,
+				Some(state_callback),
+				client_cb.ptr,
+			)
+		});
+		let session_cb = States::new();
+		let session = id(unsafe {
+			moq_session_request_accept(id(server_cb.recv()), 0, sink, Some(state_callback), session_cb.ptr)
+		});
+		for cb in [&client_cb, &session_cb] {
+			assert_eq!(cb.recv().phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+		}
+
+		let consume = request_broadcast(sink, b"live");
+		let frame_cb = Callback::new();
+		// No budget of its own, so only the group's end tells the reader to move on.
+		let mut subscription = moq_subscription_defaults();
+		subscription.delay.max_unlimited = true;
+		let reader = id(unsafe {
+			moq_consume_track(
+				consume,
+				b"video".as_ptr() as *const c_char,
+				b"video".len(),
+				&subscription,
+				Some(channel_callback),
+				frame_cb.ptr,
+			)
+		});
+
+		let first = crate::ffi::RUNTIME
+			.block_on(requests.requested_track())
+			.unwrap()
+			.accept(info());
+		let mut open = first.append_group(at(0)).unwrap();
+		open.write_frame(at(0), b"held".as_slice()).unwrap();
+		assert_eq!(payload(id(frame_cb.recv())), b"held", "{version}");
+		{
+			let _runtime = crate::ffi::RUNTIME.enter();
+			drop((first, open));
+		}
+
+		let next = crate::ffi::RUNTIME
+			.block_on(requests.requested_track())
+			.unwrap()
+			.accept(info());
+		let mut group = next.append_group(at(100)).unwrap();
+		group.write_frame(at(100), b"next".as_slice()).unwrap();
+		group.finish().unwrap();
+		let code = frame_cb.recv();
+		assert!(code > 0, "{version}: the held group ended the track with {code}");
+		assert_eq!(raw_gap(code as u32).0, 0..1, "{version}");
+		let code = frame_cb.recv();
+		assert!(code > 0, "{version}: the track ended after the gap with {code}");
+		assert_eq!(payload(code as u32), b"next", "{version}");
+
+		assert_eq!(moq_consume_track_cancel(reader), 0);
+		assert_eq!(frame_cb.recv_terminal(), 0);
+		assert_eq!(moq_consume_close(consume), 0);
+		assert_eq!(moq_session_close(client), 0);
+		client_cb.recv_terminal();
+		session_cb.recv_terminal();
+		assert!(moq_session_close(session) < 0);
+		assert_eq!(moq_server_close(server), 0);
+		assert_eq!(server_cb.recv_terminal(), 0);
+		{
+			let _runtime = crate::ffi::RUNTIME.enter();
+			drop((next, requests, route));
+		}
+		for origin in [source, sink] {
+			assert_eq!(moq_origin_close(origin), 0);
+		}
+	}
+}
+
 #[test]
 fn server_accepts_a_session() {
 	let served = id(moq_origin_create());
@@ -9068,7 +9293,7 @@ fn server_accepts_a_session() {
 		unsafe { moq_publish_track_frame(track, first.as_ptr(), first.len(), &micros(0)) },
 		0
 	);
-	assert_eq!(moq_consume_track_frame_free(id(frames.recv())), 0);
+	assert_eq!(moq_consume_track_read_free(id(frames.recv())), 0);
 	let tail = vec![42; 64 * 1024];
 	assert_eq!(
 		unsafe { moq_publish_track_frame(track, tail.as_ptr(), tail.len(), &micros(1)) },
@@ -9078,12 +9303,12 @@ fn server_accepts_a_session() {
 	assert_eq!(moq_session_close(session), 0);
 	let frame_id = id(frames.recv());
 	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { raw_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(
 		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
 		tail
 	);
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_track_read_free(frame_id), 0);
 	assert_eq!(frames.recv_terminal(), 0, "the tail ends cleanly");
 	let terminal = session_cb.recv_terminal();
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));

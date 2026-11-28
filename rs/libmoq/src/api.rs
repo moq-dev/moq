@@ -680,7 +680,7 @@ pub struct moq_frame {
 /// A frame's header without its payload, as a metadata subscription reads it
 /// ([moq_consume_meta]).
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct moq_header {
 	/// The start of the frame's group, in its track's timescale, which names it within the track.
 	pub group: u64,
@@ -691,6 +691,70 @@ pub struct moq_header {
 	/// The presentation timestamp of the frame, or on a scale-less track its group's unscaled
 	/// key (`has_scale` false).
 	pub timestamp: moq_timestamp,
+}
+
+/// What a [moq_raw_read] or [moq_meta_read] holds.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_raw_read_kind {
+	/// A frame: its payload in a raw read, its header in a metadata read.
+	MOQ_RAW_READ_FRAME = 0,
+	/// Groups the reader read past: skipped, or failed after some of their frames were read.
+	/// The track reads on.
+	MOQ_RAW_READ_GAP = 1,
+}
+
+/// Groups a raw or metadata reader read past, for a [moq_raw_read_kind::MOQ_RAW_READ_GAP] read.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_raw_gap {
+	/// The first group read past, by its start.
+	pub start: u64,
+	/// One past the last group read past, by its start.
+	pub end: u64,
+	/// The negative libmoq code a read of those groups failed with.
+	pub code: i32,
+	/// Why, as UTF-8, NOT NULL terminated, valid as long as the read.
+	pub reason: *const c_char,
+	/// The length in bytes of `reason`.
+	pub reason_len: usize,
+}
+
+impl Default for moq_raw_gap {
+	fn default() -> Self {
+		Self {
+			start: 0,
+			end: 0,
+			code: 0,
+			reason: std::ptr::null(),
+			reason_len: 0,
+		}
+	}
+}
+
+/// One raw track read, from [moq_consume_track_read]; `kind` selects the filled field and the
+/// other is zeroed.
+#[repr(C)]
+pub struct moq_raw_read {
+	/// Frame or gap.
+	pub kind: moq_raw_read_kind,
+	/// The frame's payload and timestamp, for a frame read.
+	pub frame: moq_frame,
+	/// The groups read past, for a gap read.
+	pub gap: moq_raw_gap,
+}
+
+/// One metadata read, borrowed by a [moq_consume_meta] callback; `kind` selects the filled field
+/// and the other is zeroed.
+#[repr(C)]
+pub struct moq_meta_read {
+	/// Frame header or gap.
+	pub kind: moq_raw_read_kind,
+	/// The frame's header, for a frame read.
+	pub header: moq_header,
+	/// The groups read past, for a gap read.
+	pub gap: moq_raw_gap,
 }
 
 /// One encoded media read; `kind` selects the filled field and the others are zeroed.
@@ -5003,13 +5067,15 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 /// Subscribe to a raw track by name, delivering each frame's payload as-is.
 ///
 /// This is the counterpart to [moq_publish_track]: no catalog lookup or
-/// container parsing. `on_frame` is called with a positive raw frame ID for each
-/// frame in start order, then exactly once more with a terminal code: `0`
-/// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
-/// `on_frame` is never called again and `user_data` is never touched again, so
-/// release `user_data` there. The terminal callback fires even after
-/// [moq_consume_track_cancel]. Read each frame with [moq_consume_track_frame] and
-/// release it with [moq_consume_track_frame_free]. Pass NULL for `subscription`
+/// container parsing. `on_read` is called with a positive read ID for each
+/// frame in start order, and for each gap: groups the reader read past, whether
+/// skipped or failed partway through, after which the track reads on. It is then
+/// called exactly once more with a terminal code: `0` (closed cleanly) or a
+/// negative error, which means only that the track itself ended. After the
+/// terminal (`<= 0`) callback, `on_read` is never called again and `user_data` is
+/// never touched again, so release `user_data` there. The terminal callback fires
+/// even after [moq_consume_track_cancel]. Read each with [moq_consume_track_read] and
+/// release it with [moq_consume_track_read_free]. Pass NULL for `subscription`
 /// to use moq-net defaults.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
@@ -5018,14 +5084,14 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
 /// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
 ///   whose `ranges` is NULL or points to `ranges_len` ranges.
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_track(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
 	subscription: *const moq_subscription,
-	on_frame: ffi::moq_status_callback,
+	on_read: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -5034,8 +5100,8 @@ pub unsafe extern "C" fn moq_consume_track(
 		let subscription = unsafe { subscription.as_ref() }
 			.map(|subscription| unsafe { parse_subscription(subscription) })
 			.transpose()?;
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.raw_track(broadcast, name, subscription, on_frame)
+		let on_read = unsafe { ffi::OnStatus::new(user_data, on_read)? };
+		State::lock().consume.raw_track(broadcast, name, subscription, on_read)
 	})
 }
 
@@ -5065,34 +5131,34 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 	})
 }
 
-/// Read a raw frame's payload delivered via the [moq_consume_track] callback.
+/// Read a frame or gap delivered via the [moq_consume_track] callback.
 ///
-/// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_track_frame_free], and so is `dst.timestamp`,
-/// the group's unscaled key on a scale-less track. `dst.keyframe` is reported as false because raw tracks
-/// do not parse codec metadata.
+/// A frame fills `dst.frame`: its payload, and its timestamp, the group's unscaled key on a
+/// scale-less track. `dst.frame.keyframe` is reported as false because raw tracks do not parse
+/// codec metadata. A gap fills `dst.gap`: the groups read past and why. Every pointer is valid
+/// until the read is released with [moq_consume_track_read_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_raw_read] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_track_frame(frame: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_consume_track_read(read: u32, dst: *mut moq_raw_read) -> i32 {
 	ffi::enter(move || {
-		let frame = ffi::parse_id(frame)?;
+		let read = ffi::parse_id(read)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().consume.raw_frame(frame, dst)
+		State::lock().consume.raw_read(read, dst)
 	})
 }
 
-/// Free a raw frame delivered via the [moq_consume_track] callback, releasing its payload.
+/// Free a read delivered via the [moq_consume_track] callback, releasing its payload.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
+pub extern "C" fn moq_consume_track_read_free(read: u32) -> i32 {
 	ffi::enter(move || {
-		let frame = ffi::parse_id(frame)?;
-		State::lock().consume.raw_frame_close(frame)
+		let read = ffi::parse_id(read)?;
+		State::lock().consume.raw_read_free(read)
 	})
 }
 
@@ -5143,10 +5209,10 @@ pub extern "C" fn moq_consume_track_refresh_cancel(refresh: u32) -> i32 {
 /// Stop a raw track consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the [moq_consume_track] `on_frame` callback still
+/// Does NOT free `user_data`; the [moq_consume_track] `on_read` callback still
 /// fires once more with a terminal `0` (or a negative error), which is where
-/// `user_data` should be released. Frames already delivered via the callback
-/// remain valid until released with [moq_consume_track_frame_free].
+/// `user_data` should be released. Reads already delivered via the callback
+/// remain valid until released with [moq_consume_track_read_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	ffi::enter(move || {
@@ -5162,10 +5228,12 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// subscription and drops the payload. To read the payload after all, subscribe to the track
 /// from the group reached.
 ///
-/// `on_header` is called with each frame's header, group by group in arrival order, borrowed
-/// only for the call: copy what you keep. It is then called exactly once more with a NULL header
-/// and a terminal code: `0` (closed cleanly) or a negative error. After the terminal callback,
-/// `on_header` is never called again and `user_data` is never touched again, so release
+/// `on_read` is called with a [moq_meta_read] for each frame's header, group by group in arrival
+/// order, and for each group that failed after some of its headers were read, a gap after which
+/// the track reads on. Each read is borrowed only for the call: copy what you keep. It is then
+/// called exactly once more with a NULL read and a terminal code: `0` (closed cleanly) or a
+/// negative error, which means only that the track itself ended. After the terminal callback,
+/// `on_read` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The terminal callback fires even after [moq_consume_meta_cancel]. Pass
 /// NULL for `subscription` to use the [moq_consume_track] defaults.
 ///
@@ -5175,14 +5243,14 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
 /// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
 ///   whose `ranges` is NULL or points to `ranges_len` ranges.
-/// - The caller must keep `user_data` valid until the terminal (NULL header) `on_header` callback.
+/// - The caller must keep `user_data` valid until the terminal (NULL read) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_meta(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
 	subscription: *const moq_subscription,
-	on_header: ffi::moq_header_callback,
+	on_read: ffi::moq_meta_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -5191,10 +5259,8 @@ pub unsafe extern "C" fn moq_consume_meta(
 		let subscription = unsafe { subscription.as_ref() }
 			.map(|subscription| unsafe { parse_subscription(subscription) })
 			.transpose()?;
-		let on_header = unsafe { ffi::OnHeader::new(user_data, on_header)? };
-		State::lock()
-			.consume
-			.meta_track(broadcast, name, subscription, on_header)
+		let on_read = unsafe { ffi::OnMeta::new(user_data, on_read)? };
+		State::lock().consume.meta_track(broadcast, name, subscription, on_read)
 	})
 }
 
@@ -5217,8 +5283,8 @@ pub unsafe extern "C" fn moq_consume_meta_update(meta: u32, subscription: *const
 /// Stop a metadata subscription's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`; the [moq_consume_meta] `on_header` callback still fires once more with a NULL
-/// header and a terminal `0` (or a negative error), which is where `user_data` should be released.
+/// `user_data`; the [moq_consume_meta] `on_read` callback still fires once more with a NULL
+/// read and a terminal `0` (or a negative error), which is where `user_data` should be released.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_meta_cancel(meta: u32) -> i32 {
 	ffi::enter(move || {

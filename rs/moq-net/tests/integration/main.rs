@@ -28,6 +28,7 @@ mod egress_stats;
 mod empty_group;
 mod errored_end;
 mod extensions;
+mod failed_group;
 mod failover_chain;
 mod fastest_reader;
 mod fetch_cancel;

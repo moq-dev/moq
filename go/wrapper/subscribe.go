@@ -155,7 +155,8 @@ func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (*
 
 // ReadFrame reads the first raw frame of the next group, or (nil, nil)
 // when the track ends. Convenient for one-frame-per-group tracks. Completed
-// empty groups are skipped; a nil frame is track EOF, not an empty group.
+// empty groups are skipped, and so are failed ones; a nil frame is track EOF,
+// not an empty group, and an error means the track itself ended with one.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	return bridge.Call(ctx, nil, t.inner.ReadFrame)
 }

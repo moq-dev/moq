@@ -2031,8 +2031,8 @@ pub(crate) mod tests {
 				let first = kio::clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
-			// Each group's start and frames, read until the track ends. A read cut off as
-			// stale leaves `None` for that group's frames, and a marker leaves none.
+			// Each group's start and frames, read until the track ends. A group that failed
+			// leaves `None` for its frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(kio::clock::timeout(WAIT, async move {
 					let mut groups = Vec::new();
@@ -2047,12 +2047,11 @@ pub(crate) mod tests {
 									.unwrap()
 									.push(hang::container::Frame::decode(frame.payload).unwrap()),
 								Ok(None) => break,
-								// Cut here, or by the relay.
-								Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
+								// Cut here, or by the relay: a failed group is a gap the read moves past.
+								Err(_) => {
 									frames = None;
 									break;
 								}
-								Err(err) => panic!("{err}"),
 							}
 						}
 						groups.push((group.start, frames));

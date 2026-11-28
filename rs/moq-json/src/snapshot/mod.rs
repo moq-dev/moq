@@ -244,15 +244,17 @@ mod test {
 		assert_eq!(values, vec![1, 2, 3]);
 	}
 
-	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
-	/// superseded group, `Evicted` under memory pressure, `Lagged` past the drift budget -- is not
-	/// fatal. A snapshot reader only wants the newest value, so it drops the group and takes the
-	/// replacement. Regression test for `moq export ts` exiting on `Error: json: old` when a
-	/// catalog group aged out of the relay cache underneath it.
+	/// A failed snapshot group is that group's gap, whatever it failed with: a superseded group
+	/// the relay reclaimed, or a publisher's own abort. A snapshot reader only wants the newest
+	/// value, so it drops the group and takes the replacement.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
-		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
+		// Lost on this side, reset by the publisher, or aborted by it: the same gap either way.
+		for lost in [
+			moq_net::Error::Old,
+			moq_net::Error::Stream(moq_net::StreamError::Old),
+			moq_net::Error::App(7),
+		] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("test", timed())

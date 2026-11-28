@@ -663,16 +663,13 @@ mod test {
 
 	#[test]
 	fn consumer_resumes_at_a_checkpoint_after_losing_a_group() {
-		// Each loss as this side raises it, then as a publisher's reset carries it.
+		// Any failure is that group's gap: a loss this side raises, one a publisher's reset carries,
+		// or the publisher's own abort.
 		for err in [
-			moq_net::Error::Old,
 			moq_net::Error::Lagged,
-			moq_net::Error::Evicted,
-			moq_net::Error::GroupTooLarge,
 			moq_net::Error::Stream(moq_net::StreamError::Old),
-			moq_net::Error::Stream(moq_net::StreamError::TooFarBehind),
-			moq_net::Error::Stream(moq_net::StreamError::Evicted),
-			moq_net::Error::Stream(moq_net::StreamError::GroupTooLarge),
+			moq_net::Error::Stream(moq_net::StreamError::Internal),
+			moq_net::Error::App(7),
 		] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()

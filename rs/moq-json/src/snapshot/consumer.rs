@@ -89,7 +89,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Get the next state and its exact frame timestamp, or `None` once the track ends.
 	///
 	/// Skips every group a newer one has superseded. Finish the current group's buffered frames
-	/// before taking the next. Lost groups resynchronize from a later snapshot.
+	/// before taking the next. A group that fails, whatever with, resynchronizes from a later
+	/// snapshot; only the track's own error ends the reader.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, false)
@@ -143,23 +144,14 @@ impl<T: DeserializeOwned> Consumer<T> {
 					advanced = Some(frame.timestamp);
 				}
 				Poll::Ready(Ok(None)) => self.group = None,
-				// Judged by stream code, so a group the publisher reset as old is the same loss as
-				// one this side dropped.
-				Poll::Ready(Err(err))
-					if matches!(
-						moq_net::StreamError::from(&err),
-						moq_net::StreamError::Old
-							| moq_net::StreamError::Evicted
-							| moq_net::StreamError::TooFarBehind
-							| moq_net::StreamError::GroupTooLarge
-					) =>
-				{
-					// A later group starts a fresh snapshot.
+				// A failed group is that group's gap, whatever it failed with: a later group starts
+				// a fresh snapshot, and only the track's own error, from the next group read, ends
+				// the reader.
+				Poll::Ready(Err(err)) => {
 					tracing::warn!(track = self.name, group = group.start, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
 				Poll::Pending => break,
 			}
 		}
