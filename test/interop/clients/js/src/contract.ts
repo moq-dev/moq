@@ -132,7 +132,7 @@ export type Sample = {
 	broadcastStatus: ReturnType<Broadcast["out"]["status"]["peek"]>;
 	/** Whether this document has received user activation. */
 	userActivated: boolean;
-	/** `performance.now()` when the sample was taken. */
+	/** When the sample was taken, in epoch milliseconds, so it lines up with the pages' stall logs. */
 	at: number;
 
 	/** Whether the canvas holds anything but the renderer's black fill. */
@@ -239,6 +239,25 @@ export type LongFrame = {
 
 /** The `window` property each page keeps its {@link LongFrame} log on. */
 export const LONG_FRAMES = "__moqLongFrames";
+
+/**
+ * A stretch the fixture's main audio rendition stopped moving at one stage: `capture` when its
+ * captured frames stopped reaching the page, `encoder` when the encoder stopped emitting them while
+ * it had a subscriber. A hold that covers a gap the player heard places it; none places nothing,
+ * since a stage that slows without one 100 ms stop can still starve the player.
+ */
+export type AudioHold = {
+	stage: "capture" | "encoder";
+	/** When the stage last moved before the hold, in epoch milliseconds, so it lines up with a window. */
+	at: number;
+	/** How long until it moved again, or until the log was read while it is still held, in milliseconds. */
+	duration: number;
+	/** Whether the stage was still held when the log was read. */
+	open?: boolean;
+};
+
+/** The `window` property the fixture page keeps its {@link AudioHold} log on. */
+export const AUDIO_HOLDS = "__moqAudioHolds";
 
 /**
  * Whether audio plays: the graph runs, the ring is not refilling, and a frame has anchored it. A

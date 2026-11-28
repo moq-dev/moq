@@ -211,7 +211,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			broadcastIdentity: identityText(el.broadcast.out.active.peek()?.identity),
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
-			at: performance.now(),
+			at: performance.timeOrigin + performance.now(),
 			...readCanvas(el.querySelector("canvas")),
 			videoFrames: el.video.out.stats.peek()?.frameCount ?? 0,
 			videoTimestamp: el.video.out.timestamp.peek()?.asMillis(),
