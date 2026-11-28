@@ -56,7 +56,7 @@ The cutover broke releases: tags are cut from `release`, whose
 (2026-11-23) never reached go.moq.dev, `go get moq.dev/moq-ffi@v0.4.28`
 fails, and every Release Go wrapper run since has failed downloading it.
 moq-dev/moq#9844 backports the publisher to `release`, and `just infra go
-backfill` now also builds mirror tags newer than proxy.golang.org's list from
+backfill` now also builds mirror tags proxy.golang.org does not list from
 their trees with `sh/go/modzip`. Built from the mirror's `v0.4.27` tree, modzip
 reproduces the hash sum.golang.org pinned for it.
 

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Copy every version of moq.dev/moq-ffi that proxy.golang.org lists, and the
-# bucket lacks, into the go-moq-dev bucket, then build any newer tag of the
-# moq-dev/moq-go-ffi git mirror the bucket lacks: a release the mirror took
+# bucket lacks, into the go-moq-dev bucket, then build any tag of the
+# moq-dev/moq-go-ffi git mirror that neither holds: a release the mirror took
 # after moq.dev's cutover, which proxy.golang.org can no longer reach.
 #
 # Usage: infra/go/backfill.sh
@@ -48,13 +48,14 @@ for v in $versions; do
     copied=$((copied + 1))
 done
 
-# sum.golang.org has pinned no hash for these, so modzip builds them from the
-# tag's tree, the files proxy.golang.org would have zipped.
-newest=$(tail -1 <<<"$versions")
+# A mirror tag proxy.golang.org does not list is a release only the mirror
+# took, after moq.dev's cutover. sum.golang.org has pinned no hash for it, so
+# modzip builds it from the tag's tree, the files proxy.golang.org would have
+# zipped.
 tags=$(git ls-remote --tags --refs "$MIRROR" 'v*' | sed 's|.*refs/tags/||' | sort -V)
 built=0
 for v in $tags; do
-    if [[ "$(printf '%s\n' "$newest" "$v" | sort -V | tail -1)" == "$newest" ]] || grep -qxF "$v" <<<"$have"; then
+    if grep -qxF "$v" <<<"$versions" || grep -qxF "$v" <<<"$have"; then
         continue
     fi
     src="$WORK/src/$v"
@@ -66,6 +67,6 @@ for v in $tags; do
     built=$((built + 1))
 done
 
-echo "backfill: $copied of $(wc -w <<<"$versions") versions to upload, and $built mirror tags past $newest"
+echo "backfill: $copied of $(wc -w <<<"$versions") versions to upload, and $built mirror-only tags"
 [[ "$((copied + built))" -gt 0 ]] || exit 0
 "$HERE/upload.sh" "$WORK/out"

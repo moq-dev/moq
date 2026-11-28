@@ -479,8 +479,8 @@ release in flight between steps 3 and 5.
    ```
 
    `backfill` copies every version proxy.golang.org lists, byte for byte as
-   `go mod download` checked it against sum.golang.org, and builds any newer
-   mirror tag with `sh/go/modzip`. `verify` downloads each
+   `go mod download` checked it against sum.golang.org, and builds any mirror
+   tag it lacks with `sh/go/modzip`. `verify` downloads each
    one through `https://go.moq.dev` from a clean module cache, so the go
    command checks it against sum.golang.org again, and fails if any listed
    version is missing.
