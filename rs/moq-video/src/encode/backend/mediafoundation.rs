@@ -290,18 +290,29 @@ impl MediaFoundation {
 	/// Hold the stream to `bitrate`, moving from `from` (`None` before the
 	/// stream starts): the mean, the peak in peak-constrained VBR, and the
 	/// buffer. A raise sets the peak first and a cut sets the mean first, so the
-	/// mean never passes the peak in between.
+	/// mean never passes the peak in between, and a refusal of the second puts
+	/// the first back, so the MFT runs at the rate the encoder reports.
 	fn set_rate(&self, bitrate: u32, from: Option<u32>) -> Result<(), Error> {
-		let mean = || self.require(&CODECAPI_AVEncCommonMeanBitRate, bitrate, "mean bitrate");
-		let peak = || match self.rate.mode {
-			Mode::Capped => self.require(&CODECAPI_AVEncCommonMaxBitRate, bitrate, "peak bitrate"),
-			Mode::Constant => Ok(()),
+		// `true` sets the peak (only in peak-constrained VBR), `false` the mean.
+		let set = |peak: bool, rate: u32| match (peak, self.rate.mode) {
+			(false, _) => self.require(&CODECAPI_AVEncCommonMeanBitRate, rate, "mean bitrate"),
+			(true, Mode::Capped) => self.require(&CODECAPI_AVEncCommonMaxBitRate, rate, "peak bitrate"),
+			(true, Mode::Constant) => Ok(()),
 		};
-		match from.is_some_and(|from| bitrate < from) {
-			true => mean().and_then(|()| peak())?,
-			false => peak().and_then(|()| mean())?,
+		let peak_first = !from.is_some_and(|from| bitrate < from);
+		set(peak_first, bitrate)?;
+		if let Err(err) = set(!peak_first, bitrate) {
+			// The error already reports the retune failed; a refused restore on
+			// top of it is a second failure with nothing left to try.
+			if let Some(from) = from {
+				let _ = set(peak_first, from);
+			}
+			return Err(err);
 		}
-		if self.rate.buffer {
+		// Mid-stream, only where the MFT says the buffer can change now: one
+		// that cannot keeps the buffer it opened with, and the mean and peak
+		// still hold the cap.
+		if self.rate.buffer && (from.is_none() || self.modifiable(&CODECAPI_AVEncCommonBufferSize)) {
 			self.require(
 				&CODECAPI_AVEncCommonBufferSize,
 				buffer_bytes(bitrate, self.framerate),
@@ -309,6 +320,12 @@ impl MediaFoundation {
 			)?;
 		}
 		Ok(())
+	}
+
+	/// Whether the MFT accepts `api` in its current state. Only `S_OK` says so,
+	/// as with [`supports`].
+	fn modifiable(&self, api: &GUID) -> bool {
+		unsafe { self.codec_api.IsModifiable(api) == S_OK }
 	}
 
 	/// Set a codec property the encoder cannot run correctly without.
@@ -772,6 +789,13 @@ impl Backend for MediaFoundation {
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		let bitrate = clamp_u32(bitrate);
+
+		// Before the first frame the MFT has no rate control mode yet, so the
+		// rate waits for `configure_codec_api` to set it with the rest.
+		if matches!(self.phase, Phase::Unstarted) {
+			self.bitrate = bitrate;
+			return Ok(());
+		}
 
 		// An MFT refusing a rate change means the control loop is talking to
 		// itself, and a peak left behind breaks the cap, so either is an error.
