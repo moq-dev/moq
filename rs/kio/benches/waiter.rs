@@ -11,12 +11,12 @@
 //! lock (`register` takes `&mut`), so cross-thread cost belongs to that lock, not to
 //! the list.
 //!
-//! Run with `cargo bench -p kio`.
+//! Run with `cargo bench -p kio --bench waiter`.
 
 use std::task::{Context, Waker};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Park, Waiter, WaiterList};
+use swole::bench;
 
 /// Live-waiter populations spanning inline storage and heap spill.
 const SIZES: [usize; 4] = [1, 2, 8, 32];
@@ -34,170 +34,129 @@ fn populated(n: usize) -> (WaiterList, Vec<Waiter>) {
 	(list, waiters)
 }
 
+fn fresh() -> Waiter {
+	Waiter::new(Waker::noop().clone())
+}
+
+fn empty() -> (WaiterList, Waiter) {
+	(WaiterList::new(), fresh())
+}
+
 /// Register the first waiter on a newly constructed list.
-fn bench_register_first(c: &mut Criterion) {
-	c.bench_function("waiter_register_first", |b| {
-		b.iter_batched(
-			|| (WaiterList::new(), Waiter::new(Waker::noop().clone())),
-			|(mut list, waiter)| {
-				waiter.register(&mut list);
-				(list, waiter)
-			},
-			BatchSize::SmallInput,
-		)
-	});
+#[bench(setup = empty)]
+fn waiter_register_first((mut list, waiter): (WaiterList, Waiter)) -> (WaiterList, Waiter) {
+	waiter.register(&mut list);
+	(list, waiter)
+}
+
+fn live(n: usize) -> (WaiterList, Vec<Waiter>, Waiter) {
+	let (list, waiters) = populated(n);
+	(list, waiters, fresh())
 }
 
 /// Register a fresh waiter into a list of N live entries: the dead-slot probe
 /// finds nothing, and the entry is appended.
-fn bench_register(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_register_live");
-	for &n in &SIZES {
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			b.iter_batched(
-				|| {
-					let (list, waiters) = populated(n);
-					(list, waiters, Waiter::new(Waker::noop().clone()))
-				},
-				|(mut list, waiters, fresh)| {
-					fresh.register(&mut list);
-					(list, waiters, fresh)
-				},
-				BatchSize::SmallInput,
-			)
-		});
-	}
-	g.finish();
+#[bench(args = SIZES, setup = live)]
+fn waiter_register_live(
+	(mut list, waiters, fresh): (WaiterList, Vec<Waiter>, Waiter),
+) -> (WaiterList, Vec<Waiter>, Waiter) {
+	fresh.register(&mut list);
+	(list, waiters, fresh)
+}
+
+fn parked(n: usize) -> (WaiterList, Vec<Waiter>, Park) {
+	let (list, waiters) = populated(n);
+	(list, waiters, Park::default())
 }
 
 /// Re-poll with a still-registered waiter, which the list recognizes and skips.
-fn bench_reregister(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_reregister");
-	for &n in &SIZES {
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			let (mut list, _waiters) = populated(n);
-			let mut park = Park::default();
-			let cx = Context::from_waker(Waker::noop());
-			b.iter(|| park.hold(&cx).register(&mut list));
-		});
-	}
-	g.finish();
+#[bench(args = SIZES, setup = parked)]
+fn waiter_reregister((list, _waiters, park): &mut (WaiterList, Vec<Waiter>, Park)) {
+	let cx = Context::from_waker(Waker::noop());
+	park.hold(&cx).register(list);
+}
+
+fn dead(n: usize) -> (WaiterList, Waiter) {
+	let (list, waiters) = populated(n);
+	drop(waiters);
+	(list, fresh())
 }
 
 /// Register a fresh waiter into a list whose N entries are all dead: the probe
 /// reclaims a slot in place.
-fn bench_register_dead(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_register_dead");
-	for &n in &SIZES {
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			b.iter_batched(
-				|| {
-					let (list, waiters) = populated(n);
-					drop(waiters);
-					(list, Waiter::new(Waker::noop().clone()))
-				},
-				|(mut list, fresh)| {
-					fresh.register(&mut list);
-					(list, fresh)
-				},
-				BatchSize::SmallInput,
-			)
-		});
-	}
-	g.finish();
+#[bench(args = SIZES, setup = dead)]
+fn waiter_register_dead((mut list, fresh): (WaiterList, Waiter)) -> (WaiterList, Waiter) {
+	fresh.register(&mut list);
+	(list, fresh)
 }
 
-/// Register-and-abandon without a wake: every iteration allocates a waiter, parks
+/// Register-and-abandon without a wake: every call allocates a waiter, parks
 /// it, and drops it, so the list must keep reclaiming the dead slot it leaves.
-fn bench_cancel(c: &mut Criterion) {
-	c.bench_function("waiter_cancel", |b| {
-		let mut list = WaiterList::new();
-		b.iter(|| Waiter::new(Waker::noop().clone()).register(&mut list));
-	});
+#[bench(setup = WaiterList::new)]
+fn waiter_cancel(list: &mut WaiterList) {
+	Waiter::new(Waker::noop().clone()).register(list);
+}
+
+fn lists(n: usize) -> (Park, Vec<WaiterList>) {
+	(Park::default(), (0..n).map(|_| WaiterList::new()).collect())
 }
 
 /// The cycle a poll function actually drives: hold the park, register with L lists,
 /// then one list wakes. The re-poll arrives with live registrations still parked on
 /// the other lists, which it keeps, re-registering only on the list that woke.
-fn bench_park_cycle(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_park_cycle");
-	// Include broad polls that remain parked on many quiet lists.
-	for &lists in &[1usize, 2, 4, 8, 16, 32] {
-		g.bench_with_input(BenchmarkId::from_parameter(lists), &lists, |b, &n| {
-			let cx = Context::from_waker(Waker::noop());
-			let mut park = Park::default();
-			let mut lists: Vec<_> = (0..n).map(|_| WaiterList::new()).collect();
-			b.iter(|| {
-				let waiter = park.hold(&cx);
-				for list in &mut lists {
-					waiter.register(list);
-				}
-				lists[0].wake();
-			});
-		});
+///
+/// Includes broad polls that remain parked on many quiet lists.
+#[bench(args = [1, 2, 4, 8, 16, 32], setup = lists)]
+fn waiter_park_cycle((park, lists): &mut (Park, Vec<WaiterList>)) {
+	let cx = Context::from_waker(Waker::noop());
+	let waiter = park.hold(&cx);
+	for list in lists.iter_mut() {
+		waiter.register(list);
 	}
-	g.finish();
+	lists[0].wake();
 }
 
 /// Fan-out sizes to sweep, crossing the inline capacity into heap spill.
 const FANOUT: [usize; 4] = [8, 32, 128, 512];
 
+fn waiters(n: usize) -> (WaiterList, Vec<Waiter>) {
+	(WaiterList::new(), (0..n).map(|_| fresh()).collect())
+}
+
 /// The fan-out cycle: N waiters all parked on one list, a wake drains it, and every
 /// waiter re-registers. Throughput is per registration, so a super-linear per-cycle
 /// cost shows up as falling throughput at higher N.
-fn bench_fanout_cycle(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_fanout_cycle");
-	for &n in &FANOUT {
-		g.throughput(Throughput::Elements(n as u64));
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			let mut list = WaiterList::new();
-			let waiters: Vec<_> = (0..n).map(|_| Waiter::new(Waker::noop().clone())).collect();
-			b.iter(|| {
-				for waiter in &waiters {
-					waiter.register(&mut list);
-				}
-				// Drain the production way: snapshot under the lock, wake outside.
-				list.take().wake();
-			});
-		});
+#[bench(args = FANOUT, setup = waiters, items = |n| n)]
+fn waiter_fanout_cycle((list, waiters): &mut (WaiterList, Vec<Waiter>)) {
+	for waiter in waiters.iter() {
+		waiter.register(list);
 	}
-	g.finish();
+	// Drain the production way: snapshot under the lock, wake outside.
+	list.take().wake();
+}
+
+fn parks(n: usize) -> (WaiterList, WaiterList, Vec<Park>) {
+	(
+		WaiterList::new(),
+		WaiterList::new(),
+		(0..n).map(|_| Park::default()).collect(),
+	)
 }
 
 /// The fan-out cycle when every waiter is also parked on a second, never-woken list
 /// (a value list and a closed list under one lock, say). Each partial wake requires
 /// a new waiter, so this includes allocation and reclamation at high fan-out.
-fn bench_fanout_cycle_parked(c: &mut Criterion) {
-	let mut g = c.benchmark_group("waiter_fanout_cycle_parked");
-	for &n in &FANOUT {
-		g.throughput(Throughput::Elements(n as u64));
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			let mut list = WaiterList::new();
-			let mut parked = WaiterList::new();
-			let mut parks: Vec<_> = (0..n).map(|_| Park::default()).collect();
-			let cx = Context::from_waker(Waker::noop());
-			b.iter(|| {
-				for park in &mut parks {
-					let waiter = park.hold(&cx);
-					waiter.register(&mut list);
-					waiter.register(&mut parked);
-				}
-				list.take().wake();
-			});
-		});
+#[bench(args = FANOUT, setup = parks, items = |n| n)]
+fn waiter_fanout_cycle_parked((list, parked, parks): &mut (WaiterList, WaiterList, Vec<Park>)) {
+	let cx = Context::from_waker(Waker::noop());
+	for park in parks.iter_mut() {
+		let waiter = park.hold(&cx);
+		waiter.register(list);
+		waiter.register(parked);
 	}
-	g.finish();
+	list.take().wake();
 }
 
-criterion_group!(
-	benches,
-	bench_register_first,
-	bench_register,
-	bench_reregister,
-	bench_register_dead,
-	bench_cancel,
-	bench_park_cycle,
-	bench_fanout_cycle,
-	bench_fanout_cycle_parked
-);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

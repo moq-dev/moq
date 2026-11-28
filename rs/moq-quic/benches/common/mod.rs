@@ -4,8 +4,8 @@
 //! Both sides run the `fuzz` module's plaintext crypto, which skips TLS and leaves packets
 //! unprotected, and the congestion window is unlimited, so a benchmark measures protocol CPU
 //! rather than AES or a controller's model. Time is virtual: it only advances to
-//! the next timer once no datagram is in flight. Cases are timed in thread CPU time, so a busy
-//! host descheduling the benchmark does not inflate them.
+//! the next timer once no datagram is in flight. A case that times one side of an exchange reads
+//! that side's thread CPU time, so a busy host descheduling the benchmark does not inflate it.
 
 use std::{
 	collections::{HashMap, VecDeque},
@@ -18,10 +18,6 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cpu_time::ThreadTime;
-use criterion::{
-	Criterion,
-	measurement::{Measurement, ValueFormatter, WallTime},
-};
 use kio::clock::Instant;
 use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use moq_quic::{
@@ -183,7 +179,7 @@ pub(crate) struct Peer {
 	pub(crate) conns: HashMap<ConnectionHandle, Connection>,
 	pub(crate) sink: Sink,
 	pub(crate) received: Received,
-	/// Wall time spent in [`Peer::process`], to time one side of an exchange.
+	/// Thread CPU time spent in [`Peer::process`], to time one side of an exchange.
 	pub(crate) busy: Duration,
 	tasks: Tasks,
 	inbound: VecDeque<(SocketAddr, BytesMut)>,
@@ -865,48 +861,6 @@ impl Controller for Unlimited {
 impl Factory for Unlimited {
 	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
-	}
-}
-
-/// The Criterion config every target runs with: thread CPU time, not elapsed time.
-///
-/// The suite is single-threaded, so this thread's CPU time is the protocol's, and a loaded host
-/// preempting the benchmark does not count toward it.
-pub(crate) fn config() -> Criterion<ThreadCpu> {
-	Criterion::default().with_measurement(ThreadCpu)
-}
-
-/// Measures this thread's CPU time.
-pub(crate) struct ThreadCpu;
-
-impl Measurement for ThreadCpu {
-	type Intermediate = ThreadTime;
-	type Value = Duration;
-
-	fn start(&self) -> ThreadTime {
-		ThreadTime::now()
-	}
-
-	fn end(&self, start: ThreadTime) -> Duration {
-		start.elapsed()
-	}
-
-	fn add(&self, a: &Duration, b: &Duration) -> Duration {
-		*a + *b
-	}
-
-	fn zero(&self) -> Duration {
-		Duration::ZERO
-	}
-
-	fn to_f64(&self, value: &Duration) -> f64 {
-		value.as_nanos() as f64
-	}
-
-	fn formatter(&self) -> &dyn ValueFormatter {
-		// Durations, so they format the way elapsed time does.
-		static WALL: WallTime = WallTime;
-		WALL.formatter()
 	}
 }
 

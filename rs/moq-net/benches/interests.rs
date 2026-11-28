@@ -14,11 +14,29 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench interests`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fmt;
+
 use moq_net::{Prefixes, fuzz, origin};
 
-/// `(watches, sessions)` shapes.
-const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000, 1_000)];
+/// Unrelated watches held and sessions listening, named `<watches>w_<sessions>s`.
+#[derive(Clone, Copy)]
+struct Shape {
+	watches: usize,
+	sessions: usize,
+}
+
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}w_{}s", self.watches, self.sessions)
+	}
+}
+
+fn shapes() -> Vec<Shape> {
+	[(10, 10), (1_000, 10), (10, 1_000), (1_000, 1_000)]
+		.into_iter()
+		.map(|(watches, sessions)| Shape { watches, sessions })
+		.collect()
+}
 
 /// An origin with `watches` announcement streams on prefixes of their own under
 /// `other/`, one on `room/`, and `sessions` client sessions listening. The handles
@@ -30,7 +48,7 @@ struct Table {
 	sessions: Vec<fuzz::Interests>,
 }
 
-fn table(watches: usize, sessions: usize) -> Table {
+fn table(Shape { watches, sessions }: Shape) -> Table {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	let mut held: Vec<_> = (0..watches)
 		.map(|i| scoped(&producer, &format!("other/{i}")).routes())
@@ -52,50 +70,51 @@ fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
 	producer.consume().scope(prefix, &Prefixes::all()).unwrap()
 }
 
-fn bench_uncovered(c: &mut Criterion) {
-	let mut group = c.benchmark_group("interests/uncovered");
-	for (watches, sessions) in SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
-		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
-		let mut fixture = None;
-		group.bench_function(id, |b| {
-			let (table, incoming) = fixture.get_or_insert_with(|| {
-				let table = table(watches, sessions);
-				let incoming = scoped(&table.producer, "incoming");
-				(table, incoming)
-			});
-			b.iter(|| {
-				drop(incoming.routes());
-				for session in &table.sessions {
-					assert_eq!(session.drain(), 2);
-				}
-			});
-		});
+mod interests {
+	use moq_net::origin;
+	use swole::bench;
+
+	use super::{Shape, Table, scoped, shapes, table};
+
+	/// A table and a consumer of the prefix each call watches.
+	struct Watching {
+		table: Table,
+		incoming: origin::Consumer,
 	}
-	group.finish();
+
+	fn fresh(shape: Shape) -> Watching {
+		let table = table(shape);
+		let incoming = scoped(&table.producer, "incoming");
+		Watching { table, incoming }
+	}
+
+	fn beneath(shape: Shape) -> Watching {
+		let table = table(shape);
+		let incoming = scoped(&table.producer, "room/incoming");
+		Watching { table, incoming }
+	}
+
+	#[bench(args = shapes(), setup = fresh)]
+	fn uncovered(input: &Watching) {
+		drop(input.incoming.routes());
+		for session in &input.table.sessions {
+			assert_eq!(session.drain(), 2);
+		}
+	}
+
+	/// No session hears a watch beneath one already held.
+	fn unheard(input: &Watching) {
+		for session in &input.table.sessions {
+			assert_eq!(session.drain(), 0);
+		}
+	}
+
+	#[bench(args = shapes(), setup = beneath, after = unheard)]
+	fn covered(input: &Watching) {
+		drop(input.incoming.routes());
+	}
 }
 
-fn bench_covered(c: &mut Criterion) {
-	let mut group = c.benchmark_group("interests/covered");
-	for (watches, sessions) in SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
-		let mut fixture = None;
-		group.bench_function(id, |b| {
-			let (table, incoming) = fixture.get_or_insert_with(|| {
-				let table = table(watches, sessions);
-				let incoming = scoped(&table.producer, "room/incoming");
-				(table, incoming)
-			});
-			b.iter(|| {
-				drop(incoming.routes());
-			});
-			for session in &table.sessions {
-				assert_eq!(session.drain(), 0);
-			}
-		});
-	}
-	group.finish();
+fn main() {
+	swole::main();
 }
-
-criterion_group!(benches, bench_uncovered, bench_covered);
-criterion_main!(benches);

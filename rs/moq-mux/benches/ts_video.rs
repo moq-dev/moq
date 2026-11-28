@@ -1,11 +1,15 @@
 //! Video assembly across access-unit size and PES fragmentation.
+//!
+//! Run with `cargo bench -p moq-mux --bench ts_video`.
+use std::fmt;
+use std::io::Cursor;
+
 use bytes::Bytes;
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mpeg2ts::{
 	pes::{PesPacketReader, ReadPesPacket},
 	ts::TsPacketReader,
 };
-use std::{io::Cursor, time::Duration};
+use swole::bench;
 
 fn input(size: usize, payload: usize) -> Vec<u8> {
 	let fixture = include_bytes!("../src/container/ts/test_data/poc-avc.ts");
@@ -58,36 +62,55 @@ fn input(size: usize, payload: usize) -> Vec<u8> {
 	out
 }
 
-fn assembly(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_video");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for size in [4_096, 65_536, 1_048_576] {
-		group.throughput(Throughput::Bytes(size as u64));
-		for payload in [64, 1_024, 65_000] {
-			let data = Bytes::from(input(size, payload));
-			group.bench_function(BenchmarkId::new(size.to_string(), payload), |b| {
-				b.iter_batched(
-					|| {
-						let mut broadcast = moq_net::broadcast::Info::new().produce();
-						let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-						(
-							moq_mux::container::ts::Import::new(broadcast, catalog.reserve()),
-							catalog,
-						)
-					},
-					|(mut import, _catalog)| {
-						import.decode(&data).unwrap();
-						let import = import.finish().unwrap();
-						let _finished = std::hint::black_box(import);
-					},
-					BatchSize::SmallInput,
-				)
-			});
-		}
-	}
-	group.finish();
+/// An access unit of `size` bytes split into PES packets of `payload` bytes, named `<size>/<payload>`.
+#[derive(Clone, Copy)]
+struct Case {
+	size: usize,
+	payload: usize,
 }
-criterion_group!(benches, assembly);
-criterion_main!(benches);
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.size, self.payload)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	[4_096, 65_536, 1_048_576]
+		.into_iter()
+		.flat_map(|size| [64, 1_024, 65_000].map(|payload| Case { size, payload }))
+		.collect()
+}
+
+/// The stream, and an importer ready for it that each call takes.
+struct Assembly {
+	data: Bytes,
+	import: Option<(moq_mux::container::ts::Import, moq_mux::catalog::Producer)>,
+}
+
+fn assembly(case: Case) -> Assembly {
+	Assembly {
+		data: Bytes::from(input(case.size, case.payload)),
+		import: None,
+	}
+}
+
+fn importer(assembly: &mut Assembly) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	assembly.import = Some((
+		moq_mux::container::ts::Import::new(broadcast, catalog.reserve()),
+		catalog,
+	));
+}
+
+#[bench(args = cases(), setup = assembly, before = importer, bytes = |case: Case| case.size)]
+fn ts_video(assembly: &mut Assembly) {
+	let (mut import, _catalog) = assembly.import.take().expect("an importer");
+	import.decode(&assembly.data).unwrap();
+	let _finished = import.finish().unwrap();
+}
+
+fn main() {
+	swole::main();
+}

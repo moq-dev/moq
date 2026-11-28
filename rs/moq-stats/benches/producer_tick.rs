@@ -1,88 +1,36 @@
 //! What one relay pays per stats tick to drain its registry and encode its
 //! bucket track, swept over held paths, tiers, and the share of those paths
-//! whose counters changed since the last tick.
+//! whose counters changed since the last tick (`stats_tick`).
 //!
 //! Idle paths stay in the bucket's snapshot for as long as the registry holds
-//! them, so `heldB` grows with the table and is what nears the frame cap
-//! (`cap%`).
-//! `wroteB` is what this tick wrote: a merge-patch delta, or a snapshot when
-//! the tick opened a group, and zero when nothing changed. Time is the
-//! Criterion target `stats/tick`. The table is one warm-up plus a few ticks,
-//! allocations included.
+//! them, so the snapshot grows with the table; setup checks that it still fits
+//! the frame cap and that a changed tick writes a frame.
 //!
-//! `stats/presence` sweeps the same tick over connected labels and the
+//! `stats_presence` sweeps the same tick over connected labels and the
 //! presence tracks held for them.
 //!
-//! `stats/prefix` sweeps it over held paths, path depth, and held prefix
+//! `stats_prefix` sweeps it over held paths, path depth, and held prefix
 //! tracks: each row walks its ancestors once a prefix is held, so the cost
 //! grows with rows times depth, plus each held track's encode.
 //!
-//! `stats/buckets` sweeps a depth-1 producer over held paths and the buckets
+//! `stats_buckets` sweeps a depth-1 producer over held paths and the buckets
 //! they spread across, each bucket one track: the rows cost the same however
 //! they split, so a slope in buckets is per-track overhead.
 //!
-//! `stats/roots` sweeps a producer publishing each root's view over held paths
+//! `stats_roots` sweeps a producer publishing each root's view over held paths
 //! and the roots they spread across, one session per root: each row is copied
 //! into the one view above it, so a slope in roots is per-broadcast overhead.
 //!
-//! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
+//! Run with `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
+use std::fmt;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
 use moq_net::{origin, stats};
 use moq_stats::produce::bench::{Driver, FrameBytes};
+use swole::bench;
 
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
-
-/// Ticks averaged into one table row, after a warm-up drain.
-const TABLE_TICKS: u32 = 4;
-
-/// Held paths. The last count is sized so its one-tier snapshot nears the cache cap; `cap%` shows
-/// how close. Every tier shares the one bucket's snapshot, so more tiers stop below it.
+/// Held paths. The last count is sized so its one-tier snapshot nears the cache cap. Every tier shares the one bucket's snapshot, so more tiers stop below it.
 const PATHS: [usize; 4] = [100, 1_000, 10_000, 50_000];
 
 const TIERS: [usize; 2] = [1, 4];
@@ -206,103 +154,65 @@ impl Relay {
 	}
 }
 
-struct Row {
-	allocs: usize,
-	elapsed: Duration,
-	bytes: FrameBytes,
-}
-
-/// Warm up once, then average a few ticks. The warm-up pays for track creation.
-fn sample(relay: &mut Relay) -> Row {
-	black_box(relay.driver.tick());
-	let mut allocs = 0;
-	let mut elapsed = Duration::ZERO;
-	let mut bytes = FrameBytes::default();
-	for _ in 0..TABLE_TICKS {
-		relay.touch();
-		ALLOCATIONS.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
-		let start = Instant::now();
-		bytes = black_box(relay.driver.tick());
-		elapsed += start.elapsed();
-		COUNTING.store(false, Ordering::Relaxed);
-		allocs += ALLOCATIONS.load(Ordering::Relaxed);
-	}
-	Row {
-		allocs: allocs / TABLE_TICKS as usize,
-		elapsed: elapsed / TABLE_TICKS,
-		bytes,
+/// Warm up once, paying for track creation, then check one changed tick's frame.
+fn check(relay: &mut Relay, paths: usize, changed: usize) {
+	relay.driver.tick();
+	relay.touch();
+	let bytes = relay.driver.tick();
+	assert!(bytes.held > 0, "bucket snapshot missing");
+	assert!(
+		bytes.held as u64 <= CAP,
+		"bucket frame exceeds the cache cap: {} > {CAP}",
+		bytes.held
+	);
+	// The snapshot keeps every held path, so a few paths cannot be a couple of braces.
+	assert!(bytes.held > paths, "bucket snapshot did not grow with held paths");
+	if changed > 0 {
+		assert!(bytes.wrote > 0, "changed paths did not publish a frame");
 	}
 }
 
 /// The most moq-net's group cache holds, which a snapshot frame must fit.
 const CAP: u64 = 32 * 1024 * 1024;
 
-fn check_row(paths: usize, changed: usize, row: &Row) {
-	let cap = CAP;
-	assert!(row.bytes.held > 0, "bucket snapshot missing");
-	assert!(
-		row.bytes.held as u64 <= cap,
-		"bucket frame exceeds the cache cap: {} > {cap}",
-		row.bytes.held
-	);
-	// The snapshot keeps every held path, so a few paths cannot be a couple of braces.
-	assert!(row.bytes.held > paths, "bucket snapshot did not grow with held paths");
-	if changed > 0 {
-		assert!(row.bytes.wrote > 0, "changed paths did not publish a frame");
+/// One relay's tick, named `<paths>p_<tiers>t_<changed>pct`.
+#[derive(Clone, Copy)]
+struct Tick {
+	paths: usize,
+	tiers: usize,
+	changed: usize,
+}
+
+impl fmt::Display for Tick {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}p_{}t_{}pct", self.paths, self.tiers, self.changed)
 	}
 }
 
-fn bench(c: &mut Criterion) {
-	let cap = CAP;
-	println!("plain frame cap: {cap} bytes");
-	println!("paths tiers changed% allocs/tick us/tick heldB cap% wroteB");
-
-	let mut group = c.benchmark_group("stats/tick");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(200));
-	group.measurement_time(Duration::from_secs(1));
-	for &changed in &CHANGED {
-		for &tiers in &TIERS {
-			for &paths in &PATHS {
+fn ticks() -> Vec<Tick> {
+	let mut cases = Vec::new();
+	for changed in CHANGED {
+		for tiers in TIERS {
+			for paths in PATHS {
 				if tiers > 1 && paths == PATHS[PATHS.len() - 1] {
 					continue;
 				}
-				let id = BenchmarkId::from_parameter(format!("{paths}p_{tiers}t_{changed}pct"));
-				group.throughput(Throughput::Elements((paths * tiers) as u64));
-				// Criterion re-enters the closure per sample, so build and print the row
-				// once, and only when this id runs (not under `--list` or a filter).
-				let mut relay = None;
-				group.bench_function(id, |b| {
-					let relay = relay.get_or_insert_with(|| {
-						let mut relay = Relay::build(paths, tiers, changed, 2, None);
-						let row = sample(&mut relay);
-						let micros = row.elapsed.as_secs_f64() * 1e6;
-						println!(
-							"{paths:>5} {tiers:>5} {changed:>8} {allocs:>11} {micros:>8.1} {held:>8} {ratio:>4.0} {wrote:>8}",
-							allocs = row.allocs,
-							held = row.bytes.held,
-							ratio = row.bytes.held as f64 * 100.0 / cap as f64,
-							wrote = row.bytes.wrote,
-						);
-						check_row(paths, changed, &row);
-						relay
-					});
-					b.iter_custom(|iters| {
-						let mut total = Duration::ZERO;
-						for _ in 0..iters {
-							relay.touch();
-							let start = Instant::now();
-							black_box(relay.driver.tick());
-							total += start.elapsed();
-						}
-						total
-					});
-				});
+				cases.push(Tick { paths, tiers, changed });
 			}
 		}
 	}
-	group.finish();
+	cases
+}
+
+fn tick_relay(case: Tick) -> Relay {
+	let mut relay = Relay::build(case.paths, case.tiers, case.changed, 2, None);
+	check(&mut relay, case.paths, case.changed);
+	relay
+}
+
+#[bench(args = ticks(), setup = tick_relay, before = Relay::touch, items = |case: Tick| case.paths * case.tiers)]
+fn stats_tick(relay: &mut Relay) -> FrameBytes {
+	relay.driver.tick()
 }
 
 /// Connected labels, one session each.
@@ -361,48 +271,42 @@ impl Presence {
 	}
 }
 
+/// Connected and held labels, named `<labels>l_<held>h`.
+#[derive(Clone, Copy)]
+struct PresenceCase {
+	labels: usize,
+	held: usize,
+}
+
+impl fmt::Display for PresenceCase {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}l_{}h", self.labels, self.held)
+	}
+}
+
+fn presence_cases() -> Vec<PresenceCase> {
+	LABELS
+		.into_iter()
+		.flat_map(|labels| {
+			HELD.into_iter()
+				.filter(move |&held| held <= labels)
+				.map(move |held| PresenceCase { labels, held })
+		})
+		.collect()
+}
+
+fn presence(case: PresenceCase) -> Presence {
+	let mut relay = Presence::build(case.labels, case.held);
+	relay.driver.tick();
+	relay
+}
+
 /// What holding presence tracks costs a tick, swept over connected labels and
 /// held labels: each session row looks its label up once, and each held track
 /// is summed and encoded once.
-fn presence(c: &mut Criterion) {
-	println!("labels held allocs/tick us/tick");
-
-	let mut group = c.benchmark_group("stats/presence");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(200));
-	group.measurement_time(Duration::from_secs(1));
-	for &labels in &LABELS {
-		for &held in HELD.iter().filter(|&&held| held <= labels) {
-			let id = BenchmarkId::from_parameter(format!("{labels}l_{held}h"));
-			group.throughput(Throughput::Elements(labels as u64));
-			let mut relay = None;
-			group.bench_function(id, |b| {
-				let relay = relay.get_or_insert_with(|| {
-					let mut relay = Presence::build(labels, held);
-					black_box(relay.driver.tick());
-					ALLOCATIONS.store(0, Ordering::Relaxed);
-					COUNTING.store(true, Ordering::Relaxed);
-					let start = Instant::now();
-					for _ in 0..TABLE_TICKS {
-						black_box(relay.driver.tick());
-					}
-					let micros = start.elapsed().as_secs_f64() * 1e6 / TABLE_TICKS as f64;
-					COUNTING.store(false, Ordering::Relaxed);
-					let allocs = ALLOCATIONS.load(Ordering::Relaxed) / TABLE_TICKS as usize;
-					println!("{labels:>5} {held:>4} {allocs:>11} {micros:>8.1}");
-					relay
-				});
-				b.iter_custom(|iters| {
-					let start = Instant::now();
-					for _ in 0..iters {
-						black_box(relay.driver.tick());
-					}
-					start.elapsed()
-				});
-			});
-		}
-	}
-	group.finish();
+#[bench(args = presence_cases(), setup = presence, items = |case: PresenceCase| case.labels)]
+fn stats_presence(relay: &mut Presence) -> FrameBytes {
+	relay.driver.tick()
 }
 
 const PREFIX_PATHS: [usize; 2] = [1_000, 10_000];
@@ -413,48 +317,45 @@ const PREFIX_DEPTH: [usize; 2] = [2, 8];
 /// Prefix tracks a reader holds.
 const PREFIX_HELD: [usize; 3] = [0, 10, 100];
 
-/// What holding prefix tracks costs a tick, with a tenth of the paths moving.
-fn prefix(c: &mut Criterion) {
-	println!("paths depth held allocs/tick us/tick");
+/// Held paths, their depth, and held prefix tracks, named `<paths>p_<depth>d_<held>h`.
+#[derive(Clone, Copy)]
+struct PrefixCase {
+	paths: usize,
+	depth: usize,
+	held: usize,
+}
 
-	let mut group = c.benchmark_group("stats/prefix");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(200));
-	group.measurement_time(Duration::from_secs(1));
-	for &paths in &PREFIX_PATHS {
-		for &depth in &PREFIX_DEPTH {
-			for &held in &PREFIX_HELD {
-				let id = BenchmarkId::from_parameter(format!("{paths}p_{depth}d_{held}h"));
-				group.throughput(Throughput::Elements(paths as u64));
-				let mut relay = None;
-				group.bench_function(id, |b| {
-					let relay = relay.get_or_insert_with(|| {
-						let mut relay = Relay::build(paths, 1, 10, depth, None);
-						black_box(relay.driver.tick());
-						relay.hold(held);
-						let row = sample(&mut relay);
-						let micros = row.elapsed.as_secs_f64() * 1e6;
-						println!(
-							"{paths:>5} {depth:>5} {held:>4} {allocs:>11} {micros:>8.1}",
-							allocs = row.allocs
-						);
-						relay
-					});
-					b.iter_custom(|iters| {
-						let mut total = Duration::ZERO;
-						for _ in 0..iters {
-							relay.touch();
-							let start = Instant::now();
-							black_box(relay.driver.tick());
-							total += start.elapsed();
-						}
-						total
-					});
-				});
+impl fmt::Display for PrefixCase {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}p_{}d_{}h", self.paths, self.depth, self.held)
+	}
+}
+
+fn prefix_cases() -> Vec<PrefixCase> {
+	let mut cases = Vec::new();
+	for paths in PREFIX_PATHS {
+		for depth in PREFIX_DEPTH {
+			for held in PREFIX_HELD {
+				cases.push(PrefixCase { paths, depth, held });
 			}
 		}
 	}
-	group.finish();
+	cases
+}
+
+fn prefix(case: PrefixCase) -> Relay {
+	let mut relay = Relay::build(case.paths, 1, 10, case.depth, None);
+	relay.driver.tick();
+	relay.hold(case.held);
+	// Warm up once more, paying for the held tracks' creation.
+	relay.driver.tick();
+	relay
+}
+
+/// What holding prefix tracks costs a tick, with a tenth of the paths moving.
+#[bench(args = prefix_cases(), setup = prefix, before = Relay::touch, items = |case: PrefixCase| case.paths)]
+fn stats_prefix(relay: &mut Relay) -> FrameBytes {
+	relay.driver.tick()
 }
 
 const BUCKET_PATHS: [usize; 2] = [1_000, 10_000];
@@ -462,87 +363,63 @@ const BUCKET_PATHS: [usize; 2] = [1_000, 10_000];
 /// Buckets the paths spread across, each a track.
 const BUCKETS: [usize; 3] = [1, 100, 1_000];
 
+/// Held paths and the buckets or roots they spread across, named `<paths>p_<n><unit>`.
+#[derive(Clone, Copy)]
+struct Spread {
+	paths: usize,
+	across: usize,
+	unit: char,
+}
+
+impl fmt::Display for Spread {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}p_{}{}", self.paths, self.across, self.unit)
+	}
+}
+
+fn spread(across: [usize; 3], unit: char) -> Vec<Spread> {
+	BUCKET_PATHS
+		.into_iter()
+		.flat_map(|paths| {
+			across
+				.into_iter()
+				.filter(move |&across| across <= paths)
+				.map(move |across| Spread { paths, across, unit })
+		})
+		.collect()
+}
+
+fn buckets(case: Spread) -> Relay {
+	let mut relay = Relay::build(case.paths, 1, 10, 2, Some(case.across));
+	// Warm up once, paying for track creation.
+	relay.driver.tick();
+	relay
+}
+
 /// What spreading paths over bucket tracks costs a tick, with a tenth of the
 /// paths moving.
-fn buckets(c: &mut Criterion) {
-	println!("paths buckets allocs/tick us/tick");
-
-	let mut group = c.benchmark_group("stats/buckets");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(200));
-	group.measurement_time(Duration::from_secs(1));
-	for &paths in &BUCKET_PATHS {
-		for &buckets in BUCKETS.iter().filter(|&&buckets| buckets <= paths) {
-			let id = BenchmarkId::from_parameter(format!("{paths}p_{buckets}b"));
-			group.throughput(Throughput::Elements(paths as u64));
-			let mut relay = None;
-			group.bench_function(id, |b| {
-				let relay = relay.get_or_insert_with(|| {
-					let mut relay = Relay::build(paths, 1, 10, 2, Some(buckets));
-					let row = sample(&mut relay);
-					let micros = row.elapsed.as_secs_f64() * 1e6;
-					println!(
-						"{paths:>5} {buckets:>7} {allocs:>11} {micros:>8.1}",
-						allocs = row.allocs
-					);
-					relay
-				});
-				b.iter_custom(|iters| {
-					let mut total = Duration::ZERO;
-					for _ in 0..iters {
-						relay.touch();
-						let start = Instant::now();
-						black_box(relay.driver.tick());
-						total += start.elapsed();
-					}
-					total
-				});
-			});
-		}
-	}
-	group.finish();
+#[bench(args = spread(BUCKETS, 'b'), setup = buckets, before = Relay::touch, items = |case: Spread| case.paths)]
+fn stats_buckets(relay: &mut Relay) -> FrameBytes {
+	relay.driver.tick()
 }
 
 /// Roots the paths spread across, one session scoped to each.
 const ROOTS: [usize; 3] = [1, 100, 1_000];
 
-/// What publishing each root's view costs a tick, with a tenth of the paths moving.
-fn roots(c: &mut Criterion) {
-	println!("paths roots allocs/tick us/tick");
-
-	let mut group = c.benchmark_group("stats/roots");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(200));
-	group.measurement_time(Duration::from_secs(1));
-	for &paths in &BUCKET_PATHS {
-		for &roots in ROOTS.iter().filter(|&&roots| roots <= paths) {
-			let id = BenchmarkId::from_parameter(format!("{paths}p_{roots}r"));
-			group.throughput(Throughput::Elements(paths as u64));
-			let mut relay = None;
-			group.bench_function(id, |b| {
-				let relay = relay.get_or_insert_with(|| {
-					let mut relay = Relay::build(paths, 1, 10, 2, Some(roots));
-					relay.root(roots);
-					let row = sample(&mut relay);
-					let micros = row.elapsed.as_secs_f64() * 1e6;
-					println!("{paths:>5} {roots:>5} {allocs:>11} {micros:>8.1}", allocs = row.allocs);
-					relay
-				});
-				b.iter_custom(|iters| {
-					let mut total = Duration::ZERO;
-					for _ in 0..iters {
-						relay.touch();
-						let start = Instant::now();
-						black_box(relay.driver.tick());
-						total += start.elapsed();
-					}
-					total
-				});
-			});
-		}
-	}
-	group.finish();
+fn roots(case: Spread) -> Relay {
+	let mut relay = Relay::build(case.paths, 1, 10, 2, Some(case.across));
+	relay.root(case.across);
+	// Warm up once, paying for track creation.
+	relay.driver.tick();
+	relay
 }
 
-criterion_group!(benches, bench, presence, prefix, buckets, roots);
-criterion_main!(benches);
+/// What publishing each root's view costs a tick, with a tenth of the paths moving.
+#[bench(args = spread(ROOTS, 'r'), setup = roots, before = Relay::touch, items = |case: Spread| case.paths)]
+fn stats_roots(relay: &mut Relay) -> FrameBytes {
+	relay.driver.tick()
+}
+
+fn main() {
+	swole::main();
+}

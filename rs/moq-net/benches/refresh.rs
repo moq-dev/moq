@@ -2,24 +2,37 @@
 //! interval, with the demand each raises: swept over tracks and subscribers per track. The
 //! judgment reads only the asked track's newest group, so a cost that grows with the other
 //! tracks or the track's audience shows up as a slope. The group answering each request is
-//! written outside the timed section.
+//! written between calls, outside the measurement.
 //!
 //! Run with `cargo bench -p moq-net --bench refresh`.
 
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
-
-use std::time::{Duration, Instant};
+use std::fmt;
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::{broadcast, track};
 
 const TRACKS: [usize; 3] = [1, 100, 1_000];
 const SUBSCRIBERS: [usize; 3] = [1, 10, 100];
+
+/// Tracks on the broadcast and subscribers per track, named `<tracks>x/<subscribers>`.
+#[derive(Clone, Copy)]
+struct Case {
+	tracks: usize,
+	subscribers: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}x/{}", self.tracks, self.subscribers)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	TRACKS
+		.into_iter()
+		.flat_map(|tracks| SUBSCRIBERS.map(|subscribers| Case { tracks, subscribers }))
+		.collect()
+}
 
 /// Append group `key`, whose delta outweighs its first frame.
 fn refreshable(track: &track::Producer, key: u64) {
@@ -30,87 +43,114 @@ fn refreshable(track: &track::Producer, key: u64) {
 	group.finish().unwrap();
 }
 
-fn join(c: &mut Criterion) {
-	let mut group = c.benchmark_group("refresh/join");
-	for tracks in TRACKS {
-		for subscribers in SUBSCRIBERS {
-			let broadcast = broadcast::Info::default().produce();
-			let info = track::Info::default()
-				.with_max_age(None)
-				.with_refresh(moq_net::track::Refresh::default().with_ratio(1));
-			let producers: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("bench{i}"), info.clone()).unwrap())
-				.collect();
-			let _audience: Vec<Vec<_>> = producers
-				.iter()
-				.map(|track| (0..subscribers).map(|_| track.subscribe(None)).collect())
-				.collect();
-			let track = &producers[tracks / 2];
-			let demand = track.demand();
-			refreshable(track, 0);
-			let mut latest = 0;
-			group.bench_function(BenchmarkId::new(format!("{tracks}x"), subscribers), |b| {
-				b.iter_custom(|iterations| {
-					let mut elapsed = Duration::ZERO;
-					for _ in 0..iterations {
-						let start = Instant::now();
-						let joined = track.subscribe(None);
-						let asked = demand.poll_refresh(&kio::Waiter::noop()).is_ready();
-						elapsed += start.elapsed();
-						assert!(asked);
-						drop(joined);
-						latest += 1;
-						refreshable(track, latest);
-					}
-					elapsed
-				})
-			});
-		}
-	}
-	group.finish();
+/// A broadcast of `tracks` tracks with `subscribers` readers each, and the demand of the
+/// middle track, which each call asks to refresh.
+struct Audience {
+	_broadcast: broadcast::Producer,
+	producers: Vec<track::Producer>,
+	audience: Vec<Vec<track::Subscriber>>,
+	demand: track::Demand,
+	latest: u64,
 }
 
-fn refresh(c: &mut Criterion) {
-	let mut group = c.benchmark_group("refresh/request");
-	for tracks in TRACKS {
-		for subscribers in SUBSCRIBERS {
-			let broadcast = broadcast::Info::default().produce();
-			let refresh = track::Refresh::default().with_interval(Duration::ZERO);
-			let info = track::Info::default().with_max_age(None).with_refresh(refresh);
-			let producers: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("bench{i}"), info.clone()).unwrap())
-				.collect();
-			let audience: Vec<Vec<_>> = producers
-				.iter()
-				.map(|track| (0..subscribers).map(|_| track.subscribe(None)).collect())
-				.collect();
-			let asking = &audience[tracks / 2];
-			let track = &producers[tracks / 2];
-			let demand = track.demand();
-			refreshable(track, 0);
-			let mut latest = 0;
-			let mut held = Vec::with_capacity(subscribers);
-			group.bench_function(BenchmarkId::new(format!("{tracks}x"), subscribers), |b| {
-				b.iter_custom(|iterations| {
-					let mut elapsed = Duration::ZERO;
-					for _ in 0..iterations {
-						let start = Instant::now();
-						// Every reader asks; all but the first coalesce.
-						held.extend(asking.iter().map(|reader| reader.refresh()));
-						let asked = demand.poll_refresh(&kio::Waiter::noop()).is_ready();
-						elapsed += start.elapsed();
-						assert!(asked);
-						held.clear();
-						latest += 1;
-						refreshable(track, latest);
-					}
-					elapsed
-				})
-			});
+impl Audience {
+	fn new(case: Case, info: track::Info) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let producers: Vec<_> = (0..case.tracks)
+			.map(|i| broadcast.create_track(format!("bench{i}"), info.clone()).unwrap())
+			.collect();
+		let audience = producers
+			.iter()
+			.map(|track| (0..case.subscribers).map(|_| track.subscribe(None)).collect())
+			.collect();
+		let demand = producers[case.tracks / 2].demand();
+		refreshable(&producers[case.tracks / 2], 0);
+		Self {
+			_broadcast: broadcast,
+			producers,
+			audience,
+			demand,
+			latest: 0,
 		}
 	}
-	group.finish();
+
+	fn track(&self) -> &track::Producer {
+		&self.producers[self.producers.len() / 2]
+	}
+
+	/// Write the group answering the last request.
+	fn answer(&mut self) {
+		self.latest += 1;
+		refreshable(self.track(), self.latest);
+	}
 }
 
-criterion_group!(benches, join, refresh);
-criterion_main!(benches);
+mod refresh {
+	use std::time::Duration;
+
+	use moq_net::track;
+	use swole::bench;
+
+	use super::{Audience, Case, cases};
+
+	/// An audience whose track refreshes on every join, and the reader each call joins with.
+	struct Joining {
+		audience: Audience,
+		joined: Option<track::Subscriber>,
+	}
+
+	fn joining(case: Case) -> Joining {
+		let info = track::Info::default()
+			.with_max_age(None)
+			.with_refresh(track::Refresh::default().with_ratio(1));
+		Joining {
+			audience: Audience::new(case, info),
+			joined: None,
+		}
+	}
+
+	/// Drop the joined reader and answer its request, between calls.
+	fn rejoin(input: &mut Joining) {
+		drop(input.joined.take());
+		input.audience.answer();
+	}
+
+	#[bench(args = cases(), setup = joining, after = rejoin)]
+	fn join(input: &mut Joining) {
+		input.joined = Some(input.audience.track().subscribe(None));
+		assert!(input.audience.demand.poll_refresh(&kio::Waiter::noop()).is_ready());
+	}
+
+	/// An audience whose readers may refresh at any interval, and the requests each call holds.
+	struct Requesting {
+		audience: Audience,
+		held: Vec<track::Refreshing>,
+	}
+
+	fn requesting(case: Case) -> Requesting {
+		let refresh = track::Refresh::default().with_interval(Duration::ZERO);
+		let info = track::Info::default().with_max_age(None).with_refresh(refresh);
+		Requesting {
+			audience: Audience::new(case, info),
+			held: Vec::with_capacity(case.subscribers),
+		}
+	}
+
+	/// Release the requests and answer them, between calls.
+	fn rerequest(input: &mut Requesting) {
+		input.held.clear();
+		input.audience.answer();
+	}
+
+	#[bench(args = cases(), setup = requesting, after = rerequest)]
+	fn request(input: &mut Requesting) {
+		let asking = &input.audience.audience[input.audience.producers.len() / 2];
+		// Every reader asks; all but the first coalesce.
+		input.held.extend(asking.iter().map(|reader| reader.refresh()));
+		assert!(input.audience.demand.poll_refresh(&kio::Waiter::noop()).is_ready());
+	}
+}
+
+fn main() {
+	swole::main();
+}

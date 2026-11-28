@@ -3,26 +3,14 @@
 //! input rates (with and without resampling) and independent producers.
 //!
 //! PCM is the codec, so buffering and resampling show instead of codec CPU; four Opus
-//! cases put that cost beside a real codec's. Each case builds fresh producers, writes
+//! cases put that cost beside a real codec's. Each call gets fresh producers, writes
 //! every batch and finishes the track, so the partial tail and resampler flush count too.
 //!
-//! Run with `cargo bench -p moq-audio --bench batches`. A table comes first: user-space
-//! instructions per input sample (Linux `perf_event_open`, `-` where unavailable),
-//! allocations and allocated bytes from an untimed pass, plus the slowest write from a
-//! separate latency pass. Criterion then times each case without per-write timers.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "host time measures benchmark throughput"
-)]
+//! Run with `cargo bench -p moq-audio --bench batches`.
 
-use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::fmt;
 
 use bytes::Bytes;
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group};
 use moq_audio::encode::{Codec, Config, Finished, Input, Options, Producer};
 use moq_audio::{Frame, Layout};
 use moq_net::Timestamp;
@@ -31,111 +19,6 @@ use moq_net::Timestamp;
 const SECONDS: usize = 4;
 /// The codec rate every case publishes at.
 const CODEC_RATE: u32 = 48_000;
-
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-static ALLOCATED: AtomicU64 = AtomicU64::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-impl Counter {
-	fn count(size: usize) {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-			ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
-		}
-	}
-}
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: AllocLayout) -> *mut u8 {
-		Self::count(layout.size());
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: AllocLayout) -> *mut u8 {
-		Self::count(layout.size());
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: AllocLayout, new_size: usize) -> *mut u8 {
-		Self::count(new_size);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: AllocLayout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
-
-/// User-space instructions retired by this thread, for a count that repeats run to run.
-#[cfg(target_os = "linux")]
-mod instructions {
-	use perf_event::events::Hardware;
-
-	/// One counter per core PMU, because a hybrid CPU counts a generic event on one core
-	/// type only. Retired instructions are architectural, so the sum is exact wherever the
-	/// thread runs.
-	pub struct Counter(Vec<perf_event::Counter>);
-
-	impl Counter {
-		pub fn new() -> Option<Self> {
-			let hybrid: Vec<u64> = ["cpu_core", "cpu_atom"]
-				.iter()
-				.filter_map(|pmu| std::fs::read_to_string(format!("/sys/devices/{pmu}/type")).ok())
-				.map(|kind| kind.trim().parse().ok())
-				.collect::<Option<_>>()?;
-			// The PMU type goes in the high bits, as `PERF_PMU_TYPE_SHIFT` describes.
-			let events = match hybrid.is_empty() {
-				true => vec![Hardware::INSTRUCTIONS],
-				false => hybrid
-					.into_iter()
-					.map(|pmu| Hardware(pmu << 32 | Hardware::INSTRUCTIONS.0))
-					.collect(),
-			};
-			let counters = events
-				.into_iter()
-				.map(|event| perf_event::Builder::new(event).build().ok())
-				.collect::<Option<_>>()?;
-			Some(Self(counters))
-		}
-
-		pub fn start(&mut self) {
-			for counter in &mut self.0 {
-				counter.reset().unwrap();
-				counter.enable().unwrap();
-			}
-		}
-
-		pub fn stop(&mut self) -> u64 {
-			self.0
-				.iter_mut()
-				.map(|counter| {
-					counter.disable().unwrap();
-					counter.read().unwrap()
-				})
-				.sum()
-		}
-	}
-}
-
-#[cfg(not(target_os = "linux"))]
-mod instructions {
-	pub struct Counter;
-
-	impl Counter {
-		pub fn new() -> Option<Self> {
-			None
-		}
-		pub fn start(&mut self) {}
-		pub fn stop(&mut self) -> u64 {
-			0
-		}
-	}
-}
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -156,22 +39,7 @@ impl Case {
 		(self.frames() * self.layout.channels() as usize * self.producers) as u64
 	}
 
-	fn name(&self) -> String {
-		let batch = if self.batch >= self.frames() {
-			"burst".to_string()
-		} else {
-			self.batch.to_string()
-		};
-		format!(
-			"{}/{}hz/{}ch/batch_{batch}/producers_{}",
-			self.codec,
-			self.input_rate,
-			self.layout.channels(),
-			self.producers
-		)
-	}
-
-	/// The batches every producer writes, built outside the measured section.
+	/// The batches every producer writes.
 	fn input(&self) -> Vec<Frame> {
 		let channels = self.layout.channels() as usize;
 		let samples: Vec<f32> = (0..self.frames() * channels)
@@ -189,8 +57,8 @@ impl Case {
 			.collect()
 	}
 
-	/// Fresh producers on one broadcast, kept alive so teardown stays outside the measurement.
-	fn producers(&self) -> (moq_net::broadcast::Producer, Vec<Producer>) {
+	/// Fresh producers on one broadcast, and the batches they write.
+	fn batches(self) -> Batches {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let input = Input::new(self.input_rate, self.layout);
@@ -200,27 +68,36 @@ impl Case {
 		let producers = (0..self.producers)
 			.map(|_| Producer::new(&mut broadcast, catalog.clone(), input.clone(), &options).unwrap())
 			.collect();
-		(broadcast, producers)
+		Batches {
+			broadcast,
+			producers,
+			input: self.input(),
+		}
 	}
 }
 
-/// Time individual writes only in the separate latency pass, outside instruction and throughput measurements.
-fn run<const TIMED: bool>(mut producers: Vec<Producer>, input: &[Frame]) -> (Duration, Vec<Finished>) {
-	let mut slowest = Duration::ZERO;
-	for frame in input {
-		for producer in producers.iter_mut() {
-			let start = TIMED.then(Instant::now);
-			producer.write(black_box(frame)).unwrap();
-			if let Some(start) = start {
-				slowest = slowest.max(start.elapsed());
-			}
-		}
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let batch = if self.batch >= self.frames() {
+			"burst".to_string()
+		} else {
+			self.batch.to_string()
+		};
+		write!(
+			f,
+			"{}/{}hz/{}ch/batch_{batch}/producers_{}",
+			self.codec,
+			self.input_rate,
+			self.layout.channels(),
+			self.producers
+		)
 	}
-	let finished = producers
-		.into_iter()
-		.map(|producer| producer.finish().unwrap())
-		.collect();
-	(slowest, finished)
+}
+
+struct Batches {
+	broadcast: moq_net::broadcast::Producer,
+	producers: Vec<Producer>,
+	input: Vec<Frame>,
 }
 
 fn cases() -> Vec<Case> {
@@ -262,73 +139,27 @@ fn cases() -> Vec<Case> {
 	cases
 }
 
-fn counts() {
-	let mut counter = instructions::Counter::new();
-	println!(
-		"{:<44} {:>12} {:>10} {:>12} {:>12}",
-		"case", "insn/sample", "allocs", "alloc_bytes", "slowest_us"
-	);
-	for case in cases() {
-		let input = case.input();
-		let (broadcast, producers) = case.producers();
-		ALLOCATIONS.store(0, Ordering::Relaxed);
-		ALLOCATED.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
-		if let Some(counter) = &mut counter {
-			counter.start();
+/// Write every batch to every producer, then finish each. Returns the broadcast and what the
+/// producers finished, so their teardown stays outside the measurement.
+#[swole::bench(args = cases(), setup = Case::batches, items = |case: Case| case.samples())]
+fn pcm_batches(batches: Batches) -> (moq_net::broadcast::Producer, Vec<Finished>, Vec<Frame>) {
+	let Batches {
+		broadcast,
+		mut producers,
+		input,
+	} = batches;
+	for frame in &input {
+		for producer in producers.iter_mut() {
+			producer.write(frame).unwrap();
 		}
-		let (_, finished) = run::<false>(producers, &input);
-		let instructions = counter.as_mut().map(instructions::Counter::stop);
-		COUNTING.store(false, Ordering::Relaxed);
-		drop((finished, broadcast));
-		let (broadcast, producers) = case.producers();
-		let (slowest, finished) = run::<true>(producers, &input);
-		drop((finished, broadcast));
-
-		let per_sample = match instructions {
-			Some(instructions) => format!("{:.1}", instructions as f64 / case.samples() as f64),
-			None => "-".to_string(),
-		};
-		println!(
-			"{:<44} {per_sample:>12} {:>10} {:>12} {:>12.1}",
-			case.name(),
-			ALLOCATIONS.load(Ordering::Relaxed),
-			ALLOCATED.load(Ordering::Relaxed),
-			slowest.as_secs_f64() * 1e6,
-		);
 	}
+	let finished = producers
+		.into_iter()
+		.map(|producer| producer.finish().unwrap())
+		.collect();
+	(broadcast, finished, input)
 }
-
-fn bench_batches(c: &mut Criterion) {
-	let mut group = c.benchmark_group("pcm_batches");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(500));
-	group.measurement_time(Duration::from_secs(2));
-	for case in cases() {
-		let input = case.input();
-		group.throughput(Throughput::Elements(case.samples()));
-		group.bench_function(BenchmarkId::from_parameter(case.name()), |b| {
-			b.iter_batched(
-				|| case.producers(),
-				|(broadcast, producers)| {
-					let (_, finished) = run::<false>(producers, &input);
-					(broadcast, finished)
-				},
-				BatchSize::PerIteration,
-			);
-		});
-	}
-	group.finish();
-}
-
-criterion_group!(benches, bench_batches);
 
 fn main() {
-	// Nextest lists all targets as potential test binaries.
-	if std::env::args().any(|arg| arg == "--list") {
-		return;
-	}
-	counts();
-	benches();
-	Criterion::default().configure_from_args().final_summary();
+	swole::main();
 }

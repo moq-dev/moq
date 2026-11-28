@@ -1,15 +1,13 @@
 //! Container export cost swept over independently varied tracks and queued frames, and the
 //! cost of a live export's poll that nothing new woke.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "`iter_custom` timings measure the host clock on purpose"
-)]
+//!
+//! Run with `cargo bench -p moq-mux --bench export`.
+use std::fmt;
+use std::sync::LazyLock;
 use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hang::catalog::{AAC, AudioConfig};
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::{Frame, Kind};
@@ -80,7 +78,7 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 	(source, stream, fixture)
 }
 
-/// Opened during setup so the timed drain has the same boundary across API changes.
+/// Opened during setup so the measured drain has the same boundary across API changes.
 enum Export {
 	Flv(Box<moq_mux::container::flv::Export<moq_mux::catalog::Consumer>>),
 	Mkv(Box<moq_mux::container::mkv::Export<moq_mux::catalog::Consumer>>),
@@ -139,102 +137,188 @@ async fn export(export: Export) -> usize {
 	chunks
 }
 
-// A stable profiling boundary excludes publishing and opening from instruction counts.
-#[inline(never)]
-fn profiled_export(runtime: &tokio::runtime::Runtime, opened: Export) -> usize {
-	runtime.block_on(export(opened))
-}
-
-/// A runtime whose clock stands still between setup and the timed drain. A finished track's last
-/// group ages out of a live-edge export once its span passes on the clock, so a host slow
-/// enough to spend that long between the two would export nothing.
-fn paused() -> tokio::runtime::Runtime {
+/// A runtime whose clock stands still between setup and the measured drain. A finished track's
+/// last group ages out of a live-edge export once its span passes on the clock, so a host slow
+/// enough to spend that long between the two would export nothing. Static, since each call takes
+/// its broadcast by value.
+static PAUSED: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.start_paused(true)
 		.build()
 		.unwrap()
+});
+
+/// Audio tracks and queued frames on each, named `<tracks>x<frames>`.
+#[derive(Clone, Copy)]
+struct Queue {
+	tracks: usize,
+	frames: usize,
 }
 
-fn bench_export(c: &mut Criterion) {
-	let runtime = paused();
-	let mut group = c.benchmark_group("container-export");
-	group.sample_size(10);
-	group.measurement_time(Duration::from_secs(1));
-	for format in ["flv", "mkv", "ts"] {
-		for tracks in [1, 4, 16] {
-			for frames in [1, 16, 64] {
-				group.throughput(Throughput::Elements((tracks * frames) as u64));
-				group.bench_function(BenchmarkId::new(format, format!("{tracks}x{frames}")), |b| {
-					// Publishing and opening are setup; only draining the export is measured.
-					b.iter_batched(
-						|| {
-							let (source, stream, fixture) = runtime.block_on(prepare(tracks, frames, false));
-							(open(format, source, stream), fixture)
-						},
-						|(opened, fixture)| {
-							let chunks = profiled_export(&runtime, opened);
-							if format == "ts" {
-								assert!(chunks > 0);
-							} else {
-								assert_eq!(chunks, 1 + tracks * frames);
-							}
-							fixture
-						},
-						BatchSize::PerIteration,
-					);
-				});
-			}
+impl Queue {
+	fn items(self) -> usize {
+		self.tracks * self.frames
+	}
+}
+
+impl fmt::Display for Queue {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}x{}", self.tracks, self.frames)
+	}
+}
+
+fn queues() -> Vec<Queue> {
+	[1, 4, 16]
+		.into_iter()
+		.flat_map(|tracks| [1, 16, 64].map(|frames| Queue { tracks, frames }))
+		.collect()
+}
+
+/// A finished broadcast's export, opened; publishing and opening are setup, so only draining it
+/// is measured.
+mod container_export {
+	use swole::bench;
+
+	use super::{Export, Fixture, PAUSED, Queue, open, prepare, queues};
+
+	/// An opened export, the case it exports, and what keeps its broadcast served.
+	struct Opened {
+		export: Export,
+		queue: Queue,
+		fixture: Fixture,
+	}
+
+	fn opened(format: &str, queue: Queue) -> Opened {
+		let (source, stream, fixture) = PAUSED.block_on(prepare(queue.tracks, queue.frames, false));
+		Opened {
+			export: open(format, source, stream),
+			queue,
+			fixture,
 		}
 	}
-	group.finish();
+
+	/// Drain the export, returning its broadcast to drop after the measurement.
+	fn drain(opened: Opened) -> (usize, Fixture) {
+		(PAUSED.block_on(super::export(opened.export)), opened.fixture)
+	}
+
+	fn flv_opened(queue: Queue) -> Opened {
+		opened("flv", queue)
+	}
+
+	#[bench(args = queues(), setup = flv_opened, items = Queue::items)]
+	fn flv(opened: Opened) -> Fixture {
+		let items = opened.queue.items();
+		let (chunks, fixture) = drain(opened);
+		assert_eq!(chunks, 1 + items);
+		fixture
+	}
+
+	fn mkv_opened(queue: Queue) -> Opened {
+		opened("mkv", queue)
+	}
+
+	#[bench(args = queues(), setup = mkv_opened, items = Queue::items)]
+	fn mkv(opened: Opened) -> Fixture {
+		let items = opened.queue.items();
+		let (chunks, fixture) = drain(opened);
+		assert_eq!(chunks, 1 + items);
+		fixture
+	}
+
+	fn ts_opened(queue: Queue) -> Opened {
+		opened("ts", queue)
+	}
+
+	#[bench(args = queues(), setup = ts_opened, items = Queue::items)]
+	fn ts(opened: Opened) -> Fixture {
+		let (chunks, fixture) = drain(opened);
+		assert!(chunks > 0);
+		fixture
+	}
 }
 
 /// A live export polled again from the same task with nothing new: the poll a task pays for
 /// whenever something else wakes it. Swept over tracks, a slope is work repeated per track.
-fn export_idle(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("container-export-idle");
-	group.sample_size(10);
-	group.measurement_time(Duration::from_secs(1));
-	for format in ["flv", "mkv", "ts"] {
-		for tracks in [1, 4, 16] {
-			group.throughput(Throughput::Elements(tracks as u64));
-			group.bench_function(BenchmarkId::new(format, tracks), |b| {
-				let (mut opened, _fixture) = runtime.block_on(async {
-					let (source, stream, fixture) = prepare(tracks, 4, true).await;
-					let mut opened = open(format, source, stream);
-					// Take what the export lets go now, giving the origin's tasks a turn between polls.
-					while let Ok(chunk) =
-						kio::clock::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter)))
-							.await
-					{
-						assert!(chunk, "a live export ended");
-					}
-					(opened, fixture)
-				});
-				let mut park = kio::Park::default();
-				b.iter_custom(|iterations| {
-					runtime.block_on(std::future::poll_fn(|cx| {
-						let start = std::time::Instant::now();
-						for _ in 0..iterations {
-							// Each poll holds its waiter as `kio::wait` does.
-							assert!(std::hint::black_box(opened.poll_next(park.hold(cx))).is_pending());
-						}
-						Poll::Ready(start.elapsed())
-					}))
-				});
-			});
+mod container_export_idle {
+	use std::task::{Context, Waker};
+	use std::time::Duration;
+
+	use swole::bench;
+
+	use super::{Export, Fixture, open, prepare};
+
+	/// A live export that has taken all it can, the park its polls hold their waiter in, and the
+	/// runtime its broadcast runs on.
+	struct Idle {
+		opened: Export,
+		park: kio::Park,
+		_fixture: Fixture,
+		/// Last, so the broadcast drops while its driver task still exists.
+		runtime: tokio::runtime::Runtime,
+	}
+
+	fn idle(format: &str, tracks: usize) -> Idle {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		let (opened, fixture) = runtime.block_on(async {
+			let (source, stream, fixture) = prepare(tracks, 4, true).await;
+			let mut opened = open(format, source, stream);
+			// Take what the export lets go now, giving the origin's tasks a turn between polls.
+			while let Ok(chunk) =
+				kio::clock::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter))).await
+			{
+				assert!(chunk, "a live export ended");
+			}
+			(opened, fixture)
+		});
+		Idle {
+			opened,
+			park: kio::Park::default(),
+			_fixture: fixture,
+			runtime,
 		}
 	}
-	group.finish();
-}
 
-criterion_group!(benches, bench_export, video_reorder, export_idle);
-criterion_main!(benches);
+	/// Poll once, holding its waiter as `kio::wait` does, on the runtime the export belongs to.
+	fn poll(idle: &mut Idle) {
+		let _runtime = idle.runtime.enter();
+		let cx = Context::from_waker(Waker::noop());
+		assert!(idle.opened.poll_next(idle.park.hold(&cx)).is_pending());
+	}
+
+	const TRACKS: [usize; 3] = [1, 4, 16];
+
+	fn flv_idle(tracks: usize) -> Idle {
+		idle("flv", tracks)
+	}
+
+	#[bench(args = TRACKS, setup = flv_idle, items = |tracks| tracks)]
+	fn flv(idle: &mut Idle) {
+		poll(idle);
+	}
+
+	fn mkv_idle(tracks: usize) -> Idle {
+		idle("mkv", tracks)
+	}
+
+	#[bench(args = TRACKS, setup = mkv_idle, items = |tracks| tracks)]
+	fn mkv(idle: &mut Idle) {
+		poll(idle);
+	}
+
+	fn ts_idle(tracks: usize) -> Idle {
+		idle("ts", tracks)
+	}
+
+	#[bench(args = TRACKS, setup = ts_idle, items = |tracks| tracks)]
+	fn ts(idle: &mut Idle) {
+		poll(idle);
+	}
+}
 
 /// A progressive AVC SPS declaring a reorder depth of two (25 fps), as the catalog does.
 const REORDER_SPS: &[u8] = &[
@@ -315,63 +399,113 @@ async fn prepare_video(
 	)
 }
 
-fn video_reorder(c: &mut Criterion) {
-	let runtime = paused();
-	let mut group = c.benchmark_group("video-reorder");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(50));
-	group.measurement_time(Duration::from_millis(200));
-	for (format, pattern) in [
-		("mkv", "pyramid"),
-		("mkv", "flat"),
-		("mkv", "backward"),
-		("ts", "pyramid"),
-		("ts", "step-back"),
-	] {
-		let name = if format == "ts" {
-			format!("ts/{pattern}")
-		} else {
-			pattern.into()
-		};
+/// Frames of a size in a PTS pattern, named `<pattern>/<count>x<size>`.
+#[derive(Clone, Copy)]
+struct Reorder {
+	pattern: &'static str,
+	count: usize,
+	size: usize,
+}
+
+impl fmt::Display for Reorder {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}x{}", self.pattern, self.count, self.size)
+	}
+}
+
+fn reorders(patterns: &[&'static str]) -> Vec<Reorder> {
+	let mut cases = Vec::new();
+	for &pattern in patterns {
 		for count in [64, 256, 1024] {
 			for size in [256, 16_384] {
-				group.bench_function(BenchmarkId::new(&name, format!("{count}x{size}")), |b| {
-					b.iter_batched(
-						|| runtime.block_on(prepare_video(count, size, pattern)),
-						|(source, stream, fixture)| {
-							let refused = runtime.block_on(async {
-								if format == "ts" {
-									let mut opened =
-										moq_mux::container::ts::Export::new(source, stream, std::time::Duration::ZERO);
-									let mut chunks = 0;
-									while let Some(frame) = opened.next().await.unwrap() {
-										std::hint::black_box(frame);
-										chunks += 1;
-									}
-									assert!(chunks > 0);
-									assert_eq!(opened.discontinuity(), u64::from(pattern == "step-back"));
-									return false;
-								}
-								let mut export = moq_mux::container::mkv::Export::new(source, stream)
-									.with_fragment_duration(Duration::ZERO);
-								loop {
-									match export.next().await {
-										Ok(Some(frame)) => {
-											std::hint::black_box(frame);
-										}
-										Ok(None) => break false,
-										Err(_) => break true,
-									}
-								}
-							});
-							assert_eq!(refused, format == "mkv" && pattern != "pyramid");
-							fixture
-						},
-						BatchSize::PerIteration,
-					);
-				});
+				cases.push(Reorder { pattern, count, size });
 			}
 		}
 	}
-	group.finish();
+	cases
+}
+
+/// A finished video broadcast in `case`'s pattern, prepared for each call.
+struct Reordered {
+	source: moq_mux::Source,
+	stream: moq_mux::catalog::Consumer,
+	fixture: Fixture,
+	pattern: &'static str,
+}
+
+fn reordered(case: Reorder) -> Reordered {
+	let (source, stream, fixture) = PAUSED.block_on(prepare_video(case.count, case.size, case.pattern));
+	Reordered {
+		source,
+		stream,
+		fixture,
+		pattern: case.pattern,
+	}
+}
+
+/// Exporting video whose PTS run as the pattern says; MKV refuses any but the pyramid.
+mod video_reorder {
+	use std::time::Duration;
+
+	use swole::bench;
+
+	use super::{Fixture, PAUSED, Reordered, reordered, reorders};
+
+	fn mkv_reorders() -> Vec<super::Reorder> {
+		reorders(&["pyramid", "flat", "backward"])
+	}
+
+	#[bench(args = mkv_reorders(), setup = reordered)]
+	fn mkv(reordered: Reordered) -> Fixture {
+		let Reordered {
+			source,
+			stream,
+			fixture,
+			pattern,
+		} = reordered;
+		let refused = PAUSED.block_on(async {
+			let mut export =
+				moq_mux::container::mkv::Export::new(source, stream).with_fragment_duration(Duration::ZERO);
+			loop {
+				match export.next().await {
+					Ok(Some(frame)) => {
+						std::hint::black_box(frame);
+					}
+					Ok(None) => break false,
+					Err(_) => break true,
+				}
+			}
+		});
+		assert_eq!(refused, pattern != "pyramid");
+		fixture
+	}
+
+	fn ts_reorders() -> Vec<super::Reorder> {
+		reorders(&["pyramid", "step-back"])
+	}
+
+	#[bench(args = ts_reorders(), setup = reordered)]
+	fn ts(reordered: Reordered) -> Fixture {
+		let Reordered {
+			source,
+			stream,
+			fixture,
+			pattern,
+		} = reordered;
+		PAUSED.block_on(async {
+			let mut opened = moq_mux::container::ts::Export::new(source, stream, Duration::ZERO);
+			let mut chunks = 0;
+			while let Some(frame) = opened.next().await.unwrap() {
+				std::hint::black_box(frame);
+				chunks += 1;
+			}
+			assert!(chunks > 0);
+			assert_eq!(opened.discontinuity(), u64::from(pattern == "step-back"));
+		});
+		fixture
+	}
+}
+
+fn main() {
+	swole::main();
 }

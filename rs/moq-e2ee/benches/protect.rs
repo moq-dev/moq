@@ -2,13 +2,11 @@
 //!
 //! Run with `cargo bench -p moq-e2ee --bench protect`.
 
-use std::hint::black_box;
-use std::time::Duration;
-
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_net::Timestamp;
+
+const GROUPED: [u8; 1024] = [0; 1024];
+const OPUS: [u8; 160] = [0; 160];
 
 fn credential() -> Credential {
 	Credential::new(Config {
@@ -20,47 +18,64 @@ fn credential() -> Credential {
 }
 
 /// Each producer is its own publisher instance, so it gets its own epoch.
-fn broadcast(credential: &Credential) -> moq_e2ee::broadcast::Producer {
-	moq_e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), credential.produce())
+fn broadcast() -> moq_e2ee::broadcast::Producer {
+	moq_e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), credential().produce())
 }
 
-fn bench_protect(c: &mut Criterion) {
-	let credential = credential();
-	let grouped = vec![0u8; 1024];
-	let opus = vec![0u8; 160];
+mod protect {
+	use std::time::Duration;
 
-	let mut group = c.benchmark_group("protect");
-	group.throughput(Throughput::Bytes(grouped.len() as u64));
-	group.bench_function("grouped_1k", |b| {
+	use moq_net::Timestamp;
+	use swole::bench;
+
+	use super::{GROUPED, OPUS, broadcast};
+
+	/// A track producer and the millisecond its next group starts at.
+	struct Track {
+		producer: moq_e2ee::track::Producer,
+		ms: u64,
+	}
+
+	fn track() -> Track {
 		// Advancing timestamps plus a zero max age leave only the newest group fresh.
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(Duration::ZERO);
-		let mut producer = broadcast(&credential).create_track("video", info).unwrap().unwrap();
-		let mut ms = 0u64;
-		b.iter(|| {
-			ms += 1;
-			let mut group = producer.append_group(Timestamp::from_millis(ms).unwrap()).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(ms).unwrap(), black_box(&grouped))
-				.unwrap();
-			group.finish().unwrap();
-		});
-	});
-	group.throughput(Throughput::Bytes(opus.len() as u64));
-	group.bench_function("datagram_opus160", |b| {
+		let producer = broadcast().create_track("video", info).unwrap().unwrap();
+		Track { producer, ms: 0 }
+	}
+
+	#[bench(setup = track, bytes = GROUPED.len())]
+	fn grouped_1k(track: &mut Track) {
+		track.ms += 1;
+		let at = Timestamp::from_millis(track.ms).unwrap();
+		let mut group = track.producer.append_group(at).unwrap();
+		group.write_frame(at, &GROUPED[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// A datagram producer and the millisecond its next datagram carries.
+	struct Datagrams {
+		producer: moq_e2ee::datagram::Producer,
+		ms: u64,
+	}
+
+	fn datagrams() -> Datagrams {
 		let info = moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let mut producer = broadcast(&credential).create_datagrams("audio", info).unwrap().unwrap();
-		let mut ms = 0u64;
-		b.iter(|| {
-			ms += 1;
-			producer
-				.append(Timestamp::from_millis(ms).unwrap(), black_box(&opus))
-				.unwrap()
-		});
-	});
-	group.finish();
+		let producer = broadcast().create_datagrams("audio", info).unwrap().unwrap();
+		Datagrams { producer, ms: 0 }
+	}
+
+	#[bench(setup = datagrams, bytes = OPUS.len())]
+	fn datagram_opus160(datagrams: &mut Datagrams) -> u64 {
+		datagrams.ms += 1;
+		datagrams
+			.producer
+			.append(Timestamp::from_millis(datagrams.ms).unwrap(), &OPUS[..])
+			.unwrap()
+	}
 }
 
-criterion_group!(benches, bench_protect);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

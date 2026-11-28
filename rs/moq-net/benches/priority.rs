@@ -1,6 +1,8 @@
 //! Worst-case insertion benchmarks for the publishers' stream priority queue.
+//!
+//! Run with `cargo bench -p moq-net --features async --bench priority`.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use swole::bench;
 
 // Compiled straight from source so the queue stays private to the crate; a `pub` re-export
 // just for the bench would widen the crate's surface.
@@ -29,20 +31,13 @@ fn filled(depth: usize) -> (PriorityQueue, Vec<PriorityHandle>) {
 	(queue, handles)
 }
 
-fn bench_insert(c: &mut Criterion) {
-	let mut group = c.benchmark_group("priority_queue_insert_front");
-	for depth in DEPTHS {
-		group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
-			b.iter_batched_ref(
-				|| filled(depth),
-				|(queue, handles)| {
-					handles.push(queue.insert(Priority::new(i8::MAX, 0, u64::MAX)));
-				},
-				BatchSize::SmallInput,
-			);
-		});
-	}
-	group.finish();
+/// Takes the queue by value and returns it, so building and dropping it stay unmeasured.
+#[bench(args = DEPTHS, setup = filled)]
+fn priority_queue_insert_front(
+	(queue, mut handles): (PriorityQueue, Vec<PriorityHandle>),
+) -> (PriorityQueue, Vec<PriorityHandle>) {
+	handles.push(queue.insert(Priority::new(i8::MAX, 0, u64::MAX)));
+	(queue, handles)
 }
 
 fn overflow(depth: usize) -> Vec<PriorityHandle> {
@@ -54,15 +49,13 @@ fn overflow(depth: usize) -> Vec<PriorityHandle> {
 	handles
 }
 
-fn bench_remove_overflow(c: &mut Criterion) {
-	let mut group = c.benchmark_group("priority_queue_remove_overflow");
-	for depth in OVERFLOW_DEPTHS {
-		group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
-			b.iter_batched_ref(|| overflow(depth), |handles| drop(handles.pop()), BatchSize::SmallInput);
-		});
-	}
-	group.finish();
+/// Returns the rest of the handles, so only the popped one's removal is measured.
+#[bench(args = OVERFLOW_DEPTHS, setup = overflow)]
+fn priority_queue_remove_overflow(mut handles: Vec<PriorityHandle>) -> Vec<PriorityHandle> {
+	drop(handles.pop());
+	handles
 }
 
-criterion_group!(benches, bench_insert, bench_remove_overflow);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

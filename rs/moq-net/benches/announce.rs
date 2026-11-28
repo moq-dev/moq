@@ -15,14 +15,13 @@
 //! The hop chains travel only on lite-06; lite-07 names each claim's route instead, so
 //! its streams carry none.
 //!
-//! The byte counts print once before the timings.
-//!
 //! Run with `cargo bench -p moq-net --features fuzz --bench announce`.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::fmt;
+
 use moq_net::{
 	Path, announce,
-	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
+	fuzz::{AnnounceWriter, Announced},
 	origin,
 };
 
@@ -43,41 +42,97 @@ fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	initial
 }
 
-fn initial(c: &mut Criterion) {
-	let mut group = c.benchmark_group("announce_replay");
-	for routes in [1, 64, 1024] {
-		for updates in [1, 8, 32] {
-			let events: Vec<_> = (0..updates)
-				.flat_map(|cost| {
-					(0..routes).map(move |route| moq_net::fuzz::route_update(&format!("route/{route}"), cost))
-				})
-				.collect();
-			group.throughput(Throughput::Elements(events.len() as u64));
-			for indexed in [false, true] {
-				let name = if indexed { "indexed" } else { "scan" };
-				group.bench_function(format!("{name}/{routes}r_{updates}u"), |b| {
-					b.iter_batched(
-						|| events.clone(),
-						|events| {
-							let initial = if indexed {
-								moq_net::fuzz::replay(events)
-							} else {
-								scanned(events)
-							};
-							assert_eq!(initial.len(), routes);
-							std::hint::black_box(initial);
-						},
-						BatchSize::PerIteration,
-					);
-				});
-			}
-		}
-	}
-	group.finish();
+/// Routes and updates per route in a replayed batch, named `<routes>r_<updates>u`.
+#[derive(Clone, Copy)]
+struct Replay {
+	routes: usize,
+	updates: u64,
 }
 
-/// `(routes, churn)` shapes for the whole-stream measurements.
-const SHAPES: [(u64, u64); 4] = [(100, 0), (1_000, 0), (1_000, 1_000), (10_000, 1_000)];
+impl fmt::Display for Replay {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}r_{}u", self.routes, self.updates)
+	}
+}
+
+fn replays() -> Vec<Replay> {
+	[1, 64, 1024]
+		.into_iter()
+		.flat_map(|routes| [1, 8, 32].map(|updates| Replay { routes, updates }))
+		.collect()
+}
+
+mod announce_replay {
+	use moq_net::{announce, origin};
+	use swole::bench;
+
+	use super::{Replay, replays, scanned};
+
+	/// Each case's updates, `updates` per route, and how many routes they leave.
+	fn events(replay: Replay) -> (Vec<origin::RouteEvent>, usize) {
+		let events = (0..replay.updates)
+			.flat_map(|cost| {
+				(0..replay.routes).map(move |route| moq_net::fuzz::route_update(&format!("route/{route}"), cost))
+			})
+			.collect();
+		(events, replay.routes)
+	}
+
+	fn count(replay: Replay) -> usize {
+		replay.routes * replay.updates as usize
+	}
+
+	#[bench(args = replays(), setup = events, items = count)]
+	fn indexed((events, routes): (Vec<origin::RouteEvent>, usize)) -> Vec<announce::Announce> {
+		let initial = moq_net::fuzz::replay(events);
+		assert_eq!(initial.len(), routes);
+		initial
+	}
+
+	#[bench(args = replays(), setup = events, items = count)]
+	fn scan((events, routes): (Vec<origin::RouteEvent>, usize)) -> Vec<announce::Announce> {
+		let initial = scanned(events);
+		assert_eq!(initial.len(), routes);
+		initial
+	}
+}
+
+/// Routes announced, then how many of them are replaced, named `<routes>x<churn>`.
+#[derive(Clone, Copy)]
+struct Shape {
+	routes: u64,
+	churn: u64,
+}
+
+impl Shape {
+	/// Messages in the stream: a START per route and an END and START per replacement.
+	fn messages(self) -> u64 {
+		self.routes + 2 * self.churn
+	}
+}
+
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}x{}", self.routes, self.churn)
+	}
+}
+
+/// Shapes for the whole-stream measurements.
+const SHAPES: [Shape; 4] = [
+	Shape { routes: 100, churn: 0 },
+	Shape {
+		routes: 1_000,
+		churn: 0,
+	},
+	Shape {
+		routes: 1_000,
+		churn: 1_000,
+	},
+	Shape {
+		routes: 10_000,
+		churn: 1_000,
+	},
+];
 
 /// Live routes for the steady-state encode.
 const LIVE: [u64; 3] = [100, 1_000, 10_000];
@@ -129,73 +184,96 @@ fn unique(n: u64) -> (Path, Vec<u64>) {
 	)
 }
 
-type Workload = (&'static str, fn(u64) -> (Path, Vec<u64>));
-const WORKLOADS: [Workload; 2] = [("health", health), ("unique", unique)];
+/// An encoder holding `routes` live routes, which each call churns by one.
+struct Churn {
+	writer: AnnounceWriter,
+	data: Vec<u8>,
+	ring: Vec<Announced>,
+	routes: u64,
+	oldest: u64,
+}
 
-fn report() {
-	eprintln!("announce stream bytes (lite-06 literal -> lite-07 compressed):");
-	for (name, route) in WORKLOADS {
-		for (routes, churn) in SHAPES {
-			let literal = encode_announces(&stream(routes, churn, route, false), false).len();
-			let compressed = encode_announces(&stream(routes, churn, route, true), true).len();
-			let starts = routes + churn;
-			eprintln!(
-				"  {name:>6} routes={routes:>5} churn={churn:>5}: {literal:>8} -> {compressed:>8} bytes, {:.1} -> {:.1} per START ({:+.0}%)",
-				literal as f64 / starts as f64,
-				compressed as f64 / starts as f64,
-				(compressed as f64 / literal as f64 - 1.0) * 100.0,
-			);
+impl Churn {
+	fn new(routes: u64, route: fn(u64) -> (Path, Vec<u64>), compress: bool) -> Self {
+		// A ring twice the live set, so the route started never collides with one still live.
+		let ring: Vec<_> = (0..2 * routes).map(|n| start(route, n, compress)).collect();
+		let mut writer = AnnounceWriter::new(compress);
+		let mut data = Vec::new();
+		for start in &ring[..routes as usize] {
+			writer.write(start, &mut data);
 		}
+		Self {
+			writer,
+			data,
+			ring,
+			routes,
+			oldest: 0,
+		}
+	}
+
+	/// Retract the oldest live route and start the next one.
+	fn step(&mut self) {
+		self.data.clear();
+		self.writer.write(&Announced::End(self.oldest), &mut self.data);
+		self.writer.write(
+			&self.ring[((self.routes + self.oldest) % (2 * self.routes)) as usize],
+			&mut self.data,
+		);
+		self.oldest += 1;
 	}
 }
 
-fn bench(c: &mut Criterion) {
-	report();
+/// One workload's announce benchmarks, each version's churn and decode.
+macro_rules! workload {
+	($name:ident, $route:path) => {
+		mod $name {
+			use moq_net::fuzz::{Announced, decode_announces, encode_announces};
+			use swole::bench;
 
-	for (name, route) in WORKLOADS {
-		let mut group = c.benchmark_group(format!("announce_{name}"));
+			use super::{Churn, LIVE, SHAPES, Shape, stream};
 
-		for routes in LIVE {
-			group.throughput(Throughput::Elements(2));
+			fn churn06(routes: u64) -> Churn {
+				Churn::new(routes, $route, false)
+			}
 
-			for compress in [false, true] {
-				// A ring twice the live set, so the route started never collides with one
-				// still live.
-				let ring: Vec<_> = (0..2 * routes).map(|n| start(route, n, compress)).collect();
-				let version = if compress { "lite07" } else { "lite06" };
-				group.bench_function(BenchmarkId::new(format!("churn_{version}"), routes), |b| {
-					let mut writer = AnnounceWriter::new(compress);
-					let mut data = Vec::new();
-					for start in &ring[..routes as usize] {
-						writer.write(start, &mut data);
-					}
-					let mut oldest = 0;
-					b.iter(|| {
-						data.clear();
-						writer.write(&Announced::End(oldest), &mut data);
-						writer.write(&ring[((routes + oldest) % (2 * routes)) as usize], &mut data);
-						oldest += 1;
-					});
-				});
+			fn churn07(routes: u64) -> Churn {
+				Churn::new(routes, $route, true)
+			}
+
+			#[bench(args = LIVE, setup = churn06, items = |_: u64| 2)]
+			fn churn_lite06(churn: &mut Churn) {
+				churn.step()
+			}
+
+			#[bench(args = LIVE, setup = churn07, items = |_: u64| 2)]
+			fn churn_lite07(churn: &mut Churn) {
+				churn.step()
+			}
+
+			fn encoded06(shape: Shape) -> Vec<u8> {
+				encode_announces(&stream(shape.routes, shape.churn, $route, false), false)
+			}
+
+			fn encoded07(shape: Shape) -> Vec<u8> {
+				encode_announces(&stream(shape.routes, shape.churn, $route, true), true)
+			}
+
+			#[bench(args = SHAPES, setup = encoded06, items = Shape::messages)]
+			fn decode_lite06(encoded: &[u8]) -> Vec<Announced> {
+				decode_announces(encoded, false)
+			}
+
+			#[bench(args = SHAPES, setup = encoded07, items = Shape::messages)]
+			fn decode_lite07(encoded: &[u8]) -> Vec<Announced> {
+				decode_announces(encoded, true)
 			}
 		}
-
-		for (routes, churn) in SHAPES {
-			for compress in [false, true] {
-				let announced = stream(routes, churn, route, compress);
-				group.throughput(Throughput::Elements(announced.len() as u64));
-				let version = if compress { "lite07" } else { "lite06" };
-				let encoded = encode_announces(&announced, compress);
-				group.bench_with_input(
-					BenchmarkId::new(format!("decode_{version}"), format!("{routes}x{churn}")),
-					&encoded,
-					|b, encoded| b.iter(|| decode_announces(encoded, compress)),
-				);
-			}
-		}
-		group.finish();
-	}
+	};
 }
 
-criterion_group!(benches, bench, initial);
-criterion_main!(benches);
+workload!(announce_health, super::health);
+workload!(announce_unique, super::unique);
+
+fn main() {
+	swole::main();
+}

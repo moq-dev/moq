@@ -3,10 +3,12 @@
 //! shows as a falling rate with program count. A PAT that also names programs whose PMT lists
 //! no stream shows what a program costs before it starts. Stray PIDs no table lists sweep the
 //! unclaimed-PID accounting, against the same packets sent as null stuffing, which skips it.
+//!
+//! Run with `cargo bench -p moq-mux --bench ts_programs`.
 
-use std::time::Duration;
+use std::fmt;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use swole::bench;
 
 const FPS: u64 = 25;
 const GOP: u64 = 25;
@@ -212,8 +214,10 @@ fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
 	mux.out
 }
 
+type Importer = (moq_mux::container::ts::Programs, moq_net::origin::Driver);
+
 /// A fresh importer, with the origin driver it needs kept alive but unpolled.
-fn setup() -> (moq_mux::container::ts::Programs, impl Sized) {
+fn importer() -> Importer {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let programs = moq_mux::container::ts::Programs::new(
 		origin,
@@ -224,19 +228,63 @@ fn setup() -> (moq_mux::container::ts::Programs, impl Sized) {
 }
 
 /// Import all of `input` and finish, for the counters.
-fn ingest(programs: u16, input: &[u8]) -> (moq_mux::container::ts::stats::Snapshot, impl Sized) {
-	let (mut importer, driver) = setup();
+fn ingest(programs: u16, input: &[u8]) -> moq_mux::container::ts::stats::Snapshot {
+	let (mut importer, _driver) = importer();
 	importer.decode(input).unwrap();
 	let finished = importer.finish().unwrap();
 	assert_eq!(finished.broadcasts().len(), usize::from(programs));
-	(finished.stats(), (driver, finished))
+	finished.stats()
 }
 
-fn programs(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_programs");
-	group.measurement_time(Duration::from_secs(2));
-	group.warm_up_time(Duration::from_millis(300));
-	group.sample_size(10);
+/// An input, the packets per chunk to feed it in, and an importer for each call.
+struct Ingest {
+	input: Vec<u8>,
+	packets: usize,
+	importer: Option<Importer>,
+}
+
+fn refill(ingest: &mut Ingest) {
+	ingest.importer = Some(importer());
+}
+
+/// Decode the whole input, returning the importer so its drop stays outside the measurement.
+fn decode(ingest: &mut Ingest) -> Importer {
+	let (mut programs, driver) = ingest.importer.take().expect("refilled before each call");
+	for chunk in ingest.input.chunks(188 * ingest.packets) {
+		programs.decode(chunk).unwrap();
+	}
+	(programs, driver)
+}
+
+/// Described programs at a bitrate beside `extra`, named `<programs>[+<idle>|-<lane><strays>]/<mbps>mbps`.
+#[derive(Clone, Copy)]
+struct Case {
+	programs: u16,
+	extra: Extra,
+	mbps: u64,
+}
+
+impl Case {
+	fn input(self) -> Vec<u8> {
+		multiplex(self.programs, self.extra, self.mbps * 1_000_000)
+	}
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let Extra { idle, strays, null } = self.extra;
+		write!(f, "{}", self.programs)?;
+		if idle > 0 {
+			write!(f, "+{idle}")?;
+		}
+		if strays > 0 {
+			write!(f, "-{}{strays}", if null { "null" } else { "stray" })?;
+		}
+		write!(f, "/{}mbps", self.mbps)
+	}
+}
+
+fn cases() -> Vec<Case> {
 	let mut cases = Vec::new();
 	for programs in [1u16, 4, 16] {
 		for idle in [0u16, 1000] {
@@ -246,61 +294,64 @@ fn programs(c: &mut Criterion) {
 					strays: 0,
 					null: false,
 				};
-				let name = match idle {
-					0 => format!("{programs}"),
-					_ => format!("{programs}+{idle}"),
-				};
-				cases.push((programs, extra, mbps, name));
+				cases.push(Case { programs, extra, mbps });
 			}
 		}
 		for strays in [16u16, 256] {
-			for (lane, null) in [("null", true), ("stray", false)] {
+			for null in [true, false] {
 				let extra = Extra { idle: 0, strays, null };
-				cases.push((programs, extra, 1, format!("{programs}-{lane}{strays}")));
+				cases.push(Case {
+					programs,
+					extra,
+					mbps: 1,
+				});
 			}
 		}
 	}
-	for (programs, extra, mbps, name) in cases {
-		let input = multiplex(programs, extra, mbps * 1_000_000);
-		let (stats, _driver) = ingest(programs, &input);
-		let (media, strays): (Vec<_>, Vec<_>) = stats.streams.values().partition(|s| !s.track.is_empty());
-		assert!(
-			media.len() == usize::from(programs) && media.iter().all(|s| s.units == FPS),
-			"every program delivers every frame"
-		);
-		let counted = if extra.null { 0 } else { usize::from(extra.strays) };
-		assert!(
-			strays.len() == counted && strays.iter().all(|s| s.refused == FPS),
-			"every stray packet is counted"
-		);
-		group.throughput(Throughput::Bytes(input.len() as u64));
-		group.bench_function(BenchmarkId::new(name, format!("{mbps}mbps")), |b| {
-			b.iter_batched(
-				setup,
-				|(mut programs, driver)| {
-					for chunk in input.chunks(188 * 7) {
-						programs.decode(chunk).unwrap();
-					}
-					(programs, driver)
-				},
-				BatchSize::PerIteration,
-			)
-		});
-	}
-	group.finish();
+	cases
 }
 
-/// Packet batching and program fanout vary independently while each PCR repeats its first
-/// value, so no rate is measured and each program's health clock falls back to arrival,
-/// settled per input chunk, even for programs no packet routes to.
-fn stalled(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_stalled");
-	group.measurement_time(Duration::from_secs(2));
-	group.warm_up_time(Duration::from_millis(300));
-	group.sample_size(10);
-	for programs in [1u16, 4, 16] {
+fn programs(case: Case) -> Ingest {
+	let input = case.input();
+	let stats = ingest(case.programs, &input);
+	let (media, strays): (Vec<_>, Vec<_>) = stats.streams.values().partition(|s| !s.track.is_empty());
+	assert!(
+		media.len() == usize::from(case.programs) && media.iter().all(|s| s.units == FPS),
+		"every program delivers every frame"
+	);
+	let counted = if case.extra.null {
+		0
+	} else {
+		usize::from(case.extra.strays)
+	};
+	assert!(
+		strays.len() == counted && strays.iter().all(|s| s.refused == FPS),
+		"every stray packet is counted"
+	);
+	Ingest {
+		input,
+		packets: 7,
+		importer: None,
+	}
+}
+
+#[bench(args = cases(), setup = programs, before = refill, bytes = |case: Case| case.input().len())]
+fn ts_programs(ingest: &mut Ingest) -> Importer {
+	decode(ingest)
+}
+
+/// Programs, and packets per input chunk, named `<programs>/<packets>packets`.
+#[derive(Clone, Copy)]
+struct Stalled {
+	programs: u16,
+	packets: usize,
+}
+
+impl Stalled {
+	/// One second of `programs` programs whose every PCR repeats the first.
+	fn input(self) -> Vec<u8> {
 		let mut input = multiplex(
-			programs,
+			self.programs,
 			Extra {
 				idle: 0,
 				strays: 0,
@@ -314,30 +365,43 @@ fn stalled(c: &mut Criterion) {
 				packet[6..12].copy_from_slice(&[0, 0, 0xaf, 0xc8, 0x7e, 0]);
 			}
 		}
-		let (stats, _driver) = ingest(programs, &input);
-		assert_eq!(stats.streams.len(), usize::from(programs));
-		assert!(stats.streams.values().all(|stream| stream.units == FPS));
-		group.throughput(Throughput::Bytes(input.len() as u64));
-		for packets in [1, 7, 256] {
-			group.bench_function(
-				BenchmarkId::new(programs.to_string(), format!("{packets}packets")),
-				|b| {
-					b.iter_batched(
-						setup,
-						|(mut programs, driver)| {
-							for chunk in input.chunks(188 * packets) {
-								programs.decode(chunk).unwrap();
-							}
-							(programs, driver)
-						},
-						BatchSize::PerIteration,
-					)
-				},
-			);
-		}
+		input
 	}
-	group.finish();
 }
 
-criterion_group!(benches, programs, stalled);
-criterion_main!(benches);
+impl fmt::Display for Stalled {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}packets", self.programs, self.packets)
+	}
+}
+
+fn stalled_cases() -> Vec<Stalled> {
+	[1u16, 4, 16]
+		.into_iter()
+		.flat_map(|programs| [1, 7, 256].map(|packets| Stalled { programs, packets }))
+		.collect()
+}
+
+fn stalled(case: Stalled) -> Ingest {
+	let input = case.input();
+	let stats = ingest(case.programs, &input);
+	assert_eq!(stats.streams.len(), usize::from(case.programs));
+	assert!(stats.streams.values().all(|stream| stream.units == FPS));
+	Ingest {
+		input,
+		packets: case.packets,
+		importer: None,
+	}
+}
+
+/// Packet batching and program fanout vary independently while each PCR repeats its first
+/// value, so no rate is measured and each program's health clock falls back to arrival,
+/// settled per input chunk, even for programs no packet routes to.
+#[bench(args = stalled_cases(), setup = stalled, before = refill, bytes = |case: Stalled| case.input().len())]
+fn ts_stalled(ingest: &mut Ingest) -> Importer {
+	decode(ingest)
+}
+
+fn main() {
+	swole::main();
+}

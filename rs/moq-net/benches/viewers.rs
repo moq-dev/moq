@@ -4,17 +4,14 @@
 //! may depend on how many came before.
 //!
 //! Each viewer excludes its own hop the way a session serves its peer. That view
-//! is crate-private, so this reaches it through the `fuzz` module. Its own
-//! target keeps the counting allocator out of the `origin` bench.
+//! is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench viewers`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::fmt;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Timestamp, origin};
+use moq_net::Timestamp;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -23,58 +20,38 @@ fn timed() -> moq_net::track::Info {
 		.with_timescale(moq_net::Timescale::MILLI)
 }
 
-/// `(viewers, broadcasts)` shapes: viewers spread round-robin over the broadcasts.
-const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (1_000, 100), (10_000, 100)];
+/// Viewers spread round-robin over the broadcasts, named `<viewers>v_<broadcasts>b`.
+#[derive(Clone, Copy)]
+struct Shape {
+	viewers: usize,
+	broadcasts: usize,
+}
 
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-fn count(bytes: isize) {
-	if COUNTING.load(Ordering::Relaxed) {
-		LIVE.fetch_add(bytes, Ordering::Relaxed);
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}v_{}b", self.viewers, self.broadcasts)
 	}
 }
 
-// Counting only. Every call forwards to the system allocator unchanged.
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		count(layout.size() as isize);
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		count(layout.size() as isize);
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		count(new_size as isize - layout.size() as isize);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		count(-(layout.size() as isize));
-		unsafe { System.dealloc(ptr, layout) }
-	}
+fn shapes() -> Vec<Shape> {
+	[(100, 1), (1_000, 1), (1_000, 100), (10_000, 100)]
+		.into_iter()
+		.map(|(viewers, broadcasts)| Shape { viewers, broadcasts })
+		.collect()
 }
 
 /// An origin publishing `room/<i>` broadcasts, each with one track holding one
 /// group, and its driver polled in place.
 struct Room {
-	producer: origin::Producer,
-	driver: origin::Driver,
+	producer: moq_net::origin::Producer,
+	driver: moq_net::origin::Driver,
 	broadcasts: usize,
-	_sources: Vec<(origin::Route, moq_net::track::Producer)>,
+	_sources: Vec<(moq_net::origin::Route, moq_net::track::Producer)>,
 }
 
 impl Room {
 	fn new(broadcasts: usize) -> Self {
-		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		let _sources = (0..broadcasts)
 			.map(|i| {
 				let broadcast = producer
@@ -132,72 +109,61 @@ impl Room {
 	}
 }
 
-fn id(viewers: usize, broadcasts: usize) -> BenchmarkId {
-	BenchmarkId::from_parameter(format!("{viewers}v_{broadcasts}b"))
-}
+mod origin {
+	use moq_net::track;
+	use swole::bench;
 
-/// One more viewer joining and leaving while `viewers` watch.
-fn bench_join(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/viewer_join");
-	for (viewers, broadcasts) in SHAPES {
-		group.bench_function(id(viewers, broadcasts), |b| {
-			let mut room = Room::new(broadcasts);
-			let _watching: Vec<_> = (0..viewers).map(|n| room.join(n)).collect();
-			let mut next = 0;
-			b.iter(|| {
-				let subscription = room.join(next);
-				next += 1;
-				room.leave(subscription);
-			});
-		});
+	use super::{Room, Shape, shapes};
+
+	/// A room with `viewers` watching, and the next viewer's number.
+	struct Watching {
+		room: Room,
+		_watching: Vec<track::Subscriber>,
+		next: usize,
 	}
-	group.finish();
-}
 
-/// A route change covering every broadcast after `viewers` came and went: every
-/// front beneath it wakes to re-select, so the cost follows the fronts the viewers
-/// left behind. First prints the heap each departed viewer left behind.
-fn bench_churn(c: &mut Criterion) {
-	eprintln!("origin heap retained per departed viewer:");
-	for (viewers, broadcasts) in SHAPES {
-		let mut room = Room::new(broadcasts);
-		// Warm up, so no viewer is billed for the front its broadcast keeps anyway.
-		for n in 0..broadcasts {
+	fn watching(shape: Shape) -> Watching {
+		let mut room = Room::new(shape.broadcasts);
+		let _watching = (0..shape.viewers).map(|n| room.join(n)).collect();
+		Watching {
+			room,
+			_watching,
+			next: 0,
+		}
+	}
+
+	/// One more viewer joining and leaving while `viewers` watch.
+	#[bench(args = shapes(), setup = watching)]
+	fn viewer_join(input: &mut Watching) {
+		let subscription = input.room.join(input.next);
+		input.next += 1;
+		input.room.leave(subscription);
+	}
+
+	/// A room `viewers` came and went from.
+	fn departed(shape: Shape) -> Room {
+		let mut room = Room::new(shape.broadcasts);
+		for n in 0..shape.viewers {
 			let subscription = room.join(n);
 			room.leave(subscription);
 		}
-		LIVE.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
-		for n in 0..viewers {
-			let subscription = room.join(n);
-			room.leave(subscription);
-		}
-		COUNTING.store(false, Ordering::Relaxed);
-		let retained = LIVE.load(Ordering::Relaxed) as f64 / viewers as f64;
-		eprintln!("  {viewers:>6} viewers, {broadcasts:>3} broadcasts: {retained:>8.1} bytes");
+		room
 	}
 
-	let mut group = c.benchmark_group("origin/viewer_churn");
-	for (viewers, broadcasts) in SHAPES {
-		group.bench_function(id(viewers, broadcasts), |b| {
-			let mut room = Room::new(broadcasts);
-			for n in 0..viewers {
-				let subscription = room.join(n);
-				room.leave(subscription);
-			}
-			b.iter(|| {
-				let covering = room
-					.producer
-					.claim("room", moq_net::origin::RouteOptions::default())
-					.unwrap();
-				room.poll();
-				drop(covering);
-				room.poll();
-			});
-		});
+	/// A route change covering every broadcast after `viewers` came and went: every front
+	/// beneath it wakes to re-select, so the cost follows the fronts the viewers left behind.
+	#[bench(args = shapes(), setup = departed)]
+	fn viewer_churn(room: &mut Room) {
+		let covering = room
+			.producer
+			.claim("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		room.poll();
+		drop(covering);
+		room.poll();
 	}
-	group.finish();
 }
 
-criterion_group!(benches, bench_join, bench_churn);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

@@ -1,13 +1,7 @@
 //! Tokio/epoll baseline for UDP receive batching and send GSO on Linux.
 
-use criterion::{criterion_group, criterion_main};
-
 #[cfg(target_os = "linux")]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "benchmarks measure themselves on the host clock"
-)]
+#[expect(clippy::disallowed_methods, reason = "a stalled burst fails on the host clock")]
 mod linux {
 	use std::fmt;
 	use std::io::{self, IoSliceMut};
@@ -15,9 +9,8 @@ mod linux {
 	use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 
 	use std::os::fd::AsRawFd;
-	use std::time::{Duration, Instant};
+	use std::time::Duration;
 
-	use criterion::{BenchmarkId, Criterion, Throughput};
 	use moq_sock::udp::{RecvMeta, Transmit, UdpSocketState};
 	use nix::sys::socket::{
 		ControlMessageOwned, MsgFlags, getsockopt, recvmsg, setsockopt,
@@ -30,21 +23,21 @@ mod linux {
 	const BURST_SEGMENTS: usize = 32;
 	const BURST_BYTES: usize = SEGMENT_SIZE * BURST_SEGMENTS;
 	const TOTAL_SEGMENTS: usize = 8 * 1024;
-	const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
+	pub const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
 	const RECEIVE_BUFFER_SIZE: usize = BURST_BYTES * 4;
 	const BURST_TIMEOUT: Duration = Duration::from_secs(1);
 	const MAX_GRO_SEGMENTS: usize = 64;
 	const MAX_RECV_SIZE: usize = SEGMENT_SIZE * MAX_GRO_SEGMENTS;
 
 	#[derive(Clone, Copy)]
-	struct Config {
+	pub struct Config {
 		recvmmsg: bool,
 		gro: bool,
 		gso: bool,
 	}
 
 	impl Config {
-		fn all() -> impl Iterator<Item = Self> {
+		pub fn all() -> impl Iterator<Item = Self> {
 			[false, true].into_iter().flat_map(|gso| {
 				[false, true].into_iter().flat_map(move |gro| {
 					[false, true]
@@ -64,7 +57,7 @@ mod linux {
 		}
 	}
 
-	struct Pair {
+	pub struct Pair {
 		config: Config,
 		sender: UdpSocket,
 		receiver: UdpSocket,
@@ -86,7 +79,7 @@ mod linux {
 	}
 
 	impl Pair {
-		fn new(config: Config) -> anyhow::Result<Self> {
+		pub fn new(config: Config) -> anyhow::Result<Self> {
 			let sender = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let receiver = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			setsockopt(&receiver, RcvBuf, &RECEIVE_BUFFER_SIZE)?;
@@ -153,7 +146,7 @@ mod linux {
 			})
 		}
 
-		async fn transfer(&mut self) -> anyhow::Result<()> {
+		pub async fn transfer(&mut self) -> anyhow::Result<()> {
 			for _ in 0..TOTAL_SEGMENTS / BURST_SEGMENTS {
 				self.send_burst().await?;
 
@@ -331,43 +324,42 @@ mod linux {
 			})
 		}
 	}
-
-	pub fn benchmark(c: &mut Criterion) {
-		let runtime = tokio::runtime::Builder::new_current_thread()
-			.enable_io()
-			.enable_time()
-			.build()
-			.expect("build Tokio current-thread runtime");
-
-		let mut group = c.benchmark_group("udp_tokio_epoll");
-		group.throughput(Throughput::Bytes(TOTAL_BYTES as u64));
-
-		for config in Config::all() {
-			let mut pair = runtime
-				.block_on(async { Pair::new(config) })
-				.expect("create UDP socket pair");
-			group.bench_with_input(BenchmarkId::from_parameter(config), &config, |b, _| {
-				b.iter_custom(|iterations| {
-					let start = Instant::now();
-					runtime.block_on(async {
-						for _ in 0..iterations {
-							pair.transfer().await.expect("transfer UDP benchmark payload");
-						}
-					});
-					start.elapsed()
-				});
-			});
-		}
-
-		group.finish();
-	}
 }
 
 #[cfg(target_os = "linux")]
-use linux::benchmark;
+use linux::{Config, Pair, TOTAL_BYTES};
+#[cfg(target_os = "linux")]
+use swole::bench;
 
-#[cfg(not(target_os = "linux"))]
-fn benchmark(_: &mut criterion::Criterion) {}
+/// A socket pair and the current-thread runtime that drives it.
+#[cfg(target_os = "linux")]
+struct Epoll {
+	pair: Pair,
+	runtime: tokio::runtime::Runtime,
+}
 
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+#[cfg(target_os = "linux")]
+fn epoll(config: Config) -> Epoll {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_io()
+		.enable_time()
+		.build()
+		.expect("build Tokio current-thread runtime");
+	let pair = runtime
+		.block_on(async { Pair::new(config) })
+		.expect("create UDP socket pair");
+	Epoll { pair, runtime }
+}
+
+#[cfg(target_os = "linux")]
+#[bench(args = Config::all(), setup = epoll, bytes = |_: Config| TOTAL_BYTES)]
+fn udp_tokio_epoll(epoll: &mut Epoll) {
+	epoll
+		.runtime
+		.block_on(epoll.pair.transfer())
+		.expect("transfer UDP benchmark payload");
+}
+
+fn main() {
+	swole::main();
+}

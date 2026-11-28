@@ -9,13 +9,11 @@
 //!
 //! Compression is moq-net's, so it is benchmarked there.
 //!
-//! Run with `cargo bench -p moq-json`.
+//! Run with `cargo bench -p moq-json --features bench --bench codec`.
 
-use std::hint::black_box;
-
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_json::bench::diff;
 use serde_json::{Map, Value, json};
+use swole::bench;
 
 /// One second of telemetry: a big static core plus a few moving numbers. Most fields change a little
 /// each tick, so the delta is small but touches much of the document.
@@ -130,7 +128,6 @@ fn merge_owned(target: &mut Value, patch: Value) {
 /// One workload reduced to a single old -> new transition and the artifacts each op needs: the patch
 /// value and the serialized snapshot, patch, and new value.
 struct Fixture {
-	name: &'static str,
 	old: Value,
 	new: Value,
 	patch: Value,
@@ -141,89 +138,86 @@ struct Fixture {
 	new_bytes: Vec<u8>,
 }
 
-impl Fixture {
-	fn new(name: &'static str, make: fn(u64) -> Value) -> Self {
-		let old = make(0);
-		let new = make(1);
-		let patch = diff(&old, &new).patch;
-		let snapshot_bytes = serde_json::to_vec(&old).unwrap();
-		let patch_bytes = serde_json::to_vec(&patch).unwrap();
-		let new_bytes = serde_json::to_vec(&new).unwrap();
+/// The workloads, by name.
+const FIXTURES: [&str; 2] = ["telemetry", "big_static"];
 
-		Self {
-			name,
-			old,
-			new,
-			patch,
-			snapshot_bytes,
-			patch_bytes,
-			new_bytes,
-		}
+fn fixture(name: &str) -> Fixture {
+	let make = match name {
+		"telemetry" => telemetry,
+		"big_static" => big_static,
+		_ => unreachable!("unknown fixture {name}"),
+	};
+	let old = make(0);
+	let new = make(1);
+	let patch = diff(&old, &new).patch;
+	let snapshot_bytes = serde_json::to_vec(&old).unwrap();
+	let patch_bytes = serde_json::to_vec(&patch).unwrap();
+	let new_bytes = serde_json::to_vec(&new).unwrap();
+
+	Fixture {
+		old,
+		new,
+		patch,
+		snapshot_bytes,
+		patch_bytes,
+		new_bytes,
 	}
 }
 
-fn fixtures() -> Vec<Fixture> {
-	vec![
-		Fixture::new("telemetry", telemetry),
-		Fixture::new("big_static", big_static),
-	]
+/// The size of the fixture's snapshot, each benchmark's throughput.
+fn snapshot_len(name: &str) -> usize {
+	fixture(name).snapshot_bytes.len()
 }
 
 /// 1. Generate a merge patch from the old and new values.
-fn encode_patch(c: &mut Criterion) {
-	let mut group = c.benchmark_group("encode_patch");
-	for f in &fixtures() {
-		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
-			b.iter(|| black_box(diff(&f.old, &f.new)));
-		});
-	}
-	group.finish();
+#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+fn encode_patch(f: &Fixture) -> moq_json::bench::Diff {
+	diff(&f.old, &f.new)
 }
 
 /// 2. Apply a merge patch to reconstruct the new value, json_patch (borrowing) vs consuming merge.
-fn decode_patch(c: &mut Criterion) {
-	let mut group = c.benchmark_group("decode_patch");
-	for f in &fixtures() {
-		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::new("json_patch", f.name), f, |b, f| {
-			b.iter_batched(
-				|| f.old.clone(),
-				|mut current| {
-					json_patch::merge(&mut current, &f.patch);
-					black_box(current);
-				},
-				BatchSize::SmallInput,
-			);
-		});
-		group.bench_with_input(BenchmarkId::new("merge_owned", f.name), f, |b, f| {
-			b.iter_batched(
-				|| (f.old.clone(), f.patch.clone()),
-				|(mut current, patch)| {
-					merge_owned(&mut current, patch);
-					black_box(current);
-				},
-				BatchSize::SmallInput,
-			);
-		});
+mod decode_patch {
+	use serde_json::Value;
+	use swole::bench;
+
+	use super::{FIXTURES, snapshot_len};
+
+	/// The old value and the patch, fresh for each call.
+	fn input(name: &str) -> (Value, Value) {
+		let f = super::fixture(name);
+		(f.old, f.patch)
 	}
-	group.finish();
+
+	#[bench(args = FIXTURES, setup = input, bytes = snapshot_len)]
+	fn json_patch((mut current, patch): (Value, Value)) -> Value {
+		::json_patch::merge(&mut current, &patch);
+		current
+	}
+
+	#[bench(args = FIXTURES, setup = input, bytes = snapshot_len)]
+	fn merge_owned((mut current, patch): (Value, Value)) -> Value {
+		super::merge_owned(&mut current, patch);
+		current
+	}
 }
 
 /// The marshal each path pays per tick: a full `to_vec` of the document (snapshot-only) vs a `to_vec`
 /// of just the patch (delta). The diff already walks the whole document, so this is the extra cost
 /// the snapshot path carries that the delta path avoids.
-fn marshal(c: &mut Criterion) {
-	let mut group = c.benchmark_group("marshal");
-	for f in &fixtures() {
-		group.bench_with_input(BenchmarkId::new("full", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::to_vec(&f.new).unwrap()));
-		});
-		group.bench_with_input(BenchmarkId::new("patch", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::to_vec(&f.patch).unwrap()));
-		});
+mod marshal {
+	use swole::bench;
+
+	use super::{FIXTURES, Fixture, fixture};
+
+	#[bench(args = FIXTURES, setup = fixture)]
+	fn full(f: &Fixture) -> Vec<u8> {
+		serde_json::to_vec(&f.new).unwrap()
 	}
-	group.finish();
+
+	#[bench(args = FIXTURES, setup = fixture)]
+	fn patch(f: &Fixture) -> Vec<u8> {
+		serde_json::to_vec(&f.patch).unwrap()
+	}
 }
 
 /// Seeding the delta baseline at each snapshot, two ways. The encoder has already serialized the
@@ -233,96 +227,109 @@ fn marshal(c: &mut Criterion) {
 /// The encoder uses `from_slice` because it makes the baseline the emitted snapshot by construction,
 /// which `to_value` cannot guarantee for a stateful `Serialize`. This measures what that costs: a
 /// text parse in place of a second traversal, which is not automatically the cheaper of the two.
-fn baseline(c: &mut Criterion) {
-	let mut group = c.benchmark_group("baseline");
-	for f in &fixtures() {
-		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::new("from_slice", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::from_slice::<Value>(&f.snapshot_bytes).unwrap()));
-		});
-		group.bench_with_input(BenchmarkId::new("to_value", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::to_value(&f.old).unwrap()));
-		});
+mod baseline {
+	use serde_json::Value;
+	use swole::bench;
+
+	use super::{FIXTURES, Fixture, fixture, snapshot_len};
+
+	#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+	fn from_slice(f: &Fixture) -> Value {
+		serde_json::from_slice(&f.snapshot_bytes).unwrap()
 	}
-	group.finish();
+
+	#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+	fn to_value(f: &Fixture) -> Value {
+		serde_json::to_value(&f.old).unwrap()
+	}
 }
 
 /// The full producer step, head to head: the delta path (diff + serialize patch) vs the
 /// snapshot-only path (serialize the whole document).
-fn producer(c: &mut Criterion) {
-	let mut group = c.benchmark_group("producer");
-	for f in &fixtures() {
-		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::new("merge", f.name), f, |b, f| {
-			b.iter(|| {
-				let patch = diff(&f.old, &f.new).patch;
-				black_box(serde_json::to_vec(&patch).unwrap());
-			});
-		});
-		group.bench_with_input(BenchmarkId::new("snapshot", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::to_vec(&f.new).unwrap()));
-		});
+mod producer {
+	use moq_json::bench::diff;
+	use swole::bench;
+
+	use super::{FIXTURES, Fixture, fixture, snapshot_len};
+
+	#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+	fn merge(f: &Fixture) -> Vec<u8> {
+		let patch = diff(&f.old, &f.new).patch;
+		serde_json::to_vec(&patch).unwrap()
 	}
-	group.finish();
+
+	#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+	fn snapshot(f: &Fixture) -> Vec<u8> {
+		serde_json::to_vec(&f.new).unwrap()
+	}
 }
 
 /// The full consumer step, head to head: the delta path (parse patch + merge) vs the snapshot-only
 /// path (parse the whole document). The snapshot path re-parses the entire document every tick; the
 /// delta path parses only the patch.
-fn consumer(c: &mut Criterion) {
-	let mut group = c.benchmark_group("consumer");
-	for f in &fixtures() {
-		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::new("merge", f.name), f, |b, f| {
-			b.iter_batched(
-				|| f.old.clone(),
-				|mut current| {
-					let patch: Value = serde_json::from_slice(&f.patch_bytes).unwrap();
-					json_patch::merge(&mut current, &patch);
-					black_box(current);
-				},
-				BatchSize::SmallInput,
-			);
-		});
-		group.bench_with_input(BenchmarkId::new("snapshot", f.name), f, |b, f| {
-			b.iter(|| black_box(serde_json::from_slice::<Value>(&f.new_bytes).unwrap()));
-		});
+mod consumer {
+	use serde_json::Value;
+	use swole::bench;
+
+	use super::{FIXTURES, Fixture, fixture, snapshot_len};
+
+	/// The old value, fresh for each call, and the patch's bytes.
+	fn input(name: &str) -> (Value, Vec<u8>) {
+		let f = fixture(name);
+		(f.old, f.patch_bytes)
 	}
-	group.finish();
+
+	#[bench(args = FIXTURES, setup = input, bytes = snapshot_len)]
+	fn merge((mut current, patch_bytes): (Value, Vec<u8>)) -> Value {
+		let patch: Value = serde_json::from_slice(&patch_bytes).unwrap();
+		json_patch::merge(&mut current, &patch);
+		current
+	}
+
+	#[bench(args = FIXTURES, setup = fixture, bytes = snapshot_len)]
+	fn snapshot(f: &Fixture) -> Value {
+		serde_json::from_slice(&f.new_bytes).unwrap()
+	}
 }
 
-fn snapshot_budget(c: &mut Criterion) {
-	let mut group = c.benchmark_group("snapshot_budget");
-	for entries in [100, 1000, 10000] {
+/// One small delta applied to a snapshot of `entries` entries, with and without a size budget.
+mod snapshot_budget {
+	use moq_json::snapshot::{Decoder, consumer};
+	use serde_json::{Map, Value, json};
+	use swole::bench;
+
+	const ENTRIES: [usize; 3] = [100, 1000, 10000];
+
+	fn decoder(entries: usize, max_size: Option<usize>) -> Decoder<Value> {
 		let value: Map<String, Value> = (0..entries)
 			.map(|i| (format!("path-{i}"), json!({"bytes": 123})))
 			.collect();
-		let bytes = serde_json::to_vec(&value).unwrap();
-		for bounded in [false, true] {
-			group.bench_with_input(
-				BenchmarkId::new(if bounded { "bounded" } else { "unbounded" }, entries),
-				&bytes,
-				|b, bytes| {
-					let mut config = moq_json::snapshot::consumer::Config::default();
-					config.max_size = bounded.then_some(8 * 1024 * 1024);
-					let mut decoder = moq_json::snapshot::Decoder::<Value>::new(config);
-					decoder.snapshot(bytes).unwrap();
-					b.iter(|| decoder.delta(black_box(br#"{"path-0":{"bytes":124}}"#)).unwrap());
-				},
-			);
-		}
+		let mut config = consumer::Config::default();
+		config.max_size = max_size;
+		let mut decoder = Decoder::<Value>::new(config);
+		decoder.snapshot(&serde_json::to_vec(&value).unwrap()).unwrap();
+		decoder
 	}
-	group.finish();
+
+	fn unbounded_decoder(entries: usize) -> Decoder<Value> {
+		decoder(entries, None)
+	}
+
+	fn bounded_decoder(entries: usize) -> Decoder<Value> {
+		decoder(entries, Some(8 * 1024 * 1024))
+	}
+
+	#[bench(args = ENTRIES, setup = unbounded_decoder)]
+	fn unbounded(decoder: &mut Decoder<Value>) {
+		decoder.delta(br#"{"path-0":{"bytes":124}}"#).unwrap();
+	}
+
+	#[bench(args = ENTRIES, setup = bounded_decoder)]
+	fn bounded(decoder: &mut Decoder<Value>) {
+		decoder.delta(br#"{"path-0":{"bytes":124}}"#).unwrap();
+	}
 }
 
-criterion_group!(
-	benches,
-	encode_patch,
-	decode_patch,
-	marshal,
-	baseline,
-	producer,
-	consumer,
-	snapshot_budget
-);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

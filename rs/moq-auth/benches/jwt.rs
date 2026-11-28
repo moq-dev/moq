@@ -1,30 +1,44 @@
 //! Signing and verifying one token with each key family, through the public API.
 //!
-//! Run with `cargo bench -p moq-auth --bench jwt`.
+//! Run with `cargo bench --manifest-path rs/moq-auth/Cargo.toml --bench jwt`.
 
-use std::hint::black_box;
+use moq_auth::{Algorithm, Claims};
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use moq_auth::{Algorithm, Claims, Key};
+const ALGORITHMS: [Algorithm; 4] = [Algorithm::HS256, Algorithm::ES256, Algorithm::EdDSA, Algorithm::RS256];
 
-fn bench_jwt(c: &mut Criterion) {
-	let claims = Claims::default()
+fn claims() -> Claims {
+	Claims::default()
 		.with_root("room")
-		.with_publish(["alice".parse::<moq_auth::Prefix>().unwrap()]);
-
-	let mut group = c.benchmark_group("jwt");
-	for algorithm in [Algorithm::HS256, Algorithm::ES256, Algorithm::EdDSA, Algorithm::RS256] {
-		let key = Key::generate(algorithm, None).unwrap();
-		let token = key.sign(&claims).unwrap();
-		group.bench_function(format!("sign_{algorithm}"), |b| {
-			b.iter(|| key.sign(black_box(&claims)).unwrap())
-		});
-		group.bench_function(format!("verify_{algorithm}"), |b| {
-			b.iter(|| key.verify(black_box(&token)).unwrap())
-		});
-	}
-	group.finish();
+		.with_publish(["alice".parse::<moq_auth::Prefix>().unwrap()])
 }
 
-criterion_group!(benches, bench_jwt);
-criterion_main!(benches);
+mod jwt {
+	use moq_auth::{Algorithm, Claims, Key};
+	use swole::bench;
+
+	use super::{ALGORITHMS, claims};
+
+	fn signer(algorithm: Algorithm) -> (Key, Claims) {
+		(Key::generate(algorithm, None).unwrap(), claims())
+	}
+
+	#[bench(args = ALGORITHMS, setup = signer)]
+	fn sign((key, claims): &(Key, Claims)) -> String {
+		key.sign(claims).unwrap()
+	}
+
+	fn token(algorithm: Algorithm) -> (Key, String) {
+		let key = Key::generate(algorithm, None).unwrap();
+		let token = key.sign(&claims()).unwrap();
+		(key, token)
+	}
+
+	#[bench(args = ALGORITHMS, setup = token)]
+	fn verify((key, token): &(Key, String)) -> Claims {
+		key.verify(token).unwrap()
+	}
+}
+
+fn main() {
+	swole::main();
+}

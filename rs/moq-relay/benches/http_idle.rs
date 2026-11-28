@@ -1,4 +1,6 @@
 //! Request accounting cost swept over connections and other requests in flight.
+//!
+//! Run with `cargo bench -p moq-relay --bench http_idle`.
 
 #[path = "../src/listener/idle.rs"]
 mod idle;
@@ -8,14 +10,15 @@ use axum::{
 	http::{Request, Response},
 };
 use axum_server::accept::{Accept, DefaultAcceptor};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::{
 	convert::Infallible,
+	fmt,
 	future::{Ready, ready},
 	pin::Pin,
 	task::{Context, Poll},
 };
-use tokio::io::AsyncWrite;
+use swole::bench;
+use tokio::io::{AsyncWrite, DuplexStream};
 use tower_service::Service;
 
 #[derive(Clone)]
@@ -37,102 +40,188 @@ impl Service<Request<()>> for Respond {
 	}
 }
 
-fn requests(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
+fn runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
 		.enable_time()
 		.build()
-		.unwrap();
-	let (mut baseline_io, _baseline_peer) = tokio::io::duplex(1024);
-	let mut baseline_service = Respond;
-	c.bench_function("http_idle_baseline", |b| {
-		b.iter(|| {
-			runtime.block_on(async {
-				let mut cx = Context::from_waker(std::task::Waker::noop());
-				assert!(matches!(
-					Pin::new(&mut baseline_io).poll_write(&mut cx, &[]),
-					Poll::Ready(Ok(0))
-				));
-				std::hint::black_box(baseline_service.call(Request::new(())).await.unwrap());
-			})
-		})
-	});
+		.unwrap()
+}
 
-	let mut group = c.benchmark_group("http_idle");
-	for connections in [1, 16, 256] {
-		for held in [0, 16, 256] {
-			let (mut clients, _peers, _responses) = runtime.block_on(async {
-				let acceptor = idle::Acceptor {
-					inner: DefaultAcceptor::new(),
-					timeout: Some(std::time::Duration::from_secs(30)),
-				};
-				let mut clients = Vec::new();
-				let mut peers = Vec::new();
-				let mut responses = Vec::new();
-				for _ in 0..connections {
-					let (io, peer) = tokio::io::duplex(1024);
-					let (io, mut service) = acceptor.accept(io, Respond).await.unwrap();
-					for _ in 0..held {
-						responses.push(
-							service
-								.call(Request::builder().uri("/held").body(()).unwrap())
-								.await
-								.unwrap(),
-						);
-					}
-					clients.push((io, service));
-					peers.push(peer);
-				}
-				(clients, peers, responses)
-			});
-			let mut next = 0;
-			group.bench_function(BenchmarkId::new(format!("connections={connections}"), held), |b| {
-				b.iter(|| {
-					runtime.block_on(async {
-						let (io, service) = &mut clients[next];
-						let mut cx = Context::from_waker(std::task::Waker::noop());
-						assert!(matches!(Pin::new(io).poll_write(&mut cx, &[]), Poll::Ready(Ok(0))));
-						let response = service.call(Request::new(())).await.unwrap();
-						std::hint::black_box(response);
-					});
-					next = (next + 1) % connections;
-				})
-			});
-		}
+/// One connection's write side and the service answering it, without request accounting.
+struct Baseline {
+	io: DuplexStream,
+	_peer: DuplexStream,
+	service: Respond,
+	runtime: tokio::runtime::Runtime,
+}
+
+fn baseline() -> Baseline {
+	let (io, peer) = tokio::io::duplex(1024);
+	Baseline {
+		io,
+		_peer: peer,
+		service: Respond,
+		runtime: runtime(),
 	}
-	group.finish();
+}
+
+#[bench(setup = baseline)]
+fn http_idle_baseline(baseline: &mut Baseline) -> Response<Body> {
+	let Baseline {
+		io, service, runtime, ..
+	} = baseline;
+	runtime.block_on(async {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(Pin::new(io).poll_write(&mut cx, &[]), Poll::Ready(Ok(0))));
+		service.call(Request::new(())).await.unwrap()
+	})
+}
+
+/// Connections and the requests each holds open, named `connections=<connections>/<held>`.
+#[derive(Clone, Copy)]
+struct Held {
+	connections: usize,
+	held: usize,
+}
+
+impl fmt::Display for Held {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "connections={}/{}", self.connections, self.held)
+	}
+}
+
+fn held() -> Vec<Held> {
+	[1, 16, 256]
+		.into_iter()
+		.flat_map(|connections| [0, 16, 256].map(|held| Held { connections, held }))
+		.collect()
+}
+
+type Client = (idle::Io<DuplexStream>, idle::Requests<Respond>);
+
+/// Accepted connections, each holding its requests open, served round-robin.
+struct Idle {
+	clients: Vec<Client>,
+	_peers: Vec<DuplexStream>,
+	_responses: Vec<Response<Body>>,
+	next: usize,
+	runtime: tokio::runtime::Runtime,
+}
+
+fn idle(held: Held) -> Idle {
+	let runtime = runtime();
+	let (clients, peers, responses) = runtime.block_on(async {
+		let acceptor = idle::Acceptor {
+			inner: DefaultAcceptor::new(),
+			timeout: Some(std::time::Duration::from_secs(30)),
+		};
+		let mut clients = Vec::new();
+		let mut peers = Vec::new();
+		let mut responses = Vec::new();
+		for _ in 0..held.connections {
+			let (io, peer) = tokio::io::duplex(1024);
+			let (io, mut service) = acceptor.accept(io, Respond).await.unwrap();
+			for _ in 0..held.held {
+				responses.push(
+					service
+						.call(Request::builder().uri("/held").body(()).unwrap())
+						.await
+						.unwrap(),
+				);
+			}
+			clients.push((io, service));
+			peers.push(peer);
+		}
+		(clients, peers, responses)
+	});
+	Idle {
+		clients,
+		_peers: peers,
+		_responses: responses,
+		next: 0,
+		runtime,
+	}
+}
+
+#[bench(args = held(), setup = idle)]
+fn http_idle(idle: &mut Idle) -> Response<Body> {
+	let (io, service) = &mut idle.clients[idle.next];
+	let response = idle.runtime.block_on(async {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(Pin::new(io).poll_write(&mut cx, &[]), Poll::Ready(Ok(0))));
+		service.call(Request::new(())).await.unwrap()
+	});
+	idle.next = (idle.next + 1) % idle.clients.len();
+	response
 }
 
 // The drain's shared counter must stay independent of the other connections
 // and handshakes it already holds. Compare handler-only admission with the
 // accept/first-header transfer, including a WebSocket's second transfer.
-fn admission(c: &mut Criterion) {
-	let mut group = c.benchmark_group("http_admission");
-	for connections in [1, 16, 256] {
-		for pending in [0, 16, 256] {
-			let admission = moq_net::server::Admission::default();
-			let _held = (0..connections + pending)
-				.map(|_| admission.enter().unwrap())
-				.collect::<Vec<_>>();
-			let shape = format!("connections={connections}/pending={pending}");
-			group.bench_function(BenchmarkId::new("handler", &shape), |b| {
-				b.iter(|| std::hint::black_box(admission.enter().unwrap()));
-			});
-			group.bench_function(BenchmarkId::new("plain", &shape), |b| {
-				b.iter(|| {
-					let accepted = idle::Admission::new(admission.enter().unwrap());
-					drop(std::hint::black_box(accepted.take().unwrap()));
-				});
-			});
-			group.bench_function(BenchmarkId::new("upgrade", &shape), |b| {
-				b.iter(|| {
-					let accepted = idle::Admission::new(admission.enter().unwrap());
-					let request = idle::Admission::new(accepted.take().unwrap());
-					drop(std::hint::black_box(request.take().unwrap()));
-				});
-			});
+mod http_admission {
+	use std::fmt;
+	use std::hint::black_box;
+
+	use swole::bench;
+
+	use super::idle;
+
+	/// Connections already admitted and handshakes pending, named
+	/// `connections=<connections>/pending=<pending>`.
+	#[derive(Clone, Copy)]
+	struct Shape {
+		connections: usize,
+		pending: usize,
+	}
+
+	impl fmt::Display for Shape {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			write!(f, "connections={}/pending={}", self.connections, self.pending)
 		}
 	}
-	group.finish();
+
+	fn shapes() -> Vec<Shape> {
+		[1, 16, 256]
+			.into_iter()
+			.flat_map(|connections| [0, 16, 256].map(|pending| Shape { connections, pending }))
+			.collect()
+	}
+
+	/// The drain's admission with every connection and handshake already entered.
+	struct Admission {
+		admission: moq_net::server::Admission,
+		_held: Vec<moq_net::server::Admitted>,
+	}
+
+	fn admission(shape: Shape) -> Admission {
+		let admission = moq_net::server::Admission::default();
+		let held = (0..shape.connections + shape.pending)
+			.map(|_| admission.enter().unwrap())
+			.collect();
+		Admission { admission, _held: held }
+	}
+
+	// Each drops what it admitted inside the call: leaving releases the drain's counter,
+	// which is half of the accounting being compared.
+	#[bench(args = shapes(), setup = admission)]
+	fn handler(admission: &Admission) {
+		drop(black_box(admission.admission.enter().unwrap()));
+	}
+
+	#[bench(args = shapes(), setup = admission)]
+	fn plain(admission: &Admission) {
+		let accepted = idle::Admission::new(admission.admission.enter().unwrap());
+		drop(black_box(accepted.take().unwrap()));
+	}
+
+	#[bench(args = shapes(), setup = admission)]
+	fn upgrade(admission: &Admission) {
+		let accepted = idle::Admission::new(admission.admission.enter().unwrap());
+		let request = idle::Admission::new(accepted.take().unwrap());
+		drop(black_box(request.take().unwrap()));
+	}
 }
-criterion_group!(benches, requests, admission);
-criterion_main!(benches);
+
+fn main() {
+	swole::main();
+}

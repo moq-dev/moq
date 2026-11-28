@@ -20,15 +20,17 @@
 //!
 //! Run with `cargo bench -p moq-mux --bench catalog`.
 
+use std::fmt;
 use std::hint::black_box;
+use std::sync::LazyLock;
 use std::task::Poll;
 use std::time::Duration;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::Kind;
 use moq_net::Timestamp;
+use swole::bench;
 
 /// Tracks on the broadcast: a single rendition, a small ladder, a large ladder.
 const TRACKS: [usize; 3] = [1, 4, 16];
@@ -42,7 +44,7 @@ const RISES: u64 = 1000;
 struct Fanout {
 	_broadcast: moq_net::broadcast::Producer,
 	_catalog: moq_mux::catalog::Producer,
-	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
+	tracks: Vec<VideoTrack>,
 	subscribers: Vec<moq_mux::catalog::Consumer>,
 	waiter: kio::Waiter,
 }
@@ -151,33 +153,58 @@ impl Fanout {
 	}
 }
 
-fn bench_estimate_fanout(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
+/// One fanout shape, named `tracks_<tracks>/<subscribers>`.
+#[derive(Clone, Copy)]
+struct Shape {
+	tracks: usize,
+	subscribers: usize,
+}
+
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "tracks_{}/{}", self.tracks, self.subscribers)
+	}
+}
+
+fn shapes() -> Vec<Shape> {
+	TRACKS
+		.into_iter()
+		.flat_map(|tracks| SUBSCRIBERS.map(|subscribers| Shape { tracks, subscribers }))
+		.collect()
+}
+
+/// The paused clock the rate window runs on, shared by setup and the benchmark, which takes its
+/// fanout by value.
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+	tokio::runtime::Builder::new_current_thread()
 		.enable_time()
 		.start_paused(true)
 		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("catalog_estimate_fanout");
-	for (mode, references) in [("hang", false), ("msf_references", true)] {
-		let expected = if references { 0 } else { 2 };
-		for tracks in TRACKS {
-			for subscribers in SUBSCRIBERS {
-				group.throughput(Throughput::Elements(RISES * tracks as u64));
-				group.bench_with_input(
-					BenchmarkId::new(format!("{mode}/tracks_{tracks}"), subscribers),
-					&(tracks, subscribers),
-					|b, &(tracks, subscribers)| {
-						b.iter_batched(
-							|| runtime.block_on(Fanout::new(tracks, subscribers, references)),
-							|fanout| runtime.block_on(fanout.run(expected)),
-							BatchSize::SmallInput,
-						);
-					},
-				);
-			}
-		}
+		.unwrap()
+});
+
+mod catalog_estimate_fanout {
+	use swole::bench;
+
+	use super::{Fanout, RISES, RUNTIME, Shape, shapes};
+
+	fn hang_fanout(shape: Shape) -> Fanout {
+		RUNTIME.block_on(Fanout::new(shape.tracks, shape.subscribers, false))
 	}
-	group.finish();
+
+	#[bench(args = shapes(), setup = hang_fanout, items = |shape: Shape| RISES * shape.tracks as u64)]
+	fn hang(fanout: Fanout) {
+		RUNTIME.block_on(fanout.run(2));
+	}
+
+	fn msf_fanout(shape: Shape) -> Fanout {
+		RUNTIME.block_on(Fanout::new(shape.tracks, shape.subscribers, true))
+	}
+
+	#[bench(args = shapes(), setup = msf_fanout, items = |shape: Shape| RISES * shape.tracks as u64)]
+	fn msf_references(fanout: Fanout) {
+		RUNTIME.block_on(fanout.run(0));
+	}
 }
 
 /// Declared tracks on an importer that ends before configuring any.
@@ -186,7 +213,7 @@ const UNRESOLVED: [usize; 3] = [1, 64, 1024];
 struct Unresolved {
 	_broadcast: moq_net::broadcast::Producer,
 	_catalog: moq_mux::catalog::Producer,
-	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
+	tracks: Vec<VideoTrack>,
 }
 
 impl Unresolved {
@@ -209,19 +236,9 @@ impl Unresolved {
 	}
 }
 
-fn bench_unresolved_teardown(c: &mut Criterion) {
-	let mut group = c.benchmark_group("catalog_unresolved_teardown");
-	for tracks in UNRESOLVED {
-		group.throughput(Throughput::Elements(tracks as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(tracks), &tracks, |b, &tracks| {
-			b.iter_batched(
-				|| Unresolved::new(tracks),
-				|mut unresolved| unresolved.tracks.clear(),
-				BatchSize::SmallInput,
-			);
-		});
-	}
-	group.finish();
+#[bench(args = UNRESOLVED, setup = Unresolved::new, items = |tracks| tracks)]
+fn catalog_unresolved_teardown(mut unresolved: Unresolved) {
+	unresolved.tracks.clear();
 }
 
 /// Tracks interleaving frames on one catalog.
@@ -230,68 +247,76 @@ const ORDERED: [usize; 3] = [1, 16, 64];
 /// Frames each track writes per iteration.
 const FRAMES: u64 = 100;
 
-fn bench_write_order(c: &mut Criterion) {
-	let mut group = c.benchmark_group("catalog_write_order");
-	for tracks in ORDERED {
-		group.throughput(Throughput::Elements(FRAMES * tracks as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(tracks), &tracks, |b, &tracks| {
-			b.iter_batched(
-				|| {
-					let mut broadcast = moq_net::broadcast::Info::new().produce();
-					let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-					let producers: Vec<_> = (0..tracks)
-						.map(|index| {
-							let info = catalog.track_info(hang::catalog::PRIORITY.video);
-							let track = broadcast.create_track(format!("v{index}"), info).unwrap();
-							let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-							catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
-						})
-						.collect();
-					(broadcast, catalog, producers)
-				},
-				|(_broadcast, _catalog, mut producers)| {
-					for frame in 0..FRAMES {
-						// Each track trails the one before it by a millisecond, so every write measures.
-						for (index, producer) in producers.iter_mut().enumerate() {
-							let timestamp = Duration::from_millis(frame * 40 + 1_000)
-								.saturating_sub(Duration::from_millis(index as u64));
-							producer
-								.write(moq_mux::container::Frame {
-									timestamp: Timestamp::from_micros(timestamp.as_micros() as u64).unwrap(),
-									payload: bytes::Bytes::from_static(&[0; 64]),
-									keyframe: frame == 0,
-									duration: None,
-								})
-								.unwrap();
-						}
-					}
-				},
-				BatchSize::SmallInput,
-			);
-		});
-	}
-	group.finish();
+type VideoTrack = moq_mux::container::Producer<Container, hang::catalog::VideoConfig>;
+
+fn ordered(
+	tracks: usize,
+) -> (
+	moq_net::broadcast::Producer,
+	moq_mux::catalog::Producer,
+	Vec<VideoTrack>,
+) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let producers = (0..tracks)
+		.map(|index| {
+			let info = catalog.track_info(hang::catalog::PRIORITY.video);
+			let track = broadcast.create_track(format!("v{index}"), info).unwrap();
+			let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
+		})
+		.collect();
+	(broadcast, catalog, producers)
 }
 
-fn bench_av1_codec(c: &mut Criterion) {
-	let mut group = c.benchmark_group("catalog_av1_codec");
-	for (name, codec) in [
-		("short", "av01.0.01M.08"),
-		("full", "av01.0.04M.10.0.112.09.16.09.0"),
-		("partial", "av01.0.04M.08.0.110"),
-	] {
-		group.bench_function(name, |b| {
-			b.iter(|| black_box(black_box(codec).parse::<hang::catalog::AV1>()))
-		});
+#[bench(args = ORDERED, setup = ordered, items = |tracks| FRAMES * tracks as u64)]
+fn catalog_write_order(
+	(_broadcast, _catalog, mut producers): (
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+		Vec<VideoTrack>,
+	),
+) {
+	for frame in 0..FRAMES {
+		// Each track trails the one before it by a millisecond, so every write measures.
+		for (index, producer) in producers.iter_mut().enumerate() {
+			let timestamp =
+				Duration::from_millis(frame * 40 + 1_000).saturating_sub(Duration::from_millis(index as u64));
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(timestamp.as_micros() as u64).unwrap(),
+					payload: bytes::Bytes::from_static(&[0; 64]),
+					keyframe: frame == 0,
+					duration: None,
+				})
+				.unwrap();
+		}
 	}
-	group.finish();
 }
 
-criterion_group!(
-	benches,
-	bench_estimate_fanout,
-	bench_unresolved_teardown,
-	bench_write_order,
-	bench_av1_codec
-);
-criterion_main!(benches);
+mod catalog_av1_codec {
+	use std::hint::black_box;
+
+	use swole::bench;
+
+	type Parsed = Result<hang::catalog::AV1, <hang::catalog::AV1 as std::str::FromStr>::Err>;
+
+	#[bench]
+	fn short() -> Parsed {
+		black_box("av01.0.01M.08").parse()
+	}
+
+	#[bench]
+	fn full() -> Parsed {
+		black_box("av01.0.04M.10.0.112.09.16.09.0").parse()
+	}
+
+	#[bench]
+	fn partial() -> Parsed {
+		black_box("av01.0.04M.08.0.110").parse()
+	}
+}
+
+fn main() {
+	swole::main();
+}

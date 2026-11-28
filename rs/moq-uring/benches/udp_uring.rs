@@ -1,7 +1,5 @@
 //! io_uring comparison for UDP receive batching and send GSO on Linux.
 
-use criterion::{criterion_group, criterion_main};
-
 #[cfg(target_os = "linux")]
 #[expect(
 	clippy::disallowed_methods,
@@ -19,7 +17,6 @@ mod linux {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::{Duration, Instant};
 
-	use criterion::{BenchmarkId, Criterion, Throughput};
 	use io_uring::{IoUring, cqueue, opcode, types};
 	use nix::sys::socket::{
 		getsockopt, setsockopt,
@@ -30,7 +27,7 @@ mod linux {
 	const BURST_SEGMENTS: usize = 32;
 	const BURST_BYTES: usize = SEGMENT_SIZE * BURST_SEGMENTS;
 	const TOTAL_SEGMENTS: usize = 8 * 1024;
-	const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
+	pub const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
 	const RECEIVE_BUFFER_SIZE: usize = BURST_BYTES * 4;
 	const BURST_TIMEOUT: Duration = Duration::from_secs(1);
 	const MAX_GRO_SEGMENTS: usize = 64;
@@ -43,13 +40,13 @@ mod linux {
 	const SEND_USER_DATA: u64 = 2;
 
 	#[derive(Clone, Copy)]
-	struct Config {
+	pub struct Config {
 		gro: bool,
 		gso: bool,
 	}
 
 	impl Config {
-		fn all() -> impl Iterator<Item = Self> {
+		pub fn all() -> impl Iterator<Item = Self> {
 			[false, true]
 				.into_iter()
 				.flat_map(|gso| [false, true].into_iter().map(move |gro| Self { gro, gso }))
@@ -70,7 +67,7 @@ mod linux {
 		datagrams: usize,
 	}
 
-	struct Pair {
+	pub struct Pair {
 		config: Config,
 		sender: UdpSocket,
 		receiver: UdpSocket,
@@ -81,7 +78,7 @@ mod linux {
 	}
 
 	impl Pair {
-		fn new(config: Config) -> anyhow::Result<Self> {
+		pub fn new(config: Config) -> anyhow::Result<Self> {
 			let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			setsockopt(&receiver, RcvBuf, &RECEIVE_BUFFER_SIZE)?;
@@ -118,7 +115,7 @@ mod linux {
 			Ok(pair)
 		}
 
-		fn transfer(&mut self) -> anyhow::Result<()> {
+		pub fn transfer(&mut self) -> anyhow::Result<()> {
 			for _ in 0..TOTAL_SEGMENTS / BURST_SEGMENTS {
 				let mut sends = self.submit_burst()?;
 				let mut received = Received::default();
@@ -460,33 +457,24 @@ mod linux {
 			datagrams: bytes.div_ceil(stride),
 		})
 	}
-
-	pub fn benchmark(c: &mut Criterion) {
-		let mut group = c.benchmark_group("udp_io_uring");
-		group.throughput(Throughput::Bytes(TOTAL_BYTES as u64));
-
-		for config in Config::all() {
-			let mut pair = Pair::new(config).expect("create io_uring UDP socket pair");
-			group.bench_with_input(BenchmarkId::from_parameter(config), &config, |b, _| {
-				b.iter_custom(|iterations| {
-					let start = Instant::now();
-					for _ in 0..iterations {
-						pair.transfer().expect("transfer UDP benchmark payload");
-					}
-					start.elapsed()
-				});
-			});
-		}
-
-		group.finish();
-	}
 }
 
 #[cfg(target_os = "linux")]
-use linux::benchmark;
+use linux::{Config, Pair, TOTAL_BYTES};
+#[cfg(target_os = "linux")]
+use swole::bench;
 
-#[cfg(not(target_os = "linux"))]
-fn benchmark(_: &mut criterion::Criterion) {}
+#[cfg(target_os = "linux")]
+fn pair(config: Config) -> Pair {
+	Pair::new(config).expect("create io_uring UDP socket pair")
+}
 
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+#[cfg(target_os = "linux")]
+#[bench(args = Config::all(), setup = pair, bytes = |_: Config| TOTAL_BYTES)]
+fn udp_io_uring(pair: &mut Pair) {
+	pair.transfer().expect("transfer UDP benchmark payload");
+}
+
+fn main() {
+	swole::main();
+}

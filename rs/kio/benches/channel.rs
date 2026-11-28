@@ -11,8 +11,8 @@ use std::hint::black_box;
 use std::task::{Poll, Waker};
 use std::thread;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Consumer, Producer, Waiter};
+use swole::bench;
 
 /// Fanout sizes that cover a lone reader, a small room, and a busy broadcast.
 const FANOUT: [usize; 3] = [1, 8, 128];
@@ -22,23 +22,17 @@ const CONSTRUCTORS: usize = 8;
 const CHANNELS_PER_CONSTRUCTOR: usize = 1_024;
 
 /// Measure channel construction when several executor workers create state at once.
-fn bench_create_parallel(c: &mut Criterion) {
-	let mut group = c.benchmark_group("channel_create_parallel");
-	group.throughput(Throughput::Elements((CONSTRUCTORS * CHANNELS_PER_CONSTRUCTOR) as u64));
-	group.bench_function("workers", |b| {
-		b.iter(|| {
-			thread::scope(|scope| {
-				for _ in 0..CONSTRUCTORS {
-					scope.spawn(|| {
-						for _ in 0..CHANNELS_PER_CONSTRUCTOR {
-							black_box(Producer::new(black_box(0u64)));
-						}
-					});
+#[bench(items = CONSTRUCTORS * CHANNELS_PER_CONSTRUCTOR)]
+fn channel_create_parallel() {
+	thread::scope(|scope| {
+		for _ in 0..CONSTRUCTORS {
+			scope.spawn(|| {
+				for _ in 0..CHANNELS_PER_CONSTRUCTOR {
+					black_box(Producer::new(black_box(0u64)));
 				}
 			});
-		});
+		}
 	});
-	group.finish();
 }
 
 /// One consumer and the cursor it has most recently observed.
@@ -115,42 +109,41 @@ impl Channel {
 	}
 }
 
-fn bench_notify(c: &mut Criterion) {
-	let mut group = c.benchmark_group("channel_notify_cycle");
-	for readers in FANOUT {
-		group.throughput(Throughput::Elements(readers as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
-			let mut channel = Channel::new(readers);
-			b.iter(|| channel.cycle());
-		});
+#[bench(args = FANOUT, setup = Channel::new, items = |readers| readers)]
+fn channel_notify_cycle(channel: &mut Channel) {
+	channel.cycle();
+}
+
+/// A channel nobody waits on, whose registration list a burst of readers parked on and left.
+struct Abandoned {
+	producer: Producer<u64>,
+	_consumer: Consumer<u64>,
+}
+
+fn abandoned(abandoned: usize) -> Abandoned {
+	let producer = Producer::new(0u64);
+	let consumer = producer.consume();
+	let waiters: Vec<_> = (0..abandoned).map(|_| Waiter::new(Waker::noop().clone())).collect();
+	for waiter in &waiters {
+		assert!(consumer.poll(waiter, |_| Poll::<()>::Pending).is_pending());
 	}
-	group.finish();
+	drop(waiters);
+	Abandoned {
+		producer,
+		_consumer: consumer,
+	}
 }
 
 /// Measure writes nobody waits on after a burst of readers parked and left, swept over
 /// the burst size. A write must not keep paying for waiters that are already gone.
-fn bench_write_abandoned(c: &mut Criterion) {
-	let mut group = c.benchmark_group("channel_write_abandoned");
-	for abandoned in [0, 128, 4_096] {
-		group.bench_with_input(BenchmarkId::from_parameter(abandoned), &abandoned, |b, &abandoned| {
-			let producer = Producer::new(0u64);
-			let consumer = producer.consume();
-			let waiters: Vec<_> = (0..abandoned).map(|_| Waiter::new(Waker::noop().clone())).collect();
-			for waiter in &waiters {
-				assert!(consumer.poll(waiter, |_| Poll::<()>::Pending).is_pending());
-			}
-			drop(waiters);
-
-			b.iter(|| {
-				let Ok(mut state) = producer.write() else {
-					panic!("benchmark channel is open");
-				};
-				*state += 1;
-			});
-		});
-	}
-	group.finish();
+#[bench(args = [0, 128, 4_096], setup = abandoned)]
+fn channel_write_abandoned(abandoned: &Abandoned) {
+	let Ok(mut state) = abandoned.producer.write() else {
+		panic!("benchmark channel is open");
+	};
+	*state += 1;
 }
 
-criterion_group!(benches, bench_create_parallel, bench_notify, bench_write_abandoned);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

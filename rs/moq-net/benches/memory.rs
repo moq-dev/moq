@@ -4,28 +4,19 @@
 //!
 //! Each round writes one group of [`FRAMES`] frames on every track, then reads them all
 //! back. The payload crosses as the written allocation, so the time per byte should
-//! fall as frames grow, and `MEMORY_ALLOCS=1` prints the allocations and bytes allocated
-//! per frame instead of timing: a copy would show as bytes per frame growing with the
-//! frame size.
+//! fall as frames grow, and a copy would show as bytes allocated per byte holding steady
+//! rather than falling as the frame size grows.
 //!
 //! Everything runs on one current-thread runtime, so the only work measured is the
 //! protocol, model, and transport code, never scheduling across threads.
 //!
-//! Run with `cargo bench -p moq-net --bench memory`.
+//! Run with `cargo bench -p moq-net --features async --bench memory`.
 
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::fmt;
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Client, Server, Timestamp, Version, cache, origin, track, transport::memory};
+use swole::bench;
 
 const VERSION: &str = "moq-lite-06";
 
@@ -39,52 +30,33 @@ const STREAMS: [usize; 3] = [1, 16, 128];
 /// the widest sweep rather than hold gigabytes.
 const ROUND_BYTES: usize = 512 * 1024 * 1024;
 
-/// Every `(streams, size)` pair to measure.
-fn cases() -> impl Iterator<Item = (usize, usize)> {
+/// Streams in flight and bytes per frame, named `streams=<streams>/size=<size>`.
+#[derive(Clone, Copy)]
+struct Case {
+	streams: usize,
+	size: usize,
+}
+
+impl Case {
+	/// Payload bytes one round writes and reads.
+	fn bytes(self) -> usize {
+		self.streams * FRAMES * self.size
+	}
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "streams={}/size={}", self.streams, self.size)
+	}
+}
+
+/// Every case to measure.
+fn cases() -> Vec<Case> {
 	STREAMS
 		.into_iter()
-		.flat_map(|streams| SIZES.into_iter().map(move |size| (streams, size)))
-		.filter(|(streams, size)| streams * FRAMES * size <= ROUND_BYTES)
-}
-
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-impl Counter {
-	fn count(size: usize) {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-			ALLOCATED.fetch_add(size, Ordering::Relaxed);
-		}
-	}
-}
-
-// Counting only. Every call forwards to the system allocator unchanged.
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		Self::count(layout.size());
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		Self::count(layout.size());
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		Self::count(new_size);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
+		.flat_map(|streams| SIZES.into_iter().map(move |size| Case { streams, size }))
+		.filter(|case| case.bytes() <= ROUND_BYTES)
+		.collect()
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -231,66 +203,32 @@ impl Link {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
 	}
-
-	async fn measure(&mut self, iters: u64) -> Duration {
-		let expected = self.tracks.len() * FRAMES * self.payload.len();
-		let counting = std::env::var_os("MEMORY_ALLOCS").is_some();
-		let mut elapsed = Duration::ZERO;
-		for _ in 0..iters {
-			self.tick();
-			if counting {
-				COUNTING.store(true, Ordering::Relaxed);
-			}
-			let start = Instant::now();
-			assert_eq!(self.round().await, expected);
-			elapsed += start.elapsed();
-			if counting {
-				COUNTING.store(false, Ordering::Relaxed);
-			}
-		}
-		elapsed
-	}
 }
 
-/// Print allocations and bytes allocated per frame instead of timing.
-fn allocations() {
-	const ROUNDS: usize = 64;
+/// A link and the runtime its sessions run on, declared last so it outlives them.
+struct Running {
+	link: Link,
+	rt: tokio::runtime::Runtime,
+}
 
+fn running(case: Case) -> Running {
 	let rt = runtime();
-	for (streams, size) in cases() {
-		let mut link = rt.block_on(Link::new(streams, size));
-		ALLOCATIONS.store(0, Ordering::Relaxed);
-		ALLOCATED.store(0, Ordering::Relaxed);
-		rt.block_on(link.measure(ROUNDS as u64));
-
-		let frames = (ROUNDS * streams * FRAMES) as f64;
-		let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
-		let bytes = ALLOCATED.load(Ordering::Relaxed) as f64 / frames;
-		println!("streams={streams}/size={size}: {allocations:.1} allocations, {bytes:.0} bytes allocated per frame");
-	}
+	let link = rt.block_on(Link::new(case.streams, case.size));
+	Running { link, rt }
 }
 
-fn bench(c: &mut Criterion) {
-	if std::env::var_os("MEMORY_ALLOCS").is_some() {
-		allocations();
-		return;
-	}
-
-	let rt = runtime();
-	let mut group = c.benchmark_group("memory");
-	for (streams, size) in cases() {
-		group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
-		let mut link = None;
-		group.bench_function(
-			BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
-			|b| {
-				let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
-				b.iter_custom(|iters| rt.block_on(link.measure(iters)))
-			},
-		);
-	}
-	group.finish();
+fn tick(running: &mut Running) {
+	running.link.tick();
 }
 
-criterion_group!(benches, bench);
-criterion_main!(benches);
+#[bench(args = cases(), setup = running, before = tick, bytes = Case::bytes)]
+fn memory(running: &mut Running) -> usize {
+	let expected = running.link.tracks.len() * FRAMES * running.link.payload.len();
+	let bytes = running.rt.block_on(running.link.round());
+	assert_eq!(bytes, expected);
+	bytes
+}
+
+fn main() {
+	swole::main();
+}

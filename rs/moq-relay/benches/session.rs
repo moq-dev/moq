@@ -1,50 +1,83 @@
 //! The model benchmark's scenarios through the relay's admission, cluster, and stats.
+//!
+//! Run with `cargo bench -p moq-relay --features test-support --bench session`.
 
 #[path = "../../moq-net/benches/session/mod.rs"]
 mod session;
 
+use std::fmt;
 use std::sync::Arc;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
 use moq_auth::{Grant, Prefix, lease};
 use moq_net::{cache, origin};
 use moq_relay::{Accepted, Connection, auth, cluster, stats};
 use session::{Backend, MockConnectOptions, Pair, mock::create_mock_session_pair};
+use swole::bench;
+
+/// Sessions each opening and closing against `readers` actively waiting tally readers,
+/// named `sessions=<sessions>/<readers>`.
+#[derive(Clone, Copy)]
+struct Tally {
+	sessions: usize,
+	readers: usize,
+}
+
+impl fmt::Display for Tally {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "sessions={}/{}", self.sessions, self.readers)
+	}
+}
+
+fn tallies() -> Vec<Tally> {
+	[1, 16, 256]
+		.into_iter()
+		.flat_map(|sessions| [1, 16, 256].map(|readers| Tally { sessions, readers }))
+		.collect()
+}
+
+struct Readers {
+	sessions: usize,
+	observer: moq_relay::shutdown::Observer,
+	readers: Vec<moq_relay::shutdown::Observer>,
+}
+
+fn readers(tally: Tally) -> Readers {
+	let observer = moq_relay::shutdown::Observer::disabled();
+	Readers {
+		sessions: tally.sessions,
+		readers: (0..tally.readers).map(|_| observer.clone()).collect(),
+		observer,
+	}
+}
 
 /// Session lifecycle updates against independent, actively waiting tally readers.
-fn tally(c: &mut Criterion) {
-	let mut group = c.benchmark_group("relay_tally");
-	for sessions in [1, 16, 256] {
-		for readers in [1, 16, 256] {
-			group.bench_function(BenchmarkId::new(format!("sessions={sessions}"), readers), |b| {
-				let observer = moq_relay::shutdown::Observer::disabled();
-				let mut readers: Vec<_> = (0..readers).map(|_| observer.clone()).collect();
-				b.iter(|| {
-					for _ in 0..sessions {
-						let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
-						for change in &mut changes {
-							assert!(change.as_mut().now_or_never().is_none());
-						}
-						let serving = observer.serve();
-						for change in &mut changes {
-							assert_eq!(change.as_mut().now_or_never().unwrap().open, 1);
-						}
-						drop(changes);
-						let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
-						for change in &mut changes {
-							assert!(change.as_mut().now_or_never().is_none());
-						}
-						drop(serving);
-						for change in &mut changes {
-							assert_eq!(change.as_mut().now_or_never().unwrap(), Default::default());
-						}
-					}
-				});
-			});
+#[bench(args = tallies(), setup = readers)]
+fn relay_tally(readers: &mut Readers) {
+	let Readers {
+		sessions,
+		observer,
+		readers,
+	} = readers;
+	for _ in 0..*sessions {
+		let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
+		for change in &mut changes {
+			assert!(change.as_mut().now_or_never().is_none());
+		}
+		let serving = observer.serve();
+		for change in &mut changes {
+			assert_eq!(change.as_mut().now_or_never().unwrap().open, 1);
+		}
+		drop(changes);
+		let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
+		for change in &mut changes {
+			assert!(change.as_mut().now_or_never().is_none());
+		}
+		drop(serving);
+		for change in &mut changes {
+			assert_eq!(change.as_mut().now_or_never().unwrap(), Default::default());
 		}
 	}
-	group.finish();
 }
 
 struct Relay;
@@ -69,7 +102,6 @@ impl Drop for State {
 
 impl Backend for Relay {
 	type Relay = Node;
-	const PREFIX: &'static str = "relay_";
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Node, cache::Pool) {
 		let mut config = moq_relay::cache::Config::default();
@@ -170,14 +202,8 @@ impl Backend for Relay {
 	}
 }
 
-criterion_group!(
-	benches,
-	tally,
-	session::session::<Relay>,
-	session::group_cost::<Relay>,
-	session::datagram::<Relay>,
-	session::fetch_frames::<Relay>,
-	session::fetch_range::<Relay>,
-	session::withdrawal::<Relay>
-);
-criterion_main!(benches);
+session::benches!(Relay);
+
+fn main() {
+	swole::main();
+}

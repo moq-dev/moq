@@ -35,9 +35,9 @@
 //! - `churn`: nothing live; 16 tasks pushed and drained per iteration, reusing
 //!   the slots the burst left.
 //!
-//! Retained bytes after the burst are in the `task_capacity` bench.
+//! What the burst itself allocates is in the `task_capacity` bench.
 //!
-//! Run with `cargo bench -p kio`.
+//! Run with `cargo bench -p kio --bench tasks`.
 
 use std::{
 	future::Future,
@@ -50,8 +50,7 @@ use std::{
 	task::{Context, Poll, Waker},
 };
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use futures::stream::StreamExt;
+use swole::bench;
 
 /// The shared wakeable primitive: a resettable flag plus a parked waker.
 ///
@@ -99,234 +98,303 @@ impl Future for Forever {
 	}
 }
 
-/// The `Tasks` contestant, minted by one factory so the set stays unboxed.
-fn forever(gate: Arc<Gate>) -> impl FnMut(&kio::Waiter) -> Poll<()> {
-	move |waiter| {
-		black_box(gate.consume_and_park(waiter.waker()));
+/// The `Tasks` contestant, with the same poll body as [`Forever`].
+struct Parked(Arc<Gate>);
+
+impl kio::Task for Parked {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		black_box(self.0.consume_and_park(waiter.waker()));
 		Poll::Pending
 	}
 }
 
-fn wake_sparse(c: &mut Criterion) {
+/// A task that completes on its first poll.
+struct Done;
+
+impl kio::Task for Done {
+	type Output = ();
+
+	fn poll(&mut self, _: &kio::Waiter) -> Poll<()> {
+		Poll::Ready(())
+	}
+}
+
+mod wake_16_of_1000 {
+	use std::{
+		hint::black_box,
+		sync::Arc,
+		task::{Context, Waker},
+	};
+
+	use futures::stream::{FuturesUnordered, StreamExt};
+	use swole::bench;
+
+	use super::{Forever, Gate, Parked};
+
 	const N: usize = 1000;
 	const K: usize = 16;
 
-	let mut group = c.benchmark_group("wake_16_of_1000");
+	/// Every gate's task parked in one set, and the next gate to fire.
+	struct Sparse<S> {
+		gates: Vec<Arc<Gate>>,
+		set: S,
+		waiter: kio::Waiter,
+		next: usize,
+	}
 
-	group.bench_function("kio_tasks", |b| {
+	impl<S> Sparse<S> {
+		fn fire(&mut self) {
+			for _ in 0..K {
+				self.gates[self.next].fire();
+				self.next = (self.next + 1) % N;
+			}
+		}
+	}
+
+	fn tasks() -> Sparse<kio::Tasks<Parked>> {
 		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
-		let mut tasks = kio::Tasks::new();
+		let mut set = kio::Tasks::new();
 		for gate in &gates {
-			tasks.push(forever(gate.clone()));
+			set.push(Parked(gate.clone()));
 		}
 		// Park everyone.
 		let waiter = kio::Waiter::noop();
-		let _ = tasks.poll(&waiter);
-
-		let mut next = 0;
-		b.iter(|| {
-			for _ in 0..K {
-				gates[next].fire();
-				next = (next + 1) % N;
-			}
-			let _ = black_box(tasks.poll(&waiter));
-		});
-	});
-
-	// The driver shape: the owner fires its own tasks' gates mid-poll, the way
-	// advancing its clock does, inside the batch that holds the set's wake of it.
-	group.bench_function("kio_tasks_batch", |b| {
-		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
-		let mut tasks = kio::Tasks::new();
-		for gate in &gates {
-			tasks.push(forever(gate.clone()));
+		let _ = set.poll(&waiter);
+		Sparse {
+			gates,
+			set,
+			waiter,
+			next: 0,
 		}
-		let waiter = kio::Waiter::noop();
-		let _ = tasks.poll(&waiter);
+	}
 
-		let mut next = 0;
-		b.iter(|| {
-			waiter.batch(|| {
-				for _ in 0..K {
-					gates[next].fire();
-					next = (next + 1) % N;
-				}
-				let _ = black_box(tasks.poll(&waiter));
-			});
+	#[bench(setup = tasks)]
+	fn kio_tasks(sparse: &mut Sparse<kio::Tasks<Parked>>) {
+		sparse.fire();
+		let _ = black_box(sparse.set.poll(&sparse.waiter));
+	}
+
+	/// The driver shape: the owner fires its own tasks' gates mid-poll, the way
+	/// advancing its clock does, inside the batch that holds the set's wake of it.
+	#[bench(setup = tasks)]
+	fn kio_tasks_batch(sparse: &mut Sparse<kio::Tasks<Parked>>) {
+		let Sparse {
+			gates,
+			set,
+			waiter,
+			next,
+		} = sparse;
+		waiter.batch(|| {
+			for _ in 0..K {
+				gates[*next].fire();
+				*next = (*next + 1) % N;
+			}
+			let _ = black_box(set.poll(waiter));
 		});
-	});
+	}
 
-	group.bench_function("futures_unordered", |b| {
+	fn unordered() -> Sparse<FuturesUnordered<Forever>> {
 		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
-		let mut set = futures::stream::FuturesUnordered::new();
+		let mut set = FuturesUnordered::new();
 		for gate in &gates {
 			set.push(Forever(gate.clone()));
 		}
 		// Park everyone. Nothing ever completes, so poll_next reports Pending
 		// after polling the woken (here: all new) futures.
-		let waker = Waker::noop();
-		let mut cx = Context::from_waker(waker);
-		let _ = set.poll_next_unpin(&mut cx);
+		let _ = set.poll_next_unpin(&mut Context::from_waker(Waker::noop()));
+		Sparse {
+			gates,
+			set,
+			waiter: kio::Waiter::noop(),
+			next: 0,
+		}
+	}
 
-		let mut next = 0;
-		b.iter(|| {
-			for _ in 0..K {
-				gates[next].fire();
-				next = (next + 1) % N;
-			}
-			let _ = black_box(set.poll_next_unpin(&mut cx));
-		});
-	});
-
-	group.finish();
+	#[bench(setup = unordered)]
+	fn futures_unordered(sparse: &mut Sparse<FuturesUnordered<Forever>>) {
+		sparse.fire();
+		let _ = black_box(sparse.set.poll_next_unpin(&mut Context::from_waker(Waker::noop())));
+	}
 }
 
-fn spawn_drain(c: &mut Criterion) {
-	const N: usize = 1000;
+const N: usize = 1000;
 
-	let mut group = c.benchmark_group("spawn_drain_1000");
+mod spawn_drain_1000 {
+	use std::{
+		hint::black_box,
+		task::{Context, Poll, Waker},
+	};
 
-	group.bench_function("kio_tasks", |b| {
-		let waiter = kio::Waiter::noop();
-		b.iter(|| {
-			let mut tasks = kio::Tasks::new();
-			for _ in 0..N {
-				tasks.push(|_: &kio::Waiter| Poll::Ready(()));
-			}
-			while tasks.poll(&waiter).is_pending() {}
-			black_box(&tasks);
-		});
-	});
+	use futures::stream::{FuturesUnordered, StreamExt};
+	use swole::bench;
 
-	group.bench_function("futures_unordered", |b| {
-		let waker = Waker::noop();
-		b.iter(|| {
-			let mut set = futures::stream::FuturesUnordered::new();
-			for _ in 0..N {
-				set.push(std::future::ready(()));
-			}
-			let mut cx = Context::from_waker(waker);
-			// Drain to completion. A Stream returns one completion per
-			// poll_next call, so this is N+1 calls; that per-item delivery is
-			// part of the FuturesUnordered contract (see the module doc).
-			while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
-			black_box(&set);
-		});
-	});
+	use super::{Done, N};
 
-	group.finish();
-}
-
-fn spawn_drain_hot(c: &mut Criterion) {
-	const N: usize = 1000;
-
-	let mut group = c.benchmark_group("spawn_drain_1000_hot");
-
-	group.bench_function("kio_tasks", |b| {
-		let waiter = kio::Waiter::noop();
+	#[bench(setup = kio::Waiter::noop)]
+	fn kio_tasks(waiter: &kio::Waiter) {
 		let mut tasks = kio::Tasks::new();
-		b.iter(|| {
-			for _ in 0..N {
-				tasks.push(|_: &kio::Waiter| Poll::Ready(()));
-			}
-			while tasks.poll(&waiter).is_pending() {}
-			black_box(&tasks);
-		});
-	});
+		for _ in 0..N {
+			tasks.push(Done);
+		}
+		while tasks.poll(waiter).is_pending() {}
+		black_box(&tasks);
+	}
 
-	group.bench_function("futures_unordered", |b| {
-		let waker = Waker::noop();
-		let mut set = futures::stream::FuturesUnordered::new();
-		b.iter(|| {
-			for _ in 0..N {
-				set.push(std::future::ready(()));
-			}
-			let mut cx = Context::from_waker(waker);
-			while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
-			black_box(&set);
-		});
-	});
+	#[bench]
+	fn futures_unordered() {
+		let mut set = FuturesUnordered::new();
+		for _ in 0..N {
+			set.push(std::future::ready(()));
+		}
+		let mut cx = Context::from_waker(Waker::noop());
+		// Drain to completion. A Stream returns one completion per
+		// poll_next call, so this is N+1 calls; that per-item delivery is
+		// part of the FuturesUnordered contract (see the module doc).
+		while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
+		black_box(&set);
+	}
+}
 
-	group.finish();
+mod spawn_drain_1000_hot {
+	use std::{
+		future::Ready,
+		hint::black_box,
+		task::{Context, Poll, Waker},
+	};
+
+	use futures::stream::{FuturesUnordered, StreamExt};
+	use swole::bench;
+
+	use super::{Done, N};
+
+	fn tasks() -> (kio::Waiter, kio::Tasks<Done>) {
+		(kio::Waiter::noop(), kio::Tasks::new())
+	}
+
+	#[bench(setup = tasks)]
+	fn kio_tasks((waiter, tasks): &mut (kio::Waiter, kio::Tasks<Done>)) {
+		for _ in 0..N {
+			tasks.push(Done);
+		}
+		while tasks.poll(waiter).is_pending() {}
+		black_box(&tasks);
+	}
+
+	#[bench(setup = FuturesUnordered::new)]
+	fn futures_unordered(set: &mut FuturesUnordered<Ready<()>>) {
+		for _ in 0..N {
+			set.push(std::future::ready(()));
+		}
+		let mut cx = Context::from_waker(Waker::noop());
+		while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
+		black_box(&set);
+	}
 }
 
 /// Historical peaks: one task, one chunk, and 16 and 64 chunks (the exact reach
 /// of the top wake-index word).
 const PEAKS: [usize; 4] = [1, 1024, 16_384, 65_536];
 
-/// A set that grew to `peak` tasks, every one parked, then removed all but the
-/// slots `live` keeps. Returns the set and the live tasks' gates.
-#[expect(clippy::type_complexity, reason = "an opaque task type cannot be aliased on stable")]
-fn after_burst(
-	peak: usize,
-	live: impl Fn(usize) -> bool,
-) -> (kio::Tasks<impl FnMut(&kio::Waiter) -> Poll<()>>, Vec<Arc<Gate>>) {
-	let gates: Vec<_> = (0..peak).map(|_| Gate::new()).collect();
+/// A set that grew to its peak, every task parked, then removed all but the live
+/// slots, with the live tasks' gates and how many of them each owner poll wakes.
+struct Capacity {
+	tasks: kio::Tasks<Parked>,
+	gates: Vec<Arc<Gate>>,
+	ready: usize,
+	waiter: kio::Waiter,
+	next: usize,
+}
+
+impl Capacity {
+	fn new(peak: usize, live: impl Fn(usize) -> bool, ready: usize) -> Self {
+		let gates: Vec<_> = (0..peak).map(|_| Gate::new()).collect();
+		let mut tasks = kio::Tasks::new();
+		let keys: Vec<_> = gates.iter().map(|gate| tasks.insert(Parked(gate.clone()))).collect();
+		let _ = tasks.poll(&kio::Waiter::noop());
+		let mut kept = Vec::new();
+		for (slot, (key, gate)) in keys.into_iter().zip(gates).enumerate() {
+			match live(slot) {
+				true => kept.push(gate),
+				false => drop(tasks.remove(key)),
+			}
+		}
+		Self {
+			tasks,
+			ready: ready.min(kept.len()),
+			gates: kept,
+			waiter: kio::Waiter::noop(),
+			next: 0,
+		}
+	}
+
+	/// Wake the next `ready` live tasks and poll the set once.
+	fn poll(&mut self) {
+		for _ in 0..self.ready {
+			self.gates[self.next].fire();
+			self.next = (self.next + 1) % self.gates.len();
+		}
+		let _ = black_box(self.tasks.poll(&self.waiter));
+	}
+}
+
+fn idle(peak: usize) -> Capacity {
+	Capacity::new(peak, |slot| slot == 0, 0)
+}
+
+fn survivor(peak: usize) -> Capacity {
+	Capacity::new(peak, |slot| slot == 0, 1)
+}
+
+fn sparse(peak: usize) -> Capacity {
+	Capacity::new(peak, |slot| slot % 64 == 0, 16)
+}
+
+fn full(peak: usize) -> Capacity {
+	Capacity::new(peak, |_| true, 16)
+}
+
+#[bench(args = PEAKS, setup = idle)]
+fn tasks_capacity_idle(capacity: &mut Capacity) {
+	capacity.poll();
+}
+
+#[bench(args = PEAKS, setup = survivor)]
+fn tasks_capacity_survivor(capacity: &mut Capacity) {
+	capacity.poll();
+}
+
+#[bench(args = PEAKS, setup = sparse)]
+fn tasks_capacity_sparse(capacity: &mut Capacity) {
+	capacity.poll();
+}
+
+#[bench(args = PEAKS, setup = full)]
+fn tasks_capacity_full(capacity: &mut Capacity) {
+	capacity.poll();
+}
+
+/// A set that grew to `peak` tasks which all completed, leaving their slots.
+fn drained(peak: usize) -> (kio::Waiter, kio::Tasks<Done>) {
+	let waiter = kio::Waiter::noop();
 	let mut tasks = kio::Tasks::new();
-	let keys: Vec<_> = gates.iter().map(|gate| tasks.insert(forever(gate.clone()))).collect();
-	let _ = tasks.poll(&kio::Waiter::noop());
-	let mut kept = Vec::new();
-	for (slot, (key, gate)) in keys.into_iter().zip(gates).enumerate() {
-		match live(slot) {
-			true => kept.push(gate),
-			false => drop(tasks.remove(key)),
-		}
+	for _ in 0..peak {
+		tasks.push(Done);
 	}
-	(tasks, kept)
+	while tasks.poll(&waiter).is_pending() {}
+	(waiter, tasks)
 }
 
-fn capacity(c: &mut Criterion) {
-	// Live slot predicate and tasks woken per owner poll.
-	type Shape = (&'static str, fn(usize) -> bool, usize);
-	let shapes: [Shape; 4] = [
-		("idle", |slot| slot == 0, 0),
-		("survivor", |slot| slot == 0, 1),
-		("sparse", |slot| slot % 64 == 0, 16),
-		("full", |_| true, 16),
-	];
-	for (name, live, ready) in shapes {
-		let mut group = c.benchmark_group(format!("tasks_capacity_{name}"));
-		for peak in PEAKS {
-			group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
-				let (mut tasks, gates) = after_burst(peak, live);
-				let ready = ready.min(gates.len());
-				let waiter = kio::Waiter::noop();
-				let mut next = 0;
-				b.iter(|| {
-					for _ in 0..ready {
-						gates[next].fire();
-						next = (next + 1) % gates.len();
-					}
-					let _ = black_box(tasks.poll(&waiter));
-				});
-			});
-		}
-		group.finish();
+#[bench(args = PEAKS, setup = drained)]
+fn tasks_capacity_churn((waiter, tasks): &mut (kio::Waiter, kio::Tasks<Done>)) {
+	for _ in 0..16 {
+		tasks.push(Done);
 	}
-
-	let mut group = c.benchmark_group("tasks_capacity_churn");
-	for peak in PEAKS {
-		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
-			fn done(_: &kio::Waiter) -> Poll<()> {
-				Poll::Ready(())
-			}
-			let waiter = kio::Waiter::noop();
-			let mut tasks = kio::Tasks::new();
-			for _ in 0..peak {
-				tasks.push(done);
-			}
-			while tasks.poll(&waiter).is_pending() {}
-			b.iter(|| {
-				for _ in 0..16 {
-					tasks.push(done);
-				}
-				while tasks.poll(&waiter).is_pending() {}
-				black_box(&tasks);
-			});
-		});
-	}
-	group.finish();
+	while tasks.poll(waiter).is_pending() {}
+	black_box(&tasks);
 }
 
-criterion_group!(benches, wake_sparse, spawn_drain, spawn_drain_hot, capacity);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

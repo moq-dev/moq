@@ -3,9 +3,9 @@
 //! `fanout` feeds one decoded 1080p picture to a ladder of encoders, the way every rung of a source
 //! takes the shared feed's frame. `caller` scales each rung's copy on the driving task before
 //! handing it over, as rungs did before `encode::Config::resize`; `encoder` hands over the native
-//! frame and lets each encoder scale it on its own thread. `fanout/worker` times the CPU the
-//! driving thread spends (the tokio worker a rung task occupies); `fanout/wall` times the whole
-//! fan-out, encodes included.
+//! frame and lets each encoder scale it on its own thread. Each call times the whole fan-out,
+//! encodes included; the driving thread's own CPU (the tokio worker a rung task occupies) is in
+//! swole's per-call user and system CPU.
 //!
 //! `flapping` resizes a source back and forth between two pictures and times each edit until the
 //! derived catalog is republished. Every edit retires and renames each rung, and the transcoder's
@@ -14,9 +14,9 @@
 //!
 //! Run with `cargo bench -p moq-transcode --bench ladder`.
 
+use std::fmt;
 use std::sync::Arc;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_transcode::{Config, Ladder, Rung};
 
 /// The decoded source picture every rung is fed.
@@ -82,7 +82,7 @@ fn source_frame() -> Arc<moq_video::Frame> {
 }
 
 /// Feed `frame` to every rung at once, as each rung task does with the shared feed.
-async fn fanout(sinks: &mut [(moq_video::Size, moq_video::encode::Sink)], frame: &Arc<moq_video::Frame>, scale: Scale) {
+async fn feed(sinks: &mut [(moq_video::Size, moq_video::encode::Sink)], frame: &Arc<moq_video::Frame>, scale: Scale) {
 	let resize = moq_video::resize::Config::default();
 	futures::future::join_all(sinks.iter_mut().map(|(size, sink)| async {
 		let frame = match scale {
@@ -95,58 +95,52 @@ async fn fanout(sinks: &mut [(moq_video::Size, moq_video::encode::Sink)], frame:
 	.await;
 }
 
-/// CPU time the calling thread has used, which on a current-thread runtime is the worker's.
-#[cfg(unix)]
-fn thread_cpu() -> std::time::Duration {
-	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-	// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
-	let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
-	assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
-	std::time::Duration::new(
-		u64::try_from(time.tv_sec).unwrap(),
-		u32::try_from(time.tv_nsec).unwrap(),
-	)
+/// Where each rung's copy is scaled, and how many rungs.
+#[derive(Clone, Copy)]
+struct Case {
+	scale: Scale,
+	rungs: usize,
 }
 
-fn fanout_bench(c: &mut Criterion) {
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.scale.name(), self.rungs)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	[1, RUNGS.len()]
+		.into_iter()
+		.flat_map(|rungs| [Scale::Caller, Scale::Encoder].map(|scale| Case { scale, rungs }))
+		.collect()
+}
+
+/// Open encoders for one case, and the picture each call feeds them.
+struct Fanout {
+	sinks: Vec<(moq_video::Size, moq_video::encode::Sink)>,
+	frame: Arc<moq_video::Frame>,
+	scale: Scale,
+	runtime: tokio::runtime::Runtime,
+}
+
+fn encoders(case: Case) -> Fanout {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.unwrap();
-	let frame = source_frame();
-
-	#[cfg(unix)]
-	{
-		let mut bench = c.benchmark_group("fanout/worker");
-		for rungs in [1, RUNGS.len()] {
-			for scale in [Scale::Caller, Scale::Encoder] {
-				let mut sinks = runtime.block_on(open(rungs, scale));
-				bench.bench_function(BenchmarkId::new(scale.name(), rungs), |b| {
-					b.iter_custom(|iters| {
-						runtime.block_on(async {
-							let start = thread_cpu();
-							for _ in 0..iters {
-								fanout(&mut sinks, &frame, scale).await;
-							}
-							thread_cpu() - start
-						})
-					})
-				});
-			}
-		}
-		bench.finish();
+	Fanout {
+		sinks: runtime.block_on(open(case.rungs, case.scale)),
+		frame: source_frame(),
+		scale: case.scale,
+		runtime,
 	}
+}
 
-	let mut bench = c.benchmark_group("fanout/wall");
-	for rungs in [1, RUNGS.len()] {
-		for scale in [Scale::Caller, Scale::Encoder] {
-			let mut sinks = runtime.block_on(open(rungs, scale));
-			bench.bench_function(BenchmarkId::new(scale.name(), rungs), |b| {
-				b.iter(|| runtime.block_on(fanout(&mut sinks, &frame, scale)))
-			});
-		}
-	}
-	bench.finish();
+#[swole::bench(args = cases(), setup = encoders)]
+fn fanout(fanout: &mut Fanout) {
+	fanout
+		.runtime
+		.block_on(feed(&mut fanout.sinks, &fanout.frame, fanout.scale))
 }
 
 /// A source broadcast advertising one H.264 rendition, with its video track held open.
@@ -196,15 +190,25 @@ fn names(catalog: &moq_mux::catalog::hang::Catalog) -> Vec<String> {
 	catalog.video.renditions.keys().cloned().collect()
 }
 
-fn flapping(c: &mut Criterion) {
+/// A transcoder deriving a ladder from a source, and the derived catalog's renditions so far.
+struct Flapping {
+	source: Source,
+	catalogs: moq_mux::catalog::hang::Consumer<()>,
+	current: Vec<String>,
+	edits: usize,
+	runtime: tokio::runtime::Runtime,
+}
+
+/// Same height, different width: every rung below 720 lines changes shape on each edit.
+const PICTURES: [(u32, u32); 2] = [(1280, 720), (960, 720)];
+
+fn transcoder() -> Flapping {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.unwrap();
 
-	// Same height, different width: every rung below 720 lines changes shape on each edit.
-	let pictures = [(1280, 720), (960, 720)];
-	let mut source = Source::new(size(pictures[0]));
+	let source = Source::new(size(PICTURES[0]));
 	let mut config = Config::default();
 	let rung = |short: u32| Rung::new(short, moq_net::bandwidth::Rate::from_bps(u64::from(short) * 2_000));
 	config.ladder = Ladder::new([480, 360, 240].map(rung)).unwrap();
@@ -213,9 +217,9 @@ fn flapping(c: &mut Criterion) {
 	config.source = None;
 	let output = moq_net::broadcast::Info::default().produce();
 	let consumer = output.consume();
-	let _transcoder = runtime.spawn(moq_transcode::run(source.broadcast.consume(), output, config));
+	runtime.spawn(moq_transcode::run(source.broadcast.consume(), output, config));
 
-	let (mut catalogs, mut current) = runtime.block_on(async {
+	let (catalogs, current) = runtime.block_on(async {
 		let track = loop {
 			match consumer.track(hang::Catalog::DEFAULT_NAME) {
 				Ok(track) => break track,
@@ -233,24 +237,32 @@ fn flapping(c: &mut Criterion) {
 		(catalogs, current)
 	});
 
-	let mut edits = 0usize;
-	c.bench_function("flapping", |b| {
-		b.iter(|| {
-			edits += 1;
-			source.publish(size(pictures[edits % pictures.len()]));
-			runtime.block_on(async {
-				loop {
-					let snapshot = catalogs.next().await.unwrap().unwrap().value;
-					let next = names(&snapshot);
-					if next != current {
-						current = next;
-						break;
-					}
-				}
-			})
-		})
-	});
+	Flapping {
+		source,
+		catalogs,
+		current,
+		edits: 0,
+		runtime,
+	}
 }
 
-criterion_group!(benches, fanout_bench, flapping);
-criterion_main!(benches);
+/// One edit, until the derived catalog's renditions change.
+#[swole::bench(setup = transcoder)]
+fn flapping(flapping: &mut Flapping) {
+	flapping.edits += 1;
+	flapping.source.publish(size(PICTURES[flapping.edits % PICTURES.len()]));
+	flapping.runtime.block_on(async {
+		loop {
+			let snapshot = flapping.catalogs.next().await.unwrap().unwrap().value;
+			let next = names(&snapshot);
+			if next != flapping.current {
+				flapping.current = next;
+				break;
+			}
+		}
+	})
+}
+
+fn main() {
+	swole::main();
+}

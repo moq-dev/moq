@@ -20,13 +20,15 @@
 //!   each consumer takes it only to park.
 //!
 //! The notify and log cycles include releasing and joining the workers each
-//! iteration, a fixed cost that matters only at a few consumers per thread.
+//! call, a fixed cost that matters only at a few consumers per thread. The re-poll
+//! benchmarks time themselves, releasing every pass of a sample in one round.
 //!
 //! Run with `cargo bench -p kio --bench contended`.
-#![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
+#![expect(clippy::disallowed_methods, reason = "host time times the re-poll rounds")]
 
 use std::{
 	collections::VecDeque,
+	fmt,
 	hint::black_box,
 	sync::{
 		Arc,
@@ -37,8 +39,8 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Consumer, Producer, Waiter};
+use swole::{Iterations, bench};
 
 /// Worker threads the consumers are spread over.
 const THREADS: [usize; 3] = [1, 4, 16];
@@ -166,142 +168,137 @@ fn readers<T>(producer: &Producer<T>, consumers: usize, threads: usize) -> Vec<V
 	sets
 }
 
+/// Consumers on one channel spread over worker threads, named `threads_<threads>/<consumers>`.
+#[derive(Clone, Copy)]
+struct Case {
+	threads: usize,
+	consumers: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "threads_{}/{}", self.threads, self.consumers)
+	}
+}
+
 /// Every swept (threads, consumers) pair with at least one consumer per thread.
-fn sweep() -> impl Iterator<Item = (usize, usize)> {
+fn cases() -> Vec<Case> {
 	THREADS
 		.into_iter()
-		.flat_map(|threads| CONSUMERS.into_iter().map(move |consumers| (threads, consumers)))
-		.filter(|(threads, consumers)| consumers >= threads)
+		.flat_map(|threads| CONSUMERS.into_iter().map(move |consumers| Case { threads, consumers }))
+		.filter(|case| case.consumers >= case.threads)
+		.collect()
 }
 
-fn bench_notify(c: &mut Criterion) {
-	let mut group = c.benchmark_group("contended_notify");
-	for (threads, consumers) in sweep() {
-		group.throughput(Throughput::Elements(consumers as u64));
-		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
-		group.bench_function(id, |b| {
-			let producer = Producer::new(0u64);
-			let work = readers(&producer, consumers, threads)
-				.into_iter()
-				.map(|mut set| -> Work {
-					Box::new(move || {
-						for reader in &mut set {
-							let seen = reader.seen;
-							let changed = |state: &kio::Ref<'_, u64>| {
-								if **state != seen {
-									Poll::Ready(**state)
-								} else {
-									Poll::Pending
-								}
-							};
-							let Poll::Ready(Ok(value)) = reader.consumer.poll(&reader.waiter, changed) else {
-								panic!("a published value must be ready");
-							};
-							reader.seen = black_box(value);
-							let changed = |state: &kio::Ref<'_, u64>| {
-								if **state != value {
-									Poll::Ready(())
-								} else {
-									Poll::Pending
-								}
-							};
-							assert!(reader.consumer.poll(&reader.waiter, changed).is_pending());
-						}
-					})
-				})
-				.collect();
-			let crew = Crew::new(work);
-
-			let mut next = 0;
-			b.iter_custom(|iters| {
-				let start = Instant::now();
-				for _ in 0..iters {
-					next += 1;
-					*producer.write().ok().expect("open") = next;
-					crew.run(1);
-				}
-				start.elapsed()
-			});
-		});
-	}
-	group.finish();
+/// A channel, the crew reading it, and the next value the producer writes.
+struct Contended<T> {
+	producer: Producer<T>,
+	crew: Crew,
+	next: u64,
 }
 
-fn bench_repoll(c: &mut Criterion) {
-	let mut group = c.benchmark_group("contended_repoll");
-	for (threads, consumers) in sweep() {
-		group.throughput(Throughput::Elements(consumers as u64));
-		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
-		group.bench_function(id, |b| {
-			let producer = Producer::new(0u64);
-			let work = readers(&producer, consumers, threads)
-				.into_iter()
-				.map(|set| -> Work {
-					Box::new(move || {
-						for reader in &set {
-							let changed = |state: &kio::Ref<'_, u64>| {
-								if **state != reader.seen {
-									Poll::Ready(())
-								} else {
-									Poll::Pending
-								}
-							};
-							assert!(reader.consumer.poll(&reader.waiter, changed).is_pending());
-						}
-					})
-				})
-				.collect();
-			let crew = Crew::new(work);
-
-			b.iter_custom(|iters| {
-				let start = Instant::now();
-				crew.run(iters);
-				start.elapsed()
-			});
-		});
+impl<T> Contended<T> {
+	/// Deal `case`'s readers over its threads, each set read by one pass of `work`.
+	fn new(case: Case, producer: Producer<T>, work: impl FnMut(Vec<Reader<T>>) -> Work) -> Self {
+		let work = readers(&producer, case.consumers, case.threads)
+			.into_iter()
+			.map(work)
+			.collect();
+		Self {
+			producer,
+			crew: Crew::new(work),
+			next: 0,
+		}
 	}
-	group.finish();
 }
 
-fn bench_repoll_watch(c: &mut Criterion) {
-	let mut group = c.benchmark_group("contended_repoll_watch");
-	for (threads, consumers) in sweep() {
-		group.throughput(Throughput::Elements(consumers as u64));
-		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
-		group.bench_function(id, |b| {
-			let producer = Producer::new(0u64);
-			let work = readers(&producer, consumers, threads)
-				.into_iter()
-				.map(|set| -> Work {
-					let mut set: Vec<_> = set
-						.into_iter()
-						.map(|reader| (kio::Watch::new(reader.consumer), reader.waiter, reader.seen))
-						.collect();
-					Box::new(move || {
-						for (watch, waiter, seen) in &mut set {
-							let seen = *seen;
-							let changed = |state: &kio::Ref<'_, u64>| {
-								if **state != seen {
-									Poll::Ready(())
-								} else {
-									Poll::Pending
-								}
-							};
-							assert!(watch.poll(waiter, changed).is_pending());
-						}
-					})
-				})
-				.collect();
-			let crew = Crew::new(work);
+fn notify(case: Case) -> Contended<u64> {
+	Contended::new(case, Producer::new(0u64), |mut set| -> Work {
+		Box::new(move || {
+			for reader in &mut set {
+				let seen = reader.seen;
+				let changed = |state: &kio::Ref<'_, u64>| {
+					if **state != seen {
+						Poll::Ready(**state)
+					} else {
+						Poll::Pending
+					}
+				};
+				let Poll::Ready(Ok(value)) = reader.consumer.poll(&reader.waiter, changed) else {
+					panic!("a published value must be ready");
+				};
+				reader.seen = black_box(value);
+				let changed = |state: &kio::Ref<'_, u64>| {
+					if **state != value {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				};
+				assert!(reader.consumer.poll(&reader.waiter, changed).is_pending());
+			}
+		})
+	})
+}
 
-			b.iter_custom(|iters| {
-				let start = Instant::now();
-				crew.run(iters);
-				start.elapsed()
-			});
-		});
-	}
-	group.finish();
+#[bench(args = cases(), setup = notify, items = |case: Case| case.consumers)]
+fn contended_notify(contended: &mut Contended<u64>) {
+	contended.next += 1;
+	*contended.producer.write().ok().expect("open") = contended.next;
+	contended.crew.run(1);
+}
+
+fn repoll(case: Case) -> Contended<u64> {
+	Contended::new(case, Producer::new(0u64), |set| -> Work {
+		Box::new(move || {
+			for reader in &set {
+				let changed = |state: &kio::Ref<'_, u64>| {
+					if **state != reader.seen {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				};
+				assert!(reader.consumer.poll(&reader.waiter, changed).is_pending());
+			}
+		})
+	})
+}
+
+#[bench(args = cases(), setup = repoll, items = |case: Case| case.consumers)]
+fn contended_repoll(contended: &Contended<u64>, iterations: Iterations) -> Duration {
+	let start = Instant::now();
+	contended.crew.run(iterations.get());
+	start.elapsed()
+}
+
+fn repoll_watch(case: Case) -> Contended<u64> {
+	Contended::new(case, Producer::new(0u64), |set| -> Work {
+		let mut set: Vec<_> = set
+			.into_iter()
+			.map(|reader| (kio::Watch::new(reader.consumer), reader.waiter, reader.seen))
+			.collect();
+		Box::new(move || {
+			for (watch, waiter, seen) in &mut set {
+				let seen = *seen;
+				let changed = |state: &kio::Ref<'_, u64>| {
+					if **state != seen {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				};
+				assert!(watch.poll(waiter, changed).is_pending());
+			}
+		})
+	})
+}
+
+#[bench(args = cases(), setup = repoll_watch, items = |case: Case| case.consumers)]
+fn contended_repoll_watch(contended: &Contended<u64>, iterations: Iterations) -> Duration {
+	let start = Instant::now();
+	contended.crew.run(iterations.get());
+	start.elapsed()
 }
 
 /// A frame payload. Like `Bytes`, cloning it bumps a refcount shared by every reader.
@@ -315,129 +312,92 @@ struct Log {
 	offset: u64,
 }
 
-fn bench_log(c: &mut Criterion) {
-	let mut group = c.benchmark_group("contended_log");
-	for (threads, consumers) in sweep() {
-		group.throughput(Throughput::Elements(consumers as u64));
-		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
-		group.bench_function(id, |b| {
-			let producer = Producer::new(Log::default());
-			let work = readers(&producer, consumers, threads)
-				.into_iter()
-				.map(|mut set| -> Work {
-					Box::new(move || {
-						for reader in &mut set {
-							let cursor = reader.seen;
-							let next = |log: &kio::Ref<'_, Log>| match log.frames.get((cursor - log.offset) as usize) {
-								Some(frame) => Poll::Ready(frame.clone()),
-								None => Poll::Pending,
-							};
-							let Poll::Ready(Ok(frame)) = reader.consumer.poll(&reader.waiter, next) else {
-								panic!("an appended frame must be ready");
-							};
-							black_box(frame);
-							reader.seen += 1;
+fn log(case: Case) -> Contended<Log> {
+	Contended::new(case, Producer::new(Log::default()), |mut set| -> Work {
+		Box::new(move || {
+			for reader in &mut set {
+				let cursor = reader.seen;
+				let next = |log: &kio::Ref<'_, Log>| match log.frames.get((cursor - log.offset) as usize) {
+					Some(frame) => Poll::Ready(frame.clone()),
+					None => Poll::Pending,
+				};
+				let Poll::Ready(Ok(frame)) = reader.consumer.poll(&reader.waiter, next) else {
+					panic!("an appended frame must be ready");
+				};
+				black_box(frame);
+				reader.seen += 1;
 
-							let cursor = reader.seen;
-							let next = |log: &kio::Ref<'_, Log>| match log.frames.get((cursor - log.offset) as usize) {
-								Some(_) => Poll::Ready(()),
-								None => Poll::Pending,
-							};
-							assert!(reader.consumer.poll(&reader.waiter, next).is_pending());
-						}
-					})
-				})
-				.collect();
-			let crew = Crew::new(work);
+				let cursor = reader.seen;
+				let next = |log: &kio::Ref<'_, Log>| match log.frames.get((cursor - log.offset) as usize) {
+					Some(_) => Poll::Ready(()),
+					None => Poll::Pending,
+				};
+				assert!(reader.consumer.poll(&reader.waiter, next).is_pending());
+			}
+		})
+	})
+}
 
-			let mut index = 0;
-			b.iter_custom(|iters| {
-				let start = Instant::now();
-				for _ in 0..iters {
-					{
-						let mut log = producer.write().ok().expect("open");
-						log.frames.push_back(Arc::new(index));
-						if log.frames.len() > LOG_FRAMES {
-							log.frames.pop_front();
-							log.offset += 1;
-						}
-					}
-					index += 1;
-					crew.run(1);
-				}
-				start.elapsed()
-			});
-		});
+#[bench(args = cases(), setup = log, items = |case: Case| case.consumers)]
+fn contended_log(contended: &mut Contended<Log>) {
+	{
+		let mut log = contended.producer.write().ok().expect("open");
+		log.frames.push_back(Arc::new(contended.next));
+		if log.frames.len() > LOG_FRAMES {
+			log.frames.pop_front();
+			log.offset += 1;
+		}
 	}
-	group.finish();
+	contended.next += 1;
+	contended.crew.run(1);
+}
+
+fn log_lockfree(case: Case) -> Contended<kio::log::Writer<Frame>> {
+	Contended::new(case, Producer::new(kio::log::Writer::<Frame>::new(0)), |set| -> Work {
+		let mut set: Vec<_> = set
+			.into_iter()
+			.map(|reader| {
+				let log = reader.consumer.read().reader();
+				(reader, log)
+			})
+			.collect();
+		Box::new(move || {
+			for (reader, log) in &mut set {
+				{
+					let mut read = log.read();
+					let Ok(Some(frame)) = read.get(reader.seen) else {
+						panic!("an appended frame must be ready");
+					};
+					black_box(frame.clone());
+					reader.seen += 1;
+					assert_eq!(read.get(reader.seen), Ok(None));
+				}
+				let cursor = reader.seen;
+				let next = |log: &kio::Ref<'_, kio::log::Writer<Frame>>| match log.end() > cursor {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				};
+				assert!(reader.consumer.poll(&reader.waiter, next).is_pending());
+			}
+		})
+	})
 }
 
 /// `contended_log` on [`kio::log`]: the frames move out of the channel into the log,
 /// which readers read without its lock. The channel stays for parking, so a reader
 /// takes the lock only to park at the edge, once per round instead of twice.
-fn bench_log_lockfree(c: &mut Criterion) {
-	let mut group = c.benchmark_group("contended_log_lockfree");
-	for (threads, consumers) in sweep() {
-		group.throughput(Throughput::Elements(consumers as u64));
-		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
-		group.bench_function(id, |b| {
-			let producer = Producer::new(kio::log::Writer::<Frame>::new(0));
-			let work = readers(&producer, consumers, threads)
-				.into_iter()
-				.map(|set| -> Work {
-					let mut set: Vec<_> = set
-						.into_iter()
-						.map(|reader| {
-							let log = reader.consumer.read().reader();
-							(reader, log)
-						})
-						.collect();
-					Box::new(move || {
-						for (reader, log) in &mut set {
-							{
-								let mut read = log.read();
-								let Ok(Some(frame)) = read.get(reader.seen) else {
-									panic!("an appended frame must be ready");
-								};
-								black_box(frame.clone());
-								reader.seen += 1;
-								assert_eq!(read.get(reader.seen), Ok(None));
-							}
-							let cursor = reader.seen;
-							let next = |log: &kio::Ref<'_, kio::log::Writer<Frame>>| match log.end() > cursor {
-								true => Poll::Ready(()),
-								false => Poll::Pending,
-							};
-							assert!(reader.consumer.poll(&reader.waiter, next).is_pending());
-						}
-					})
-				})
-				.collect();
-			let crew = Crew::new(work);
-
-			let mut index = 0;
-			b.iter_custom(|iters| {
-				let start = Instant::now();
-				for _ in 0..iters {
-					{
-						let mut log = producer.write().ok().expect("open");
-						log.push(Arc::new(index));
-						let end = log.end();
-						log.evict(end.saturating_sub(LOG_FRAMES as u64));
-					}
-					index += 1;
-					crew.run(1);
-				}
-				start.elapsed()
-			});
-		});
+#[bench(args = cases(), setup = log_lockfree, items = |case: Case| case.consumers)]
+fn contended_log_lockfree(contended: &mut Contended<kio::log::Writer<Frame>>) {
+	{
+		let mut log = contended.producer.write().ok().expect("open");
+		log.push(Arc::new(contended.next));
+		let end = log.end();
+		log.evict(end.saturating_sub(LOG_FRAMES as u64));
 	}
-	group.finish();
+	contended.next += 1;
+	contended.crew.run(1);
 }
 
-criterion_group! {
-	name = benches;
-	config = Criterion::default().warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(3));
-	targets = bench_notify, bench_repoll, bench_repoll_watch, bench_log, bench_log_lockfree
+fn main() {
+	swole::main();
 }
-criterion_main!(benches);

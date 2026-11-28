@@ -1,56 +1,20 @@
 //! Cost of decoding window frames into typed records, swept over records per header.
 //!
-//! Each run decodes one group header holding `records` records, then `records` push frames. The
-//! frames are built outside the measured section.
+//! `header` decodes one group header holding `records` records into a fresh decoder; `push`
+//! decodes `records` push frames after such a header. The frames are built outside the measured
+//! section.
 //!
-//! Run `cargo bench -p moq-json --bench window` and compare the table across revisions.
+//! Run with `cargo bench -p moq-json --bench window`.
 #![expect(
 	clippy::disallowed_methods,
 	clippy::disallowed_types,
-	reason = "host time measures benchmark throughput"
+	reason = "push times itself to leave out the header its group must decode first"
 )]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use moq_json::window::{Decoder, consumer};
-
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
+use swole::{Iterations, bench};
 
 /// A stats-shaped record: flat counters plus one nested object, nothing owned on the heap.
 #[derive(serde::Deserialize)]
@@ -70,8 +34,7 @@ struct Nested {
 	frames: u64,
 }
 
-/// Runs measured per configuration.
-const RUNS: u32 = 16;
+const RECORDS: [usize; 4] = [1, 16, 256, 4096];
 
 fn record(index: usize) -> serde_json::Value {
 	serde_json::json!({
@@ -83,64 +46,56 @@ fn record(index: usize) -> serde_json::Value {
 	})
 }
 
-fn measure<R>(f: impl FnOnce() -> R) -> (usize, Duration) {
-	ALLOCATIONS.store(0, Ordering::Relaxed);
-	COUNTING.store(true, Ordering::Relaxed);
-	let start = Instant::now();
-	let out = f();
-	let elapsed = start.elapsed();
-	COUNTING.store(false, Ordering::Relaxed);
-	drop(black_box(out));
-	(ALLOCATIONS.load(Ordering::Relaxed), elapsed)
+/// A header of `records` records and the `records` pushes that follow it.
+struct Window {
+	decoder: Decoder<Record>,
+	header: Vec<u8>,
+	pushes: Vec<Vec<u8>>,
 }
 
-/// Mean allocations and time for the header, and per push.
-fn run(records: usize) -> ((usize, Duration), (usize, Duration)) {
+fn window(records: usize) -> Window {
 	let header = serde_json::to_vec(&serde_json::json!({
 		"offset": 0,
 		"records": (0..records).map(record).collect::<Vec<_>>(),
 	}))
 	.unwrap();
-	let pushes: Vec<_> = (records..2 * records)
+	let pushes = (records..2 * records)
 		.map(|index| serde_json::to_vec(&serde_json::json!({ "push": record(index) })).unwrap())
 		.collect();
+	Window {
+		decoder: Decoder::new(consumer::Config::default()),
+		header,
+		pushes,
+	}
+}
 
-	let (mut header_allocs, mut header_time) = (0, Duration::ZERO);
-	let (mut push_allocs, mut push_time) = (0, Duration::ZERO);
-	for _ in 0..RUNS {
+fn fresh(window: &mut Window) {
+	window.decoder = Decoder::new(consumer::Config::default());
+}
+
+#[bench(args = RECORDS, setup = window, before = fresh, items = |records| records)]
+fn header(window: &mut Window) {
+	window.decoder.group().decode(&window.header).unwrap();
+}
+
+/// A push needs its group positioned by the header first, and the group borrows its decoder, so
+/// no step outside the call can leave one ready: this times the pushes alone.
+#[bench(args = RECORDS, setup = window, items = |records| records)]
+fn push(window: &Window, iterations: Iterations) -> Duration {
+	let mut elapsed = Duration::ZERO;
+	for _ in iterations {
 		let mut decoder = Decoder::<Record>::new(consumer::Config::default());
 		let mut group = decoder.group();
-
-		let (allocs, time) = measure(|| group.decode(&header).unwrap());
-		header_allocs += allocs;
-		header_time += time;
-
-		let (allocs, time) = measure(|| {
-			for push in &pushes {
-				group.decode(push).unwrap();
-			}
-		});
-		push_allocs += allocs;
-		push_time += time;
+		group.decode(&window.header).unwrap();
+		let start = Instant::now();
+		for push in &window.pushes {
+			group.decode(push).unwrap();
+		}
+		elapsed += start.elapsed();
 	}
-
-	let pushes = RUNS * records as u32;
-	(
-		(header_allocs / RUNS as usize, header_time / RUNS),
-		(push_allocs / pushes as usize, push_time / pushes),
-	)
+	elapsed
 }
 
 fn main() {
-	// Nextest lists all targets as potential test binaries.
-	if std::env::args().any(|arg| arg == "--list") {
-		return;
-	}
-	println!("records header_allocs header_us push_allocs push_ns");
-	for records in [1, 16, 256, 4096] {
-		let ((header_allocs, header_time), (push_allocs, push_time)) = run(records);
-		let header_us = header_time.as_secs_f64() * 1e6;
-		let push_ns = push_time.as_nanos();
-		println!("{records:>7} {header_allocs:>13} {header_us:>9.1} {push_allocs:>11} {push_ns:>7}");
-	}
+	swole::main();
 }

@@ -2,6 +2,8 @@
 //!
 //! Swept over the pins held (WebRTC sessions) and the shards routing at once,
 //! since every shard of a worker group reads the same pin table.
+//!
+//! Run with `cargo bench -p moq-sock --bench demux`.
 
 #![allow(
 	clippy::disallowed_methods,
@@ -10,13 +12,14 @@
 )]
 
 use std::{
+	fmt,
 	hint::black_box,
 	net::SocketAddr,
 	time::{Duration, Instant},
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_sock::demux::{Flows, Route};
+use moq_sock::demux::{Flows, Pin, Route};
+use swole::{Iterations, bench};
 
 /// Datagrams one shard routes per iteration, as one receive batch would hold.
 const BATCH: usize = 64;
@@ -25,45 +28,66 @@ fn remote(i: usize) -> SocketAddr {
 	SocketAddr::from(([10, (i >> 16) as u8, (i >> 8) as u8, i as u8], 4433))
 }
 
-fn bench_route(c: &mut Criterion) {
-	let mut group = c.benchmark_group("demux_route");
-	let quic = [0x40u8; 1200];
-	for pins in [0, 1, 1024] {
-		let flows = Flows::default();
-		// Pinned addresses never match the senders, so every datagram stays QUIC.
-		let _pins: Vec<_> = (0..pins).map(|i| flows.pin(remote(1 << 20 | i))).collect();
-		for shards in [1, 4] {
-			group.throughput(Throughput::Elements((BATCH * shards) as u64));
-			group.bench_function(
-				BenchmarkId::new(format!("pins_{pins}"), format!("shards_{shards}")),
-				|b| {
-					b.iter_custom(|iters| {
-						let start = Instant::now();
-						std::thread::scope(|scope| {
-							for shard in 0..shards {
-								let flows = &flows;
-								scope.spawn(move || {
-									for _ in 0..iters {
-										for i in 0..BATCH {
-											let route = flows.route(remote(shard * BATCH + i), &quic);
-											assert_eq!(black_box(route), Route::Quic);
-										}
-									}
-								});
-							}
-						});
-						start.elapsed()
-					})
-				},
-			);
-		}
-	}
-	group.finish();
+/// Pins held and shards routing at once, named `pins_<n>/shards_<n>`.
+#[derive(Clone, Copy)]
+struct Case {
+	pins: usize,
+	shards: usize,
 }
 
-criterion_group! {
-	name = benches;
-	config = Criterion::default().measurement_time(Duration::from_secs(2));
-	targets = bench_route
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "pins_{}/shards_{}", self.pins, self.shards)
+	}
 }
-criterion_main!(benches);
+
+fn cases() -> Vec<Case> {
+	[0, 1, 1024]
+		.into_iter()
+		.flat_map(|pins| [1, 4].map(|shards| Case { pins, shards }))
+		.collect()
+}
+
+/// A pin table holding `pins` pins, and the shards that route through it.
+struct Table {
+	flows: Flows,
+	_pins: Vec<Pin>,
+	shards: usize,
+}
+
+fn table(case: Case) -> Table {
+	let flows = Flows::default();
+	// Pinned addresses never match the senders, so every datagram stays QUIC.
+	let _pins = (0..case.pins).map(|i| flows.pin(remote(1 << 20 | i))).collect();
+	Table {
+		flows,
+		_pins,
+		shards: case.shards,
+	}
+}
+
+/// Times itself so each shard's thread starts once per sample and routes a batch per iteration.
+#[bench(args = cases(), setup = table, items = |case: Case| BATCH * case.shards)]
+fn demux_route(table: &Table, iterations: Iterations) -> Duration {
+	let quic = [0x40u8; 1200];
+	let start = Instant::now();
+	std::thread::scope(|scope| {
+		for shard in 0..table.shards {
+			let flows = &table.flows;
+			let quic = &quic;
+			scope.spawn(move || {
+				for _ in iterations {
+					for i in 0..BATCH {
+						let route = flows.route(remote(shard * BATCH + i), quic);
+						assert_eq!(black_box(route), Route::Quic);
+					}
+				}
+			});
+		}
+	});
+	start.elapsed()
+}
+
+fn main() {
+	swole::main();
+}

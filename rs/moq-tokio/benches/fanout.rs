@@ -4,13 +4,9 @@
 //! connection, writes a small message on each and finishes it, while the server accepts and
 //! reads every stream to the end. Reported per stream, so a cost that grows with the number of
 //! streams in flight (a scan over every stream per event, say) shows as a slope across N.
+//!
+//! Run with `cargo bench -p moq-tokio --bench fanout`.
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::num::NonZeroU64;
-use std::sync::Arc;
-use std::time::Duration;
-
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use moq_tokio::quic::driver::{
 	Limits, client,
@@ -22,6 +18,9 @@ use rustls::{
 	RootCertStore,
 	pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::num::NonZeroU64;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 /// Streams in flight per iteration.
@@ -143,61 +142,84 @@ impl Pair {
 	}
 }
 
-fn bench_fanout(c: &mut Criterion) {
-	let pair = Pair::new();
-	let message = vec![0x5a; MESSAGE];
-	let mut group = c.benchmark_group("fanout");
-	group.sample_size(20);
-	group.warm_up_time(Duration::from_secs(1));
-	group.measurement_time(Duration::from_secs(5));
-	for streams in STREAMS {
-		group.throughput(Throughput::Elements(streams as u64));
-		group.bench_with_input(BenchmarkId::new("uni_1KiB", streams), &streams, |b, &streams| {
-			b.iter(|| pair.fanout(streams, &message));
-		});
+mod fanout {
+	use swole::bench;
+
+	use super::{MESSAGE, Pair, STREAMS};
+
+	/// A connected pair and how many streams each call opens.
+	struct Fanout {
+		pair: Pair,
+		streams: usize,
 	}
-	group.finish();
+
+	fn fanout(streams: usize) -> Fanout {
+		Fanout {
+			pair: Pair::new(),
+			streams,
+		}
+	}
+
+	#[bench(args = STREAMS, setup = fanout, items = |streams| streams)]
+	fn uni_1kib(fanout: &Fanout) {
+		fanout.pair.fanout(fanout.streams, &[0x5a; MESSAGE]);
+	}
 }
 
-mod native {
-	use super::*;
+/// The same connection through `moq-net`'s poll transport API.
+mod native_transport {
+	use std::fmt;
+
 	use bytes::Bytes;
 	use moq_net::transport::poll::{RecvStream as _, SendStream as _};
-	use std::alloc::{GlobalAlloc, Layout, System};
-	use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+	use moq_tokio::quic::web::Session;
+	use swole::bench;
 
-	struct Counter;
-	static COUNTING: AtomicBool = AtomicBool::new(false);
-	static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-	static ALLOCATED: AtomicU64 = AtomicU64::new(0);
-	#[global_allocator]
-	static ALLOCATOR: Counter = Counter;
+	use super::Pair;
 
-	fn count(size: usize) {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-			ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
-		}
+	/// Message size and streams per call, named `bytes-<size>/streams-<n>`.
+	#[derive(Clone, Copy)]
+	struct Case {
+		size: usize,
+		streams: usize,
 	}
-	unsafe impl GlobalAlloc for Counter {
-		unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-			count(layout.size());
-			unsafe { System.alloc(layout) }
-		}
-		unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-			count(layout.size());
-			unsafe { System.alloc_zeroed(layout) }
-		}
-		unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-			count(size);
-			unsafe { System.realloc(ptr, layout, size) }
-		}
-		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-			unsafe { System.dealloc(ptr, layout) }
+
+	impl fmt::Display for Case {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			write!(f, "bytes-{}/streams-{}", self.size, self.streams)
 		}
 	}
 
-	fn transfer<S: moq_net::transport::poll::Session>(
+	fn cases() -> Vec<Case> {
+		[64, 64 * 1024]
+			.into_iter()
+			.flat_map(|size| [1, 16, 256].map(|streams| Case { size, streams }))
+			.collect()
+	}
+
+	/// Both ends of a connected pair as transport sessions, and what each call sends.
+	struct Native {
+		client: Session,
+		server: Session,
+		message: Bytes,
+		streams: usize,
+		// Declared last so the sessions drop before the runtime and endpoints they use.
+		pair: Pair,
+	}
+
+	fn native(case: Case) -> Native {
+		let pair = Pair::new();
+		Native {
+			client: Session::raw(pair.client.clone()),
+			server: Session::raw(pair.server.clone()),
+			message: Bytes::from(vec![0x5a; case.size]),
+			streams: case.streams,
+			pair,
+		}
+	}
+
+	/// Generic so it sends through the transport traits rather than the session's own methods.
+	fn send<S: moq_net::transport::poll::Session>(
 		pair: &Pair,
 		client: &S,
 		server: &S,
@@ -227,43 +249,18 @@ mod native {
 		});
 	}
 
-	pub fn benchmark(c: &mut Criterion) {
-		let pair = Pair::new();
-		let client = moq_tokio::quic::web::Session::raw(pair.client.clone());
-		let server = moq_tokio::quic::web::Session::raw(pair.server.clone());
-		let allocations = std::env::var_os("NATIVE_ALLOCS").is_some();
-		let mut group = c.benchmark_group("native_transport");
-		for size in [64, 64 * 1024] {
-			let message = Bytes::from(vec![0x5a; size]);
-			for streams in [1, 16, 256] {
-				if allocations {
-					for _ in 0..16 {
-						transfer(&pair, &client, &server, streams, &message);
-					}
-					ALLOCATIONS.store(0, Ordering::Relaxed);
-					ALLOCATED.store(0, Ordering::Relaxed);
-					COUNTING.store(true, Ordering::Relaxed);
-					for _ in 0..64 {
-						transfer(&pair, &client, &server, streams, &message);
-					}
-					COUNTING.store(false, Ordering::Relaxed);
-					let count = (streams * 64) as f64;
-					println!(
-						"native_transport bytes={size} streams={streams} allocations_per_stream={} allocated_bytes_per_stream={}",
-						ALLOCATIONS.load(Ordering::Relaxed) as f64 / count,
-						ALLOCATED.load(Ordering::Relaxed) as f64 / count
-					);
-				} else {
-					group.throughput(Throughput::Elements(streams as u64));
-					group.bench_function(format!("bytes-{size}/streams-{streams}"), |b| {
-						b.iter(|| transfer(&pair, &client, &server, streams, &message));
-					});
-				}
-			}
-		}
-		group.finish();
+	#[bench(args = cases(), setup = native, items = |case: Case| case.streams)]
+	fn transfer(native: &Native) {
+		send(
+			&native.pair,
+			&native.client,
+			&native.server,
+			native.streams,
+			&native.message,
+		);
 	}
 }
 
-criterion_group!(benches, bench_fanout, native::benchmark);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

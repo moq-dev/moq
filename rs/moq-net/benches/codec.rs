@@ -3,70 +3,174 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench codec`.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::fuzz::{Messages, decode_varints, encode_varints};
+mod codec_messages {
+	use std::fmt;
 
-type Encode = fn(&Messages, &mut Vec<u8>);
-type Decode = fn(&Messages, &[u8]);
+	use moq_net::fuzz::Messages;
+	use swole::bench;
 
-/// Varints spanning the length classes of both wire forms.
-fn varints() -> Vec<u64> {
-	(0..1_024u64)
-		.map(|n| match n % 4 {
-			0 => n % 60,
-			1 => 1_000 + n,
-			2 => 1_000_000 + n,
-			_ => (1 << 40) + n,
-		})
-		.collect()
+	#[derive(Clone, Copy)]
+	enum Protocol {
+		Lite,
+		Ietf,
+	}
+
+	const PROTOCOLS: [Protocol; 2] = [Protocol::Lite, Protocol::Ietf];
+
+	impl Protocol {
+		fn encode(self, messages: &Messages, out: &mut Vec<u8>) {
+			match self {
+				Self::Lite => messages.encode_lite(out),
+				Self::Ietf => messages.encode_ietf(out),
+			}
+		}
+
+		fn wire(self, messages: &Messages) -> Vec<u8> {
+			let mut wire = Vec::new();
+			self.encode(messages, &mut wire);
+			wire
+		}
+
+		fn bytes(self) -> usize {
+			self.wire(&Messages::default()).len()
+		}
+	}
+
+	impl fmt::Display for Protocol {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str(match self {
+				Self::Lite => "lite",
+				Self::Ietf => "ietf",
+			})
+		}
+	}
+
+	struct Encoding {
+		protocol: Protocol,
+		messages: Messages,
+		out: Vec<u8>,
+	}
+
+	fn encoding(protocol: Protocol) -> Encoding {
+		let messages = Messages::default();
+		let out = Vec::with_capacity(protocol.wire(&messages).len());
+		Encoding {
+			protocol,
+			messages,
+			out,
+		}
+	}
+
+	#[bench(args = PROTOCOLS, setup = encoding, bytes = Protocol::bytes)]
+	fn encode(input: &mut Encoding) {
+		input.out.clear();
+		input.protocol.encode(&input.messages, &mut input.out);
+	}
+
+	struct Decoding {
+		protocol: Protocol,
+		messages: Messages,
+		wire: Vec<u8>,
+	}
+
+	fn decoding(protocol: Protocol) -> Decoding {
+		let messages = Messages::default();
+		let wire = protocol.wire(&messages);
+		Decoding {
+			protocol,
+			messages,
+			wire,
+		}
+	}
+
+	#[bench(args = PROTOCOLS, setup = decoding, bytes = Protocol::bytes)]
+	fn decode(input: &Decoding) {
+		match input.protocol {
+			Protocol::Lite => input.messages.decode_lite(&input.wire),
+			Protocol::Ietf => input.messages.decode_ietf(&input.wire),
+		}
+	}
 }
 
-fn bench(c: &mut Criterion) {
-	let messages = Messages::default();
+mod codec_varint {
+	use std::fmt;
 
-	let mut group = c.benchmark_group("codec_messages");
-	let protocols: [(&str, Encode, Decode); 2] = [
-		("lite", Messages::encode_lite, Messages::decode_lite),
-		("ietf", Messages::encode_ietf, Messages::decode_ietf),
+	use moq_net::fuzz::{decode_varints, encode_varints};
+	use swole::bench;
+
+	/// Varints spanning the length classes of both wire forms.
+	fn varints() -> Vec<u64> {
+		(0..VARINTS as u64)
+			.map(|n| match n % 4 {
+				0 => n % 60,
+				1 => 1_000 + n,
+				2 => 1_000_000 + n,
+				_ => (1 << 40) + n,
+			})
+			.collect()
+	}
+
+	const VARINTS: usize = 1_024;
+
+	/// A wire form, by the `ietf` flag `encode_varints` takes.
+	#[derive(Clone, Copy)]
+	struct Form {
+		name: &'static str,
+		ietf: bool,
+	}
+
+	const FORMS: [Form; 2] = [
+		Form {
+			name: "quic",
+			ietf: false,
+		},
+		Form {
+			name: "leading_ones",
+			ietf: true,
+		},
 	];
-	for (name, encode, decode) in protocols {
-		let mut encoded = Vec::new();
-		encode(&messages, &mut encoded);
-		group.throughput(Throughput::Bytes(encoded.len() as u64));
 
-		group.bench_function(BenchmarkId::new("encode", name), |b| {
-			let mut out = Vec::with_capacity(encoded.len());
-			b.iter(|| {
-				out.clear();
-				encode(&messages, &mut out);
-			});
-		});
-		group.bench_function(BenchmarkId::new("decode", name), |b| {
-			b.iter(|| decode(&messages, &encoded))
-		});
+	impl fmt::Display for Form {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str(self.name)
+		}
 	}
-	group.finish();
 
-	let values = varints();
-	let mut group = c.benchmark_group("codec_varint");
-	group.throughput(Throughput::Elements(values.len() as u64));
-	for (name, ietf) in [("quic", false), ("leading_ones", true)] {
-		let mut encoded = Vec::new();
-		encode_varints(&values, ietf, &mut encoded);
-
-		group.bench_function(BenchmarkId::new("encode", name), |b| {
-			let mut out = Vec::with_capacity(encoded.len());
-			b.iter(|| {
-				out.clear();
-				encode_varints(&values, ietf, &mut out);
-			});
-		});
-		group.bench_function(BenchmarkId::new("decode", name), |b| {
-			b.iter(|| decode_varints(&encoded, ietf))
-		});
+	struct Encoding {
+		ietf: bool,
+		values: Vec<u64>,
+		out: Vec<u8>,
 	}
-	group.finish();
+
+	fn encoding(form: Form) -> Encoding {
+		let values = varints();
+		let mut out = Vec::new();
+		encode_varints(&values, form.ietf, &mut out);
+		Encoding {
+			ietf: form.ietf,
+			values,
+			out,
+		}
+	}
+
+	#[bench(args = FORMS, setup = encoding, items = |_: Form| VARINTS)]
+	fn encode(input: &mut Encoding) {
+		input.out.clear();
+		encode_varints(&input.values, input.ietf, &mut input.out);
+	}
+
+	fn wire(form: Form) -> (bool, Vec<u8>) {
+		let mut wire = Vec::new();
+		encode_varints(&varints(), form.ietf, &mut wire);
+		(form.ietf, wire)
+	}
+
+	#[bench(args = FORMS, setup = wire, items = |_: Form| VARINTS)]
+	fn decode((ietf, wire): &(bool, Vec<u8>)) -> u64 {
+		decode_varints(wire, *ietf)
+	}
 }
 
-criterion_group!(benches, bench);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

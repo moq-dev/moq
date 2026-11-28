@@ -1,39 +1,82 @@
-//! Matching a pattern union, swept over union size and path depth.
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+//! Matching a pattern union, swept over union size and path depth, and whole-union operations.
+//!
+//! Run with `cargo bench -p moq-pattern --bench matching`.
+
+use std::fmt;
+
 use moq_pattern::{Pattern, Patterns, Prefix, Prefixes};
 
-fn matching(c: &mut Criterion) {
-	let mut group = c.benchmark_group("pattern-matching");
-	for count in [1, 16, 256] {
-		for depth in [1, 8, 32] {
-			let tail = vec!["node"; depth - 1].join("/");
-			let path = |tenant: String| {
-				if tail.is_empty() {
-					tenant
-				} else {
-					format!("{tenant}/{tail}")
-				}
-			};
-			let patterns: Patterns = (0..count)
-				.map(|index| path(format!("tenant{index:03}")).parse::<Pattern>().unwrap())
-				.collect();
-			assert_eq!(patterns.len(), count);
-			for (case, input, expected) in [
-				("last-match", path(format!("tenant{:03}", count - 1)), true),
-				("miss", path("other".into()), false),
-			] {
-				assert_eq!(patterns.matches(&input), expected);
-				group.throughput(Throughput::Elements(1));
-				group.bench_function(
-					BenchmarkId::new(case, format!("{count}patterns-{depth}segments")),
-					|b| {
-						b.iter(|| std::hint::black_box(patterns.matches(std::hint::black_box(&input))));
-					},
-				);
+/// Matching one path against a union of literal paths.
+mod pattern_matching {
+	use std::fmt;
+
+	use moq_pattern::{Pattern, Patterns};
+	use swole::bench;
+
+	/// A union's size and its paths' depth, named `<count>patterns-<depth>segments`.
+	#[derive(Clone, Copy)]
+	struct Case {
+		count: usize,
+		depth: usize,
+	}
+
+	impl Case {
+		fn path(self, tenant: String) -> String {
+			let tail = vec!["node"; self.depth - 1].join("/");
+			if tail.is_empty() {
+				tenant
+			} else {
+				format!("{tenant}/{tail}")
 			}
 		}
+
+		fn patterns(self) -> Patterns {
+			let patterns: Patterns = (0..self.count)
+				.map(|index| self.path(format!("tenant{index:03}")).parse::<Pattern>().unwrap())
+				.collect();
+			assert_eq!(patterns.len(), self.count);
+			patterns
+		}
 	}
-	group.finish();
+
+	impl fmt::Display for Case {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			write!(f, "{}patterns-{}segments", self.count, self.depth)
+		}
+	}
+
+	fn cases() -> Vec<Case> {
+		[1, 16, 256]
+			.into_iter()
+			.flat_map(|count| [1, 8, 32].map(|depth| Case { count, depth }))
+			.collect()
+	}
+
+	/// The union and a path matching its last member.
+	fn last(case: Case) -> (Patterns, String) {
+		let patterns = case.patterns();
+		let input = case.path(format!("tenant{:03}", case.count - 1));
+		assert!(patterns.matches(&input));
+		(patterns, input)
+	}
+
+	/// The union and a path matching none of it.
+	fn other(case: Case) -> (Patterns, String) {
+		let patterns = case.patterns();
+		let input = case.path("other".into());
+		assert!(!patterns.matches(&input));
+		(patterns, input)
+	}
+
+	#[bench(args = cases(), setup = last)]
+	fn last_match((patterns, input): &(Patterns, String)) -> bool {
+		patterns.matches(input)
+	}
+
+	#[bench(args = cases(), setup = other)]
+	fn miss((patterns, input): &(Patterns, String)) -> bool {
+		patterns.matches(input)
+	}
 }
 
 /// Whole-union operations, swept over member kind and the size of each union.
@@ -54,96 +97,109 @@ fn matching(c: &mut Criterion) {
 /// `collect` reduces it as decoding does, and `covers` compares it against a previous
 /// grant as a regrant does. Their throughput is bytes, so a cost that grows faster than
 /// the message shows as falling throughput.
-fn algebra(c: &mut Criterion) {
-	let mut group = c.benchmark_group("pattern-algebra");
-	let union = |kind: &str, name: &str, count: usize| -> Patterns {
-		let union: Patterns = (0..count)
-			.map(|index| match kind {
-				"literal" => format!("{name}{index:04}"),
-				"partial" => format!("{name}{index:04}*tail"),
-				_ if index % 2 == 0 => format!("{name}{:04}", index / 2),
-				_ => format!("{name}{:04}/x", index / 2),
-			})
-			.map(|text| text.parse::<Pattern>().unwrap())
-			.collect();
-		assert_eq!(union.len(), count);
-		union
-	};
-	for kind in ["literal", "partial", "two-tier"] {
-		for count in [16, 256, 4096] {
-			let inputs: Vec<Pattern> = union(kind, "room", count).into_iter().collect();
-			group.throughput(Throughput::Elements(count as u64));
-			group.bench_function(BenchmarkId::new(format!("collect-{kind}"), count), |b| {
-				b.iter(|| std::hint::black_box(inputs.iter().cloned().collect::<Patterns>().len()));
-			});
-		}
-		for (held, queried) in [(16, 16), (4096, 16), (16, 4096), (4096, 4096)] {
-			let ours = union(kind, "room", held);
-			let theirs = union(kind, "other", queried);
-			let sizes = format!("{held}x{queried}");
-			group.throughput(Throughput::Elements((held + queried) as u64));
+mod pattern_algebra {
+	use moq_pattern::{Pattern, Patterns, Prefix, Prefixes};
+	use swole::bench;
 
-			group.bench_function(BenchmarkId::new(format!("extend-{kind}"), &sizes), |b| {
-				b.iter(|| {
-					let mut union = ours.clone();
-					union.extend(theirs.iter().cloned());
-					std::hint::black_box(union.len())
-				});
-			});
-			group.bench_function(BenchmarkId::new(format!("intersect-{kind}"), &sizes), |b| {
-				b.iter(|| std::hint::black_box(ours.intersect(&theirs).unwrap().len()));
-			});
-			if queried <= held {
-				let subset = union(kind, "room", queried);
-				assert!(ours.covers(&subset));
-				group.bench_function(BenchmarkId::new(format!("covers-{kind}"), &sizes), |b| {
-					b.iter(|| std::hint::black_box(ours.covers(&subset)));
-				});
-			}
-		}
+	use super::{Grant, Pair, Sizes, Union, grant_cases, kinds, pairs, prefix_grant, sizes, subtree_pairs, wire};
+
+	fn inputs(case: Union) -> Vec<Pattern> {
+		case.kind.union("room", case.count).into_iter().collect()
 	}
-	for (held, queried) in [(16, 16), (4096, 16), (16, 4096), (4096, 4096)] {
-		let subtrees: Patterns = (0..held)
+
+	#[bench(args = kinds(), setup = inputs, items = |case: Union| case.count)]
+	fn collect(inputs: &[Pattern]) -> usize {
+		inputs.iter().cloned().collect::<Patterns>().len()
+	}
+
+	/// Our union of `held` and their union of `queried`, disjoint.
+	fn unions(case: Pair) -> (Patterns, Patterns) {
+		(
+			case.kind.union("room", case.held),
+			case.kind.union("other", case.queried),
+		)
+	}
+
+	#[bench(args = pairs(false), setup = unions, items = Pair::total)]
+	fn extend((ours, theirs): &(Patterns, Patterns)) -> usize {
+		let mut union = ours.clone();
+		union.extend(theirs.iter().cloned());
+		union.len()
+	}
+
+	#[bench(args = pairs(false), setup = unions, items = Pair::total)]
+	fn intersect((ours, theirs): &(Patterns, Patterns)) -> usize {
+		ours.intersect(theirs).unwrap().len()
+	}
+
+	/// Our union of `held` and a subset of it of `queried`.
+	fn subset(case: Pair) -> (Patterns, Patterns) {
+		let ours = case.kind.union("room", case.held);
+		let subset = case.kind.union("room", case.queried);
+		assert!(ours.covers(&subset));
+		(ours, subset)
+	}
+
+	#[bench(args = pairs(true), setup = subset, items = Pair::total)]
+	fn covers((ours, subset): &(Patterns, Patterns)) -> bool {
+		ours.covers(subset)
+	}
+
+	/// `held` subtrees and `queried` literals beneath them.
+	fn subtrees(sizes: Sizes) -> (Patterns, Patterns) {
+		let subtrees: Patterns = (0..sizes.held)
 			.map(|index| format!("s{index:04}/**").parse::<Pattern>().unwrap())
 			.collect();
-		let literals: Patterns = (0..queried)
+		let literals: Patterns = (0..sizes.queried)
 			.map(|index| {
-				format!("s{:04}/room{index:04}", index % held)
+				format!("s{:04}/room{index:04}", index % sizes.held)
 					.parse::<Pattern>()
 					.unwrap()
 			})
 			.collect();
 		assert!(subtrees.covers(&literals));
-		group.throughput(Throughput::Elements((held + queried) as u64));
-		group.bench_function(BenchmarkId::new("covers-subtree", format!("{held}x{queried}")), |b| {
-			b.iter(|| std::hint::black_box(subtrees.covers(&literals)));
-		});
+		(subtrees, literals)
 	}
-	// Each iteration reduces a whole message, so fewer samples keep the sweep short.
-	group.sample_size(10);
-	for shape in [Shape::Mask, Shape::Chain] {
-		for bytes in [4096, 16384, MAX_MESSAGE] {
-			let (message, previous) = shape.grant(bytes);
-			let size = wire(&message);
-			assert!(
-				size <= bytes && size * 16 > bytes * 15,
-				"{shape:?} fills {size} of {bytes} bytes"
-			);
-			let message: Vec<Pattern> = message.iter().map(|text| text.parse().unwrap()).collect();
-			let reduced: Patterns = message.iter().cloned().collect();
-			assert_eq!(reduced.len(), message.len(), "{shape:?} members are incomparable");
-			assert!(previous.covers(&reduced));
-			group.throughput(Throughput::Bytes(size as u64));
-			group.bench_function(BenchmarkId::new(format!("collect-{}", shape.name()), bytes), |b| {
-				b.iter(|| std::hint::black_box(message.iter().cloned().collect::<Patterns>().len()));
-			});
-			group.bench_function(BenchmarkId::new(format!("covers-{}", shape.name()), bytes), |b| {
-				b.iter(|| std::hint::black_box(previous.covers(&reduced)));
-			});
-		}
+
+	#[bench(args = subtree_pairs(), setup = subtrees, items = |sizes: Sizes| sizes.held + sizes.queried)]
+	fn covers_subtree((subtrees, literals): &(Patterns, Patterns)) -> bool {
+		subtrees.covers(literals)
 	}
-	// The grant `AUTH_OK` carries: prefixes reduce in one sort and one sweep on any shape.
-	for bytes in [4096, 16384, MAX_MESSAGE] {
+
+	/// A grant's members, them reduced, and the previous grant covering them.
+	fn grant(case: Grant) -> (Vec<Pattern>, Patterns, Patterns) {
+		let (message, previous) = case.shape.grant(case.bytes);
+		let size = wire(&message);
+		assert!(
+			size <= case.bytes && size * 16 > case.bytes * 15,
+			"{:?} fills {size} of {} bytes",
+			case.shape,
+			case.bytes
+		);
+		let message: Vec<Pattern> = message.iter().map(|text| text.parse().unwrap()).collect();
+		let reduced: Patterns = message.iter().cloned().collect();
+		assert_eq!(
+			reduced.len(),
+			message.len(),
+			"{:?} members are incomparable",
+			case.shape
+		);
+		assert!(previous.covers(&reduced));
+		(message, reduced, previous)
+	}
+
+	#[bench(args = grant_cases(), setup = grant, bytes = Grant::size)]
+	fn collect_shape((message, _, _): &(Vec<Pattern>, Patterns, Patterns)) -> usize {
+		message.iter().cloned().collect::<Patterns>().len()
+	}
+
+	#[bench(args = grant_cases(), setup = grant, bytes = Grant::size)]
+	fn covers_shape((_, reduced, previous): &(Vec<Pattern>, Patterns, Patterns)) -> bool {
+		previous.covers(reduced)
+	}
+
+	/// The prefix grant's members, them reduced, and the previous grant of their parents.
+	fn prefixes(bytes: usize) -> (Vec<Prefix>, Prefixes, Prefixes) {
 		let (message, previous) = prefix_grant(bytes);
 		let size = wire(&message);
 		assert!(
@@ -154,18 +210,166 @@ fn algebra(c: &mut Criterion) {
 		let reduced: Prefixes = message.iter().cloned().collect();
 		assert_eq!(reduced.len(), message.len(), "prefix members are disjoint");
 		assert!(previous.covers(&reduced));
-		group.throughput(Throughput::Bytes(size as u64));
-		group.bench_function(BenchmarkId::new("collect-prefix", bytes), |b| {
-			b.iter(|| std::hint::black_box(message.iter().cloned().collect::<Prefixes>().len()));
-		});
-		group.bench_function(BenchmarkId::new("covers-prefix", bytes), |b| {
-			b.iter(|| std::hint::black_box(previous.covers(&reduced)));
-		});
-		group.bench_function(BenchmarkId::new("intersect-prefix", bytes), |b| {
-			b.iter(|| std::hint::black_box(previous.intersect(&reduced).len()));
-		});
+		(message, reduced, previous)
 	}
-	group.finish();
+
+	fn prefix_size(bytes: usize) -> usize {
+		wire(&prefix_grant(bytes).0)
+	}
+
+	// The grant `AUTH_OK` carries: prefixes reduce in one sort and one sweep on any shape.
+	#[bench(args = sizes(), setup = prefixes, bytes = prefix_size)]
+	fn collect_prefix((message, _, _): &(Vec<Prefix>, Prefixes, Prefixes)) -> usize {
+		message.iter().cloned().collect::<Prefixes>().len()
+	}
+
+	#[bench(args = sizes(), setup = prefixes, bytes = prefix_size)]
+	fn covers_prefix((_, reduced, previous): &(Vec<Prefix>, Prefixes, Prefixes)) -> bool {
+		previous.covers(reduced)
+	}
+
+	#[bench(args = sizes(), setup = prefixes, bytes = prefix_size)]
+	fn intersect_prefix((_, reduced, previous): &(Vec<Prefix>, Prefixes, Prefixes)) -> usize {
+		previous.intersect(reduced).len()
+	}
+}
+
+/// What a union's members look like: literals share one specificity tier, partials another,
+/// and two-tier pairs a one-segment literal with a two-segment one beneath it.
+#[derive(Clone, Copy)]
+enum Kind {
+	Literal,
+	Partial,
+	TwoTier,
+}
+
+impl Kind {
+	const ALL: [Self; 3] = [Self::Literal, Self::Partial, Self::TwoTier];
+
+	fn union(self, name: &str, count: usize) -> Patterns {
+		let union: Patterns = (0..count)
+			.map(|index| match self {
+				Self::Literal => format!("{name}{index:04}"),
+				Self::Partial => format!("{name}{index:04}*tail"),
+				Self::TwoTier if index % 2 == 0 => format!("{name}{:04}", index / 2),
+				Self::TwoTier => format!("{name}{:04}/x", index / 2),
+			})
+			.map(|text| text.parse::<Pattern>().unwrap())
+			.collect();
+		assert_eq!(union.len(), count);
+		union
+	}
+}
+
+impl fmt::Display for Kind {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(match self {
+			Self::Literal => "literal",
+			Self::Partial => "partial",
+			Self::TwoTier => "two-tier",
+		})
+	}
+}
+
+/// One union of a kind, named `<kind>/<count>`.
+#[derive(Clone, Copy)]
+struct Union {
+	kind: Kind,
+	count: usize,
+}
+
+impl fmt::Display for Union {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.kind, self.count)
+	}
+}
+
+fn kinds() -> Vec<Union> {
+	Kind::ALL
+		.into_iter()
+		.flat_map(|kind| [16, 256, 4096].map(|count| Union { kind, count }))
+		.collect()
+}
+
+/// The held and queried unions' sizes, named `<held>x<queried>`.
+#[derive(Clone, Copy)]
+struct Sizes {
+	held: usize,
+	queried: usize,
+}
+
+impl fmt::Display for Sizes {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}x{}", self.held, self.queried)
+	}
+}
+
+/// The held and queried sizes swept, so a cost that follows either shows its own slope.
+const PAIRS: [(usize, usize); 4] = [(16, 16), (4096, 16), (16, 4096), (4096, 4096)];
+
+fn subtree_pairs() -> Vec<Sizes> {
+	PAIRS.map(|(held, queried)| Sizes { held, queried }).into()
+}
+
+/// A held and a queried union of one kind, named `<kind>/<held>x<queried>`.
+#[derive(Clone, Copy)]
+struct Pair {
+	kind: Kind,
+	held: usize,
+	queried: usize,
+}
+
+impl Pair {
+	fn total(self) -> usize {
+		self.held + self.queried
+	}
+}
+
+impl fmt::Display for Pair {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}x{}", self.kind, self.held, self.queried)
+	}
+}
+
+/// Every kind and size pair, only those whose queried union fits in the held one if `subset`.
+fn pairs(subset: bool) -> Vec<Pair> {
+	Kind::ALL
+		.into_iter()
+		.flat_map(|kind| PAIRS.map(|(held, queried)| Pair { kind, held, queried }))
+		.filter(|pair| !subset || pair.queried <= pair.held)
+		.collect()
+}
+
+/// The message sizes a grant fills.
+fn sizes() -> [usize; 3] {
+	[4096, 16384, MAX_MESSAGE]
+}
+
+/// A grant of one shape filling at most `bytes`, named `<shape>/<bytes>`.
+#[derive(Clone, Copy)]
+struct Grant {
+	shape: Shape,
+	bytes: usize,
+}
+
+impl Grant {
+	/// The grant's encoded size.
+	fn size(self) -> usize {
+		wire(&self.shape.grant(self.bytes).0)
+	}
+}
+
+impl fmt::Display for Grant {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.shape.name(), self.bytes)
+	}
+}
+
+fn grant_cases() -> Vec<Grant> {
+	[Shape::Mask, Shape::Chain]
+		.into_iter()
+		.flat_map(|shape| sizes().map(|bytes| Grant { shape, bytes }))
+		.collect()
 }
 
 /// Distinct prefix members two segments beneath a shared parent, filling at most `bytes`
@@ -276,5 +480,6 @@ impl Shape {
 	}
 }
 
-criterion_group!(benches, matching, algebra);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

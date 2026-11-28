@@ -2,7 +2,7 @@
 //!
 //! A lite-07 SUBSCRIBE fits about 32K ranges in its 64 KiB message, so a walk over every
 //! range on each poll lets a peer multiply what one subscription costs by that much. Each
-//! group here holds the ranges fixed and repeats one steady-state step, swept over the range
+//! benchmark here holds the ranges fixed and repeats one steady-state step, swept over the range
 //! count, so such a walk shows up as a slope over it:
 //!
 //! - `ranges_time_end`: ranges whose time ends lie past the live edge, so none settles. A
@@ -26,8 +26,8 @@ use std::hint::black_box;
 use std::task::Poll;
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Timestamp, broadcast, group, track};
+use swole::bench;
 
 /// Ranges in the one subscription, up to about what a lite-07 SUBSCRIBE fits.
 const RANGES: [u64; 4] = [1, 64, 1024, 16_384];
@@ -278,44 +278,31 @@ impl TimeGaps {
 	}
 }
 
-fn sweep<S>(c: &mut Criterion, name: &str, new: impl Fn(u64) -> S, step: impl Fn(&mut S)) {
-	let mut group = c.benchmark_group(name);
-	group.throughput(Throughput::Elements(1));
-	for ranges in RANGES {
-		group.bench_function(BenchmarkId::from_parameter(ranges), |b| {
-			let mut scenario = new(ranges);
-			b.iter(|| step(&mut scenario));
-		});
-	}
-	group.finish();
+#[bench(args = RANGES, setup = TimeEnds::new, items = |_: u64| 1)]
+fn ranges_time_end(scenario: &mut TimeEnds) {
+	scenario.step()
 }
 
-fn bench_time_end(c: &mut Criterion) {
-	sweep(c, "ranges_time_end", TimeEnds::new, TimeEnds::step);
+#[bench(args = RANGES, setup = TimeCap::new, items = |_: u64| 1)]
+fn ranges_time_cap(scenario: &mut TimeCap) {
+	scenario.step()
 }
 
-fn bench_time_cap(c: &mut Criterion) {
-	sweep(c, "ranges_time_cap", TimeCap::new, TimeCap::step);
+#[bench(args = RANGES, setup = FillsOut::new, items = |_: u64| 1)]
+fn ranges_fills_out(scenario: &mut FillsOut) {
+	scenario.step()
 }
 
-fn bench_fills_out(c: &mut Criterion) {
-	sweep(c, "ranges_fills_out", FillsOut::new, FillsOut::step);
+#[bench(args = RANGES, setup = Sparse::new, items = |_: u64| 1)]
+fn ranges_sparse(scenario: &mut Sparse) {
+	scenario.step()
 }
 
-fn bench_sparse(c: &mut Criterion) {
-	sweep(c, "ranges_sparse", Sparse::new, Sparse::step);
+#[bench(args = RANGES, setup = TimeGaps::new, items = |_: u64| 1)]
+fn ranges_time_gaps(scenario: &mut TimeGaps) {
+	scenario.step()
 }
 
-fn bench_time_gaps(c: &mut Criterion) {
-	sweep(c, "ranges_time_gaps", TimeGaps::new, TimeGaps::step);
+fn main() {
+	swole::main();
 }
-
-criterion_group!(
-	benches,
-	bench_time_end,
-	bench_time_cap,
-	bench_fills_out,
-	bench_sparse,
-	bench_time_gaps
-);
-criterion_main!(benches);
