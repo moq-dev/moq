@@ -574,7 +574,11 @@ pub(crate) mod test_util {
 		#[cfg_attr(
 			all(
 				feature = "openh264",
-				not(any(apple, all(target_os = "linux", any(feature = "nvidia", feature = "vaapi"))))
+				not(any(
+					apple,
+					target_os = "windows",
+					all(target_os = "linux", any(feature = "nvidia", feature = "vaapi"))
+				))
 			),
 			expect(dead_code, reason = "only the hardware encoders' tests bound the peak")
 		)]

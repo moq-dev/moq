@@ -15,6 +15,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The Rust cache writes on main, and mbx seeds a new Cargo.lock's
+          # predictions from history (see .github/actions/rust-cache).
+          fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
         with:

@@ -181,16 +181,10 @@ enum Media {
 }
 
 impl Media {
-	fn open(
-		&mut self,
-		timestamp: Timestamp,
-		keyframe: bool,
-		duration: Option<Timestamp>,
-		size: usize,
-	) -> crate::Result<Streamed> {
+	fn open(&mut self, frame: crate::container::Frame, size: usize) -> crate::Result<Streamed> {
 		match self {
-			Self::Video(track) => track.open(timestamp, keyframe, duration, size),
-			Self::Audio(track) => track.open(timestamp, keyframe, duration, size),
+			Self::Video(track) => track.open(frame, size),
+			Self::Audio(track) => track.open(frame, size),
 		}
 	}
 
@@ -932,7 +926,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					let size = usize::try_from(size).map_err(|_| moq_net::Error::FrameTooLarge)?;
 					frames.index += 1;
-					let frame = track.track.open(timestamp, keyframe, frames.duration, size)?;
+					let frame = track.track.open(
+						crate::container::Frame {
+							timestamp,
+							decode: None,
+							duration: frames.duration,
+							payload: bytes::Bytes::new(),
+							keyframe,
+						},
+						size,
+					)?;
 					if keyframe && let Some(record) = &mut track.record {
 						// A keyframe a failed block cut short starts over.
 						record.keyframe = Some(crate::codec::video::InBand::new(&record.config)?);

@@ -85,7 +85,11 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
  * Resumed readers backfill superseded groups, so it sets no publisher limit.
  */
 function copy(source: BroadcastProducer) {
-	const producer = defined(source.createTrack("seq", { maxAge: null }));
+	return copyOf(defined(source.createTrack("seq", { maxAge: null })));
+}
+
+/** {@link copy} of a track `source` already created. */
+function copyOf(producer: track.Producer) {
 	return {
 		producer,
 		write(key: bigint, frames = 1, close = true) {
@@ -4877,8 +4881,13 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 				tb.write(5n);
 				tb.write(6n);
 			}
-			if (resolution === "drop")
+			if (resolution === "drop") {
 				hooks.dropTrackGroups(ta.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+				// The serving route the switch asked for 5 still owes it: a drop is only that route's.
+				await settle();
+				expect(await isPending(held)).toBe(true);
+				hooks.dropTrackGroups(tb.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+			}
 			if (resolution === "budget") await clock.advance(Duration.millis(1000));
 			// The budget runs from when the serving copy held 7, past the boundary at 6: once it
 			// passed, 6 is stale too, as on a plain read of one route.
@@ -5573,6 +5582,183 @@ test("a switch backfills a group the replaced copy holds without its head", asyn
 	}
 });
 
+// An ordered read passes every key below a group it hands out, so a group a replaced copy was left
+// to drain and lost is asked of the serving route before one above it goes out. Mirrors the Rust
+// `an_ordered_read_asks_for_a_lost_drain_before_passing_it`.
+test("an ordered read asks for a group a draining copy loses before passing it", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe(withMax({ delay: { max: null } }))
+		.ordered();
+	try {
+		ta.write(0n);
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(0n);
+		ta.write(1n);
+		ta.write(2n);
+		ta.write(3n);
+		front.serve(b.consume());
+		await settle();
+		// The switch leaves groups 1 and 2 to the replaced copy.
+		expect(ordered.tryNextGroup()?.start).toBe(1n);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		ta.write(4n);
+		tb.write(2n);
+		tb.write(3n);
+		await settle();
+		const keys: bigint[] = [];
+		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+			keys.push(group.start);
+			group.close();
+		}
+		expect(keys).toEqual([2n, 3n]);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+// A group a replaced copy lost, before the switch or after it left that copy the group to drain, is
+// waited for on the serving route before an ordered read hands out the group above, as a plain
+// ordered cursor on that route waits for it: the backfill asks the route's feed from below where it
+// started, which owes the group until it lands or its publisher skips it. Mirrors the Rust
+// `an_ordered_read_waits_for_a_lost_group_the_serving_route_answers_late`, whose copies' feeds
+// start where their session declares, so the group comes from a fill there.
+for (const [before, answer] of [
+	[false, "land"],
+	[true, "land"],
+	[false, "skip"],
+] as const) {
+	for (const nested of [false, true]) {
+		test(`an ordered read waits for a lost group its serving route answers late (before ${before}, ${answer}, nested ${nested})`, async () => {
+			const clock = new Manual();
+			const installed = install(clock);
+			const front = new Front();
+			const inner = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			hooks.receiveTrack(ta.producer);
+			hooks.receiveTrack(tb.producer);
+			// Its live feed starts at the resume point, until the backfill's demand asks it from below.
+			hooks.startTrack(tb.producer, { start: 3n, requested: 3n });
+			tb.write(3n);
+			front.serve(a.consume());
+			const ordered = front.consumer
+				.track("seq")
+				.subscribe(withMax({ delay: { max: null } }))
+				.ordered();
+			try {
+				ta.write(0n);
+				await settle();
+				expect(ordered.tryNextGroup()?.start).toBe(0n);
+				ta.write(1n);
+				ta.write(2n);
+				// Idle past the cache window, so the next write evicts every group but the new edge.
+				if (before) clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+				ta.write(3n);
+				if (nested) {
+					inner.serve(b.consume());
+					front.serve(inner.consumer);
+				} else front.serve(b.consume());
+				await settle();
+				if (!before) {
+					// The switch leaves groups 1 and 2 to the replaced copy, which then loses 2.
+					expect(ordered.tryNextGroup()?.start).toBe(1n);
+					clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+					ta.write(4n);
+					await settle();
+				}
+				expect(ordered.tryNextGroup()).toBeUndefined();
+				const lost = before ? [1n, 2n] : [2n];
+				for (const key of lost) {
+					if (answer === "skip") tb.producer.skipGroups(key, key + 1n);
+					else tb.write(key);
+				}
+				await settle();
+				const keys: bigint[] = [];
+				for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+					keys.push(group.start);
+					group.close();
+				}
+				expect(keys).toEqual(answer === "skip" ? [3n] : [...lost, 3n]);
+			} finally {
+				ordered.close();
+				front.consumer.close();
+				inner.consumer.close();
+				a.close();
+				b.close();
+				installed.close();
+			}
+		});
+	}
+}
+
+// A group a replaced copy was left to drain, which it lost and got again without its head, is asked
+// of the serving route before an ordered read hands out the group above: the copy that offers it
+// gives it up. The Rust `an_ordered_read_reads_a_drain_its_copy_got_again_without_its_head` hands
+// out the reserved group instead.
+test("an ordered read asks for a drain its copy holds without its head", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 0n, end: 3n }] }))
+		.ordered();
+	try {
+		ta.write(0n);
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(0n);
+		ta.write(1n);
+		ta.write(2n);
+		ta.write(3n);
+		front.serve(b.consume());
+		await settle();
+		// The switch leaves groups 1 and 2 to the replaced copy.
+		expect(ordered.tryNextGroup()?.start).toBe(1n);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		ta.write(4n);
+		const tail = hooks.receiveGroup(ta.producer, { start: 2n, offset: 1 });
+		tail.writeFrame({ payload: enc.encode("2.1"), timestamp: Timestamp.unscaled(2n) });
+		tail.finish();
+		tb.write(2n);
+		tb.write(3n);
+		await settle();
+		const keys: bigint[] = [];
+		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+			keys.push(group.start);
+			group.close();
+		}
+		expect(keys).toEqual([2n, 3n]);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
 // A group the switch left to a replaced copy to drain, which that copy's cache then evicts, is asked
 // of the serving route after all: what the reader gets never depends on what a copy happens to hold.
 // Mirrors the Rust `a_group_a_draining_copy_loses_is_backfilled`.
@@ -5612,6 +5798,54 @@ test("a group a draining copy loses is backfilled", async () => {
 		front.consumer.close();
 		a.close();
 		b.close();
+	}
+});
+
+// A group the switch left to a replaced copy to drain is asked of the serving route once that copy
+// no longer offers it, whether the copy is let go or a read of another of its groups keeps it.
+// Mirrors the Rust `a_group_a_draining_copy_gives_up_is_backfilled`.
+test("a group a draining copy gives up is backfilled", async () => {
+	for (const leased of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
+		hooks.receiveTrack(tb.producer);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe(joining(Duration.secs(1)));
+		try {
+			ta.write(0n);
+			await settle();
+			expect(drain(sub)).toEqual([0n]);
+			ta.write(1n);
+			ta.write(2n);
+			tb.write(1n);
+			front.serve(b.consume());
+			await settle();
+			tb.write(3n);
+			await settle();
+			// The switch leaves group 1 to the replaced copy, which hands out only group 2 for now.
+			const serving = sub.tryRecvGroup();
+			expect(serving?.start).toBe(3n);
+			serving?.close();
+			const reading = sub.tryRecvGroup();
+			expect(reading?.start).toBe(2n);
+			if (!leased) reading?.close();
+			// A budget later, the replaced copy no longer offers group 1, while the serving route
+			// still does.
+			await clock.advance(Duration.millis(1200));
+			expect(drain(sub), `leased ${leased}`).toEqual([1n]);
+			reading?.close();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
 	}
 });
 
@@ -6131,6 +6365,215 @@ test("a replaced copy's unread late groups outlive the serving copy's stale verd
 		} finally {
 			installed.close();
 		}
+	}
+});
+
+// A replaced copy's unread late groups stay owed while it is past the reader's budget, so a later
+// widened budget still reads them though the serving copy handed out groups meanwhile, as one
+// track's skipped groups stay owed to a wider budget. Mirrors the Rust
+// `a_widened_budget_reads_an_expired_copys_groups_past_a_hand_out`.
+test("a widened budget reads an expired copy's groups past a hand-out", async () => {
+	for (const routed of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		try {
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			front.serve(a.consume());
+			const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+			const sub = routed ? front.consumer.track("seq").subscribe(budget) : ta.producer.subscribe(budget);
+			ta.write(0n);
+			ta.write(5n);
+			// Held, so the replaced copy stays subscribed once it expires.
+			const held = defined(sub.tryRecvGroup());
+			expect(held.start).toBe(5n);
+			expect(drain(sub)).toEqual([0n]);
+			if (routed) {
+				front.serve(b.consume());
+				await settle();
+			}
+			const serving = routed ? tb : ta;
+			serving.write(6n);
+			await clock.advance(Duration.millis(900));
+			expect(drain(sub)).toEqual([6n]);
+			await clock.advance(Duration.millis(50));
+			for (const key of [4n, 2n, 1n]) ta.write(key);
+			serving.write(7n);
+			// Newest first, so the late groups are left unread.
+			const seven = defined(sub.tryRecvGroup());
+			expect(seven.start, `routed ${routed}`).toBe(7n);
+			// The replaced copy expires, and 2 and 1 go stale by 4 under the reader's budget.
+			await clock.advance(Duration.millis(1_450));
+			serving.write(8n);
+			expect(drain(sub), `routed ${routed}`).toEqual([8n]);
+			// Wide enough to read the copy again and keep 2 and 1, not 4: 5 arrived past it.
+			sub.update(withMax({ delay: { max: Duration.millis(2_000) } }));
+			expect(drain(sub), `routed ${routed}`).toEqual([2n, 1n]);
+
+			seven.close();
+			held.close();
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+// Late groups that land on a replaced copy only after it expired, so no read of it ever looked at
+// them, stay owed past the serving copy's hand-out to a later widened budget, as one track's
+// arrivals do. Mirrors the Rust
+// `a_widened_budget_reads_late_groups_landing_on_an_expired_copy_past_a_hand_out`.
+test("a widened budget reads late groups landing on an expired copy past a hand-out", async () => {
+	for (const routed of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		try {
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			front.serve(a.consume());
+			const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+			const sub = routed ? front.consumer.track("seq").subscribe(budget) : ta.producer.subscribe(budget);
+			ta.write(0n);
+			ta.write(5n);
+			// Held, so the replaced copy stays subscribed once it expires.
+			const held = defined(sub.tryRecvGroup());
+			expect(held.start).toBe(5n);
+			expect(drain(sub)).toEqual([0n]);
+			if (routed) {
+				front.serve(b.consume());
+				await settle();
+			}
+			const serving = routed ? tb : ta;
+			serving.write(6n);
+			await clock.advance(Duration.millis(900));
+			expect(drain(sub)).toEqual([6n]);
+			// A budget past 6 superseding it, the replaced copy expires and goes unread.
+			await clock.advance(Duration.millis(1_500));
+			expect(drain(sub)).toEqual([]);
+			for (const key of [4n, 2n, 1n]) ta.write(key);
+			serving.write(7n);
+			// Newest first, so the late groups are left unread.
+			const seven = defined(sub.tryRecvGroup());
+			expect(seven.start, `routed ${routed}`).toBe(7n);
+			// Wide enough to read the copy again and keep 2 and 1, not 4: 5 arrived past it.
+			sub.update(withMax({ delay: { max: Duration.millis(2_000) } }));
+			expect(drain(sub), `routed ${routed}`).toEqual([2n, 1n]);
+
+			seven.close();
+			held.close();
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+// A leased copy's unread groups stop holding back the fold once the track's max age passed, as no
+// widened budget reads them then. Mirrors the Rust
+// `an_expired_copy_past_its_max_age_bound_holds_back_no_gap`.
+test("an expired copy past its max age bound holds back no gap", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copyOf(defined(a.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	const tb = copyOf(defined(b.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+	try {
+		ta.write(0n);
+		ta.write(5n);
+		// Held, so the replaced copy stays subscribed once it expires.
+		const held = defined(sub.tryRecvGroup());
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(b.consume());
+		await settle();
+		tb.write(6n);
+		await clock.advance(Duration.millis(900));
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Duration.millis(50));
+		for (const key of [4n, 2n, 1n]) ta.write(key);
+		tb.write(7n);
+		// Newest first, so the late groups are left unread.
+		const seven = defined(sub.tryRecvGroup());
+		expect(seven.start).toBe(7n);
+		for (let key = 9n; key < 40n; key += 2n) {
+			await clock.advance(Duration.millis(1_100));
+			tb.write(key);
+			expect(drain(sub)).toEqual([key]);
+		}
+		// No more than after the first of them, however long the lease lasts.
+		expect(hooks.deliveredRuns(sub)).toBe(3);
+		seven.close();
+		held.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+// An expired copy's unread group still fresh by its own successor at the track's max age stays
+// owed, so a budget widened past that age reads it, while one stale even at that age is forgotten.
+// Mirrors the Rust `a_widened_budget_reads_an_expired_copys_group_fresh_at_its_max_age`.
+test("a widened budget reads an expired copy's group fresh at its max age", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copyOf(defined(a.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	const tb = copyOf(defined(b.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+	try {
+		ta.write(0n);
+		ta.write(5n);
+		// Held, so the replaced copy stays subscribed once it expires.
+		const held = defined(sub.tryRecvGroup());
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(b.consume());
+		await settle();
+		tb.write(6n);
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Duration.millis(900));
+		// 3 lands with its successor 4, while 4's successor 5 landed long before.
+		ta.write(3n);
+		ta.write(4n);
+		tb.write(7n);
+		// Newest first, so the late groups are left unread.
+		const seven = defined(sub.tryRecvGroup());
+		expect(seven.start).toBe(7n);
+		// The replaced copy expires, past the track's max age since it was replaced.
+		await clock.advance(Duration.millis(1_200));
+		tb.write(8n);
+		expect(drain(sub)).toEqual([8n]);
+		// Wider than the max age, which still keeps 3 fresh by 4, but not 4 by 5.
+		sub.update(withMax({ delay: { max: Duration.millis(3_000) } }));
+		expect(drain(sub)).toEqual([3n]);
+		seven.close();
+		held.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
 	}
 });
 

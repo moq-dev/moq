@@ -2498,6 +2498,7 @@ mod tests {
 		for (index, &micros) in stamps.iter().enumerate() {
 			let frame = moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				decode: None,
 				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
 				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,

@@ -1,18 +1,27 @@
-import type { Reader, Writer } from "../stream.ts";
+import { Cursor, type Reader, type Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
-import type { IetfVersion } from "./version.ts";
+import { hasTimestampObjectIds, type IetfVersion } from "./version.ts";
 
-// TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
-// Track scope: it declares the units of the track's Group IDs, which are its groups' starts,
-// and its presence is what makes the track timed at all.
-const TIMESCALE = 0x08n;
+// Legacy timescale property (0x08), emitted on draft-18..22 for side-by-side rollout compatibility
+// with released moq-net-v0.3.24 peers (which use dense ordinal Object IDs). On draft-23+, 0x08 is
+// LOC's TIMESCALE and passes through untouched while ID_TIMESCALE (0x40B70) carries moq-timestamp.
+// Temporary migration shim: delete when draft-22 compatibility is retired.
+const LEGACY_TIMESCALE = 0x08n;
+
+// ID_TIMESCALE (0x40B70), from draft-lcurley-moq-timestamp.
+// Track scope: it declares the units of the track's Group IDs and Object IDs (`dts =
+// Group ID + Object ID - TIMESTAMP_TIE`), and its presence is what makes the track timed.
+// Distinct from LOC's TIMESCALE (0x08), which is skipped as an unknown property on draft-23+.
+const TIMESCALE = 0x40b70n;
 
 // DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
 // It shares its number with the GROUP_ORDER *message parameter*, which is a different
 // registry: that one is only legal in SUBSCRIBE, PUBLISH_OK, and FETCH, where the
 // subscriber states its own preference.
 const DEFAULT_PUBLISHER_PRIORITY = 0x0en;
+/** Immutable Properties: a nested block of properties the publisher sealed. */
+const IMMUTABLE = 0x0bn;
 const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
 
 /**
@@ -45,8 +54,9 @@ export interface Properties {
 /// the caller must not append anything after it.
 ///
 /// Properties are serialized in ascending order by type, delta-encoded.
-export async function encode(w: Writer, properties: Properties, _version: IetfVersion): Promise<void> {
+export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
 	let prevType = 0n;
+	const sparseIds = hasTimestampObjectIds(version);
 
 	if (properties.maxCacheDuration !== undefined) {
 		await w.u62(4n);
@@ -54,10 +64,10 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 		prevType = 4n;
 	}
 
-	if (properties.timescale !== undefined) {
-		await w.u62(TIMESCALE - prevType);
+	if (!sparseIds && properties.timescale !== undefined) {
+		await w.u62(LEGACY_TIMESCALE - prevType);
 		await w.u62(BigInt(properties.timescale));
-		prevType = TIMESCALE;
+		prevType = LEGACY_TIMESCALE;
 	}
 
 	if (properties.priority !== undefined) {
@@ -72,6 +82,13 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 	if (properties.groupOrder !== undefined) {
 		await w.u62(DEFAULT_PUBLISHER_GROUP_ORDER - prevType);
 		await w.u62(BigInt(properties.groupOrder));
+		prevType = DEFAULT_PUBLISHER_GROUP_ORDER;
+	}
+
+	if (sparseIds && properties.timescale !== undefined) {
+		await w.u62(TIMESCALE - prevType);
+		await w.u62(BigInt(properties.timescale));
+		prevType = TIMESCALE;
 	}
 }
 
@@ -83,8 +100,39 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 ///
 /// Unlike an unknown message parameter, an unknown property is skipped rather than fatal,
 /// which is what lets a relay forward properties it does not implement.
-export async function decode(r: Reader, _version: IetfVersion): Promise<Properties> {
+export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
 	const properties: Properties = {};
+	const sparseIds = hasTimestampObjectIds(version);
+	// Each understood property holds one value, searched in both the top-level list and the
+	// Immutable Properties block, so a second occurrence is malformed, as in Rust.
+	const seen = new Set<bigint>();
+	const once = (key: bigint) => {
+		if (seen.has(key)) throw new Error(`repeated property: ${key}`);
+		seen.add(key);
+	};
+	const apply = (abs: bigint, value: bigint) => {
+		if (abs === 4n) {
+			once(abs);
+			properties.maxCacheDuration = value;
+		} else if (abs === TIMESCALE || (!sparseIds && abs === LEGACY_TIMESCALE)) {
+			once(TIMESCALE);
+			// A zero timescale is invalid; treat it as no declaration rather than
+			// failing the whole message over one property we could have ignored.
+			if (value > 0n) properties.timescale = Timescale(toNumber(value));
+		} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
+			once(abs);
+			if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
+			properties.priority = Number(value);
+		} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
+			once(abs);
+			// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
+			// fields, 0x0 has no "publisher decides" meaning to fall back on.
+			if (value < 1n || value > 2n) {
+				throw new Error(`unknown group order: ${value}`);
+			}
+			properties.groupOrder = Number(value);
+		}
+	};
 	let prevType = 0n;
 	let i = 0;
 
@@ -96,28 +144,24 @@ export async function decode(r: Reader, _version: IetfVersion): Promise<Properti
 
 		if (abs % 2n === 0n) {
 			// Even type: single varint value
-			const value = await r.u62();
-			if (abs === 4n) {
-				properties.maxCacheDuration = value;
-			} else if (abs === TIMESCALE && value > 0n) {
-				// A zero timescale is invalid; treat it as no declaration rather than
-				// failing the whole message over one property we could have ignored.
-				properties.timescale = Timescale(toNumber(value));
-			} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
-				if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
-				properties.priority = Number(value);
-			} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
-				// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
-				// fields, 0x0 has no "publisher decides" meaning to fall back on.
-				if (value < 1n || value > 2n) {
-					throw new Error(`unknown group order: ${value}`);
-				}
-				properties.groupOrder = Number(value);
-			}
-		} else {
-			// Odd type: length-prefixed bytes
-			const len = await r.u53();
-			await r.read(len);
+			apply(abs, await r.u62());
+			continue;
+		}
+		// Odd type: length-prefixed bytes
+		const bytes = await r.read(await r.u53());
+		if (abs !== IMMUTABLE) continue;
+		// One block, never nested, as in Rust: a second would leave the sealed keys ambiguous.
+		once(IMMUTABLE);
+		// A sealed property applies as a mutable one does: ID_TIMESCALE there still picks the
+		// Object ID scheme.
+		const block = new Cursor(bytes, r.version);
+		let prev = 0n;
+		while (block.remaining > 0) {
+			const id = prev + block.u62();
+			prev = id;
+			if (id === IMMUTABLE) throw new Error("nested Immutable Properties");
+			if (id % 2n === 0n) apply(id, block.u62());
+			else block.read(block.u53());
 		}
 	}
 

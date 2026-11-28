@@ -70,7 +70,9 @@ want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
 served under a prefix claim has nothing to list. A relay lists its upstream's
 tracks as they arrive and syncs when its upstream does, so a track listed after
-the synced mark is new at the source, through any number of hops.
+the synced mark is new at the source, through any number of hops. A moq-transport
+upstream never signals a complete list, so a relay listing one syncs at once
+with the tracks it already knows.
 
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
@@ -402,18 +404,23 @@ across its subscribers.
 A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time, so an untimed
 track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
-moq-transport without a `TIMESCALE`, arrive
+moq-transport without an `ID_TIMESCALE` (or `TIMESCALE` on pre-draft-23), arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there it goes
 out as milliseconds, each frame stamped with its group's start; the
 work-in-progress 07 carries it without a timescale, with the same stamps.
 
 A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
-05 and 06 without checking them, since an older publisher stamps an untimed
-track there with send times, which look like media time, and an older group
-fetched later would look like a rewind. A relay serves them on
-over every version. A moq-transport frame's time is its Group ID, so its
-timestamps cannot rewind and are checked like any other.
+moq-lite 07 receiver. A group's timestamps never decrease either: writing a frame
+below its predecessor fails, so a stream with B-frames stamps decode time and
+carries presentation time in its payload, as hang's `cts` container does.
+moq-lite 07 sends each after a stream's first as an unsigned delta. A receiver passes on the timestamps it
+gets over moq-lite 05 and 06 without checking them, since an older publisher
+stamps an untimed track there with send times, which look like media time, and an
+older group fetched later would look like a rewind. A relay serves them on to
+moq-lite 05 and 06, while a moq-lite 07 or moq-transport draft-23 subscriber gets
+an error for a group whose timestamps decrease. On moq-transport draft-23 and later, a timed frame's
+timestamp is `Group ID + Object ID - TIMESTAMP_TIE` in the track's `ID_TIMESCALE`;
+earlier drafts use `TIMESCALE`, with every frame at its Group ID.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one

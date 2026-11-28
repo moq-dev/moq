@@ -16,6 +16,7 @@ import type * as Identity from "./identity.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
+import type { Timescale } from "./time.ts";
 import type * as track from "./track.ts";
 import { checkName } from "./util/utf8.ts";
 
@@ -31,8 +32,11 @@ export interface Broadcast {
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
-	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Position | undefined;
+	/**
+	 * The newest frame the track's cache holds, read without subscribing; `undefined` while it holds
+	 * none. With `timescale`, its `frame` is that frame's moq-timestamp Object ID at that scale.
+	 */
+	largest(name: string, timescale?: Timescale): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
 	fetchGroup?(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;

@@ -181,7 +181,12 @@ impl Producer {
 	/// until the last [`Producer`] clone is dropped. Spawning it is the caller's,
 	/// so the caller decides what a panic in it ends. With no origin the producer
 	/// is a no-op: its registry is disabled and the publisher returns at once.
+	///
+	/// # Panics
+	///
+	/// If `config.interval` is zero.
 	pub fn new(config: Config) -> (Self, Publisher) {
+		assert!(!config.interval.is_zero(), "publish interval must be non-zero");
 		let Config {
 			origin,
 			prefix,
@@ -650,8 +655,9 @@ impl<T: Serialize> Snapshot<T> {
 			{
 				return Ok(None);
 			}
+			// The group ends where the next begins, so a lite-07 reader accounts its span.
 			if let Some(group) = self.group.take() {
-				group.finish()?;
+				group.finish_at(start)?;
 			}
 			if self.fresh && self.largest.is_none() {
 				self.track.skip_groups(0..start);
@@ -1695,6 +1701,40 @@ mod tests {
 		assert_eq!(snapshot.largest, Some(6_000), "started at its drain's timestamp");
 		assert!(snapshot.update(&frame(10), stamp(6)).unwrap().is_some());
 		assert_eq!(snapshot.largest, Some(6_000), "the next change is a delta");
+	}
+
+	#[test]
+	#[should_panic(expected = "interval must be non-zero")]
+	fn a_zero_interval_is_refused() {
+		let _ = Producer::new(Config::new().with_interval(Duration::ZERO));
+	}
+
+	/// A group closed because the next one starts ends where that one begins, so a
+	/// lite-07 reader accounts the span between them.
+	#[tokio::test]
+	async fn a_group_ends_where_the_next_starts() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		// Uncompressed, so the refresh ratio is judged on the plain frame sizes.
+		let track = broadcast
+			.create_track("t.json", info().with_compression(moq_net::track::Compression::None))
+			.unwrap();
+		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), moq_json::snapshot::Config::default());
+		let frame = |n| Frame {
+			entries: vec![(Path::from_static("a"), n)],
+		};
+
+		let mut cursor = track.subscribe(None);
+		// A snapshot and nine deltas: past the track's refresh ratio.
+		for n in 0..10 {
+			snapshot.update(&frame(n), stamp(5)).unwrap();
+		}
+		let first = cursor.recv_group().await.unwrap().unwrap();
+		assert_eq!(first.end(), None, "open until the next group");
+
+		// A joiner asks for a fresh group, which closes the first at its own start.
+		let _late = track.subscribe(None);
+		assert!(snapshot.update(&frame(9), stamp(6)).unwrap().is_some());
+		assert_eq!(first.end(), Some(6_000));
 	}
 
 	/// A relay origin, and the cache pool its copies are billed to.

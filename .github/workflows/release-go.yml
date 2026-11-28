@@ -177,7 +177,8 @@ jobs:
           # the release).
           ORIGIN=$(just go ffi-origin)
           case "$ORIGIN" in
-            mod) MOD_URL="https://go.moq.dev/moq.dev/moq-ffi/@v/v${FFI_VERSION}.mod" ;;
+            # The .info goes up last, so it means the version is whole.
+            mod) MOD_URL="https://go.moq.dev/moq.dev/moq-ffi/@v/v${FFI_VERSION}.info" ;;
             git) MOD_URL="https://raw.githubusercontent.com/moq-dev/moq-go-ffi/v${FFI_VERSION}/go.mod" ;;
           esac
           if ! STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "$MOD_URL"); then

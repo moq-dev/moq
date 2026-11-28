@@ -405,8 +405,12 @@ macro_rules! publish {
 					&unit,
 					params.as_ref().into_iter().flat_map(|params| params.nals()),
 				)?;
+				let decode = (unit.reorder)
+					.map(|reorder| crate::container::decode_time(pts, reorder))
+					.transpose()?;
 				for mut frame in frames {
 					frame.timestamp = pts;
+					frame.decode = decode;
 					published += u64::from(super::skip_missing_keyframe(import.decode([frame]))?);
 				}
 				assembly.clock.commit();

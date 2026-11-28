@@ -539,9 +539,8 @@ test("a refresh reuses the newest timestamp", async () => {
 	expect(timestamps).toEqual([0, 30]);
 });
 
-// A delta may carry a timestamp older than its group's first frame, but a new group must start past
-// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
-// update, then restates the value there. (Mirrors the Rust
+// A delta may carry its group's start, but a new group must start past it, so a refresh whose newest
+// timestamp is still the group's own start waits for a later update, then restates the value there. (Mirrors the Rust
 // `a_refresh_after_older_updates_waits_for_a_later_one`.)
 test("a refresh after older updates waits for a later one", async () => {
 	const track = new Track.Producer("test").accept({
@@ -550,8 +549,9 @@ test("a refresh after older updates waits for a later one", async () => {
 		maxAge: null,
 	});
 	const producer = new Producer<Value>({ track });
-	// Deltas may carry timestamps older than their group's first frame.
-	for (const [n, ms] of [30, 10, 20, 15].entries()) producer.update({ n }, Time.Timestamp.fromMillis(ms));
+	// Deltas may carry their group's start; a timestamp below it is refused.
+	for (const n of [0, 1, 2, 3]) producer.update({ n }, Time.Timestamp.fromMillis(30));
+	expect(() => producer.update({ n: 9 }, Time.Timestamp.fromMillis(10))).toThrow(NetError.TimestampMismatch);
 
 	const joiner = track.subscribe();
 	await settle();

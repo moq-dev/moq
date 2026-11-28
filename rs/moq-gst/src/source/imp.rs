@@ -2522,6 +2522,7 @@ mod tests {
 		gst::init().unwrap();
 		let frame = moq_mux::container::Frame {
 			timestamp: Timestamp::from_scale(1 << 60, 1).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::new(),
 			keyframe: true,
 			duration: None,
@@ -2795,6 +2796,7 @@ mod session_tests {
 						let mut write = |index: usize, seconds: u64| {
 							tracks[index]
 								.write(moq_mux::container::Frame {
+									decode: None,
 									timestamp: moq_net::Timestamp::from_scale(seconds * scales[index], scales[index])
 										.unwrap(),
 									payload: bytes::Bytes::from_static(&[0xf8]),
@@ -3345,6 +3347,7 @@ mod session_tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from(vec![i as u8; 64]),
 					keyframe: i == 0,
 					duration: None,
@@ -3490,6 +3493,7 @@ mod session_tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from(vec![i as u8; 64]),
 					keyframe: i == 0 || i == HEAD,
 					duration: None,
@@ -3633,6 +3637,7 @@ mod session_tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from(vec![i as u8; 64]),
 					keyframe: i == 0,
 					duration: None,
@@ -3688,6 +3693,7 @@ mod session_tests {
 		let container = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let keyframe = moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::from(vec![0; 64]),
 			keyframe: true,
 			duration: None,
@@ -3987,6 +3993,7 @@ mod session_tests {
 			let elapsed = (self.clock.time() - self.start).useconds();
 			moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(elapsed).unwrap(),
+				decode: None,
 				payload: bytes::Bytes::from(vec![tag; 64]),
 				keyframe: true,
 				duration: None,

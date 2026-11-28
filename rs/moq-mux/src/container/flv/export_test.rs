@@ -579,6 +579,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		video
 			.write(crate::container::Frame {
 				timestamp: Timestamp::from_millis(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
 				keyframe: true,
@@ -605,6 +606,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 	audio
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(&[0xde, 0xad]),
 			keyframe: true,
@@ -765,6 +767,7 @@ async fn export_without_multitrack_keeps_best_audio_rendition() {
 			audio
 				.write(crate::container::Frame {
 					timestamp: Timestamp::from_millis(0).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(&[0xde, 0xad]),
 					keyframe: true,
@@ -936,6 +939,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 	large
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
 			keyframe: true,
@@ -1067,6 +1071,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 	large
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(100).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
 			keyframe: true,
@@ -1294,6 +1299,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	);
 	let video_frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
@@ -1311,6 +1317,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(20).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(&[0xde, 0xad]),
 			keyframe: true,
@@ -1387,6 +1394,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 	}
 	let frame = |micros: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_micros(micros).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
@@ -1527,6 +1535,7 @@ async fn a_reorder_declared_after_the_header_raises_the_shift() {
 		.insert(name.clone(), config);
 	let frame = |ms: u64, keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(if keyframe {
 			&[0, 0, 0, 1, 0x65]
@@ -1691,6 +1700,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	let mut audio = crate::container::Producer::new(audio_track, legacy());
 	let frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
@@ -1785,6 +1795,7 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		let failed = audio.name().to_string();
 		let frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 			timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(payload),
 			keyframe,
@@ -1881,6 +1892,7 @@ async fn a_replacement_declaring_reorder_raises_the_shift() {
 	let mut audio = crate::container::Producer::new(audio_track, legacy());
 	let frame = |ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
@@ -1966,6 +1978,7 @@ async fn a_continued_track_wakes_the_export() {
 	let mut high = add("b.aac", 128_000);
 	let frame = |timestamp_ms: u64, payload: &'static [u8]| crate::container::Frame {
 		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe: true,
@@ -2047,6 +2060,7 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	let mut audio = crate::container::Producer::new(audio, legacy());
 	let frame = |timestamp_ms: u64| crate::container::Frame {
 		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from_static(&[0xde, 0xad]),
 		keyframe: true,
@@ -2082,6 +2096,7 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	replacement
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(40).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
 			keyframe: true,

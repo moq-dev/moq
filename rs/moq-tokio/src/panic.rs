@@ -21,15 +21,18 @@ static COUNT: AtomicU64 = AtomicU64::new(0);
 /// Run one owned task, returning its panic to the owner instead of unwinding past it.
 ///
 /// Returns `None` once the panic is logged and counted.
-pub async fn isolate<F: Future>(task: F) -> Option<F::Output> {
-	match AssertUnwindSafe(task).catch_unwind().await {
+///
+/// Built from combinators, not an `async fn`: an async fn stores its argument twice, and the
+/// task is often a session's whole lifetime.
+pub fn isolate<F: Future>(task: F) -> impl Future<Output = Option<F::Output>> {
+	AssertUnwindSafe(task).catch_unwind().map(|caught| match caught {
 		Ok(output) => Some(output),
 		Err(payload) => {
 			COUNT.fetch_add(1, Ordering::Relaxed);
 			tracing::error!(panic = message(payload.as_ref()), "owned task panicked");
 			None
 		}
-	}
+	})
 }
 
 /// How many panics [`isolate`] has contained since the process started.

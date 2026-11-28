@@ -53,6 +53,7 @@
 
 pub mod connection;
 pub mod endpoint;
+mod events;
 pub(crate) mod forward;
 mod incoming;
 mod mutex;

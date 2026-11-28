@@ -139,7 +139,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 }
 
 /// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
-/// delta encoding, including negative deltas (B-frame ordering).
+/// delta encoding.
 async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_net::{Timescale, Timestamp};
 
@@ -157,9 +157,8 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		)
 		.expect("failed to create track");
 
-	// Three frames where the middle PTS goes backwards (B-frame decode order) so the
-	// zigzag timestamp delta carries a negative value.
-	let frames = [10_000u64, 30_000, 20_000];
+	// Three frames with growing gaps, so each timestamp delta differs.
+	let frames = [10_000u64, 20_000, 40_000];
 	let mut group = track
 		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
@@ -275,9 +274,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		)
 		.expect("failed to create track");
 
-	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
-	// stream carries a negative zigzag delta too).
-	let frames = [10_000u64, 30_000, 20_000];
+	// A group with a few timestamped frames, so the fetch stream carries their deltas too.
+	let frames = [10_000u64, 20_000, 40_000];
 	let mut group = track
 		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group"); // seq 0

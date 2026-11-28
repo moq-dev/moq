@@ -364,7 +364,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		subscriptions,
 	});
 	let peer_target = publisher.peer_target();
-	let mut subscriber = Subscriber::new(SubscriberConfig {
+	let subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -378,9 +378,9 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 		auth: auth.clone(),
+		announces,
+		viewers,
 	});
-	subscriber.announces = announces;
-	subscriber.viewers = viewers;
 	let datagrams_unrouted = version.has_datagrams().then(|| subscriber.datagrams_unrouted.clone());
 
 	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the

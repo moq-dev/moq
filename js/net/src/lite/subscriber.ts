@@ -2446,7 +2446,7 @@ export class Subscriber {
 		}
 	}
 
-	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)
+	// Read the FETCH response (bare frames, delta-timestamped unless `timescale` is 0)
 	// into the group, then FIN. A stream-level failure aborts the group so its reader observes
 	// the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, info: TrackInfo): Promise<void> {

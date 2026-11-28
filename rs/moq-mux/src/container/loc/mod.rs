@@ -37,9 +37,13 @@ impl Container for Wire {
 			let timestamp = frame.timestamp.convert(DEFAULT_TIMESCALE).map_err(hang::Error::from)?;
 			let data = moq_loc::encode(timestamp.value(), &frame.payload)?;
 
-			// Carry the timestamp on the net frame too (converted to the track's
-			// timescale), so a relay sees it without parsing the LOC payload.
-			group.write_frame(frame.timestamp, data)?;
+			// The property carries the presentation time, and the transport the newest so far
+			// (converted to the track's timescale), which never decreases within a group.
+			let transport = match group.latest() {
+				Some(latest) if frame.timestamp < latest => latest,
+				_ => frame.timestamp,
+			};
+			group.write_frame(transport, data)?;
 		}
 		Ok(())
 	}
@@ -63,6 +67,7 @@ impl Container for Wire {
 
 		Ok(vec![Frame {
 			timestamp,
+			decode: None,
 			payload: loc.payload,
 			// LOC doesn't carry the keyframe bit on the wire; the
 			// wrapping Consumer fills it in from group position.
@@ -92,6 +97,7 @@ impl Container for Wire {
 				group,
 				&[Frame {
 					timestamp,
+					decode: None,
 					payload: bytes::Bytes::new(),
 					keyframe: false,
 					duration: None,
