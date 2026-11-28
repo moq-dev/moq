@@ -5635,6 +5635,10 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};
+		hooks.owes = (subscriber, start, end) => {
+			if (subscriber.#resume) return subscriber.#resume.owes(start, end);
+			return subscriber.#waitOwed(start, end, subscriber.#drift());
+		};
 		hooks.provenTrack = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.proven();
 			const producer = subscriber.#state.producer;

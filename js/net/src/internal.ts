@@ -797,6 +797,8 @@ export interface ResumeSource {
 	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
+	/** Whether an ordered read of a copy this reader keeps waits for a group in `[start, end)`; see `hooks.owes`. */
+	owes(start: bigint, end: bigint): boolean;
 	/** Whether the serving route's copy names every start on its wire; see `hooks.provenTrack`. */
 	proven(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -1414,6 +1416,13 @@ export const hooks: {
 	 * reader on any copy it keeps; see {@link Land}.
 	 */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
+	/**
+	 * Whether an ordered read of the subscriber still waits for a group in `[start, end)`: one a fill
+	 * it asked has yet to answer, or one its received copy's live feed owes within its budget. Arms
+	 * the read's wakeups for that wait. A front's reader asks the copies it keeps. Mirrors the Rust
+	 * `track::Subscriber::owes`.
+	 */
+	owes: (subscriber: Subscriber, start: bigint, end: bigint) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };
 	/** Whether `position` is a subscriber's largest and its group ended there, so no frame follows it. */
@@ -1956,6 +1965,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	mayLand: () => {
+		throw new Error("track.ts not loaded");
+	},
+	owes: () => {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {

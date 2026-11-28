@@ -13409,6 +13409,35 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether an ordered read here still waits for a group in `groups`: one a fill it asked
+	/// has yet to answer, one whose head a bounded window asked for, or one this received
+	/// copy's live feed owes within its arrival grace (see `TrackState::owed`). Parks `waiter`
+	/// until that grace folds. A front's logical track asks the route copies it keeps.
+	pub(super) fn owes(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> bool {
+		let cursor = match &self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.owes(groups, waiter),
+		};
+		if groups.is_empty() {
+			return false;
+		}
+		if cursor.misses.as_ref().is_some_and(|misses| misses.wants(&groups)) {
+			return true;
+		}
+		// The live feed counts a group whose head is still asked for as arrived.
+		if (cursor.heads.as_ref()).is_some_and(|heads| heads.fetching.range(groups.clone()).next().is_some()) {
+			return true;
+		}
+		let state = cursor.state.read();
+		let Some(owed) = state.owed(groups, &cursor.filter.window) else {
+			return false;
+		};
+		if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
+			state.cache.watch_wall(folds, waiter);
+		}
+		true
+	}
+
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
 	/// front's logical track counts every route it holds.
 	/// Parks `waiter` until a change while some of `groups` is not.
@@ -13475,6 +13504,39 @@ impl Subscriber {
 	pub(crate) fn reaches(&self, fin: u64) -> bool {
 		self.bounds().end.is_none_or(|cap| cap >= fin)
 			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some())
+	}
+
+	/// How many groups this read's track cached so far, fetched ones included; see
+	/// [`Self::cached_in`]. A front's logical track caches none of its own.
+	pub(super) fn cached(&self) -> u64 {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().cached,
+			Inner::Resume(..) => 0,
+		}
+	}
+
+	/// Whether a group in `groups` that a read in key order here hands out was cached after
+	/// the first `seen`, as [`Self::cached`] counts them: the check `Cursor::poll_owed` makes.
+	pub(super) fn cached_in(&self, seen: u64, groups: &RangeSet<u64>) -> bool {
+		let Inner::Plain(cursor) = &self.inner else {
+			return false;
+		};
+		let state = cursor.state.read();
+		// Nothing cached since leaves no slot to look up.
+		state.cached > seen
+			&& groups.iter().any(|run| {
+				(state.walk(run.start, cursor.end_key, &cursor.filter.window))
+					.take_while(|slot| slot.group.start < run.end)
+					.any(|slot| slot.cached > seen)
+			})
+	}
+
+	/// Forget the parked group read: a group was cached that the caller saw before its wake
+	/// reached the read.
+	pub(super) fn disarm(&mut self) {
+		if let Inner::Plain(cursor) = &mut self.inner {
+			idle::Idle::disarm(&mut cursor.idle);
+		}
 	}
 
 	/// Pass groups another route copy handed out, preserving the arrival cursor and bounds.

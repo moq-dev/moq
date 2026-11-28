@@ -4881,8 +4881,13 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 				tb.write(5n);
 				tb.write(6n);
 			}
-			if (resolution === "drop")
+			if (resolution === "drop") {
 				hooks.dropTrackGroups(ta.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+				// The serving route the switch asked for 5 still owes it: a drop is only that route's.
+				await settle();
+				expect(await isPending(held)).toBe(true);
+				hooks.dropTrackGroups(tb.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+			}
 			if (resolution === "budget") await clock.advance(Duration.millis(1000));
 			// The budget runs from when the serving copy held 7, past the boundary at 6: once it
 			// passed, 6 is stale too, as on a plain read of one route.
@@ -5624,6 +5629,83 @@ test("an ordered read asks for a group a draining copy loses before passing it",
 		installed.close();
 	}
 });
+
+// A group a replaced copy lost, before the switch or after it left that copy the group to drain, is
+// waited for on the serving route before an ordered read hands out the group above, as a plain
+// ordered cursor on that route waits for it: the backfill asks the route's feed from below where it
+// started, which owes the group until it lands or its publisher skips it. Mirrors the Rust
+// `an_ordered_read_waits_for_a_lost_group_the_serving_route_answers_late`, whose copies' feeds
+// start where their session declares, so the group comes from a fill there.
+for (const [before, answer] of [
+	[false, "land"],
+	[true, "land"],
+	[false, "skip"],
+] as const) {
+	for (const nested of [false, true]) {
+		test(`an ordered read waits for a lost group its serving route answers late (before ${before}, ${answer}, nested ${nested})`, async () => {
+			const clock = new Manual();
+			const installed = install(clock);
+			const front = new Front();
+			const inner = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			hooks.receiveTrack(ta.producer);
+			hooks.receiveTrack(tb.producer);
+			// Its live feed starts at the resume point, until the backfill's demand asks it from below.
+			hooks.startTrack(tb.producer, { start: 3n, requested: 3n });
+			tb.write(3n);
+			front.serve(a.consume());
+			const ordered = front.consumer
+				.track("seq")
+				.subscribe(withMax({ delay: { max: null } }))
+				.ordered();
+			try {
+				ta.write(0n);
+				await settle();
+				expect(ordered.tryNextGroup()?.start).toBe(0n);
+				ta.write(1n);
+				ta.write(2n);
+				// Idle past the cache window, so the next write evicts every group but the new edge.
+				if (before) clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+				ta.write(3n);
+				if (nested) {
+					inner.serve(b.consume());
+					front.serve(inner.consumer);
+				} else front.serve(b.consume());
+				await settle();
+				if (!before) {
+					// The switch leaves groups 1 and 2 to the replaced copy, which then loses 2.
+					expect(ordered.tryNextGroup()?.start).toBe(1n);
+					clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+					ta.write(4n);
+					await settle();
+				}
+				expect(ordered.tryNextGroup()).toBeUndefined();
+				const lost = before ? [1n, 2n] : [2n];
+				for (const key of lost) {
+					if (answer === "skip") tb.producer.skipGroups(key, key + 1n);
+					else tb.write(key);
+				}
+				await settle();
+				const keys: bigint[] = [];
+				for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+					keys.push(group.start);
+					group.close();
+				}
+				expect(keys).toEqual(answer === "skip" ? [3n] : [...lost, 3n]);
+			} finally {
+				ordered.close();
+				front.consumer.close();
+				inner.consumer.close();
+				a.close();
+				b.close();
+				installed.close();
+			}
+		});
+	}
+}
 
 // A group a replaced copy was left to drain, which it lost and got again without its head, is asked
 // of the serving route before an ordered read hands out the group above: the copy that offers it
