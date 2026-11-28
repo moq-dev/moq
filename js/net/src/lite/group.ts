@@ -127,8 +127,9 @@ export interface FrameFormat {
  * closes the group; before it the size ends the header, and stream end at the frame's first field
  * ends the group.
  *
- * On lite-07 the first delta is an unsigned offset from the group's `start`, whatever frame the
- * stream starts at, later deltas are unsigned offsets from the prior frame, and GROUP_END's End
+ * On lite-07 the first delta is a zigzag offset from the group's `start`, whatever frame the
+ * stream starts at, since a group's first frame may precede its key, later deltas are unsigned
+ * offsets from the prior frame, and GROUP_END's End
  * counts from the last frame's timestamp, or from `start` when the stream carried none. Mirrors
  * the Rust `FrameIngest`.
  */
@@ -142,6 +143,7 @@ export function frameDecoder({
 	if (meta && !lengthFirst) throw new Error("a metadata Group Stream needs moq-lite-07");
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = lengthFirst ? start : 0n;
+	let first = true;
 	return (c) => {
 		let size = 0;
 		if (lengthFirst) {
@@ -153,7 +155,7 @@ export function frameDecoder({
 			}
 			size = length - 1;
 		}
-		const delta = timescale !== undefined ? (lengthFirst ? c.u62() : unzigzag(c.u62())) : 0n;
+		const delta = timescale !== undefined ? (lengthFirst && !first ? c.u62() : unzigzag(c.u62())) : 0n;
 		const inflated = compress && !meta ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,
@@ -163,6 +165,7 @@ export function frameDecoder({
 		const payload = meta ? undefined : compress ? c.read(size) : decodePayload(c, size);
 		const header = meta || undefined;
 		// Commit the delta only after the last read: an incomplete decode gets retried.
+		first = false;
 		if (timescale === undefined) return { size, payload, inflated, header };
 		prevTs += delta;
 		return { size, payload, inflated, header, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };

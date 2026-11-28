@@ -58,7 +58,9 @@ function groupStream(subscriber: Subscriber, key: bigint, subscribe = 0n) {
 	let first = true;
 	return {
 		write: (payload: string) => {
-			controller.enqueue(frame(payload, subscriber.version, first ? Number(key) : 0));
+			// Lite-07 counts the first delta from the group's start, so its first frame sits there.
+			const at = first && !hasLengthFirst(subscriber.version) ? Number(key) : 0;
+			controller.enqueue(frame(payload, subscriber.version, at));
 			first = false;
 		},
 		finish: () => controller.close(),

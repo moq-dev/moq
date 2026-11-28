@@ -5740,7 +5740,8 @@ mod tests {
 		] {
 			let mut body = vec![0x1 | 0x4];
 			body.extend(record);
-			body.extend([frame, 0]);
+			// The first frame's zigzag delta from the group's start at 0.
+			body.extend([frame * 2, 0]);
 			let (res, track, _) = receive_ietf(draft18(Some(Timescale::MILLI)), &body).await;
 			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
 			if ok {
@@ -5791,15 +5792,16 @@ mod tests {
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
-		// The first delta counts from the group's start on lite-07 (unsigned), and from 0 before (zigzag).
+		// The first delta counts from the group's start on lite-07, and from 0 before, both zigzag;
+		// lite-07's later deltas are unsigned.
 		let base = match version.has_group_end() {
 			true => 5,
 			false => 0,
 		};
 		for (index, delta) in deltas.iter().enumerate() {
 			let delta = if index == 0 { delta - base } else { *delta };
-			let wire = match version.has_group_end() {
-				true => u64::try_from(delta).expect("lite-07 delta must be non-negative"),
+			let wire = match version.has_group_end() && index > 0 {
+				true => u64::try_from(delta).expect("a later lite-07 delta must be non-negative"),
 				false => crate::coding::varint::zigzag(delta),
 			};
 			encoder.varint(wire).unwrap();
@@ -8537,10 +8539,10 @@ mod tests {
 			}
 			.encode(&mut w, version)
 			.unwrap();
-			// A one-byte payload's length plus one, then the frame at the group's key, since
-			// starts strictly increase.
+			// A one-byte payload's length plus one, then the frame at the group's key (a zero
+			// delta), since starts strictly increase.
 			w.varint(2).unwrap();
-			w.varint(key).unwrap();
+			w.varint(0).unwrap();
 			w.u8(payload);
 			bytes
 		};

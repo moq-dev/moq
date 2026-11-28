@@ -92,10 +92,10 @@ for (;;) {
 const groupBytes = await write(async (w) => {
 	await group.encode(w, version);
 	let prev = lengthFirst ? group.key : 0n;
-	for (const { timestamp, payload } of frames) {
+	for (const [index, { timestamp, payload }] of frames.entries()) {
 		const delta = timestamp - prev;
 		prev = timestamp;
-		await w.write(frameHeader(version, delta, undefined, payload.byteLength, lengthFirst));
+		await w.write(frameHeader(version, delta, undefined, payload.byteLength, lengthFirst, index === 0));
 		await w.write(payload);
 	}
 });

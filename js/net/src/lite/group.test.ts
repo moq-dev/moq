@@ -118,8 +118,11 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 		{ delta: 20_000n, payload: [2, 2] },
 		{ delta: lengthFirst ? 50n : -50n, payload: [] },
 	];
-	const encoded = frames.map(({ delta, payload }) =>
-		concat([frameHeader(version, delta, undefined, payload.length, lengthFirst), new Uint8Array(payload)]),
+	const encoded = frames.map(({ delta, payload }, index) =>
+		concat([
+			frameHeader(version, delta, undefined, payload.length, lengthFirst, index === 0),
+			new Uint8Array(payload),
+		]),
 	);
 	// The first field is the size plus one on lite-07, and the timestamp delta before it.
 	const first = encoded[0];
@@ -142,7 +145,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	expect(await consumer.readFrame()).toBeUndefined();
 
 	// A compressed track's inflated size follows the timestamp delta, and the size still leads.
-	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst), new Uint8Array([5, 6])]);
+	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst, true), new Uint8Array([5, 6])]);
 	const decoded = (await streamOf([compressed], version).decode(
 		frameDecoder({ scale: SCALE, compress: true, lengthFirst }),
 	)) as WireFrame;
@@ -255,8 +258,8 @@ test("a resumed lite-07 stream counts its first delta from the group's start", a
 	const producer = new Producer(1000n);
 	hooks.startGroup(producer, 3);
 	const consumer = producer.consume();
-	// Frame 3 sits 99 past the start, and the group ends 33 past it.
-	const end = await readFrames(streamOf([lite07(2, 99, 7, 0, 33)], Version.DRAFT_07), producer, {
+	// Frame 3 sits 99 past the start (a zigzag first delta), and the group ends 33 past it.
+	const end = await readFrames(streamOf([lite07(2, 198, 7, 0, 33)], Version.DRAFT_07), producer, {
 		scale: SCALE,
 		lengthFirst: true,
 	});
@@ -328,12 +331,12 @@ test("a lite-07 GROUP carries its start and frame start", async () => {
 // Stream end at the Payload Length ends a lite-07 group; within the rest of the header, it cut a frame.
 test("a lite-07 stream ending at the Payload Length ends the group", async () => {
 	const version = Version.DRAFT_07;
-	const whole = concat([frameHeader(version, 1n, undefined, 1, true), new Uint8Array([7])]);
+	const whole = concat([frameHeader(version, 1n, undefined, 1, true, true), new Uint8Array([7])]);
 	const producer = new Producer(0n);
 	await readFrames(streamOf([whole], version), producer, { scale: SCALE, lengthFirst: true });
 	expect(producer.consume().frameCount).toBe(1);
 
-	const cut = frameHeader(version, 1n, undefined, 1, true).subarray(0, 1);
+	const cut = frameHeader(version, 1n, undefined, 1, true, true).subarray(0, 1);
 	await expect(
 		readFrames(streamOf([cut], version), new Producer(0n), { scale: SCALE, lengthFirst: true }),
 	).rejects.toThrow("unexpected end of stream");

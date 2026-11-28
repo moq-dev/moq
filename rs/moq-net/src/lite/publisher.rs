@@ -8817,11 +8817,11 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "finished={finished}: no FIN");
-			// The frame: its length plus one, the unsigned timestamp delta from the group's start,
+			// The frame: its length plus one, the zigzag timestamp delta 2 from the group's start,
 			// and the payload; then GROUP_END, its End 3 past the frame at 2.
 			let tail: &[u8] = match finished {
-				true => &[2, 2, b'x', 0, 3],
-				false => &[2, 2, b'x'],
+				true => &[2, 4, b'x', 0, 3],
+				false => &[2, 4, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
@@ -8869,9 +8869,10 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "{compression:?}: no FIN");
-			// 301 as a two-byte varint, then each unsigned delta: 2ms, then 1ms for the empty frame
-			// (length 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
-			let tail: &[u8] = &[0x81, 0x2d, 2, 1, 1, 6, 1, 0, 1];
+			// 301 as a two-byte varint, then each delta: the first zigzag 2ms, then 1ms unsigned for
+			// the empty frame (length 1) and "hello" (length 6), then GROUP_END, its End 1 past the
+			// frame at 4.
+			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 1, 6, 1, 0, 1];
 			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
 			let info = crate::track::Info::timed().with_compression(compression);
 			assert_eq!(
@@ -8894,14 +8895,13 @@ mod serve_group_test {
 		let mut r = crate::coding::Decoder::new(bytes, version.into());
 		assert_eq!(r.varint().unwrap(), 0, "a group stream");
 		let header = lite::Group::decode(&mut r, version).unwrap();
+		let mut clock = lite::group::Clock::new(version, header.key);
 		let (mut sizes, mut times, mut end) = (Vec::new(), Vec::new(), None);
-		let mut ts = header.key;
 		while !r.is_empty() {
 			match r.varint().unwrap() {
-				0 => end = Some(ts + r.varint().unwrap()),
+				0 => end = Some(clock.end(r.varint().unwrap()).unwrap()),
 				length => {
-					ts += r.varint().unwrap();
-					times.push(ts);
+					times.push(clock.decode_delta(r.varint().unwrap()).unwrap());
 					sizes.push(length - 1);
 				}
 			}

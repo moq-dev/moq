@@ -1029,10 +1029,11 @@ async function servedSubscription(
 			// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
 			const lengthFirst = hasLengthFirst(version);
 			let ts = lengthFirst ? header.key : 0n;
+			let first = true;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
 				// leads with the size plus one instead, where 0 is GROUP_END and its End delta, and
-				// carries the timestamp delta unsigned.
+				// carries the timestamp deltas after the first unsigned.
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				if (length === -1) {
 					endDelta = await reader.u62();
@@ -1040,7 +1041,8 @@ async function servedSubscription(
 					continue;
 				}
 				const raw = await reader.u62();
-				ts += lengthFirst ? raw : (raw >> 1n) ^ -(raw & 1n);
+				ts += lengthFirst && !first ? raw : (raw >> 1n) ^ -(raw & 1n);
+				first = false;
 				times.push(ts);
 				const size = length ?? (await reader.u53());
 				if (options.meta) sizes.push(size);
