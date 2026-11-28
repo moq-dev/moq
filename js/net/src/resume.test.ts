@@ -8152,3 +8152,44 @@ test("a routed reader reports its serving copy's whole group spans", async () =>
 		installed.close();
 	}
 });
+
+// A front reader on a sparse live track settles each handed-out group on its copy so `reported`
+// coalesces with declared skips into O(1) runs on both the copy and logical records.
+test("a sparse live track through a front keeps reported runs bounded", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("sparse", { ...INFO, timescale: Timescale.MILLI, maxAge: null }));
+	hooks.startsAtKeys(producer);
+	front.serve(handle);
+	const sub = front.consumer.track("sparse").subscribe(withMax({ delay: { max: Duration.millis(200) } }));
+	const wire = hooks.wire(sub);
+	try {
+		await clock.advance(Duration.ZERO);
+		const spacing = 17n;
+		const base = 1_000_003n;
+		for (let n = 0n; n < 300n; n++) {
+			const key = base + n * spacing;
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finishAt(key + spacing);
+			hooks.skipTrackGroups(producer, key + 1n, key + spacing);
+			await clock.advance(Duration.millis(Number(spacing)));
+			const got = sub.tryRecvGroup();
+			expect(got?.start).toBe(key);
+			got?.close();
+			wire.tell(key, key + 1n);
+			while (hooks.tryDrop(sub)) {}
+			expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+		}
+		expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(20);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});

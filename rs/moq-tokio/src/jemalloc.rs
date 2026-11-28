@@ -1,7 +1,8 @@
 //! On-demand jemalloc heap profiling, for chasing leaks in a running process.
 //!
 //! Install [`Allocator`] as the `#[global_allocator]`, then spawn [`run`] to dump a profile
-//! whenever the process gets SIGUSR1.
+//! whenever the process gets SIGUSR1. Each signal also logs the exact bytes allocated and
+//! resident, with or without profiling, so a leak shows as a slope without parsing a profile.
 //!
 //! Sampling does not have to be running for that to work. `MALLOC_CONF=prof:true` alone builds
 //! the profiling backend without sampling anything, and the first SIGUSR1 starts it. That keeps
@@ -10,7 +11,7 @@
 
 use std::alloc::{GlobalAlloc, Layout};
 
-use tikv_jemalloc_ctl::raw;
+use tikv_jemalloc_ctl::{raw, stats};
 use tikv_jemallocator::Jemalloc;
 
 /// The jemalloc allocator [`run`] profiles, for a binary's `#[global_allocator]`.
@@ -74,7 +75,7 @@ fn sampling() -> bool {
 	matches!(unsafe { raw::read::<bool>(b"prof.active\0") }, Ok(true))
 }
 
-/// Listen for SIGUSR1 and dump a jemalloc heap profile on each signal.
+/// Listen for SIGUSR1, logging the heap's size and dumping a jemalloc heap profile on each signal.
 ///
 /// Requires `MALLOC_CONF=prof:true` at startup (plus a `prof_prefix` to choose where dumps land).
 /// `prof_active:true` is optional: without it the first signal starts sampling, so a process only
@@ -98,12 +99,24 @@ pub async fn run() -> crate::Result<()> {
 
 		loop {
 			sig.recv().await;
+			report();
 			dump(ready).await;
 			#[cfg(test)]
 			signal_handled().notify_one();
 		}
 	})
 	.await
+}
+
+/// Log the bytes the application holds and the bytes jemalloc keeps resident for it.
+fn report() {
+	// The counters are a snapshot taken at the last epoch advance.
+	let stats =
+		tikv_jemalloc_ctl::epoch::advance().and_then(|_| Ok((stats::allocated::read()?, stats::resident::read()?)));
+	match stats {
+		Ok((allocated, resident)) => tracing::info!(allocated, resident, "jemalloc heap"),
+		Err(err) => tracing::error!(%err, "failed to read jemalloc stats"),
+	}
 }
 
 /// Answer one SIGUSR1: start sampling if it is off, then dump a profile.

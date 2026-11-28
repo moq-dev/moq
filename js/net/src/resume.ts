@@ -2293,6 +2293,7 @@ class Reader implements ResumeSource {
 	}
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
+		hooks.settleIfDropping(copy.sub, group.start);
 		this.#newest = max(this.#newest ?? 0n, group.start);
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a

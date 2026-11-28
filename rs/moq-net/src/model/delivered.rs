@@ -16,6 +16,11 @@ use super::subscription::{Cover, minus};
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
+	/// Span covering keys closed into `runs` by budget retirement ([`Self::fold_below`]) or
+	/// debt skip compaction ([`Self::compact_skip`]) without having been handed out or reported.
+	/// Kept as one bounding range (zero heap overhead) so debt folding never promotes unreported
+	/// keys into the report floor.
+	unreported: std::ops::Range<u64>,
 	/// The keys a fold counted as handed out that no range held then, so no budget judged
 	/// them: a range added later owes each it holds (see [`Self::reopen`]). Always within `runs`,
 	/// and never more runs than [`Self::fold_below`] leaves.
@@ -63,10 +68,18 @@ impl Delivered {
 
 	/// Record every key in `groups` as handed out, joining the runs it touches.
 	pub fn insert_run(&mut self, groups: std::ops::Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.unjudged.remove(groups.clone());
+		self.merge_run(groups);
+	}
+
+	/// Join `groups` into `runs` without clearing `unjudged` on keys already present.
+	fn merge_run(&mut self, groups: std::ops::Range<u64>) {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
-		self.unjudged.remove(groups.clone());
 		let mut first = groups.start;
 		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
@@ -83,6 +96,28 @@ impl Delivered {
 			}
 		}
 		self.runs.insert(first, last);
+	}
+
+	/// Compact a declared-skip gap `groups` into `runs`, preserving `unjudged` on surrounding
+	/// runs and extending `unreported` so debt folding never promotes compacted skips into the
+	/// report floor.
+	pub fn compact_skip(&mut self, groups: std::ops::Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.merge_run(groups.clone());
+		self.mark_unreported(groups);
+	}
+
+	fn mark_unreported(&mut self, span: std::ops::Range<u64>) {
+		if span.is_empty() {
+			return;
+		}
+		if self.unreported.is_empty() {
+			self.unreported = span;
+		} else {
+			self.unreported = self.unreported.start.min(span.start)..self.unreported.end.max(span.end);
+		}
 	}
 
 	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.
@@ -104,6 +139,20 @@ impl Delivered {
 			}
 			if end > last {
 				self.runs.insert(last + 1, end);
+			}
+		}
+		// Shrink both ends of `unreported` past any keys `remove` just vacated in `runs`, so
+		// keys later handed out there are not permanently blocked from debt folding.
+		if !self.unreported.is_empty() {
+			let start = self.next_from(self.unreported.start);
+			let end = self
+				.runs
+				.range(..self.unreported.end)
+				.next_back()
+				.map(|(_, last)| (*last + 1).min(self.unreported.end));
+			match (start, end) {
+				(Some(start), Some(end)) if start < end => self.unreported = start..end,
+				_ => self.unreported = 0..0,
 			}
 		}
 	}
@@ -153,7 +202,8 @@ impl Delivered {
 	/// identity makes harmless, as [`Record::retire`](super::record::Record) trades, rather than
 	/// miss one never handed out.
 	pub fn fold_below(&mut self, floor: u64, judged: Option<&Cover>) {
-		let gaps: Vec<std::ops::Range<u64>> = self.gaps(self.floor()..floor).collect();
+		let prev = self.floor();
+		let gaps: Vec<std::ops::Range<u64>> = self.gaps(prev..floor).collect();
 		let added = !gaps.is_empty();
 		for gap in gaps {
 			match judged {
@@ -164,6 +214,9 @@ impl Delivered {
 				}
 				None => self.unjudged.insert(gap),
 			}
+		}
+		if prev < floor {
+			self.mark_unreported(prev..floor);
 		}
 		self.forget_below(floor);
 		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
@@ -183,6 +236,36 @@ impl Delivered {
 			for gap in owed {
 				self.unjudged.remove(gap);
 			}
+		}
+	}
+
+	/// Bounding span covering keys closed by budget retirement or skip compaction without
+	/// having been reported.
+	pub fn unreported(&self) -> std::ops::Range<u64> {
+		self.unreported.clone()
+	}
+
+	/// One past the contiguous settled run in `delivered` starting at `key`, stopping before
+	/// `unreported` so debt folding never promotes unreported keys.
+	pub fn settled_run_end(&self, key: u64) -> Option<u64> {
+		if self.unreported.contains(&key) {
+			return None;
+		}
+		let end = self.run_end(key)?;
+		if !self.unreported.is_empty() && key < self.unreported.start && end > self.unreported.start {
+			Some(self.unreported.start)
+		} else {
+			Some(end)
+		}
+	}
+
+	/// The lowest key from `key` on that is in `delivered` and outside `unreported`.
+	pub fn next_settled_from(&self, key: u64) -> Option<u64> {
+		let start = self.next_from(key)?;
+		if self.unreported.contains(&start) {
+			self.next_from(self.unreported.end)
+		} else {
+			Some(start)
 		}
 	}
 
@@ -208,6 +291,11 @@ impl Delivered {
 	pub fn settle_below(&mut self, floor: u64) {
 		self.forget_below(floor);
 		self.unjudged.remove(0..floor);
+		if self.unreported.end <= floor {
+			self.unreported = 0..0;
+		} else if self.unreported.start < floor {
+			self.unreported.start = floor;
+		}
 	}
 
 	/// Count every key below `floor` as handed out.
@@ -238,6 +326,24 @@ impl Delivered {
 		self.runs.range(..key).next_back().map(|(start, _)| *start)
 	}
 
+	/// The gap immediately below the run holding `key` when both runs start strictly above `0`
+	/// (so bridging it never raises `delivered.floor()`).
+	pub fn gap_before(&self, key: u64) -> Option<std::ops::Range<u64>> {
+		let (&run_start, _) = self.runs.range(..=key).next_back().filter(|(_, last)| key <= **last)?;
+		let (&prev_start, &prev_last) = self.runs.range(..run_start).next_back()?;
+		(prev_start > 0 && prev_last + 1 < run_start).then_some(prev_last + 1..run_start)
+	}
+
+	/// The gap immediately above the run holding `key` when that run starts strictly above `0`.
+	pub fn gap_after(&self, key: u64) -> Option<std::ops::Range<u64>> {
+		let (&run_start, &run_last) = self.runs.range(..=key).next_back().filter(|(_, last)| key <= **last)?;
+		if run_start == 0 {
+			return None;
+		}
+		let (&next_start, _) = self.runs.range(run_last + 1..).next()?;
+		(run_last + 1 < next_start).then_some(run_last + 1..next_start)
+	}
+
 	/// One past the last key of the run holding `key`, if it was handed out.
 	pub fn run_end(&self, key: u64) -> Option<u64> {
 		self.runs
@@ -263,6 +369,20 @@ impl Delivered {
 	/// How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged.
 	pub fn runs(&self) -> usize {
 		self.runs.len() + self.unjudged.len()
+	}
+
+	/// Count distinct runs overlapping `groups`, stopping at `limit`.
+	pub fn count_runs_in(&self, groups: std::ops::Range<u64>, limit: usize) -> usize {
+		if groups.is_empty() || limit == 0 {
+			return 0;
+		}
+		let from = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.filter(|(_, last)| **last >= groups.start)
+			.map_or(groups.start, |(start, _)| *start);
+		self.runs.range(from..groups.end).take(limit).count()
 	}
 }
 
@@ -389,6 +509,23 @@ mod test {
 		delivered.forget_below(13);
 		assert_eq!(runs(&delivered), [(0, 12)]);
 		assert_eq!(delivered.above_gap(), None);
+	}
+
+	#[test]
+	fn count_runs_in_counts_overlapping_runs_up_to_limit() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(10..15);
+		for key in [20, 22, 24, 26] {
+			delivered.insert(key);
+		}
+		assert_eq!(delivered.count_runs_in(0..10, 4), 0);
+		assert_eq!(delivered.count_runs_in(12..14, 4), 1);
+		assert_eq!(delivered.count_runs_in(14..21, 4), 2);
+		assert_eq!(delivered.count_runs_in(20..30, 2), 2);
+		assert_eq!(delivered.count_runs_in(20..30, 10), 4);
+		assert_eq!(delivered.count_runs_in(21..22, 4), 0);
+		assert_eq!(delivered.count_runs_in(20..20, 4), 0);
+		assert_eq!(delivered.count_runs_in(20..30, 0), 0);
 	}
 
 	#[test]

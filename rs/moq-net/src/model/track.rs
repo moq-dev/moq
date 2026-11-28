@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use super::delivered::Delivered;
 use super::idle;
-use super::record::{Pending, Record, Report, Standing};
+use super::record::{Beside, Pending, Record, Report, SkipEnd, SkipLookup, Standing};
 use crate::ledger::{self, Ledger};
 
 use super::subscription;
@@ -2161,6 +2161,14 @@ impl TrackState {
 	/// When the latest group cached at `keys` landed here, `None` when none is.
 	fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
 		self.lookup.range(keys).map(|(_, slot)| slot.arrived).max()
+	}
+
+	/// One past the declared skip run holding `key`, if `key` was declared skipped.
+	fn skip_end(&self, key: u64) -> Option<u64> {
+		match self.drops.get_key_value(&key) {
+			Some((run, Hole::Skip)) => Some(run.end),
+			_ => None,
+		}
 	}
 
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
@@ -8016,6 +8024,28 @@ enum Source {
 	Broadcast(Box<broadcast::Consumer>, Option<kio::ConsumerWeak<TrackState>>),
 }
 
+impl SkipLookup for kio::Consumer<TrackState> {
+	fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+		let state = self.read();
+		f(&|key| state.skip_end(key));
+	}
+}
+
+impl Consumer {
+	/// Look up declared skips on this track (or its serving route) under a single read lock.
+	pub(super) fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+		if let Some(serving) = self.serving() {
+			serving.with_skips(f);
+			return;
+		}
+		let _ = self.with_state(|state| {
+			let state = state?.read();
+			f(&|key| state.skip_end(key));
+			Some(())
+		});
+	}
+}
+
 impl Consumer {
 	/// Whether these handles resolve to the same cached track, without subscribing.
 	pub(super) fn same_channel(&self, other: &Self) -> bool {
@@ -8953,6 +8983,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					dropping: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -9382,6 +9413,9 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// Whether a publisher polled this reader's drops: only then does its record report what
+	/// it hands out. A debt fold raising the floor is no sign of it.
+	dropping: bool,
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -10699,6 +10733,7 @@ impl DropCursor {
 		state: &TrackState,
 		cut: BTreeSet<u64>,
 		within: &Within<'_>,
+		withdrawable: bool,
 	) -> Option<(ops::Range<u64>, Hole)> {
 		let (span, window) = (&within.span, within.window);
 		// A cut already reclaimed from the cache is in the track's drops instead.
@@ -10817,7 +10852,7 @@ impl DropCursor {
 			if clipped.end < range.end {
 				record.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			if let Some(gap) = record.report(clipped, &pending.hole) {
+			if let Some(gap) = record.report(clipped, &pending.hole, withdrawable) {
 				if gap.end < range.end {
 					record.pending.insert(gap.end..range.end, pending.clone());
 				}
@@ -10999,17 +11034,25 @@ impl Cursor {
 		// this. Taken before reading the track, so a cut after the read still wakes.
 		let cut = drops.cuts.poll(waiter);
 		let record = &mut self.record;
-		match self.state.poll(waiter, |state| {
+		let withdrawable = self.withdrawn.is_some();
+		let next = match self.state.poll(waiter, |state| {
 			drops
-				.next(record, state, cut, &within)
+				.next(record, state, cut, &within, withdrawable)
 				.map_or(Poll::Pending, Poll::Ready)
 		}) {
 			Poll::Ready(Ok(range)) => Poll::Ready(range),
 			Poll::Ready(Err(state)) => drops
-				.next(record, &state, BTreeSet::new(), &within)
+				.next(record, &state, BTreeSet::new(), &within, withdrawable)
 				.map_or(Poll::Pending, Poll::Ready),
 			Poll::Pending => Poll::Pending,
+		};
+		if let Poll::Ready((ref gap, Hole::Skip)) = next
+			&& let Some(misses) = &mut self.misses
+			&& self.record.delivered.covers(gap.clone())
+		{
+			misses.forget(gap.clone());
 		}
+		next
 	}
 
 	/// The keys that landed in this cursor's window since it last looked, below `below`: a key
@@ -11911,6 +11954,65 @@ impl Cursor {
 		self.forget_past_budget(&mut delivered, terms, None);
 		self.record.delivered = delivered;
 		self.retire_written_off();
+		// Only prune `misses.given_up` once drops are being polled (so any give-up was already
+		// queued into `record.pending` and will not be lost if `poll_drop` is called later).
+		// Behind an ordered reader, keep stale verdicts for buffered unreturned gaps intact so
+		// a budget widening between reads can still withdraw them.
+		if self.drops.is_some()
+			&& let Some(misses) = &mut self.misses
+		{
+			let floor = self.record.delivered.floor();
+			let limit = match self.withdrawn {
+				Some(_) => {
+					let reported = &self.record.reported;
+					let unreturned_stale = misses.stale_runs().find_map(|run| {
+						if run.start >= floor {
+							return None;
+						}
+						// Any key in `run` not yet settled as `Report::Final` may still be
+						// withdrawn on a budget widening.
+						let end = run.end.min(floor);
+						let mut at = run.start;
+						for (rep, kind) in reported.overlapping(at..end) {
+							if rep.start > at {
+								return Some(at);
+							}
+							if *kind != Report::Final {
+								return Some(at.max(rep.start));
+							}
+							at = at.max(rep.end);
+						}
+						(at < end).then_some(at)
+					});
+					[
+						unreturned_stale,
+						reported
+							.overlapping(0..floor)
+							.find(|(_, report)| **report == Report::Withdrawable)
+							.map(|(run, _)| run.start),
+						self.record
+							.pending
+							.overlapping(0..floor)
+							.find(|(_, pending)| pending.hole.stale_budget().is_some())
+							.map(|(run, _)| run.start),
+					]
+					.into_iter()
+					.flatten()
+					.min()
+					.unwrap_or(u64::MAX)
+				}
+				None => u64::MAX,
+			};
+			let after = floor.min(limit);
+			if after > 0 {
+				misses.forget(0..after);
+			}
+			if key >= after
+				&& let Some(end) = key.checked_add(1)
+			{
+				misses.forget(key..end);
+			}
+		}
 	}
 
 	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
@@ -12133,8 +12235,10 @@ impl Cursor {
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
 		self.let_go_kept_out();
 		self.look_up(waiter);
+		if let Some(drops) = &mut self.drops {
+			drops.drift = Some((drift.budget.clone(), drift.coverage.clone()));
+		}
 		self.rejudge(drift);
-		let taken = &self.record.delivered;
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
@@ -12144,6 +12248,7 @@ impl Cursor {
 		// One lock for the judgement, since every subscriber of the track probes through it.
 		let asks = {
 			let state = self.state.read();
+			let taken = &self.record.delivered;
 			misses.judge(
 				&state,
 				(from, revision, cap),
@@ -12205,7 +12310,7 @@ impl Cursor {
 			let mut open = record.untold(run.clone());
 			if self.withdrawn.is_some() {
 				for (dropped, report) in record.reported.overlapping(run) {
-					if *report == Report::Dropped {
+					if *report == Report::Withdrawable {
 						open.insert(dropped.start.max(run.start)..dropped.end.min(run.end));
 					}
 				}
@@ -13492,15 +13597,20 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let window = &cursor.filter.window;
+				let state = &cursor.state;
 				let reader = Standing {
 					from,
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
 				};
-				let state = &cursor.state;
+				let skips: Option<&dyn SkipLookup> = cursor.drops.is_none().then_some(state);
 				match cursor.misses.as_deref_mut() {
-					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, reader),
-					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), reader),
+					Some(misses) => cursor
+						.record
+						.settle_with(|| state.read().cache.clone(), misses, reader, skips),
+					None => cursor
+						.record
+						.settle_with(|| state.read().cache.clone(), &mut (), reader, skips),
 				}
 			}
 			Inner::Resume(resume, logical) => {
@@ -13510,7 +13620,10 @@ impl Subscriber {
 					ranges: resume.ranges(),
 				};
 				let state = &logical.state;
-				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
+				let skips: Option<&dyn SkipLookup> = Some(&**resume);
+				logical
+					.record
+					.settle_with(|| state.read().cache.clone(), &mut (), reader, skips)
 			}
 		}
 	}
@@ -13543,6 +13656,24 @@ impl Subscriber {
 				logical.record.untell(range.clone());
 				resume.untell(range);
 			}
+		}
+	}
+
+	/// Record `key` as final in `reported` when this subscriber is already tracking drops, so a
+	/// front's copy coalesces each handed-out group with the skipped runs between them without
+	/// adding runs to a copy that never polls drops.
+	pub(super) fn settle_if_dropping(&mut self, key: u64) {
+		let Some(end) = key.checked_add(1) else {
+			return;
+		};
+		match &mut self.inner {
+			Inner::Plain(cursor) if cursor.drops.is_some() => {
+				cursor.record.tell(key..end, Report::Final);
+			}
+			Inner::Resume(_, logical) if logical.dropping => {
+				logical.record.tell(key..end, Report::Final);
+			}
+			_ => {}
 		}
 	}
 
@@ -13660,11 +13791,10 @@ impl Subscriber {
 
 	/// Record `keys` as served or reported, so no cut or drop of them is reported again.
 	fn settle_range(&mut self, keys: ops::Range<u64>) {
-		let record = match &mut self.inner {
-			Inner::Plain(cursor) => &mut cursor.record,
-			Inner::Resume(_, logical) => &mut logical.record,
-		};
-		record.tell(keys, Report::Settled);
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.tell(keys, Report::Final),
+			Inner::Resume(_, logical) => logical.record.tell(keys, Report::Final),
+		}
 	}
 
 	/// Pending while a waiting time start below `end` holds back a gap an [`Ordered`] read at
@@ -14211,6 +14341,7 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
+				logical.dropping = true;
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}
@@ -36012,6 +36143,590 @@ mod test {
 			assert_eq!(drain_groups(&mut subscriber), [key]);
 		}
 		assert_eq!(subscriber.delivered_runs(), 1000);
+	}
+
+	/// A live reader of a track whose groups start at sparse keys, each ending whole where the
+	/// next starts, keeps a bounded record however long the track runs, whether the keys between
+	/// groups are skipped by the publisher's append or by the upstream's group end:
+	/// - Under a finite freshness budget (even with a huge pool), `reported` coalesces to O(1)
+	///   and budget retirement keeps `delivered` + `misses` bounded to the budget window.
+	/// - Under an unlimited budget and finite cache capacity, pool debt folds both reporting and
+	///   non-reporting readers to O(1) runs.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sparse_live_track_keeps_a_bounded_record() {
+		#[derive(Clone, Copy, Debug)]
+		enum Reader {
+			Told,
+			Dropped,
+			Untold,
+			Receive,
+			Ordered,
+		}
+		const GROUPS: u64 = 2000;
+		const SPACING: u64 = 17;
+		// Live groups start well above key 0, as a timestamp does.
+		const BASE: u64 = 1_000_003;
+		for reader in [
+			Reader::Told,
+			Reader::Dropped,
+			Reader::Untold,
+			Reader::Receive,
+			Reader::Ordered,
+		] {
+			for received in [false, true] {
+				// (pool_capacity, max_delay, max_expected_runs)
+				let configs: &[(u64, Option<Duration>, u64)] = &[
+					// Finite freshness budget on a roomy pool (no debt folding needed).
+					(1 << 40, Some(Duration::from_millis(200)), 40),
+					// Unlimited budget under finite pool capacity (debt folding keeps it O(1)).
+					(1 << 14, None, 200),
+				];
+				for &(capacity, max_delay, limit) in configs {
+					let (producer, pool) = pooled_producer(capacity);
+					if received {
+						producer.received();
+					}
+					let sub_cfg = match max_delay {
+						Some(max) => Subscription::default().with_max(max),
+						None => Subscription::default(),
+					};
+					let mut subscriber = Some(producer.subscribe(sub_cfg));
+					let mut ordered = match reader {
+						Reader::Ordered => subscriber.take().map(Subscriber::ordered),
+						_ => None,
+					};
+					let mut most = 0;
+					for n in 0..GROUPS {
+						let key = BASE + n * SPACING;
+						let span = key..key + SPACING;
+						let mut group = match received {
+							false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
+							true => producer.create_group(group::Info { start: key }).unwrap(),
+						};
+						group
+							.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+							.unwrap();
+						group.finish_at(span.end).unwrap();
+						// A GROUP_END accounts for the starts inside its span.
+						if received {
+							producer.skip_groups(key + 1..span.end);
+						}
+						if max_delay.is_some() {
+							elapse(&producer, Duration::from_millis(SPACING));
+						}
+						match (&mut subscriber, &mut ordered) {
+							(Some(subscriber), _) => {
+								assert_eq!(
+									drain_groups(subscriber),
+									[key],
+									"{reader:?} received={received} max_delay={max_delay:?}"
+								);
+								match reader {
+									Reader::Told => {
+										subscriber.record_mut().tell(span, Report::Final);
+									}
+									Reader::Dropped => {
+										drained_drops(subscriber);
+										subscriber.record_mut().tell(span, Report::Final);
+									}
+									Reader::Untold => {
+										drained_drops(subscriber);
+										subscriber.settle_if_dropping(key);
+									}
+									_ => {}
+								}
+								assert!(
+									subscriber.record().reported.len() <= 2,
+									"{reader:?} received={received} max_delay={max_delay:?}: reported grew to {}",
+									subscriber.record().reported.len()
+								);
+							}
+							(None, Some(ordered)) => {
+								let mut items = Vec::new();
+								while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop()) {
+									items.push(match item {
+										Item::Group(group) => group.start,
+										Item::Gap { range, .. } => {
+											panic!("{reader:?} received={received}: gap {range:?}")
+										}
+									});
+								}
+								assert_eq!(items, [key], "{reader:?} received={received}");
+							}
+							(None, None) => unreachable!(),
+						}
+						most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+					}
+					assert!(
+						most <= limit,
+						"{reader:?} received={received} max_delay={max_delay:?}: the record grew to {most} runs (limit {limit})"
+					);
+				}
+			}
+		}
+	}
+
+	/// A group whose key was reported dropped and then arrives whole later is never silently
+	/// marked delivered: both an arrival-order subscriber and a key-order reader that has not
+	/// passed it still deliver the group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_whole_group_after_a_reported_drop_is_still_delivered() {
+		let oldest = || {
+			Subscription::default().with_ranges([Range {
+				start: Start::Oldest,
+				end: None,
+			}])
+		};
+		for ordered_mode in [false, true] {
+			let (producer, _pool) = pooled_producer(1 << 30);
+			producer.received();
+			let mut sub = producer.subscribe(oldest());
+			let mut group0 = producer.create_group(group::Info { start: 100 }).unwrap();
+			group0
+				.write_frame(Timestamp::from_millis(100).unwrap(), &b"a"[..])
+				.unwrap();
+			group0.finish_at(110).unwrap();
+			producer.skip_groups(101..110);
+
+			if ordered_mode {
+				let mut ord = sub.ordered();
+				assert!(matches!(
+					ord.poll_next_item(&kio::Waiter::noop()),
+					Poll::Ready(Ok(Some(Item::Group(g)))) if g.start == 100
+				));
+				// Drop 120 (coalesced with skip 121..130) while 110 is still open/owed.
+				producer.give_up(120..121, Hole::drop(StreamError::NotFound));
+				producer.skip_groups(121..130);
+				// Polling registers drop 120 in `reported` + `gaps`, blocked behind owed 110.
+				assert!(ord.poll_next_item(&kio::Waiter::noop()).is_pending());
+				// Now 110 and 120 both arrive whole!
+				let mut g1 = producer.create_group(group::Info { start: 110 }).unwrap();
+				g1.write_frame(Timestamp::from_millis(110).unwrap(), &b"b"[..]).unwrap();
+				g1.finish_at(120).unwrap();
+				producer.skip_groups(111..120);
+				let mut g2 = producer.create_group(group::Info { start: 120 }).unwrap();
+				g2.write_frame(Timestamp::from_millis(120).unwrap(), &b"c"[..]).unwrap();
+				g2.finish_at(130).unwrap();
+				let mut got = Vec::new();
+				while let Poll::Ready(Ok(Some(item))) = ord.poll_next_item(&kio::Waiter::noop()) {
+					if let Item::Group(g) = item {
+						got.push(g.start);
+					}
+				}
+				assert_eq!(got, [110, 120], "ordered reader must deliver late whole group 120");
+			} else {
+				assert_eq!(drain_groups(&mut sub), [100]);
+				producer.give_up(110..111, Hole::drop(StreamError::NotFound));
+				producer.skip_groups(111..120);
+				let drops = drained_drops(&mut sub);
+				assert!(drops.iter().any(|(s, e)| (*s..*e).contains(&110)));
+				// Late whole group 110 arrives after its drop was reported.
+				let mut group1 = producer.create_group(group::Info { start: 110 }).unwrap();
+				group1
+					.write_frame(Timestamp::from_millis(110).unwrap(), &b"b"[..])
+					.unwrap();
+				group1.finish_at(120).unwrap();
+				assert_eq!(
+					drain_groups(&mut sub),
+					[110],
+					"arrival reader must still deliver late whole group 110"
+				);
+			}
+		}
+	}
+
+	/// A lagging lite-07 viewer whose publisher reports stale `OLD` drops alternating with skips
+	/// keeps a bounded record, and a `Receive`-only reader with an unbounded budget keeps a
+	/// bounded record even when `GROUP_END` skips land after the next group opens.
+	#[test]
+	#[cfg(feature = "async")]
+	fn lagging_stale_drops_and_late_group_end_keep_a_bounded_record() {
+		const GROUPS: u64 = 2000;
+		const SPACING: u64 = 17;
+		const BASE: u64 = 1_000_003;
+
+		// Case 1: lagging wire viewer receiving stale OLD drops + skips.
+		let (producer, pool) = pooled_producer(1 << 40);
+		producer.received();
+		let mut sub = producer.subscribe(Subscription::default().with_start(0).with_max(Duration::from_secs(1)));
+		let mut most = 0;
+		for n in 0..GROUPS {
+			let key = BASE + n * SPACING;
+			producer.give_up(key..key + 1, Hole::stale(Duration::from_secs(1)));
+			producer.skip_groups(key + 1..key + SPACING);
+			drained_drops(&mut sub);
+			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+		}
+		assert!(most <= 8, "lagging stale drops grew record to {most} runs");
+
+		// Case 2: Receive-only reader with unbounded budget (`Start::Oldest`) and out-of-order
+		// `GROUP_END` skips arriving after the next group opens, bounded under finite pool capacity.
+		let (producer, pool) = pooled_producer(64 * 1024);
+		producer.received();
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Oldest,
+			end: None,
+		}]));
+		let mut open: Option<(u64, group::Producer)> = None;
+		let mut most = 0;
+		for n in 0..GROUPS {
+			let key = BASE + n * SPACING;
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+				.unwrap();
+			assert_eq!(drain_groups(&mut sub), [key]);
+			if let Some((prev, prev_group)) = open.take() {
+				let _ = prev_group.finish_at(key);
+				producer.skip_groups(prev + 1..key);
+			}
+			open = Some((key, group));
+			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+		}
+		if let Some((_, prev_group)) = open.take() {
+			let _ = prev_group.finish();
+		}
+		assert!(most <= 600, "out-of-order GROUP_END grew record to {most} runs");
+	}
+
+	/// `Misses` never forgets a fill refusal while `delivered` does not cover that key, even as
+	/// later sparse groups and skips pass by; under pool debt, subsequent stretches fold cleanly
+	/// without ever re-asking the refused key.
+	#[test]
+	#[cfg(feature = "async")]
+	fn misses_keep_uncovered_fill_verdicts_and_prune_covered_ones() {
+		let (producer, pool) = pooled_producer(1 << 40);
+		producer.received();
+		let fills = producer.requests();
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Oldest,
+			end: None,
+		}]));
+
+		// Seed group 100 and 120 so 110 is the sole miss (0..100, 101..110, 111..120 skipped).
+		producer.skip_groups(0..100);
+		let mut g0 = producer.create_group(group::Info { start: 100 }).unwrap();
+		g0.write_frame(Timestamp::from_millis(100).unwrap(), &b"a"[..]).unwrap();
+		g0.finish_at(110).unwrap();
+		producer.skip_groups(101..110);
+		producer.skip_groups(111..120);
+		let mut g2 = producer.create_group(group::Info { start: 120 }).unwrap();
+		g2.write_frame(Timestamp::from_millis(120).unwrap(), &b"c"[..]).unwrap();
+		g2.finish_at(137).unwrap();
+		producer.skip_groups(121..137);
+		assert_eq!(drain_groups(&mut sub), [120, 100]);
+
+		// Probe past arrival grace asks the fill handler for 110 once; refuse it.
+		elapse(&producer, Duration::from_secs(2));
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = fills.poll_requested_fill(&kio::Waiter::noop()) {
+			let range = fill.start().group..fill.end();
+			asked.push(range.clone());
+			fill.refuse_groups(range, Error::NotFound);
+		}
+		assert_eq!(asked, std::slice::from_ref(&(110..111)), "110 asked once");
+		// Take in the refusal.
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+
+		// Advance 200 sparse groups with roomy pool: 110 stays uncovered and is NEVER re-asked.
+		for n in 1..=200u64 {
+			let key = 120 + n * 17;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+			g.finish_at(key + 17).unwrap();
+			producer.skip_groups(key + 1..key + 17);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			drained_drops(&mut sub);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+			assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			assert!(
+				fills.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
+				"refused key 110 must never be re-asked at step {n}"
+			);
+		}
+
+		// Under pool pressure, `Record::fold` folds the settled stretch and frees `misses` runs
+		// without re-asking 110. Write 4 KiB frames so eviction clears the 200 cached groups
+		// while the pinned live edge stays well below the record's bill.
+		pool.resize(1);
+		for step in 0..32u64 {
+			let key = 120 + (201 + step) * 17;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; 4 * 1024])
+				.unwrap();
+			g.finish_at(key + 17).unwrap();
+			producer.skip_groups(key + 1..key + 17);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			drained_drops(&mut sub);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+			assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			while let Poll::Ready(Ok(fill)) = fills.poll_requested_fill(&kio::Waiter::noop()) {
+				assert!(
+					!(fill.start().group..fill.end()).contains(&110),
+					"refused key 110 must never be re-asked after fold"
+				);
+			}
+		}
+		assert!(
+			pool.recorded() / super::super::record::RUN_OVERHEAD <= 8,
+			"record + misses did not fold under pool pressure: {} runs",
+			pool.recorded() / super::super::record::RUN_OVERHEAD
+		);
+	}
+
+	/// A drop-reporting reader (plain or behind a front) under cache pool debt never absorbs
+	/// unreported skips on hand-out, so `Record::fold` cannot mark them `Final` before
+	/// `poll_drop` emits `SUBSCRIBE_SKIP`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reporting_reader_under_pool_debt_never_loses_an_unreported_skip() {
+		let from_zero = || {
+			Subscription::default().with_ranges([Range {
+				start: Start::Time(0),
+				end: None,
+			}])
+		};
+		// Plain subscriber under pool debt.
+		{
+			let (producer, pool) = pooled_producer(1 << 20);
+			producer.received();
+			let mut sub = producer.subscribe(from_zero());
+			// Mark as drop-reporting (as TrackRun does before receiving groups).
+			assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+			let mut g0 = producer.create_group(group::Info { start: 0 }).unwrap();
+			g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
+			g0.finish_at(10).unwrap();
+			producer.skip_groups(1..10);
+			assert_eq!(drain_groups(&mut sub), [0]);
+
+			let mut g1 = producer.create_group(group::Info { start: 10 }).unwrap();
+			g1.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..]).unwrap();
+			g1.finish_at(20).unwrap();
+			producer.skip_groups(11..20);
+
+			// Shrink the pool below what the track holds so handing out group 10 triggers
+			// debt folding in `settle_record`.
+			pool.resize(1);
+			assert_eq!(drain_groups(&mut sub), [10]);
+			let drops = drained_drops(&mut sub);
+			assert!(
+				drops.contains(&(1, 10)) && drops.contains(&(11, 20)),
+				"unreported skips must survive pool debt: {drops:?}"
+			);
+		}
+		// Front (resume) subscriber under pool debt.
+		{
+			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 20));
+			let broadcast = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let routes = super::super::resume::Producer::new();
+			let logical = Request::new(broadcast.clone(), "sparse")
+				.routes(routes.consume())
+				.accept(crate::track::Info::timed());
+			let source = Producer::new(broadcast, "sparse", crate::track::Info::timed());
+			source.received();
+			routes.serve(source.consume());
+
+			let mut sub = match logical.consume().subscribe(from_zero()).poll_ok(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(sub)) => sub,
+				_ => panic!("logical subscription should resolve"),
+			};
+			assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+			let mut g0 = source.create_group(group::Info { start: 0 }).unwrap();
+			g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
+			g0.finish_at(10).unwrap();
+			source.skip_groups(1..10);
+			assert_eq!(drain_groups(&mut sub), [0]);
+
+			let mut g1 = source.create_group(group::Info { start: 10 }).unwrap();
+			g1.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..]).unwrap();
+			g1.finish_at(20).unwrap();
+			source.skip_groups(11..20);
+
+			pool.resize(1);
+			assert_eq!(drain_groups(&mut sub), [10]);
+			let drops = drained_drops(&mut sub);
+			assert!(
+				drops.contains(&(1, 10)) && drops.contains(&(11, 20)),
+				"front reader unreported skips must survive pool debt: {drops:?}"
+			);
+		}
+	}
+
+	/// A drop-reporting reader polling drops before handing out groups coalesces adjacent
+	/// already-reported skips into `reported` (1 run), and compacts `delivered` under pool debt.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reporting_reader_coalesces_skips_reported_before_their_group() {
+		let (producer, pool) = pooled_producer(1 << 40);
+		producer.received();
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Oldest,
+			end: None,
+		}]));
+		for n in 0..200u64 {
+			let key = 1_000 + 2 * n;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+			g.finish_at(key + 1).unwrap();
+			producer.skip_groups(key + 1..key + 2);
+			// Poll drops FIRST, before handing out group `key`.
+			let drops = drained_drops(&mut sub);
+			assert_eq!(drops, [(key + 1, key + 2)]);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+			assert!(
+				sub.record().reported.len() <= 2,
+				"reported grew to {} runs",
+				sub.record().reported.len()
+			);
+		}
+		assert_eq!(sub.delivered_runs(), 200, "unlimited budget keeps every run until debt");
+		// Under pool pressure, `Record::fold` compacts all 200 `delivered` runs into 1.
+		// Write 4 KiB frames so eviction clears the 200 cached groups while the pinned live
+		// edge stays well below the record's bill.
+		pool.resize(1);
+		for step in 0..96u64 {
+			let key = 1_400 + 2 * step;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; 4 * 1024])
+				.unwrap();
+			g.finish_at(key + 1).unwrap();
+			producer.skip_groups(key + 1..key + 2);
+			drained_drops(&mut sub);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+		}
+		assert!(
+			sub.delivered_runs() <= 2,
+			"expected folded delivered runs <= 2, got {}",
+			sub.delivered_runs(),
+		);
+	}
+
+	/// A wire publisher serving disjoint ranges `[0, 0]` and `[10, 10]` must not bridge the
+	/// out-of-range unreported skip `[1, 10)` into `delivered`, so folding under cache debt
+	/// cannot advance the report floor over `[1, 10)` and widening to `[0, 10]` still emits it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn disjoint_wire_publisher_does_not_fold_unreported_skip_bridge() {
+		let (producer, _pool) = pooled_producer(1);
+		producer.received();
+		let mut g0 = producer.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..]).unwrap();
+		g0.finish_at(10).unwrap();
+		producer.skip_groups(1..10);
+		let mut g10 = producer.create_group(group::Info { start: 10 }).unwrap();
+		g10.write_frame(Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		g10.finish().unwrap();
+
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([
+			Range {
+				start: Start::Time(0),
+				end: Some(0),
+			},
+			Range {
+				start: Start::Time(10),
+				end: Some(10),
+			},
+		]));
+		// Serve group 0, record on wire, then serve group 10 and record on wire.
+		assert_eq!(drain_groups(&mut sub), [10, 0]);
+		sub.record_mut().tell(0..1, Report::Final);
+		sub.record_mut().tell(10..11, Report::Final);
+		// Owe the reader debt, so the poll that settles the record folds it.
+		sub.settle_record(None);
+		let mut debt = 1 << 20;
+		producer.state.read().cache.owe_readers(&mut debt);
+		assert!(
+			matches!(&sub.inner, Inner::Plain(cursor) if cursor.record.owes()),
+			"reader must owe debt before folding"
+		);
+		assert!(drained_drops(&mut sub).is_empty());
+		assert!(
+			!sub.record_mut().told(5),
+			"unreported out-of-range skip must never be folded into the report floor"
+		);
+		// Widening to [0, 10] must still report [1, 10).
+		sub.update(Subscription::default().with_ranges([Range {
+			start: Start::Time(0),
+			end: Some(10),
+		}]))
+		.unwrap();
+		assert_eq!(drained_drops(&mut sub), [(1, 10)]);
+	}
+
+	/// When an ordered reader buffers two stale gaps before taking a newer group internally,
+	/// both `hand_out` and a pool-debt fold must keep the second gap's stale verdict
+	/// withdrawable until it is returned or withdrawn, so widening the budget still withdraws it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_keeps_second_buffered_stale_gap_withdrawable_after_budget_widening() {
+		for force_debt in [false, true] {
+			let pool = crate::cache::Pool::unbounded();
+			let broadcast = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let producer = Producer::new(broadcast, "test", Info::timed());
+			producer.received();
+			producer.anchored();
+			let _fills = producer.requests();
+			producer.skip_groups(0..100);
+			producer.give_up(100..200, Hole::stale(Duration::from_millis(100)));
+			producer.skip_groups(200..300);
+			producer.give_up(300..400, Hole::stale(Duration::from_millis(100)));
+			producer.skip_groups(400..2000);
+			write_group(&producer, 2000);
+
+			let mut ord = producer.subscribe(within(Duration::from_millis(100), None)).ordered();
+
+			// First poll: `find_gap(true)` adopts both stale runs (100..200 and 300..400) into
+			// `misses.stale` and buffers them as withdrawable gaps; then `read()` takes group 2000
+			// internally (`hand_out(2000, ordered=true)` advances `delivered.floor()` past 300..400)
+			// and returns the first gap (100..200) while keeping 300..400 buffered behind it.
+			assert!(matches!(
+				ord.poll_next_item(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(Item::Gap { range, .. }))) if range == (100..200)
+			));
+
+			if force_debt {
+				// Shrink capacity to 1 byte without evicting drops, assign real reader debt, and
+				// run a debt fold while 300..400 is still buffered as `Report::Withdrawable`.
+				ord.inner.settle_record(None);
+				pool.resize(1);
+				let mut debt = 1 << 20;
+				producer.state.read().cache.owe_readers(&mut debt);
+				assert!(
+					matches!(&ord.inner.inner, Inner::Plain(cursor) if cursor.record.owes()),
+					"reader must owe debt before folding"
+				);
+				ord.inner.settle_record(None);
+			}
+
+			// Widen the budget before reading the next item: gap 300..400 must be withdrawn
+			// rather than returned as `Old`.
+			ord.update(within(Duration::from_secs(60), None)).unwrap();
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = ord.poll_next_item(&kio::Waiter::noop()) {
+				match item {
+					Item::Group(g) => items.push(Ok(g.start)),
+					Item::Gap { range, .. } => items.push(Err(range)),
+				}
+			}
+			assert_eq!(
+				items,
+				[Ok(2000)],
+				"widening budget must withdraw buffered second stale gap 300..400 (force_debt={force_debt})"
+			);
+		}
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

@@ -1,0 +1,15 @@
+# Relay config for the steady run: stock cache settings, as a deployment runs them.
+# run.sh overrides the ports on the command line (`--listen` / `--web-http-listen`).
+
+[log]
+level = "info"
+
+[listen]
+bind = "127.0.0.1:4470"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+listen = "127.0.0.1:4470"
+
+[auth]
+public = ""

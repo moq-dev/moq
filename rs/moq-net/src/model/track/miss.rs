@@ -428,6 +428,11 @@ impl Misses {
 		&self.skipped
 	}
 
+	/// The stale verdicts still held, in key order.
+	pub fn stale_runs(&self) -> impl Iterator<Item = &ops::Range<u64>> {
+		self.stale.iter().map(|(run, _)| run)
+	}
+
 	/// The exclusive end of the run from `key` this reader's fills refused or it gave
 	/// up, `None` when it may still be read.
 	pub fn gone(&self, key: u64) -> Option<u64> {
@@ -1253,7 +1258,7 @@ impl Misses {
 			for held in backfill(state, run.clone()).iter() {
 				self.filled.extend(held.clone());
 			}
-			for hole in holes(state, run.clone()) {
+			for hole in holes(state, run.clone()).into_iter().flat_map(|hole| taken.gaps(hole)) {
 				self.adopt_drops(state, hole.clone(), drift);
 				for hole in self.unclaimed(state, hole, drift) {
 					let Unfed { never, lost, awaited } = state.unfed(hole, now);

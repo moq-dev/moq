@@ -7388,6 +7388,65 @@ test("local group finishAt skips its span while cached and preserves it on evict
 	}
 });
 
+test("a sparse live track coalesces reported runs and keeps bounded records", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const spacing = 17n;
+		const base = 1_000_003n;
+		const producer = new TrackProducer("sparse").accept({ timescale: Timescale.MILLI, maxAge: null });
+		hooks.startsAtKeys(producer);
+
+		const wireSub = producer.subscribe(withMax({ delay: { max: Duration.millis(200) } }));
+		const wire = hooks.wire(wireSub);
+		const ordered = producer.subscribe({ ranges: [{ start: base }] }).ordered();
+		const staleProducer = new TrackProducer("stale").accept({ timescale: Timescale.MILLI, maxAge: null });
+		putGroup(staleProducer, 0n, 0);
+		const lagging = staleProducer.subscribe(withMax({ delay: { max: Duration.millis(200) } }));
+		try {
+			let maxDelivered = 0;
+			for (let n = 0n; n < 300n; n++) {
+				const key = base + n * spacing;
+				const group = producer.createGroup(key);
+				group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+				group.finishAt(key + spacing);
+				hooks.skipTrackGroups(producer, key + 1n, key + spacing);
+				await clock.advance(Duration.millis(Number(spacing)));
+
+				const got = wireSub.tryRecvGroup();
+				expect(got?.start).toBe(key);
+				got?.close();
+				wire.tell(key, key + 1n);
+				while (hooks.tryDrop(wireSub)) {}
+				expect(hooks.reportedRuns(wireSub)).toBeLessThanOrEqual(2);
+				maxDelivered = Math.max(maxDelivered, hooks.deliveredRuns(wireSub));
+
+				// Lagging viewer receiving alternating stale drops and skips coalesces into 1 run.
+				hooks.dropTrackGroups(staleProducer, key, key + 1n, staleHole(200));
+				hooks.skipTrackGroups(staleProducer, key + 1n, key + spacing);
+				while (hooks.tryDrop(lagging)) {}
+				expect(hooks.reportedRuns(lagging)).toBeLessThanOrEqual(2);
+
+				const item = await ordered.nextItem();
+				expect(item?.kind).toBe("group");
+				if (item?.kind === "group") {
+					expect(item.group.start).toBe(key);
+					item.group.close();
+				}
+			}
+			expect(maxDelivered).toBeLessThanOrEqual(20);
+		} finally {
+			ordered.close();
+			lagging.close();
+			staleProducer.close();
+			wireSub.close();
+			producer.close();
+		}
+	} finally {
+		installed.close();
+	}
+});
+
 // A read by arrival never raises its key cursor, and a cached group below its range holds its
 // hand-out floor, so only its budget bounds the fill verdicts it holds: a publisher keying groups
 // by timestamp skips the keys between, one verdict each.

@@ -6604,7 +6604,7 @@ impl TrackRun {
 		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
 		if !cut.is_empty() && self.start.emits_range() {
 			for inner in cut {
-				self.track.record_mut().tell(inner.clone(), Report::Skip);
+				self.track.record_mut().tell(inner.clone(), Report::Final);
 				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -6617,10 +6617,9 @@ impl TrackRun {
 			for (span, err) in dropped {
 				let hole = Hole::drop(err);
 				if self.start.emits_range() {
-					let report = self.report(&hole);
 					let record = self.track.record_mut();
 					for gap in record.untold(span.clone()).iter() {
-						record.tell(gap.clone(), report);
+						record.tell(gap.clone(), Report::Final);
 					}
 				}
 				self.buffer_hole(span, hole, writer)?;
@@ -6859,7 +6858,7 @@ impl TrackRun {
 	/// span a whole group's GROUP_END accounted for.
 	fn mark_served(&mut self, groups: Range<u64>) {
 		if self.start.emits_range() {
-			self.track.record_mut().tell(groups, Report::Settled);
+			self.track.record_mut().tell(groups, Report::Final);
 		}
 	}
 
@@ -6879,22 +6878,9 @@ impl TrackRun {
 			Hole::Skip => range,
 			Hole::Drop { .. } => range.start..self.track.span_end(range.end),
 		};
-		let report = self.report(hole);
-		self.track.record_mut().tell(range.clone(), report);
+		self.track.record_mut().tell(range.clone(), Report::Final);
 		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
-	}
-
-	/// What the wire is told when `hole` goes out.
-	fn report(&self, hole: &Hole) -> Report {
-		match self.ctx.version.has_skip() {
-			// Every drop is final before lite-07.
-			false => Report::Settled,
-			true => match hole {
-				Hole::Skip => Report::Skip,
-				Hole::Drop { .. } => Report::Dropped,
-			},
-		}
 	}
 
 	/// Give up, as `hole` says, whatever part of `range` this subscription has not been
@@ -6909,9 +6895,8 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let gaps = self.track.record_mut().untold(range);
-		let report = self.report(hole);
 		for gap in gaps.iter() {
-			self.track.record_mut().tell(gap.clone(), report);
+			self.track.record_mut().tell(gap.clone(), Report::Final);
 			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())
@@ -9993,7 +9978,7 @@ mod serve_group_test {
 		hole: &Hole,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) {
-		while let Some(gap) = run.track.record_mut().report(range.clone(), hole) {
+		while let Some(gap) = run.track.record_mut().report(range.clone(), hole, false) {
 			run.forward_range(gap, hole, writer).unwrap();
 		}
 	}

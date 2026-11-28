@@ -1309,6 +1309,12 @@ export const hooks: {
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** How many runs a subscriber's record of what it reported holds. Tests only. */
 	reportedRuns: (subscriber: Subscriber) => number;
+	/**
+	 * Record `key` as final in `reported` when `subscriber` is already tracking drops, so a front's
+	 * copy coalesces each handed-out group with the skipped runs between them. Mirrors the Rust
+	 * `Subscriber::settle_if_dropping`.
+	 */
+	settleIfDropping: (subscriber: Subscriber, key: bigint) => void;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1887,6 +1893,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportedRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	settleIfDropping: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

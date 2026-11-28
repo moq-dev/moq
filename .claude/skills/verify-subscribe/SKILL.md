@@ -49,7 +49,7 @@ Sync commit: `f3315bb478a55cb4514a0d114858254fb4f1c039`. Run `git log f3315bb478
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `serve`, `mark_served`; `rs/moq-net/src/model/record.rs` `Record::told` | `CursorHand` |
 | `rs/moq-net/src/model/group.rs` `Producer::finish_at`; `rs/moq-net/src/model/track.rs` `TrackState::appended`, `TrackState::span_end` | `Finish`, `ends`, `CursorHole` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way`, `shed` | a new group, or one shed, as `Serve`, then `StreamFail` with `old` whose header never arrives |
-| `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `report`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
+| `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `GroupOutcomes::whole`, `GroupOutcomes::cut`) | `PubOutcomes`, `CutSkip` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `buffer_group_end`, `settle_failed`, `settle_reset`, `accounts`, `poll_given_up`, `GroupContext::reliable_reset`; `rs/moq-net/src/transport/boxed.rs` `Held::reset`, `ListedState::preempted` | `StreamHold`, `StreamFin`, `StreamFail`, `StreamAck`, `SubStop`, `Kept` |
 | `rs/moq-net/src/model/record.rs` `Record::fold` | `PubFold`, `folded` |

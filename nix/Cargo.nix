@@ -22196,6 +22196,7 @@ rec {
             name = "tikv-jemalloc-ctl";
             packageId = "tikv-jemalloc-ctl";
             optional = true;
+            features = [ "stats" ];
           }
           {
             name = "tikv-jemallocator";
@@ -49039,7 +49040,10 @@ rec {
           "stats" = [ "tikv-jemalloc-sys/stats" ];
           "use_std" = [ "libc/use_std" ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [
+          "default"
+          "stats"
+        ];
       };
       "tikv-jemalloc-sys" = rec {
         crateName = "tikv-jemalloc-sys";
@@ -49076,6 +49080,7 @@ rec {
           "background_threads_runtime_support"
           "default"
           "profiling"
+          "stats"
           "unprefixed_malloc_on_supported_platforms"
         ];
       };

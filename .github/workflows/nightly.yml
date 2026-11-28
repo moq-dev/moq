@@ -435,7 +435,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -464,7 +464,9 @@ jobs:
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         # `rs sweep` runs kio's suite under its adversarial sim schedules with the lost-wakeup probe.
-        recipe: ["gh test-integration", "rs sweep", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        # `test steady` runs one passthrough broadcast at 60 groups/s for 15 minutes and fails on
+        # a heap slope after warm-up, too long for a pull request (see test/steady).
+        recipe: ["gh test-integration", "rs sweep", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
@@ -516,14 +518,24 @@ jobs:
           sudo udevadm settle
           # The runner user is not in the video group.
           sudo chmod a+rw /dev/video*
-      # Inside the job's hour, so a recipe that overruns fails the job, where the
+      # Inside the job's timeout, so a recipe that overruns fails the job, where the
       # failure-based triage sees it, instead of cancelling it.
       - name: Test
+        id: test
         timeout-minutes: 55
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
           CI_STRICT: 1
+      - name: Upload the steady run
+        # Its samples, heap dumps, and binaries name the stacks that grew (`jeprof --base`).
+        if: ${{ always() && steps.test.outcome != 'success' && matrix.recipe == 'test steady' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: steady
+          path: .tmp/harness/steady-*
+          include-hidden-files: true
+          retention-days: 14
 
   tla:
     name: TLA+ (${{ matrix.name }})
