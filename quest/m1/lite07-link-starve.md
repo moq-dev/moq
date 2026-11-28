@@ -58,8 +58,9 @@ also passed at `5d86f05321`. A relay built at an older commit run against this c
 sends lite-07's `Meta` byte (added in `eed4c1850c`) and the older relay answers PROTOCOL_VIOLATION.
 Build both from one commit when replaying an old build.
 
-What remains is to catch it again: run the hold on the nightly's hosts (Linux, 32 broadcasts)
-a few nights with `HARNESS_KEEP=1`, and if it still never fails, delete this quest.
+The hold runs only when started by hand: Nightly's mesh replays play the default script. What
+remains is the maintainer's pick under Waiting, which revisits the 2026-11-25 decision to keep
+this quest.
 
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
 [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md), per the milestone
@@ -70,9 +71,10 @@ Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
 
 ## Waiting
 
-- Maintainer: the stall did not reproduce at `5d86f05321` built whole or on `main`; keep the quest?
-  - Delete it, keeping the hold check (Recommended) - nothing reproduces it, and the hold soaks that exact state; reopen from the check's failure with logs if it ever fires
-  - Keep it for a few nightly hold runs on Linux - costs a nightly job's 10 minutes a cell to rule out a host-specific cause
+- Maintainer: the stall did not reproduce at `5d86f05321` built whole or on `main`, and the hold that would catch it runs only by hand. This revisits the 2026-11-25 decision to keep the quest. What now?
+  - Delete the quest (Recommended) - nothing reproduces it and its original runs' logs are gone; rerun `half-roll-hold.toml` by hand and reopen the quest if it ever fails
+  - Delete it and add a nightly cell that plays the hold - catches a return on Linux at 32 broadcasts, for 10 more minutes of a nightly runner a night
+  - Keep it open until a few nightly hold runs on Linux come back clean - same cost, quest stays in m1
 
 ## Related
 

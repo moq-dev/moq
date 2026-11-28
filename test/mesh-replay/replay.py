@@ -946,7 +946,7 @@ class Run:
             "versions": versions,
             "readers": self.reader_report(start, end, targets),
         }
-        self.check(report, unfed, unrouted)
+        self.check(report, unfed, unrouted, (start, end) if kind == "hold" else None)
         self.events.append(report)
         return report
 
@@ -1058,8 +1058,11 @@ class Run:
                         )
         return unfed, unrouted
 
-    def check(self, report: dict, unfed: list[dict], unrouted: list[dict]) -> None:
-        """Record each reader with a route left unfed, and each broadcast shown with no source."""
+    def check(
+        self, report: dict, unfed: list[dict], unrouted: list[dict], hold: tuple[float, float] | None = None
+    ) -> None:
+        """Record each reader with a route left unfed, and each broadcast shown with no source,
+        and over a `hold`'s window, each reader that paused past `stall` and read again."""
         publishing = {relay.name for relay in self.relays.values() if relay.publisher.alive}
         shown = []
         for relay in self.relays.values():
@@ -1099,15 +1102,32 @@ class Run:
             self.violation(report, "unfed", items, kind, None if name == report["name"] else began)
         if shown:
             self.violation(report, "shown", shown)
-        # No fault ends a hold, so a pause that recovers on its own is the failure, and `unfed`
-        # sees only a reader still stalled when the hold ends.
-        if report["kind"] == "hold":
-            worst = report["readers"]["worst"]
-            if paused := [row for row in worst if row["s"] > self.script.stall]:
-                self.violation(report, "paused", paused)
+        if hold and (paused := self.paused(*hold)):
+            self.violation(report, "paused", paused)
         died = [proc.name for proc in self.procs() if proc.died]
         if died:
             self.violation(report, "died", died)
+
+    def paused(self, start: float, end: float) -> list[dict]:
+        """Readers that went quiet for longer than `stall` inside [start, end], the part of a pause
+        before `start` not counted. No fault ends a hold, so a pause that recovers on its own is
+        the failure, and `unfed` sees only a reader still stalled when the hold ends. A reader never
+        fed is `unfed`'s, and one still stalled from an earlier event is that event's strand."""
+        rows = []
+        for relay in self.relays.values():
+            known = max(start, min(end, relay.readout.status_at))
+            for path, state in relay.readout.paths.items():
+                if state.last is None or (relay.name, path) in self.strands:
+                    continue
+                longest = max(
+                    (finish - max(begin, start) for begin, finish, _ in state.gaps if finish >= start and begin <= end),
+                    default=0.0,
+                )
+                # A pause still going counts up to the reader's latest status line.
+                longest = max(longest, min(end, max(known, state.last)) - max(state.last, start))
+                if longest > self.script.stall:
+                    rows.append({"reader": relay.name, "path": path, "s": round(longest, 2)})
+        return sorted(rows, key=lambda row: -row["s"])
 
     def violation(
         self, report: dict, check: str, items: list, kind: str | None = None, began: dict | None = None

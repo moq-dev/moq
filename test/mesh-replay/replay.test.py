@@ -538,5 +538,48 @@ class EventTest(unittest.TestCase):
         self.assertTrue(replay.Run.baseline(run(True, "old"), "start"))
 
 
+class HoldTest(unittest.TestCase):
+    def paused(self, paths, strands=(), stall=3.0, window=(100.0, 700.0), status_at=700.0):
+        readout = SimpleNamespace(paths=paths, status_at=status_at)
+        run = SimpleNamespace(
+            relays={"a": SimpleNamespace(name="a", readout=readout)},
+            strands={key: {} for key in strands},
+            script=SimpleNamespace(stall=stall),
+        )
+        return replay.Run.paused(run, *window)
+
+    def test_a_pause_that_recovers_inside_the_hold_fails_it(self):
+        gap = replay.Follow(last=700.0, gaps=[(200.0, 204.5, 45)])
+        rows = self.paused({"replay/b/0": gap})
+        self.assertEqual([(r["path"], r["s"]) for r in rows], [("replay/b/0", 4.5)])
+        # At the threshold is not past it.
+        self.assertEqual(self.paused({"replay/b/0": replay.Follow(last=700.0, gaps=[(200.0, 203.0, 30)])}), [])
+
+    def test_only_the_part_of_a_pause_inside_the_hold_counts(self):
+        # The roll's settle left it 2.8s in; 1.2s of the pause fell inside the hold.
+        gap = replay.Follow(last=700.0, gaps=[(97.2, 101.2, 40)])
+        self.assertEqual(self.paused({"replay/b/0": gap}), [])
+
+    def test_a_reader_never_fed_or_stalled_since_an_event_is_not_this_holds(self):
+        never = replay.Follow()
+        stalled = replay.Follow(last=90.0)
+        paths = {"replay/b/0": never, "replay/b/1": stalled}
+        self.assertEqual(self.paused(paths, strands=[("a", "replay/b/1")]), [])
+        # Unless an event never carried it: then its pause through the hold is the failure.
+        self.assertEqual([r["path"] for r in self.paused({"replay/b/1": stalled})], ["replay/b/1"])
+
+    def test_every_pause_is_reported_not_the_five_worst(self):
+        paths = {f"replay/b/{n}": replay.Follow(last=700.0, gaps=[(200.0, 210.0, 100)]) for n in range(8)}
+        self.assertEqual(len(self.paused(paths)), 8)
+
+    def test_a_hold_names_its_duration(self):
+        mesh = replay.load_mesh(HERE / "ring6.toml")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "script.toml"
+            path.write_text('[[events]]\nkind = "hold"\n')
+            with self.assertRaises(ValueError):
+                replay.load_script(path, mesh)
+
+
 if __name__ == "__main__":
     unittest.main()
