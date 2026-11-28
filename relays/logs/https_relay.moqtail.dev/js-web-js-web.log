@@ -1,69 +1,20 @@
 [page] negotiated protocol: moqt-22
-[page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 active=true
-[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=moqtail/ch00 active=true
 [page] announced: broadcast=moqtail/testsrc active=true
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=moqtail/ch01 active=true
+[page] announced: broadcast=moqtail/ch07_vod active=true
 [page] announced: broadcast=moqtail/ch07 active=true
+[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=moqtail/ch07_all active=true
 [page] announced: broadcast=moqtail/ch06 active=true
+[page] announced: broadcast=moqtail/ch03 active=true
+[page] announced: broadcast=moqtail/ch04 active=true
 [page] announced: broadcast=moqtail/ch00_all active=true
 [page] announced: broadcast=moqtail/ch05 active=true
-[page] announced: broadcast=moqtail/ch07_vod active=true
-[page] announced: broadcast=moqtail/ch00 active=true
-[page] announced: broadcast=moqtail/ch07_all active=true
-[page] announced: broadcast=moqtail/ch03 active=true
-[page] announced: broadcast=moqtail/ch01 active=true
-[page] announced: broadcast=moqtail/ch02 active=true
-[page] announced: broadcast=smoke-js-web-4241-8625.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4241-8625.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4241-8625.hang track=catalog.json
-[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 rerouted
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4241-8625.hang track=catalog.json
-[page] announced: broadcast=smoke-js-web-4241-8625.hang rerouted
-[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at Ge (http://localhost:34535/assets/index-DYbY3AOv.js:1:15528)
-    at http://localhost:34535/assets/index-DYbY3AOv.js:1:98650
-    at async #s (http://localhost:34535/assets/index-DYbY3AOv.js:1:98613)
-    at async bs.done (http://localhost:34535/assets/index-DYbY3AOv.js:1:100714)
-    at async Sf.runPublishNamespace (http://localhost:34535/assets/index-DYbY3AOv.js:1:223424)
-    at async #p (http://localhost:34535/assets/index-DYbY3AOv.js:1:229325)
-[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e active=true
-[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e rerouted
-[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at Ge (http://localhost:34535/assets/index-DYbY3AOv.js:1:15528)
-    at http://localhost:34535/assets/index-DYbY3AOv.js:1:98650
-    at async #s (http://localhost:34535/assets/index-DYbY3AOv.js:1:98613)
-    at async bs.done (http://localhost:34535/assets/index-DYbY3AOv.js:1:100714)
-    at async Sf.runPublishNamespace (http://localhost:34535/assets/index-DYbY3AOv.js:1:223424)
-    at async #p (http://localhost:34535/assets/index-DYbY3AOv.js:1:229325)
-[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 active=true
-[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 rerouted
-[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at Ge (http://localhost:34535/assets/index-DYbY3AOv.js:1:15528)
-    at http://localhost:34535/assets/index-DYbY3AOv.js:1:98650
-    at async #s (http://localhost:34535/assets/index-DYbY3AOv.js:1:98613)
-    at async bs.done (http://localhost:34535/assets/index-DYbY3AOv.js:1:100714)
-    at async Sf.runPublishNamespace (http://localhost:34535/assets/index-DYbY3AOv.js:1:223424)
-    at async #p (http://localhost:34535/assets/index-DYbY3AOv.js:1:229325)
-[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec active=true
-[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec rerouted
-[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec rerouted
-[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec active=false
-[page] error processing bidi stream NetworkError: The stream was aborted by the remote server
-    at e.write (http://localhost:34535/assets/index-DYbY3AOv.js:1:103554)
-    at Ks (http://localhost:34535/assets/index-DYbY3AOv.js:1:106182)
-    at async Sf.runPublishNamespace (http://localhost:34535/assets/index-DYbY3AOv.js:1:224071)
-    at async #p (http://localhost:34535/assets/index-DYbY3AOv.js:1:229325)
-[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 active=true
-[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 rerouted
-[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at Ge (http://localhost:34535/assets/index-DYbY3AOv.js:1:15528)
-    at http://localhost:34535/assets/index-DYbY3AOv.js:1:98650
-    at async #s (http://localhost:34535/assets/index-DYbY3AOv.js:1:98613)
-    at async bs.done (http://localhost:34535/assets/index-DYbY3AOv.js:1:100714)
-    at async Sf.runPublishNamespace (http://localhost:34535/assets/index-DYbY3AOv.js:1:223424)
-    at async #p (http://localhost:34535/assets/index-DYbY3AOv.js:1:229325)
-decoded 0 frames from smoke-js-web-4241-8625.hang (vite)
+[page] announced: broadcast=smoke-js-web-4395-17821.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4395-17821.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4395-17821.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4395-17821.hang track=catalog.json
+[page] announced: broadcast=smoke-js-web-4395-17821.hang rerouted
+decoded 0 frames from smoke-js-web-4395-17821.hang (vite)

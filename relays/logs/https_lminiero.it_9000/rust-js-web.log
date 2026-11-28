@@ -1,18 +1,11 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4241-32421.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4241-32421.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4241-32421.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4241-32421.hang track=catalog.json
-[page] received catalog hang smoke-rust-4241-32421.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4241-32421.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4241-32421.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4241-32421.hang track=0.avc3
-[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 4
-    at e.decode (http://localhost:33367/assets/index-DYbY3AOv.js:1:177221)
-    at a (http://localhost:33367/assets/index-DYbY3AOv.js:1:225445)
-    at #f (http://localhost:33367/assets/index-DYbY3AOv.js:1:99924)
-    at bs.tryDecode (http://localhost:33367/assets/index-DYbY3AOv.js:1:99455)
-    at Sf.handleGroup (http://localhost:33367/assets/index-DYbY3AOv.js:1:225505)
-    at async #g (http://localhost:33367/assets/index-DYbY3AOv.js:1:229995)
-decoded 15 frames from smoke-rust-4241-32421.hang (vite)
+[page] announced: broadcast=smoke-rust-4395-16280.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4395-16280.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4395-16280.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4395-16280.hang track=catalog.json
+[page] received catalog hang smoke-rust-4395-16280.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4395-16280.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4395-16280.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4395-16280.hang track=0.avc3
+decoded 19 frames from smoke-rust-4395-16280.hang (vite)

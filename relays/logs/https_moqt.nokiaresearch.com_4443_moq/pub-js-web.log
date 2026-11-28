@@ -1,17 +1,13 @@
-publishing smoke-js-web-4241-21939.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
+publishing smoke-js-web-4395-29611.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=2
 [page] announced: broadcast=moq-test-00 active=true
 [page] announced: broadcast=video active=true
 [page] announced: broadcast=simulcast active=true
 [page] announced: broadcast=demo active=true
-[page] announced: broadcast=moq-test/interop/760e75aef301a5f41698b17dc5a85415/moq-test-00/0/0/0/2/5/5/64/32/2/1/1/1/-1/2/0 active=true
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=catalog.json
-[page] announced: broadcast=moq-test/interop/760e75aef301a5f41698b17dc5a85415/moq-test-00/0/0/0/2/5/5/64/32/2/1/1/1/-1/2/0 active=false
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4241-21939.hang track=video
-[page] announced: broadcast=moq-test/interop/e5d038795bbacd640808c942a1ea25a0/moq-test-00/4/0/0/0/0/5/96/96/2/1/1/0/-1/-1/0 active=true
-[page] announced: broadcast=moq-test/interop/e5d038795bbacd640808c942a1ea25a0/moq-test-00/4/0/0/0/0/5/96/96/2/1/1/0/-1/-1/0 active=false
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4395-29611.hang track=video
