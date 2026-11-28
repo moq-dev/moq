@@ -424,10 +424,10 @@ pub(crate) fn frame_duration(mut asc: &[u8]) -> Option<moq_net::Timestamp> {
 	let mut reader = BitReader::new(&mut asc);
 	let (object_type, core_rate, _) = read_header(&mut reader).ok()?;
 	let (core, _) = read_core(&mut reader, object_type, core_rate).ok()?;
-	// Main, LC, SSR, and LTP, and ER AAC LD and ELD; the GASpecificConfig or ELDSpecificConfig
-	// leads with frameLengthFlag.
+	// Main, LC, SSR, LTP, scalable, and their error-resilient forms, and ER AAC LD and ELD; the
+	// GASpecificConfig or ELDSpecificConfig leads with frameLengthFlag.
 	let (long, short) = match core {
-		1..=4 => (1024, 960),
+		1..=4 | 6 | 17 | 19 | 20 => (1024, 960),
 		23 | 39 => (512, 480),
 		_ => return None,
 	};
@@ -894,6 +894,8 @@ mod tests {
 		// ER AAC LD at 48 kHz: 512 samples, or 480 with frameLengthFlag set.
 		assert_eq!(micros(&[0xB9, 0x90, 0x00]), Some(10_666));
 		assert_eq!(micros(&[0xB9, 0x94, 0x00]), Some(10_000));
+		// ER AAC LC at 48 kHz: 1024 samples.
+		assert_eq!(micros(&[0x89, 0x91, 0x00]), Some(21_333));
 		// ER BSAC codes frames of another length.
 		assert_eq!(micros(&[0xB0, 0x90, 0x00]), None);
 	}

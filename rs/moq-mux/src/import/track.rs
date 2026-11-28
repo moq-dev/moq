@@ -224,8 +224,8 @@ pub struct Track {
 #[derive(Default)]
 struct Grouping {
 	join: crate::container::Join,
-	/// The open group holds a packet with audio in it, rather than only DTX packets.
-	voiced: bool,
+	/// The last packet carried audio rather than DTX, so a DTX packet now starts a silence.
+	speaking: bool,
 }
 
 impl Grouping {
@@ -234,8 +234,9 @@ impl Grouping {
 	///
 	/// A frame that doesn't say how long it plays counts as a point, so its group closes on the
 	/// first frame starting a span past it instead. An Opus encoder entering DTX sends a
-	/// header-only `pause` packet, so the first one after audio closes the group rather than
-	/// leaving it open through the silence; further ones fill groups like any other packet.
+	/// header-only `pause` packet, so the first one after audio closes its group, even one it
+	/// opens, rather than leaving it open through the silence; further ones fill groups like any
+	/// other packet.
 	fn fill(&mut self, written: Written, pause: bool) -> Option<Option<moq_net::Timestamp>> {
 		// The duration counts samples at the codec's rate, which the timestamp's scale may not share.
 		let end = written
@@ -243,8 +244,8 @@ impl Grouping {
 			.zip(written.timestamp.scale())
 			.and_then(|(duration, scale)| written.timestamp.checked_add(duration.convert(scale).ok()?).ok());
 		let full = self.join.fill(written.timestamp, end.unwrap_or(written.timestamp));
-		let silenced = pause && self.voiced;
-		self.voiced |= !pause;
+		let silenced = pause && self.speaking;
+		self.speaking = !pause;
 		if full.is_none() && !silenced {
 			return None;
 		}
@@ -257,7 +258,6 @@ impl Grouping {
 	/// Forget the open group, which closed some other way.
 	fn reset(&mut self) {
 		self.join.reset();
-		self.voiced = false;
 	}
 }
 
@@ -1246,13 +1246,14 @@ mod tests {
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
 
-		for ts in [0, 20_000] {
+		// Five voiced packets fill a group, so the first DTX packet opens one and closes it alone.
+		for index in 0..5 {
 			import
-				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(index * 20_000).unwrap()))
 				.unwrap();
 		}
-		// Header-only 20 ms packets: the first closes the voiced group, the rest fill their own.
-		for index in 2..9 {
+		// Header-only 20 ms packets: the first closes its group, the rest fill their own.
+		for index in 5..11 {
 			import
 				.decode(b"a", Some(Timestamp::from_micros(index * 20_000).unwrap()))
 				.unwrap();
@@ -1264,8 +1265,7 @@ mod tests {
 		}
 		let _finished = import.finish().unwrap();
 
-		// The first packet after the silence starts past the open group's span, so it closes it.
-		assert_eq!(collect_groups(subscriber).await, vec![3, 5, 2, 1]);
+		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 5, 2]);
 	}
 
 	/// A group closed on a frame of unknown length declares no end, so the producer doesn't
