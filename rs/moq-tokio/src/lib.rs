@@ -63,8 +63,11 @@ fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 	let mut config = qmux::Config::default();
 	config.limits = quic.limits();
 	// A keep-alive closes a quiet session at its hard limit, so the idle timeout must not first.
+	// QMux carries the idle timeout in whole milliseconds, truncating, so round `hard` up to fit.
 	if let Some(keep_alive) = quic.liveness {
-		config.idle_timeout = config.idle_timeout.map(|idle| idle.max(keep_alive.hard));
+		let millis = keep_alive.hard.as_nanos().div_ceil(1_000_000);
+		let hard = std::time::Duration::from_millis(u64::try_from(millis).unwrap_or(u64::MAX));
+		config.idle_timeout = config.idle_timeout.map(|idle| idle.max(hard));
 	}
 	config
 }
