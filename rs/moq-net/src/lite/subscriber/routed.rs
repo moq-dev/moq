@@ -821,6 +821,12 @@ impl Routed {
 		self.stream.goaway();
 	}
 
+	/// The peer went unheard past its keep-alive's `soft` limit, or was heard again: what
+	/// it gave ranks below everything else while it is stale.
+	pub(in crate::lite) fn stale(&mut self, stale: bool) {
+		self.stream.stale(stale);
+	}
+
 	/// The session's permit changed. A routing neighbour's must stay whole. For any
 	/// other, a new limit changes which of the peer's claims the node holds, and what
 	/// the peer granted changes the prefixes asked of it.

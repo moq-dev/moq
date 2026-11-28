@@ -110,7 +110,8 @@ pub(super) struct Subscriber {
 	/// Lite-07: the Announce Streams the peer opened, for the route layer to read. It
 	/// allows the peer one.
 	announce_streams: kio::Queue<route_stream::Reader>,
-	going_away: crate::goaway::GoingAway,
+	/// Whether this session's routes rank as draining: the peer sent a GOAWAY or is stale.
+	draining: crate::goaway::Draining,
 	auth: crate::auth::Link,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
@@ -653,6 +654,7 @@ impl Subscriber {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = crate::Hop::from(config.origin.node());
+		let draining = crate::goaway::Draining::new(config.going_away, config.session.liveness());
 		Self {
 			session: config.session,
 			runtime: config.runtime,
@@ -674,7 +676,7 @@ impl Subscriber {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			announce_streams: kio::Queue::new(),
-			going_away: config.going_away,
+			draining,
 			auth: config.auth,
 			announces: Default::default(),
 			viewers: Default::default(),
@@ -867,9 +869,10 @@ impl Subscriber {
 	/// The route to announce for a prefix this peer advertised, charging our
 	/// link's price on top of the cost it advertised.
 	///
-	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
-	/// including a restart of one already attached: a connection on its way out must
-	/// not win selection, however good the path it advertises looks.
+	/// Once the peer has sent a GOAWAY, or while it is stale, every route it announces
+	/// starts out draining, including a restart of one already attached: a connection on
+	/// its way out, or one that stopped answering, must not win selection, however good the
+	/// path it advertises looks.
 	///
 	/// The identity and epoch are the ones the peer announced at `path`: an update
 	/// carries neither, since it never changes the stream.
@@ -890,7 +893,7 @@ impl Subscriber {
 		.with_cost(cost.charged(link_cost))
 		.with_via(self.via(responder));
 
-		route.draining = self.going_away.is_set();
+		route.draining = self.draining.is_set();
 		route
 	}
 
@@ -2472,7 +2475,7 @@ impl ProbeStream {
 		let mut stream: Stream<Transport, Version> = wait!(Open => {
 			// Probe is best-effort telemetry; a session that is going away
 			// has no use for a new estimate, so skip it rather than erroring.
-			if self.subscriber.going_away.is_set() {
+			if self.subscriber.draining.going_away.is_set() {
 				return Poll::Ready(Ok(()));
 			}
 			Stream::poll_open(&self.session, &mut self.open, self.subscriber.version, waiter)
@@ -2553,6 +2556,8 @@ struct PrefixRun {
 	/// Lite05+: the ANNOUNCE_STARTs of the initial set still to read. Anything else
 	/// before them, or the stream ending, cuts the counted set short.
 	initial: u64,
+	/// Whether the routes on this stream last ranked as draining.
+	draining: bool,
 }
 
 #[kio::machine(self.state: PrefixState)]
@@ -2632,6 +2637,7 @@ impl AnnouncePrefix {
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
 			initial,
+			draining: self.subscriber.draining.is_set(),
 		};
 
 		// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
@@ -2669,12 +2675,12 @@ impl AnnouncePrefix {
 
 		// Streaming announce updates.
 		Poll::Ready(wait!(Run => {
-			// A draining peer usually stops announcing, so react to the
-			// GOAWAY itself; waiting for another message would leave the
-			// route primary until the session finally closed. Idempotent,
-			// since the signal stays set.
-			if self.subscriber.going_away.poll(waiter).is_ready() {
-				run.announced.drain();
+			// A draining peer usually stops announcing, and a stale one says nothing at all,
+			// so react to the signal itself; waiting for another message would leave the
+			// route primary until the session finally closed.
+			while let Poll::Ready(draining) = self.subscriber.draining.poll_changed(waiter, run.draining) {
+				run.draining = draining;
+				run.announced.drain(draining);
 			}
 			// A new limit holds back what the peer may no longer publish to us,
 			// and brings back what it may again. The peer still holds each
@@ -13167,7 +13173,7 @@ impl Announced {
 				}
 				Some(Held::Withheld(mut route)) => {
 					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
-					route.draining |= subscriber.going_away.is_set();
+					route.draining = subscriber.draining.is_set();
 					self.offer(subscriber, path, route);
 				}
 				_ => unreachable!("only attached and withheld routes change"),
@@ -13175,11 +13181,12 @@ impl Announced {
 		}
 	}
 
-	/// Rank every attached route last (the peer sent a GOAWAY).
-	fn drain(&mut self) {
+	/// Rank every attached route last (the peer sent a GOAWAY or is stale), or not (it was
+	/// heard again).
+	fn drain(&mut self, draining: bool) {
 		for held in self.routes.values_mut() {
 			if let Held::Attached(entry) = held {
-				entry.drain();
+				entry.drain(draining);
 			}
 		}
 	}
@@ -13277,14 +13284,14 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 		let _ = self.dynamic.update(route);
 	}
 
-	/// Rank the route last (the peer sent a GOAWAY): every other candidate outranks
-	/// it while it stays selectable as the last path, at its real cost. Idempotent,
-	/// since the signal stays set.
-	fn drain(&mut self) {
-		if self.route.draining {
+	/// Rank the route last (the peer sent a GOAWAY or is stale), or not: every other
+	/// candidate outranks a draining one while it stays selectable as the last path, at its
+	/// real cost.
+	fn drain(&mut self, draining: bool) {
+		if self.route.draining == draining {
 			return;
 		}
-		self.route.draining = true;
+		self.route.draining = draining;
 		let _ = self.dynamic.update(self.route.clone());
 	}
 }

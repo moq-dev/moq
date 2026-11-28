@@ -165,6 +165,73 @@ impl GoingAway {
 	}
 }
 
+/// Whether a session's routes rank as draining: the peer sent a GOAWAY, which lasts, or it
+/// went unheard past its keep-alive's `soft` limit, which clears once it is heard again.
+///
+/// A stale peer is demoted the way a draining one is, never closed: it still serves when
+/// nothing else does, and recovers its rank the moment it is heard.
+#[derive(Clone)]
+pub(crate) struct Draining {
+	pub going_away: GoingAway,
+	/// The peer's liveness, under a keep-alive.
+	liveness: Option<kio::Consumer<crate::transport::Liveness>>,
+}
+
+impl Draining {
+	pub fn new(going_away: GoingAway, liveness: Option<kio::Consumer<crate::transport::Liveness>>) -> Self {
+		Self { going_away, liveness }
+	}
+
+	/// Whether the session's routes rank as draining now.
+	pub fn is_set(&self) -> bool {
+		self.going_away.is_set() || self.stale()
+	}
+
+	fn stale(&self) -> bool {
+		(self.liveness.as_ref()).is_some_and(|liveness| *liveness.read() == crate::transport::Liveness::Stale)
+	}
+
+	/// Ready with whether the session's routes rank as draining once that differs from `last`.
+	pub fn poll_changed(&self, waiter: &kio::Waiter, last: bool) -> Poll<bool> {
+		loop {
+			let stale = self.stale();
+			let now = self.going_away.poll(waiter).is_ready() || stale;
+			if now != last {
+				return Poll::Ready(now);
+			}
+			std::task::ready!(self.poll_stale(waiter, stale));
+		}
+	}
+
+	/// Ready with whether the peer is stale once that differs from `last`. Pending forever
+	/// without a keep-alive, or once the session ends.
+	pub fn poll_stale(&self, waiter: &kio::Waiter, last: bool) -> Poll<bool> {
+		let Some(liveness) = &self.liveness else {
+			return Poll::Pending;
+		};
+		let changed = liveness.poll(waiter, |now| {
+			let stale = **now == crate::transport::Liveness::Stale;
+			match stale != last {
+				true => Poll::Ready(stale),
+				false => Poll::Pending,
+			}
+		});
+		match changed {
+			Poll::Ready(Ok(stale)) => Poll::Ready(stale),
+			// The session ended, and the caller's own loop with it.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+/// A detached signal for tests that build a subscriber without a session.
+#[cfg(test)]
+impl Default for Draining {
+	fn default() -> Self {
+		Self::new(GoingAway::default(), None)
+	}
+}
+
 /// A detached signal for tests that build a subscriber without a session. Its
 /// channel is already closed, so it never reports a GOAWAY.
 #[cfg(test)]

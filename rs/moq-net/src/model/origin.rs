@@ -590,13 +590,7 @@ pub struct RouteInfo {
 	/// How the route layer ranks the route among those of its claim; see [`Lane`].
 	pub(crate) lane: Lane,
 
-	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
-	/// every other available route, whatever its priority or cost, yet above one held
-	/// unavailable, and still serves when nothing else does.
-	///
-	/// A ranking state, never a saturated metric. Never in an announcement, so a relay
-	/// advertises a draining route at its real cost and its readers never see the flag; only
-	/// the lite-07 route layer hears it, which drains the claim it makes for the route.
+	/// The route ranks below every other available one; see [`Self::draining`].
 	pub(crate) draining: bool,
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
@@ -702,6 +696,18 @@ impl RouteInfo {
 	/// it recovers: request again once it turns available.
 	pub fn available(&self) -> bool {
 		self.available
+	}
+
+	/// Whether the route ranks below every other available one, whatever its priority or
+	/// cost, yet above one held unavailable, and still serves when nothing else does: the
+	/// session it arrived on is going away (the peer sent a GOAWAY), or went unheard past its
+	/// keep-alive's `soft` limit, or a lite-07 path to its origin crosses such a session.
+	/// A stale session's routes stop draining once it is heard again.
+	///
+	/// A ranking state, never a saturated metric: a relay advertises a draining route at its
+	/// real cost, and only lite-07 carries the flag on the wire.
+	pub fn draining(&self) -> bool {
+		self.draining
 	}
 
 	/// Serve a stable `identity` at `epoch`; see [`RouteOptions::with_identity`].
@@ -1036,13 +1042,13 @@ type RouteMeta = (
 	Option<crate::route::NodeId>,
 	bool,
 	u8,
-	Option<Standing>,
+	Standing,
 );
 
-/// A route's drain and link priority, which a ranked cursor ([`NodeFilter::Own`]) delivers as
-/// well: they change how the route layer ranks the claim it is fed, but nothing a reader
-/// sees, so no other cursor carries them (see [`RouteInfo::draining`]).
-type Standing = (bool, Priority);
+/// A route's drain (see [`RouteInfo::draining`]), and its link priority for a ranked cursor
+/// ([`NodeFilter::Own`]) alone: the priority changes how the route layer ranks the claim it
+/// is fed, but nothing a reader sees, so no other cursor carries it.
+type Standing = (bool, Option<Priority>);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -1084,7 +1090,7 @@ struct Delivered {
 	/// path from a restart; see [`lite06_churn::falls_back`].
 	publisher: Option<Hop>,
 	rank: (Cost, usize),
-	/// Whether a ranked cursor delivered the route draining; see [`Delivered::drains`].
+	/// Whether the cursor delivered the route draining; see [`Delivered::drains`].
 	draining: bool,
 }
 
@@ -1100,15 +1106,15 @@ impl Delivered {
 
 	/// Whether `meta` is the route starting to drain, which the update hold never delays: it
 	/// damps path hunting, which a drain is not, and a peer closing within the hold would
-	/// end the route before a ranked cursor's reader learned it drains.
+	/// end the route before the cursor's reader learned it drains.
 	fn drains(&self, meta: &RouteMeta) -> bool {
 		!self.draining && draining(meta)
 	}
 }
 
-/// Whether a ranked cursor delivers `meta` draining.
+/// Whether a cursor delivers `meta` draining.
 fn draining(meta: &RouteMeta) -> bool {
-	meta.9.is_some_and(|(draining, _)| draining)
+	meta.9.0
 }
 
 /// A pending update's hold, kept with it in its [`Routes`]'s queue.
@@ -1509,13 +1515,13 @@ impl OriginConsumerState {
 				epoch: meta.4,
 				auth: meta.5,
 				node: meta.6,
-				draining: meta.9.is_some_and(|(draining, _)| draining),
+				draining: meta.9.0,
 				available: meta.7,
 				// A ranked cursor's link priority rides the lane's, which
 				// [`OwnClaims::apply`] reads: it ranks the route where the route layer's would.
 				lane: Lane {
 					above: meta.8,
-					priority: meta.9.map(|(_, priority)| priority.value()),
+					priority: meta.9.1.map(|priority| priority.value()),
 					..Lane::default()
 				},
 				marked: false,
@@ -1570,7 +1576,6 @@ struct RouteEntry {
 	/// The route layer's route it follows; see [`RouteInfo::lane`].
 	lane: Lane,
 	/// Whether the route ranks below every other available one; see [`RouteInfo::draining`].
-	/// Only a ranked cursor's [`Self::meta`] carries it, for the route layer.
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
@@ -1655,7 +1660,7 @@ impl RouteEntry {
 		}
 	}
 
-	/// The metadata an announce cursor delivers for this entry, its [`Standing`] too when the
+	/// The metadata an announce cursor delivers for this entry, its link priority too when the
 	/// cursor is `ranked`.
 	fn meta(&self, ranked: bool) -> RouteMeta {
 		(
@@ -1672,9 +1677,9 @@ impl RouteEntry {
 		)
 	}
 
-	/// What a `ranked` cursor delivers of the entry's drain and link priority.
-	fn standing(&self, ranked: bool) -> Option<Standing> {
-		ranked.then(|| (self.draining, self.link_priority()))
+	/// What a cursor delivers of the entry's drain, and of its link priority when `ranked`.
+	fn standing(&self, ranked: bool) -> Standing {
+		(self.draining, ranked.then(|| self.link_priority()))
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
@@ -1822,7 +1827,7 @@ pub(crate) enum NodeFilter {
 	#[default]
 	Any,
 	/// Only the routes this node serves itself, which the route layer is fed as this node's
-	/// own claims: a cursor delivers each one's [`Standing`] too, since the claim carries it.
+	/// own claims: a cursor delivers each one's link priority too, since the claim carries it.
 	Own,
 	/// Only the route layer's route following the forwarding node `node`'s claim.
 	#[cfg_attr(
@@ -1970,7 +1975,7 @@ struct TableCursor {
 	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection. Servability is part of the dedupe key but never leaves the model.
 	current: HashMap<Path, CursorRoute>,
-	/// Whether the cursor delivers each route's [`Standing`], and a change to it.
+	/// Whether the cursor delivers each route's link priority, and a change to it.
 	ranked: bool,
 	/// Whether the cursor serves a path lookup ([`Consumer::path_routes`]), which reads only
 	/// what serves its root: the entry [`RouteTable::best_route`] picks for it, as a request
@@ -12100,25 +12105,27 @@ mod tests {
 		);
 	}
 
-	/// Draining is local selection state: the winner draining changes nothing a reader
-	/// sees, and the route keeps its real cost.
+	/// A reader sees the winner start and stop draining, each an update at the route's real
+	/// cost, so a caller can show a stale peer's routes, or ignore them.
 	#[kio::test]
-	async fn draining_is_invisible_to_readers() {
+	async fn draining_reaches_readers() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
 
 		let dynamic = producer
 			.forward("room", RouteInfo::new().with_hops(hops(&[10])).with_cost(3))
 			.unwrap();
-		announced.expect_next_active("room").await;
+		assert!(!announced.expect_next_active("room").await.draining());
 		dynamic.update(dynamic.route().unwrap().with_draining(true)).unwrap();
-		// Past the hold a best-route change would wait out.
-		// An update is held back from the poll that first sees it, so poll on both sides of the hold.
-		announced.assert_next_wait();
+		// A drain is never held back.
+		let route = announced.expect_next_active("room").await;
+		assert_eq!((route.cost(), route.draining()), (Cost::new(3), true));
+
+		dynamic.update(dynamic.route().unwrap().with_draining(false)).unwrap();
 		kio::clock::sleep(Config::default().update_hold * 2).await;
+		let route = announced.expect_next_active("room").await;
+		assert_eq!((route.cost(), route.draining()), (Cost::new(3), false));
 		announced.assert_next_wait();
-		let route = dynamic.route().unwrap();
-		assert_eq!((route.cost, route.draining), (Cost::new(3), true));
 	}
 
 	#[kio::test]

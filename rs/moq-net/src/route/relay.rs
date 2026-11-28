@@ -200,7 +200,7 @@ pub(crate) struct Here<'a> {
 }
 
 impl Here<'_> {
-	/// `offer`, heard on `port` from a neighbour that sent GOAWAY when `draining`, as it
+	/// `offer`, heard on `port` from a neighbour that sent GOAWAY or is stale when `draining`, as it
 	/// stands here: priced and ranked over the link. `None` for one this node never uses:
 	/// at the longest path, through a session known closed, or past the metric.
 	pub fn arrive(&self, port: &Port, draining: bool, offer: &Offer) -> Option<Offer> {
@@ -586,6 +586,8 @@ struct Peer<I, A> {
 	session: u64,
 	/// It sent GOAWAY.
 	draining: bool,
+	/// It went unheard past its keep-alive's `soft` limit, until it is heard again.
+	stale: bool,
 	/// Its first marker arrived: what it sends now answers what this node asked.
 	answering: bool,
 	/// What it answers of what this node asked it for, each with whether its initial set
@@ -626,6 +628,11 @@ struct Gone<N, A> {
 }
 
 impl<I, A> Peer<I, A> {
+	/// Whether what it gives ranks as draining here: it sent GOAWAY, or it is stale.
+	fn demoted(&self) -> bool {
+		self.draining || self.stale
+	}
+
 	fn routing(&self) -> Option<NodeId> {
 		match self.port.role {
 			Role::Routing(id) => Some(id),
@@ -1078,6 +1085,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				port,
 				session: self.sessions,
 				draining: false,
+				stale: false,
 				answering: false,
 				asked: BTreeMap::new(),
 				asking: VecDeque::new(),
@@ -1281,6 +1289,29 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.drains(node, None, &mut touched);
 		for origin in touched {
 			self.reselect(origin);
+		}
+		self.done();
+	}
+
+	/// `peer` went unheard past its keep-alive's `soft` limit when `stale`, or was heard
+	/// again. While stale, every route through it ranks as draining, here and at every node
+	/// this node's routes reach, and so does every claim it gave. Unlike a GOAWAY it names
+	/// nothing draining to the mesh, so being heard again restores every route at once.
+	pub fn stale(&mut self, peer: N, stale: bool) {
+		let Some(state) = self.peers.get_mut(&peer) else {
+			return;
+		};
+		if state.stale == stale {
+			return;
+		}
+		state.stale = stale;
+		let origins: Vec<NodeId> = state.offers.iter().copied().collect();
+		let broadcasts: Vec<Broadcast<I>> = state.given.keys().cloned().collect();
+		for origin in origins {
+			self.reselect(origin);
+		}
+		for broadcast in broadcasts {
+			self.restate(broadcast, Change::Lost);
 		}
 		self.done();
 	}
@@ -1803,7 +1834,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			if heard.ended {
 				continue;
 			}
-			if let Some(offer) = here.arrive(&peer.port, peer.draining, &heard.offer) {
+			if let Some(offer) = here.arrive(&peer.port, peer.demoted(), &heard.offer) {
 				usable.push(Best { via, offer });
 			}
 		}
@@ -2492,9 +2523,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.filter(|(peer, claim)| !self.stale_copy(&broadcast, claim, Holder::Peer(**peer)))
 			.map(|(&peer, claim)| {
 				self.visit();
-				// A claim from a neighbour that sent GOAWAY is draining from here on.
+				// A claim from a neighbour that sent GOAWAY, or is stale, is draining from here
+				// on. Applied here rather than kept on the claim, so being heard again
+				// restores it without waiting for the neighbour to announce it again.
 				let mut claim = claim.clone();
-				claim.draining |= self.peers.get(&peer).is_some_and(|peer| peer.draining);
+				claim.draining |= self.peers.get(&peer).is_some_and(Peer::demoted);
 				(claim, peer)
 			})
 			// Precedence first and then the order `closest` takes, an unavailable claim last.
@@ -2794,7 +2827,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						continue;
 					}
 					let mut given = given.clone();
-					given.draining |= self.peers.get(peer).is_some_and(|peer| peer.draining);
+					given.draining |= self.peers.get(peer).is_some_and(Peer::demoted);
 					ways.push(Way {
 						origin,
 						next: Next::Local(*peer),
