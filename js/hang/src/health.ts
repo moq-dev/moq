@@ -44,6 +44,22 @@ export interface Sample<S> {
 	age: Duration;
 }
 
+/**
+ * Diff `sample.current` against `previous`, over the time between the two reports' `transport.uptime`s.
+ * A report without one, or an uptime that did not advance, leaves the sample as it is, with nothing to diff
+ * against: arrival times say nothing about the time between the samples, since a congested report arrives
+ * late and in a burst.
+ */
+export function withUptime<S extends { transport?: Stats.Transport }>(
+	sample: Sample<S>,
+	previous: Report<S>,
+): Sample<S> {
+	const before = previous.snapshot.transport?.uptime;
+	const after = sample.current.snapshot.transport?.uptime;
+	if (before === undefined || after === undefined || after <= before) return sample;
+	return { ...sample, previous, interval: Duration.millis(after - before) };
+}
+
 /** The values at which an input grades degraded and unhealthy (below them, for `headroom`). */
 export interface Limits<T = number> {
 	/** Degraded from this value on. */

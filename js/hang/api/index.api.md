@@ -153,6 +153,9 @@ export namespace Health {
 	export function defaultThresholds(): Health.Thresholds;
 	export function publisher(sample: Health.Sample<Stats.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
 	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
+	export function withUptime<S extends {
+		transport?: Stats.Transport;
+	}>(sample: Health.Sample<S>, previous: Health.Report<S>): Health.Sample<S>;
 }
 
 export * as Net from "@moq/net";

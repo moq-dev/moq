@@ -31,7 +31,8 @@ Counters are cumulative; readers derive rates over an interval and treat a
 replacement or decrease as a reset. Bitrate, latency, RTT, estimated rate,
 and sample age are gauges. Loss is cumulative lost bytes and packets, and
 `sentBytes` is the bytes the connection sent across every broadcast it
-carries, `uptime` is the reporter's monotonic clock in milliseconds, with unavailable transport measurements absent. Missing rendition counters
+carries, `uptime` is the reporter's monotonic clock in milliseconds, with
+unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
@@ -130,7 +131,10 @@ consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
 pair of `.echo` snapshots. Each report names the broadcast it was read from
 (its path and identity), which observed every number in it; the caller states the
 interval between the two and how long ago the newer one arrived, as a `Duration`
-in both languages. Both languages compute the same result from the shared
+in both languages. `Sample::with_uptime` and `withUptime` take the interval from the
+two reports' `transport.uptime`s instead, which the time between arrivals cannot
+replace: a congested report arrives late and in a burst. A report without an
+uptime, or one that did not advance, has nothing to diff against. Both languages compute the same result from the shared
 fixtures in `rs/hang/fixtures/health.json`.
 
 The result holds the deltas over the interval (frames, bytes, and bitrate per
@@ -161,9 +165,11 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's loss and rate by the change in its
 `sentBytes`, so they hold however many broadcasts it carries; a report without
 `sentBytes`, or one whose previous transport sample is stale, leaves both
-`unknown`; the headroom's bitrate spans the reports' interval widened by the earlier
-transport `age` and narrowed by the later's, since native QUIC counters are cached
-samples up to 100 ms old. Native QUIC counts overhead and retransmissions in `sentBytes` and a
+`unknown`. The counters span the interval between the two reports, widened by
+the earlier report's transport `age` and narrowed by the later's: native QUIC
+counters are cached samples that the session refreshes after a read, so a reader
+polling once a second reads samples about a second old, which `age` reports.
+Native QUIC counts overhead and retransmissions in `sentBytes` and a
 browser's WebTransport does not. The transport limits were measured on one paced TS feed
 through a shaped link over five-second intervals, dividing by media bytes. The rendition limits are not
 measured against real traffic, and no CLI viewer reports `late`, `errors`, or

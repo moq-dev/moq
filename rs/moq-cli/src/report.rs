@@ -458,9 +458,7 @@ pub async fn print_health(origin: moq_net::origin::Consumer, path: String) -> an
 }
 
 /// Grade `current` against `previous`, over the time the reporter says its counters span, then
-/// keep it as the next `previous`. A pair whose reports state no later uptime has nothing to
-/// diff: arrival times say nothing about the time between the samples, since a congested report
-/// arrives late and in a burst.
+/// keep it as the next `previous`.
 fn grade(
 	previous: &mut Option<hang::health::Report<hang::stats::Snapshot>>,
 	current: hang::health::Report<hang::stats::Snapshot>,
@@ -468,16 +466,7 @@ fn grade(
 	// A report is graded as it arrives, so it has no age to be stale by.
 	let mut sample = hang::health::Sample::new(&current, Duration::ZERO);
 	if let Some(previous) = previous.as_ref() {
-		let span = current
-			.snapshot
-			.transport
-			.uptime
-			.zip(previous.snapshot.transport.uptime)
-			.and_then(|(current, previous)| current.checked_sub(previous))
-			.filter(|span| !span.is_zero());
-		if let Some(span) = span {
-			sample = sample.with_previous(previous, span);
-		}
+		sample = sample.with_uptime(previous);
 	}
 	let health = hang::health::publisher(&sample, &hang::health::Thresholds::default());
 	*previous = Some(current);
@@ -765,9 +754,9 @@ mod tests {
 		assert_eq!(headroom.value, Some(0.5));
 		assert_eq!(headroom.verdict, hang::health::Verdict::Unhealthy);
 
-		// No uptime, or one that went backwards, leaves nothing to diff against.
-		assert_eq!(grade(&mut previous, report(2_000_000, None)).interval, None);
-		assert_eq!(grade(&mut previous, report(3_000_000, Some(1))).interval, None);
+		// An uptime that went backwards, or none, leaves nothing to diff against.
+		assert_eq!(grade(&mut previous, report(2_000_000, Some(3))).interval, None);
+		assert_eq!(grade(&mut previous, report(3_000_000, None)).interval, None);
 	}
 
 	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.

@@ -12,8 +12,7 @@ numbers the browser reporters publish.
 Done in the quest's PR: `transport.sentBytes` (the connection's cumulative
 bytes sent) in the `stats` and `echo` snapshots, loss and headroom graded over
 it so they hold for a connection carrying several broadcasts, `moq export
-health` as the first consumer, and `moq import --report` and `moq export
---echo` reporting it. `moq-dev/studio` m0 (`quest/m0/pin-moq-tip.md`) and
+health` as the first consumer, and `moq import --report` reporting it. `moq-dev/studio` m0 (`quest/m0/pin-moq-tip.md`) and
 `moq-dev/hang.live` m2 (`quest/m2/network-xray.md`, reading `Hang.Health`) read
 the grade in their own repositories once they move to a `main` with it, and
 [Preflight](/quest/m3/stats/preflight.md) will too.

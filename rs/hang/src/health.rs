@@ -104,6 +104,39 @@ impl<'a, S> Sample<'a, S> {
 	}
 }
 
+impl<'a, E> Sample<'a, stats::Snapshot<E>> {
+	/// Diff against `previous`, over the time between the two reports' `transport.uptime`s. A report
+	/// without one, or an uptime that did not advance, leaves nothing to diff against: arrival
+	/// times say nothing about the time between the samples, since a congested report arrives late
+	/// and in a burst.
+	pub fn with_uptime(self, previous: &'a Report<stats::Snapshot<E>>) -> Self {
+		match uptime(&previous.snapshot.transport, &self.current.snapshot.transport) {
+			Some(span) => self.with_previous(previous, span),
+			None => self,
+		}
+	}
+}
+
+impl<'a, E> Sample<'a, echo::Snapshot<E>> {
+	/// Diff against `previous`, over the time between the two reports' `transport.uptime`s, like
+	/// [Sample::with_uptime] for a publisher.
+	pub fn with_uptime(self, previous: &'a Report<echo::Snapshot<E>>) -> Self {
+		match uptime(&previous.snapshot.transport, &self.current.snapshot.transport) {
+			Some(span) => self.with_previous(previous, span),
+			None => self,
+		}
+	}
+}
+
+/// How much later `current`'s uptime is than `previous`'s, when both state one and it advanced.
+fn uptime(previous: &stats::Transport, current: &stats::Transport) -> Option<Duration> {
+	current
+		.uptime
+		.zip(previous.uptime)
+		.and_then(|(current, previous)| current.checked_sub(previous))
+		.filter(|span| !span.is_zero())
+}
+
 /// The values at which an input grades degraded and unhealthy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits<T> {
@@ -698,6 +731,35 @@ mod tests {
 			let actual = serde_json::to_value(health(&case, &Thresholds::default())).unwrap();
 			assert_eq!(numeric(actual), numeric(case.health.clone()), "{}", case.name);
 		}
+	}
+
+	#[test]
+	fn with_uptime_diffs_over_the_time_between_uptimes() {
+		let report = |uptime: Option<u64>| {
+			let mut snapshot = stats::Snapshot::<()>::default();
+			snapshot.transport.uptime = uptime.map(Duration::from_secs);
+			let observer = Observer::new(moq_net::Path::from_static("room/live"), None);
+			Report::new(observer, snapshot)
+		};
+		let current = report(Some(14));
+		let start = || Sample::new(&current, Duration::ZERO);
+
+		let before = report(Some(10));
+		let spanned = start().with_uptime(&before);
+		assert_eq!(spanned.interval, Duration::from_secs(4));
+		assert!(spanned.previous.is_some());
+
+		// A report without an uptime, or one that did not advance, leaves nothing to diff against.
+		for previous in [report(None), report(Some(14)), report(Some(20))] {
+			assert!(start().with_uptime(&previous).previous.is_none());
+		}
+		let unstated = report(None);
+		assert!(
+			Sample::new(&unstated, Duration::ZERO)
+				.with_uptime(&before)
+				.previous
+				.is_none()
+		);
 	}
 
 	#[test]
