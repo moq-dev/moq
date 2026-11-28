@@ -2451,8 +2451,14 @@ impl Request for SubscribeServe {
 		peer_fin: bool,
 	) -> Result<Self, Error> {
 		let one_shot = single_group_position(&msg, shared.version);
+		// A metadata subscription reads the copy apart for it where the broadcast keeps one,
+		// so payload crosses no hop for it.
+		let lookup = |broadcast: &crate::broadcast::Consumer| match msg.meta {
+			true => broadcast.track_meta(track),
+			false => broadcast.track(track),
+		};
 		if peer_fin && let Some((group, start_frame, end_frame)) = one_shot {
-			let track = broadcast.track(track)?;
+			let track = lookup(&broadcast)?;
 			return Ok(Self::Fetch(Box::new(OneShotFetch::new(
 				msg,
 				track,
@@ -2463,7 +2469,7 @@ impl Request for SubscribeServe {
 		}
 		let legacy =
 			Legacy::new(shared.version, &broadcast, track).map(|legacy| legacy.adopting(&shared.held_datagrams));
-		let track = match broadcast.track(track) {
+		let track = match lookup(&broadcast) {
 			Ok(track) => track,
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};
@@ -7201,13 +7207,24 @@ impl TrackRun {
 		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
 		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
 		// one per group. An update that asks below the start names them then, and a wider budget
-		// may still serve a stale one.
+		// may still serve a stale one. On lite-07, whose ranges bound what a stale verdict was judged
+		// within, a run stale under the track's own freshness bound is final all the same, since no
+		// budget reaches past that bound: a relay reading from the oldest group would otherwise wait
+		// on it forever. Earlier drafts name a drop with no range, which a capped read could still
+		// serve, so they stop there.
+		let bound = self
+			.ctx
+			.version
+			.has_ranges()
+			.then(|| self.track.max_age_bound())
+			.flatten();
+		let final_stale = |budget: Duration| bound.is_some_and(|bound| budget >= bound);
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
 				continue;
 			}
-			if range.end < reach || hole.stale_budget().is_some() {
+			if range.end < reach || hole.stale_budget().is_some_and(|budget| !final_stale(budget)) {
 				break;
 			}
 			reach = range.start;
@@ -8852,6 +8869,12 @@ mod serve_group_test {
 			// 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
 			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 2, 6, 2, 0, 1];
 			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
+			let info = crate::track::Info::timed().with_compression(compression);
+			assert_eq!(
+				ingest_meta_group(&bytes, info),
+				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
+				"{compression:?}: the ingest reads it back"
+			);
 			assert!(
 				!bytes.windows(5).any(|w| w == b"hello"),
 				"{compression:?}: a payload went out"
@@ -8884,9 +8907,127 @@ mod serve_group_test {
 		(header.key, sizes, times, end)
 	}
 
-	/// Metadata subscriptions across the Rust/JS boundary: JS reads a Rust publisher's metadata
-	/// Group Stream, and a JS publisher serves a Rust-encoded metadata SUBSCRIBE with one Rust
-	/// reads, each frame's header alone, compressed or not.
+	/// A metadata Group Stream read through the subscriber's ingest into a metadata copy of a
+	/// track with `info`: the group's key, each frame's declared size and timestamp, and the End
+	/// its GROUP_END names.
+	fn ingest_meta_group(bytes: &[u8], info: crate::track::Info) -> (u64, Vec<u64>, Vec<u64>, Option<u64>) {
+		use crate::coding::Decode;
+
+		/// The rest of the stream in one read, then its FIN.
+		struct Once(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Once {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				std::task::Poll::Ready(Ok(self.0.take()))
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let mut r = crate::coding::Decoder::new(bytes, version.into());
+		assert_eq!(r.varint().unwrap(), 0, "a group stream");
+		let header = lite::Group::decode(&mut r, version).unwrap();
+		let rest = bytes::Bytes::copy_from_slice(r.rest());
+		let mut reader = crate::coding::Reader::new(crate::transport::poll::Buffered::new(Once(Some(rest))), version);
+		let track = track::Producer::new_meta(Arc::new(broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(group::Info { start: header.key }).unwrap();
+		let mut consumer = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let framing = lite::Framing::new(&info, version);
+		let mut ingest = lite::FrameIngest::new(
+			framing,
+			false,
+			header.frame_start,
+			lite::Clock::new(version, header.key),
+		);
+		let waiter = kio::Waiter::noop();
+		// The whole stream is ready, so only the ingest's own yields leave it pending.
+		let end = (0..bytes.len() + 64)
+			.find_map(|_| match ingest.poll(&mut reader, &mut group, &waiter) {
+				std::task::Poll::Ready(end) => Some(end.unwrap()),
+				std::task::Poll::Pending => None,
+			})
+			.expect("the ingest stalled on a complete stream");
+		match end {
+			Some(end) => group.finish_at(end).unwrap(),
+			None => group.finish().unwrap(),
+		}
+		let (mut sizes, mut times) = (Vec::new(), Vec::new());
+		while let std::task::Poll::Ready(Ok(Some(object))) = consumer.poll_read_object(&waiter) {
+			assert!(object.frame.payload.is_empty(), "a metadata frame holds no payload");
+			sizes.push(object.inflated.expect("a metadata frame declares its size"));
+			times.push(object.frame.timestamp.as_millis().unwrap() as u64);
+		}
+		(header.key, sizes, times, end)
+	}
+
+	/// Metadata ingest waits on its group's fastest reader as payload ingest does, so a long
+	/// group of headers pauses its stream instead of shedding a header that reader has yet to
+	/// take.
+	#[test]
+	fn metadata_ingest_waits_for_its_reader() {
+		/// The rest of the stream in one read, and never its FIN.
+		struct Open(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Open {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				match self.0.take() {
+					Some(chunk) => std::task::Poll::Ready(Ok(Some(chunk))),
+					None => std::task::Poll::Pending,
+				}
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let info = crate::track::Info::default();
+		// Empty untimed frames, each `Payload Length` 1: far more headers than the pace window
+		// holds, which the cache would shed from the front unpaced.
+		let headers = 400_000;
+		let stream = bytes::Bytes::from(vec![1u8; headers]);
+		let mut reader = crate::coding::Reader::new(crate::transport::poll::Buffered::new(Open(Some(stream))), version);
+		let track = track::Producer::new_meta(Arc::new(broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut idle = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let mut ingest = lite::FrameIngest::new(
+			lite::Framing::new(&info, version),
+			false,
+			0,
+			lite::Clock::new(version, 0),
+		);
+		let waiter = kio::Waiter::noop();
+		// Polled until a poll writes nothing more: the ingest's own yields always progress.
+		let mut written = 0;
+		loop {
+			assert!(ingest.poll(&mut reader, &mut group, &waiter).is_pending());
+			let count = group.frame_count();
+			if count == written {
+				break;
+			}
+			written = count;
+		}
+		assert!(
+			written > 0 && written < headers,
+			"{written} of {headers} headers written"
+		);
+		let std::task::Poll::Ready(Ok(Some(first))) = idle.poll_read_object(&waiter) else {
+			panic!("the reader's next header was shed");
+		};
+		assert_eq!(first.inflated, Some(0));
+	}
+
+	/// Metadata subscriptions across the Rust/JS boundary: each reads the other's metadata Group
+	/// Stream through its own ingest, each frame's header alone, compressed or not: JS a Rust
+	/// publisher's, and Rust a JS publisher's answer to a Rust-encoded metadata SUBSCRIBE.
 	#[kio::test]
 	#[ignore = "requires Bun; run by just test interop"]
 	async fn lite07_meta_interop() {
@@ -8943,6 +9084,7 @@ mod serve_group_test {
 				meta: true,
 			};
 			let bytes = subscribe.encode_bytes(Version::Lite07).unwrap();
+			let info = crate::track::Info::timed().with_compression(compression);
 			let compression = match compression {
 				crate::track::Compression::None => serde_json::Value::Null,
 				crate::track::Compression::Deflate => "deflate".into(),
@@ -8950,7 +9092,7 @@ mod serve_group_test {
 			let input = serde_json::json!({ "mode": "serve", "bytes": bytes.to_vec(), "compression": compression });
 			let served: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
 			assert_eq!(
-				read_meta_group(&served),
+				ingest_meta_group(&served, info),
 				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
 				"{compression}"
 			);
@@ -10882,6 +11024,33 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// History stale under the track's own freshness bound is named below an oldest range's
+	/// start, as a final run is: no budget a subscriber asks reaches past that bound, so a relay
+	/// copy reading from the oldest group would otherwise wait on it forever.
+	#[kio::test]
+	async fn lite07_names_history_stale_under_the_bound_below_the_start() {
+		let info = broadcast::Info {
+			cache_duration: Some(Duration::from_secs(30)),
+			..Default::default()
+		};
+		let track = track::Producer::new(Arc::new(info), "test", crate::track::Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut old = track.append_group(at(10)).unwrap();
+		old.write_frame(at(10), b"x".as_slice()).unwrap();
+		old.finish().unwrap();
+		let mut open = track.append_group(at(1_000)).unwrap();
+		for n in 0..60 {
+			open.write_frame(at(1_000 + n * 1_000), b"x".as_slice()).unwrap();
+			kio::clock::sleep(Duration::from_secs(1)).await;
+		}
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.start.resolved(), Some(1_000));
+		let named = holes(&mut writer, &log).await;
+		assert_eq!(named.first().map(|(_, run)| run.start), Some(0), "{named:?}");
+		assert_eq!(named.last().map(|(_, run)| run.end), Some(1_000), "{named:?}");
 	}
 
 	/// A copy whose feed start resolved before its upstream said where the live edge is resolves

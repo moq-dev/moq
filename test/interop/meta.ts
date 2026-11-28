@@ -1,8 +1,10 @@
 // moq-lite-07 metadata subscriptions both ways. `serve`: the JS publisher serves a Rust-encoded
-// metadata SUBSCRIBE and returns its Group Stream. `read`: JS reads a Rust publisher's metadata
-// Group Stream, returning each frame's plain size and timestamp and the group's End.
+// metadata SUBSCRIBE and returns its Group Stream. `read`: JS ingests a Rust publisher's metadata
+// Group Stream into a metadata copy, returning each frame's plain size and timestamp and the
+// group's End.
 import { randomHop } from "../../js/net/src/hop.ts";
-import { Group } from "../../js/net/src/lite/group.ts";
+import { hooks } from "../../js/net/src/internal.ts";
+import { Group, readFrames } from "../../js/net/src/lite/group.ts";
 import { Publisher } from "../../js/net/src/lite/publisher.ts";
 import { Subscribe } from "../../js/net/src/lite/subscribe.ts";
 import { Version } from "../../js/net/src/lite/version.ts";
@@ -11,6 +13,7 @@ import { Producer as OriginProducer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { Reader, Stream } from "../../js/net/src/stream.ts";
 import { Timescale, Timestamp } from "../../js/net/src/time.ts";
+import { Producer as TrackProducer } from "../../js/net/src/track.ts";
 
 // Stdout is the byte channel back to Rust.
 console.debug = console.error;
@@ -64,23 +67,24 @@ if (input.mode === "serve") {
 	const reader = new Reader(undefined, bytes, version);
 	await reader.u53(); // stream type
 	const header = await Group.decode(reader, version);
+	// Read through the JS ingest into a metadata copy of a millisecond track, as the Rust one is.
+	const track = new TrackProducer("test");
+	hooks.metaTrack(track);
+	track.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const group = track.createGroup(header.key);
+	const end = await readFrames(reader, group, { scale: 1000, lengthFirst: true });
+	if (end === undefined) group.finish();
+	else group.finishAt(end);
+	const consumer = group.consume();
 	const sizes: number[] = [];
 	const times: string[] = [];
-	let ts = header.key;
-	let highest: bigint | undefined;
-	let end: string | undefined;
-	while (!(await reader.done())) {
-		// A metadata FRAME: the plain size plus one, then the timestamp delta, and no payload.
-		const length = await reader.u53();
-		if (length === 0) {
-			end = ((highest ?? header.key) + (await reader.u62())).toString();
-			continue;
-		}
-		const zigzag = await reader.u62();
-		ts += (zigzag >> 1n) ^ -(zigzag & 1n);
-		if (highest === undefined || ts > highest) highest = ts;
-		times.push(ts.toString());
-		sizes.push(length - 1);
+	for (;;) {
+		const read = await hooks.readGroupFrame(consumer, false, 0, true);
+		if (!read) break;
+		if (read.frame.payload.byteLength !== 0) throw new Error("a metadata frame holds no payload");
+		if (read.inflated === undefined) throw new Error("a metadata frame declares its size");
+		sizes.push(read.inflated);
+		times.push(read.frame.timestamp.asMillis().toString());
 	}
-	process.stdout.write(JSON.stringify({ key: header.key.toString(), sizes, times, end }));
+	process.stdout.write(JSON.stringify({ key: header.key.toString(), sizes, times, end: end?.toString() }));
 }

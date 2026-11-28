@@ -72,7 +72,7 @@ Include URLs nest under the served broadcast's (see
 [`Include`](https://docs.rs/moq-hls/latest/moq_hls/export/struct.Include.html)), so
 access middleware sees the parent broadcast's path, while the server resolves each
 [include](/draft/moq-hang#include) through its own scoped origin and leaves out
-one it may not read. They follow include restarts unless the entry pins an `identity`;
+one it may not read. They follow include restarts;
 an unavailable include leaves the multivariant playlist until it returns. DASH and
 `--output` include only the broadcast's own renditions; record an include as its own
 broadcast.

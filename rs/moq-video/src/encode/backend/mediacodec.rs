@@ -105,11 +105,15 @@ const FLAG_KEY_FRAME: u32 = 1;
 const FLAG_CODEC_CONFIG: u32 = 2;
 const FLAG_END_OF_STREAM: u32 = 4;
 
-/// How long to wait for a free input buffer before dropping the frame. A codec
-/// that has not freed one within about a third of a frame interval at 30 fps is
-/// backed up behind its own output, and a live encoder that blocks instead
-/// builds latency it can never give back.
+/// How long to wait for a free input buffer, with frames in flight, before
+/// dropping the frame. A codec that has not freed one within about a third of a
+/// frame interval at 30 fps is backed up behind its own output, and a live
+/// encoder that blocks instead builds latency it can never give back.
 const INPUT_TIMEOUT: Duration = Duration::from_millis(10);
+
+/// How long to wait for an input buffer with nothing in flight before calling
+/// the codec wedged: the same second a tail drain gives it.
+const IDLE_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Poll for finished output without waiting. [`MediaCodec::encode`] drains on
 /// both sides of every submission, so output that isn't ready yet is collected
@@ -236,8 +240,8 @@ impl MediaCodec {
 			.map_err(|e| codec_err("request a sync frame", e))
 	}
 
-	/// Write one frame into a free input buffer, dropping it if the codec has
-	/// none.
+	/// Write one frame into a free input buffer, dropping it if the codec is
+	/// backed up behind frames already in flight.
 	fn submit(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		if cut {
 			// Keep the request pending until a frame is actually accepted. A full
@@ -251,9 +255,17 @@ impl MediaCodec {
 		let size = I420::len(crate::Size::new(self.width as u32, self.height as u32))?;
 		let sample_time = self.sample_time();
 
+		// With nothing in flight the codec owes no output, so a missing input buffer
+		// is not backpressure but a codec that has just started or flushed and not
+		// handed its buffers out yet, which can take longer than `INPUT_TIMEOUT` on a
+		// loaded device. Dropping the frame there would relieve nothing, and a lone
+		// frame followed by a flush would encode to nothing at all.
+		let idle = self.pending.is_empty();
+		let timeout = if idle { IDLE_INPUT_TIMEOUT } else { INPUT_TIMEOUT };
+
 		let submitted = match self
 			.codec
-			.dequeue_input_buffer(INPUT_TIMEOUT)
+			.dequeue_input_buffer(timeout)
 			.map_err(|e| codec_err("dequeue an input buffer", e))?
 		{
 			DequeuedInputBufferResult::Buffer(mut buffer) => {
@@ -269,6 +281,11 @@ impl MediaCodec {
 					.queue_input_buffer(buffer, 0, size, sample_time as u64, 0)
 					.map_err(|e| codec_err("queue an input buffer", e))?;
 				true
+			}
+			DequeuedInputBufferResult::TryAgainLater if idle => {
+				return Err(Error::codec(anyhow::anyhow!(
+					"MediaCodec handed out no input buffer within {IDLE_INPUT_TIMEOUT:?} with nothing in flight"
+				)));
 			}
 			// Every input buffer is still with the codec, which means it is behind
 			// on encoding rather than on anything we can hand it. Drop the frame:
@@ -732,9 +749,12 @@ mod tests {
 		let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(crate::Surface::I420(i420), timestamp(0));
 
+		// One frame into a codec that just started, so it lands before the codec may
+		// have handed out an input buffer, and it must not be dropped for that.
 		let mut encoded = backend.encode_all(&frame, true).unwrap();
 		encoded.extend(backend.flush_all().unwrap());
-		let annexb: Vec<u8> = encoded.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
-		moq_mux::codec::h264::config(&annexb).expect("a keyframe carrying its own parameter sets");
+		let first = encoded.first().expect("the only frame was encoded");
+		assert!(first.keyframe);
+		moq_mux::codec::h264::config(&first.payload).expect("a keyframe carrying its own parameter sets");
 	}
 }

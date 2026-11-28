@@ -307,7 +307,6 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			identity: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -321,14 +320,13 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	}
 }
 
-/// A rendition whose catalog `broadcast` field names `reference`, served under `identity`.
-fn referencing(reference: Option<&str>, identity: Option<&str>) -> MoqRendition {
+/// A rendition whose catalog `broadcast` field names `reference`.
+fn referencing(reference: Option<&str>) -> MoqRendition {
 	let mut rendition = rendition("video", MoqContainer::Legacy);
 	let MoqRendition::Video { config, .. } = &mut rendition else {
 		unreachable!()
 	};
 	config.broadcast = reference.map(Into::into);
-	config.identity = identity.map(Into::into);
 	rendition
 }
 
@@ -350,7 +348,6 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
-		identity: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -4220,7 +4217,7 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
+	let sibling = kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"))))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -4297,13 +4294,13 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
 	// made only of slashes is refused rather than read as the empty one.
-	consumer.resolve(referencing(None, None)).await.unwrap();
-	consumer.resolve(referencing(Some(""), None)).await.unwrap();
-	assert!(consumer.resolve(referencing(Some("/"), None)).await.is_err());
+	consumer.resolve(referencing(None)).await.unwrap();
+	consumer.resolve(referencing(Some(""))).await.unwrap();
+	assert!(consumer.resolve(referencing(Some("/"))).await.is_err());
 
 	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
-	match consumer.resolve(referencing(Some("./source"), None)).await {
+	match consumer.resolve(referencing(Some("./source"))).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
@@ -4323,7 +4320,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
+	let sibling = kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"))))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -4336,7 +4333,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 		.unwrap();
 
 	// And it can follow a reference of its own, back to where we started.
-	let back = kio::clock::timeout(TIMEOUT, sibling.resolve(referencing(Some("./pub"), None)))
+	let back = kio::clock::timeout(TIMEOUT, sibling.resolve(referencing(Some("./pub"))))
 		.await
 		.expect("timed out resolving back")
 		.unwrap();
@@ -4344,80 +4341,6 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 
 	catalog.close().unwrap();
 	source.close().unwrap();
-}
-
-/// A reference's identity names the identity it expects: a broadcast proven to serve another fails
-/// the rendition, while an unnamed reference, or a route that cannot prove its identity, reads
-/// whichever identity resolves.
-#[tokio::test]
-async fn resolve_honors_the_reference_identity() {
-	async fn resolve(
-		broadcast: &MoqBroadcastConsumer,
-		reference: &str,
-		identity: Option<&str>,
-	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), identity)))
-			.await
-			.expect("timed out resolving the reference")
-	}
-
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let served = moq_net::Identity::random().to_string();
-	let other = moq_net::Identity::random().to_string();
-	let options = MoqRouteOptions {
-		identity: Some(MoqIdentity::parse(served.clone()).unwrap()),
-		..Default::default()
-	};
-
-	let catalog_route = origin.route("a/pub".into(), options.clone()).unwrap();
-	let catalog = catalog_route.broadcast();
-	let source_route = origin.route("a/source".into(), options).unwrap();
-	let source = source_route.broadcast();
-	let _video = source.publish_track("video".into(), None).unwrap();
-	let plain = create_announced(&origin, "a/plain");
-
-	let broadcast = await_announced(&consumer, "a/pub").await;
-	await_announced(&consumer, "a/source").await;
-	await_announced(&consumer, "a/plain").await;
-
-	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
-	assert_eq!(matching.inner().info().path.as_str(), "a/source");
-	resolve(&broadcast, "./source", None).await.unwrap();
-	// A broadcast that minted its own identity is another stream than the one named.
-	assert!(matches!(
-		resolve(&broadcast, "./plain", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
-	));
-
-	assert!(matches!(
-		resolve(&broadcast, "./source", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
-	));
-	// Without a broadcast, the identity names the catalog's own stream.
-	resolve(&broadcast, "", Some(&served)).await.unwrap();
-	assert!(matches!(
-		resolve(&broadcast, "", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
-	));
-	assert!(matches!(
-		resolve(&broadcast, "./source", Some("")).await,
-		Err(MoqError::InvalidIdentity { .. })
-	));
-
-	// The rendition-based consumers read the identity off the rendition.
-	let config = MoqMediaTrackConfig {
-		rendition: referencing(Some("./source"), Some(&other)),
-		subscription: None,
-	};
-	let subscribed = kio::clock::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
-		.await
-		.expect("timed out subscribing to the rendition");
-	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves identity")));
-
-	catalog.close().unwrap();
-	source.close().unwrap();
-	plain.close().unwrap();
 }
 
 #[tokio::test]
@@ -10652,7 +10575,6 @@ async fn video_subscribe_configuration_boundary() {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			identity: None,
 			track: None,
 			coded: None,
 			display_aspect: None,
@@ -10979,4 +10901,44 @@ async fn group_calls_wake_ready_after_unlocking() {
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
+}
+
+/// A metadata subscription reads each frame's declared size and timestamp, an empty frame as
+/// size 0, and ends the group and the track where the payload reads would.
+#[tokio::test]
+async fn subscribe_meta_reads_headers() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("video".into(), Some(timed_info())).unwrap();
+	let meta = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_meta("video".into(), None)
+		.await
+		.unwrap();
+	let group = track.append_group(us(0)).unwrap();
+	for (at, payload) in [(0, &b"key"[..]), (1, b"")] {
+		group
+			.write_frame(MoqFrame {
+				payload: payload.to_vec(),
+				timestamp: us(at),
+			})
+			.unwrap();
+	}
+	group.finish().unwrap();
+
+	let read = kio::clock::timeout(TIMEOUT, meta.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.expect("a group");
+	assert_eq!(read.start(), 0);
+	let mut headers = Vec::new();
+	while let Some(header) = kio::clock::timeout(TIMEOUT, read.next_header()).await.unwrap().unwrap() {
+		headers.push((header.size, micros(header.timestamp)));
+	}
+	assert_eq!(headers, [(3, 0), (0, 1)]);
+
+	track.finish().unwrap();
+	let end = kio::clock::timeout(TIMEOUT, meta.recv_group()).await.unwrap().unwrap();
+	assert!(end.is_none(), "the track finished");
 }

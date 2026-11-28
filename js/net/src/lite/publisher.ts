@@ -52,7 +52,7 @@ import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
-import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, trackMetaOf, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
@@ -119,6 +119,12 @@ const datagramBudget = new Budget();
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+// The track a SUBSCRIBE reads: a metadata subscription reads the copy kept apart for it where the
+// broadcast keeps one, so no payload crosses a hop for it.
+function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
+	return msg.meta ? trackMetaOf(msg.track, front) : front.track(msg.track);
 }
 
 /**
@@ -1292,7 +1298,7 @@ export class Publisher {
 			}
 		}
 
-		const consumer = front.track(msg.track);
+		const consumer = subscribed(front, msg);
 		// The live joins already placed, which start where they were placed.
 		const absent = legacyStart(this.version, msg.maxDelay);
 		const placed = requestedPlaced(msg, absent);
@@ -1572,6 +1578,7 @@ export class Publisher {
 				initial: BigInt(asked.length),
 				requested,
 				oneShot: oneShot !== undefined,
+				maxAge: info.maxAge?.asMillis(),
 			});
 			if (result === "one-shot" && oneShot) {
 				track.close();
@@ -1644,7 +1651,7 @@ export class Publisher {
 				frameStart: req.startFrame,
 				held: true,
 			};
-			const groupPromise = front.track(msg.track).fetchGroup(req.group, options);
+			const groupPromise = subscribed(front, msg).fetchGroup(req.group, options);
 			// Track the resolved group immediately so a failure, revoke, or abort before
 			// `await groupPromise` still releases it without unhandled rejections.
 			groupPromise.then(
@@ -1931,6 +1938,9 @@ export class Publisher {
 			// Lite-07 single-group Position request eligible for one-shot fetch handoff if
 			// subscriber FIN arrives after SUBSCRIBE (e.g. in a separate QUIC STREAM frame).
 			oneShot?: boolean;
+			// The track's Publisher Max Age in milliseconds, undefined for none: no subscriber
+			// budget reaches past it.
+			maxAge?: number;
 		},
 	): Promise<boolean | "one-shot"> {
 		const { sub, broadcast, stamp, publisher, compress, meta, named, bounds, initial, requested } = serving;
@@ -2279,13 +2289,19 @@ export class Publisher {
 					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
 					// gave up, stay untold: naming them would send every gap in the track's history, as a
 					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
-					// names them then, and a wider budget may still serve a stale one. Mirrors the Rust
-					// `TrackRun::resolve`.
+					// names them then, and a wider budget may still serve a stale one. On lite-07, whose ranges
+					// bound what a stale verdict was judged within, a run stale under the track's own max age is
+					// final all the same, since no budget reaches past it: a relay reading from the oldest group
+					// would otherwise wait on it forever. Earlier drafts name a drop with no range, which a
+					// capped read could still serve, so they stop there. Mirrors the Rust `TrackRun::resolve`, whose
+					// bound also takes in the hop's cache ceiling, which a TypeScript publisher does not have.
+					const bound = hasRanges(this.version) ? serving.maxAge : undefined;
+					const finalStale = (stale: number) => bound !== undefined && stale >= bound;
 					let reach = startKey;
 					for (let i = skipped.size - 1; i >= 0; i--) {
 						const range = skipped.all[i];
 						if (range.start >= reach) continue;
-						if (range.end < reach || range.stale !== undefined) break;
+						if (range.end < reach || (range.stale !== undefined && !finalStale(range.stale))) break;
 						reach = range.start;
 					}
 					// On lite-07, a subscription can also name disjoint history ranges below `reach` whose

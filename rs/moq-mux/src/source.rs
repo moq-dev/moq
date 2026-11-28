@@ -55,13 +55,6 @@ impl Drop for Priority {
 ///
 /// A reader that follows a sibling's announcements instead, restarting on each new identity,
 /// uses [`follow`](Self::follow), which holds nothing.
-///
-/// A reference may name the stream it expects with an identity (the catalog's optional
-/// `identity` beside `broadcast`). A held or resolved broadcast of another identity fails that
-/// reference with [`Error::IdentityMismatch`](crate::Error::IdentityMismatch) rather than
-/// replacing the held one or falling back to it. A route over a wire that carries no identity
-/// has one its session [minted](moq_net::Identity::is_minted), which proves nothing, so there the
-/// reference is best effort: it reads the held broadcast.
 #[derive(Clone)]
 pub struct Source {
 	origin: moq_net::origin::Consumer,
@@ -222,13 +215,11 @@ impl Source {
 	}
 
 	/// The broadcast `path` is pinned to, or a lookup that waits for the path's first
-	/// announcement and pins its answer, either checked against `identity` on every read.
-	pub(crate) fn request_path(&self, path: &moq_net::Path, identity: Option<&moq_net::Identity>) -> Binding {
+	/// announcement and pins its answer.
+	pub(crate) fn request_path(&self, path: &moq_net::Path) -> Binding {
 		let pinned = self.pins.lock().expect("pins poisoned").get(path).cloned();
 		let bound = match pinned {
 			Some(pinned) => Bound::Ready(pinned),
-			// Unpinned even with an identity: the path's first answer is pinned for every
-			// reference, and each read refuses one of another identity.
 			None => {
 				let mut following = self.origin.follow(path, None);
 				// Issue the request now: a handler answers it whether or not anyone reads yet.
@@ -248,7 +239,6 @@ impl Source {
 		};
 		Binding {
 			bound,
-			identity: identity.cloned(),
 			sibling: *path != self.path,
 		}
 	}
@@ -321,20 +311,15 @@ impl Source {
 	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty reference)
 	/// resolves the catalog broadcast itself; anything else fetches the referenced
 	/// broadcast from the origin, waiting for its first announcement if nothing serves it yet.
-	/// `identity` is the rendition's `identity` field, the stream the broadcast must be (see
-	/// [`Source`]). Use it when you need the broadcast handle itself (e.g. to FETCH individual
-	/// groups) rather than a subscription.
+	/// Use it when you need the broadcast handle itself (e.g. to FETCH individual groups) rather
+	/// than a subscription.
 	///
 	/// A reference that escapes above the origin root is
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast): the rendition names
 	/// no broadcast, so there is nothing to resolve.
 	#[cfg(feature = "async")]
-	pub async fn resolve(
-		&self,
-		rel: Option<&moq_net::path::Relative>,
-		identity: Option<&moq_net::Identity>,
-	) -> crate::Result<moq_net::broadcast::Consumer> {
-		let binding = self.bind(rel, identity)?;
+	pub async fn resolve(&self, rel: Option<&moq_net::path::Relative>) -> crate::Result<moq_net::broadcast::Consumer> {
+		let binding = self.bind(rel)?;
 		kio::wait(|waiter| binding.poll_broadcast(waiter)).await
 	}
 
@@ -351,14 +336,9 @@ impl Source {
 	/// one upstream subscription, and its answer is pinned. Use [`Binding::new`] when the
 	/// intended broadcast is already in hand.
 	///
-	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does, and checks
-	/// `identity` on every read.
-	pub fn bind(
-		&self,
-		rel: Option<&moq_net::path::Relative>,
-		identity: Option<&moq_net::Identity>,
-	) -> crate::Result<Binding> {
-		Ok(self.request_path(&self.target(rel)?, identity))
+	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
+	pub fn bind(&self, rel: Option<&moq_net::path::Relative>) -> crate::Result<Binding> {
+		Ok(self.request_path(&self.target(rel)?))
 	}
 
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
@@ -366,10 +346,8 @@ impl Source {
 	///
 	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty reference)
 	/// subscribes on the catalog broadcast; anything else is resolved as in
-	/// [`resolve`](Self::resolve), waiting for its first announcement and checked against
-	/// `identity`. A
-	/// reference that escapes above the origin root is
-	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast).
+	/// [`resolve`](Self::resolve), waiting for its first announcement. A reference that escapes
+	/// above the origin root is [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast).
 	///
 	/// This is the async counterpart to the poll-driven container exporters: consumers
 	/// that wrap a raw [`moq_net::track::Subscriber`] themselves
@@ -378,23 +356,17 @@ impl Source {
 	pub async fn subscribe_track(
 		&self,
 		rel: Option<&moq_net::path::Relative>,
-		identity: Option<&moq_net::Identity>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
-		let mut subscribe = self.subscribe(rel, identity, name)?;
+		let mut subscribe = self.subscribe(rel, name)?;
 		kio::wait(|waiter| subscribe.poll(waiter)).await
 	}
 
 	/// Start [`subscribe_track`](Self::subscribe_track) for a caller that polls.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn subscribe(
-		&self,
-		rel: Option<&moq_net::path::Relative>,
-		identity: Option<&moq_net::Identity>,
-		name: &str,
-	) -> crate::Result<Subscribe> {
+	pub(crate) fn subscribe(&self, rel: Option<&moq_net::path::Relative>, name: &str) -> crate::Result<Subscribe> {
 		Ok(Subscribe::Binding {
-			binding: self.bind(rel, identity)?,
+			binding: self.bind(rel)?,
 			name: name.to_string(),
 		})
 	}
@@ -407,46 +379,13 @@ impl Source {
 	/// built from and never reports its end, since a reader follows its catalog's own end and
 	/// restarts by building a new source.
 	///
-	/// With an `identity`, only that stream is handed out: another taking over ends the
-	/// rendition rather than substituting for it. A self-reference whose identity the catalog
-	/// broadcast contradicts fails with [`Error::IdentityMismatch`](crate::Error::IdentityMismatch),
-	/// since no other can come.
 	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
-	pub fn follow(
-		&self,
-		rel: Option<&moq_net::path::Relative>,
-		identity: Option<&moq_net::Identity>,
-	) -> crate::Result<crate::follow::Identities> {
+	pub fn follow(&self, rel: Option<&moq_net::path::Relative>) -> crate::Result<crate::follow::Identities> {
 		let path = self.target(rel)?;
 		Ok(match path == self.path {
-			true => {
-				let broadcast = self.broadcast();
-				check_identity(identity, &broadcast)?;
-				crate::follow::Identities::fixed(broadcast)
-			}
-			false => crate::follow::Identities::following(self.origin.follow(&path, None)?, identity.cloned()),
+			true => crate::follow::Identities::fixed(self.broadcast()),
+			false => crate::follow::Identities::following(self.origin.follow(&path, None)?),
 		})
-	}
-}
-
-/// Fail with [`Error::IdentityMismatch`](crate::Error::IdentityMismatch) when `broadcast` has
-/// another identity than `identity` names. A broadcast not resolved through an origin has none
-/// to compare, and a [minted](moq_net::Identity::is_minted) one proves nothing, so only a known
-/// mismatch fails.
-pub(crate) fn check_identity(
-	identity: Option<&moq_net::Identity>,
-	broadcast: &moq_net::broadcast::Consumer,
-) -> crate::Result<()> {
-	let info = broadcast.info();
-	match (identity, &info.identity) {
-		(Some(expected), Some(actual)) if expected != actual && !actual.is_minted() => {
-			Err(crate::Error::IdentityMismatch {
-				path: info.path.to_string(),
-				expected: expected.clone(),
-				actual: actual.clone(),
-			})
-		}
-		_ => Ok(()),
 	}
 }
 
@@ -456,14 +395,11 @@ pub(crate) fn check_identity(
 /// resolves (see [`follow`](moq_net::origin::Consumer::follow)). Once the
 /// path is pinned, reading the binding answers that pin and never looks the path up again, even
 /// after its publisher is replaced or goes. Issuing a request does not establish an identity
-/// relationship with a separate catalog broadcast. A binding made with an identity refuses a
-/// broadcast of another one.
+/// relationship with a separate catalog broadcast.
 ///
 /// Build one with [`Source::bind`], or with [`Binding::new`] for a broadcast already in hand.
 pub struct Binding {
 	bound: Bound,
-	/// The identity the reference named, if any.
-	identity: Option<moq_net::Identity>,
 	/// The reference names another broadcast than the catalog's.
 	sibling: bool,
 }
@@ -486,7 +422,6 @@ impl Binding {
 	pub fn new(broadcast: moq_net::broadcast::Consumer) -> Self {
 		Self {
 			bound: Bound::Ready(broadcast),
-			identity: None,
 			sibling: false,
 		}
 	}
@@ -514,14 +449,14 @@ impl Binding {
 					pinned.clone()
 				} else {
 					let broadcast = ready!(poll_first(&mut following, waiter))?;
-					// The path's first answer is pinned even when it fails this binding's identity, so
-					// no later reference resolves the path independently.
+					// The path's first answer is pinned, so no later reference resolves the path
+					// independently.
 					let mut pins = pins.lock().expect("pins poisoned");
 					pins.entry(path.clone()).or_insert(broadcast).clone()
 				}
 			}
 		};
-		Poll::Ready(check_identity(self.identity.as_ref(), &broadcast).map(|()| broadcast))
+		Poll::Ready(Ok(broadcast))
 	}
 }
 
@@ -692,7 +627,7 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "pub").await;
 		let dynamic = origin.claim("media", moq_net::origin::RouteOptions::default()).unwrap();
-		let binding = source.bind(Some(&Relative::new("media").unwrap()), None).unwrap();
+		let binding = source.bind(Some(&Relative::new("media").unwrap())).unwrap();
 		let request = dynamic.requested().await.unwrap();
 
 		assert!(
@@ -728,7 +663,7 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "pub").await;
 		let media = Relative::new("media").unwrap();
-		let binding = source.bind(Some(&media), None).unwrap();
+		let binding = source.bind(Some(&media)).unwrap();
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
 
@@ -739,12 +674,12 @@ mod tests {
 		let _second = origin.route("media", Default::default()).unwrap();
 		settle().await;
 		assert!(binding.broadcast().await.unwrap().is_clone(&first));
-		assert!(source.resolve(Some(&media), None).await.unwrap().is_clone(&first));
+		assert!(source.resolve(Some(&media)).await.unwrap().is_clone(&first));
 
 		drop(first_publisher);
 		first.closed().await;
 		assert!(binding.broadcast().await.unwrap().is_clone(&first));
-		let late = source.bind(Some(&media), None).unwrap();
+		let late = source.bind(Some(&media)).unwrap();
 		assert!(
 			late.broadcast().await.unwrap().is_clone(&first),
 			"a later binding reads the pin"
@@ -752,7 +687,7 @@ mod tests {
 
 		// A new catalog identity starts fresh pins, which resolve the replacement.
 		let fresh = source.switched(&source.broadcast());
-		assert!(!fresh.resolve(Some(&media), None).await.unwrap().is_closed());
+		assert!(!fresh.resolve(Some(&media)).await.unwrap().is_closed());
 	}
 
 	/// A source serves its path from the broadcast it was built from, even when a replacement
@@ -770,9 +705,9 @@ mod tests {
 		settle().await;
 		let source = Source::new(consumer, first.clone());
 		assert!(source.broadcast().is_clone(&first));
-		assert!(source.resolve(None, None).await.unwrap().is_clone(&first));
+		assert!(source.resolve(None).await.unwrap().is_clone(&first));
 		assert!(
-			source.subscribe_track(None, None, "late").await.is_err(),
+			source.subscribe_track(None, "late").await.is_err(),
 			"the replacement's track is never read"
 		);
 	}
@@ -799,7 +734,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let source = Source::new(consumer, catalog);
-		let sibling = kio::clock::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))
+		let sibling = kio::clock::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap())))
 			.await
 			.expect("the sibling resolves without the stalled session")
 			.unwrap();
@@ -807,7 +742,7 @@ mod tests {
 
 		// Nothing serves a later sibling yet and the stalled session never syncs, so its
 		// lookup keeps waiting rather than failing, and resolves once it is published.
-		let binding = source.bind(Some(&Relative::new("./late").unwrap()), None).unwrap();
+		let binding = source.bind(Some(&Relative::new("./late").unwrap())).unwrap();
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
 		let _late = healthy.route("a/late", Default::default()).unwrap();
@@ -827,134 +762,18 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let sibling = Relative::new("./source").unwrap();
-		let first = source
-			.resolve(Some(&sibling), None)
-			.await
-			.expect("the sibling resolves");
+		let first = source.resolve(Some(&sibling)).await.expect("the sibling resolves");
 
 		let new = origin.route("a/source", Default::default()).unwrap();
 		let _late = new.broadcast().create_track("late", None).unwrap();
 		settle().await;
-		assert!(source.resolve(Some(&sibling), None).await.unwrap().is_clone(&first));
+		assert!(source.resolve(Some(&sibling)).await.unwrap().is_clone(&first));
 		assert!(
-			source.subscribe_track(Some(&sibling), None, "late").await.is_err(),
+			source.subscribe_track(Some(&sibling), "late").await.is_err(),
 			"the replacement's track is never read"
 		);
-		let bound = source.bind(Some(&sibling), None).unwrap().broadcast().await.unwrap();
+		let bound = source.bind(Some(&sibling)).unwrap().broadcast().await.unwrap();
 		assert!(bound.is_clone(&first), "a binding honors the pin too");
-	}
-
-	fn route(identity: &moq_net::Identity) -> moq_net::origin::RouteOptions {
-		moq_net::origin::RouteOptions::default().with_identity(identity.clone(), 0)
-	}
-
-	fn is_mismatch(result: crate::Result<moq_net::broadcast::Consumer>, expected: &moq_net::Identity) -> bool {
-		matches!(result, Err(crate::Error::IdentityMismatch { expected: ref named, .. }) if named == expected)
-	}
-
-	/// An omitted or matching identity resolves the sibling; another one fails instead.
-	#[tokio::test(start_paused = true)]
-	async fn a_reference_identity_must_match_the_resolved_sibling() {
-		let origin = produce_origin();
-		let (catalog, sibling, other) = (
-			moq_net::Identity::random(),
-			moq_net::Identity::random(),
-			moq_net::Identity::random(),
-		);
-		let _catalog = origin.route("a/pub", route(&catalog)).unwrap();
-		let _sibling = origin.route("a/source", route(&sibling)).unwrap();
-		settle().await;
-		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source").unwrap();
-
-		let first = source.resolve(Some(&rel), None).await.unwrap();
-		assert_eq!(first.info().identity.as_ref(), Some(&sibling));
-		let matching = source.resolve(Some(&rel), Some(&sibling)).await.unwrap();
-		assert!(matching.is_clone(&first));
-		assert!(is_mismatch(source.resolve(Some(&rel), Some(&other)).await, &other));
-		assert!(
-			source.subscribe_track(Some(&rel), Some(&other), "video").await.is_err(),
-			"a mismatched reference reads nothing"
-		);
-	}
-
-	/// A replacement before the first resolution fails a reference naming the old identity,
-	/// rather than falling back to the current winner.
-	#[tokio::test(start_paused = true)]
-	async fn a_replaced_sibling_fails_a_reference_to_the_old_identity() {
-		let origin = produce_origin();
-		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
-		let _catalog = origin.route("a/pub", Default::default()).unwrap();
-		let _old = origin.route("a/source", route(&old_identity)).unwrap();
-		let _new = origin.route("a/source", route(&new_identity)).unwrap();
-		settle().await;
-		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source").unwrap();
-
-		assert!(is_mismatch(
-			source.resolve(Some(&rel), Some(&old_identity)).await,
-			&old_identity
-		));
-		// The path's first answer is pinned all the same: later references read that identity.
-		let pinned = source.resolve(Some(&rel), None).await.unwrap();
-		assert_eq!(pinned.info().identity.as_ref(), Some(&new_identity));
-	}
-
-	/// A later reference naming the replacement cannot move a pinned sibling, and a new
-	/// catalog identity starts fresh pins that resolve it.
-	#[tokio::test(start_paused = true)]
-	async fn a_conflicting_identity_cannot_replace_a_pin() {
-		let origin = produce_origin();
-		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
-		let _catalog = origin.route("a/pub", Default::default()).unwrap();
-		let _old = origin.route("a/source", route(&old_identity)).unwrap();
-		settle().await;
-		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source").unwrap();
-		let first = source.resolve(Some(&rel), Some(&old_identity)).await.unwrap();
-
-		let _new = origin.route("a/source", route(&new_identity)).unwrap();
-		settle().await;
-		// A rendition added later names the replacement: it fails, and the pin stays.
-		let binding = source.bind(Some(&rel), Some(&new_identity)).unwrap();
-		assert!(is_mismatch(binding.broadcast().await, &new_identity));
-		assert!(source.resolve(Some(&rel), None).await.unwrap().is_clone(&first));
-		assert!(
-			source
-				.resolve(Some(&rel), Some(&old_identity))
-				.await
-				.unwrap()
-				.is_clone(&first)
-		);
-
-		// Concurrent consumers: a new catalog identity resolves the replacement while the old
-		// source keeps reading its pin.
-		let fresh = source.switched(&source.broadcast());
-		let replaced = fresh.resolve(Some(&rel), Some(&new_identity)).await.unwrap();
-		assert_eq!(replaced.info().identity.as_ref(), Some(&new_identity));
-		assert!(source.resolve(Some(&rel), None).await.unwrap().is_clone(&first));
-	}
-
-	/// A self-reference's identity must not contradict the catalog broadcast's own.
-	#[tokio::test(start_paused = true)]
-	async fn a_self_reference_identity_checks_the_catalog_broadcast() {
-		let origin = produce_origin();
-		let (catalog, other) = (moq_net::Identity::random(), moq_net::Identity::random());
-		let _catalog = origin.route("a/pub", route(&catalog)).unwrap();
-		settle().await;
-		let source = resolved(&origin, "a/pub").await;
-
-		for reference in [None, Some("./pub")] {
-			let rel = reference.map(|rel| Relative::new(rel).unwrap());
-			let own = source.resolve(rel.as_ref(), Some(&catalog)).await.unwrap();
-			assert!(own.is_clone(&source.broadcast()), "{reference:?}");
-			assert!(is_mismatch(source.resolve(rel.as_ref(), Some(&other)).await, &other));
-			assert!(source.follow(rel.as_ref(), Some(&catalog)).is_ok());
-			assert!(matches!(
-				source.follow(rel.as_ref(), Some(&other)),
-				Err(crate::Error::IdentityMismatch { .. })
-			));
-		}
 	}
 
 	/// Every self-reference serves the broadcast the source was built from, even once it
@@ -971,7 +790,7 @@ mod tests {
 
 		for reference in [None, Some(""), Some("live"), Some("./live"), Some("../a/live")] {
 			let rel = reference.map(|rel| Relative::new(rel).unwrap());
-			let bound = source.bind(rel.as_ref(), None).unwrap().broadcast().await.unwrap();
+			let bound = source.bind(rel.as_ref()).unwrap().broadcast().await.unwrap();
 			assert!(
 				bound.is_closed(),
 				"{reference:?} must keep the original catalog broadcast"
@@ -989,14 +808,14 @@ mod tests {
 
 		// No reference and an empty reference both resolve to the catalog broadcast.
 		source
-			.bind(None, None)
+			.bind(None)
 			.expect("no reference is always resolvable")
 			.broadcast()
 			.await
 			.expect("catalog broadcast should resolve");
 		let empty = Relative::empty();
 		source
-			.bind(Some(&empty), None)
+			.bind(Some(&empty))
 			.expect("empty reference is always resolvable")
 			.broadcast()
 			.await
@@ -1013,7 +832,7 @@ mod tests {
 
 		let source = resolved(&origin, "a/pub").await;
 		source
-			.subscribe_track(None, None, "video")
+			.subscribe_track(None, "video")
 			.await
 			.expect("catalog track should resolve");
 	}
@@ -1030,7 +849,7 @@ mod tests {
 		// Names the catalog within its own parent.
 		let rel = Relative::new("./pub").unwrap();
 		source
-			.subscribe_track(Some(&rel), None, "video")
+			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("self-reference should resolve to the catalog broadcast");
 	}
@@ -1060,16 +879,16 @@ mod tests {
 				source.resolve_reference(Some(&rel)).is_none(),
 				"{reference} should escape"
 			);
-			assert!(source.bind(Some(&rel), None).is_err(), "{reference} should be rejected");
+			assert!(source.bind(Some(&rel)).is_err(), "{reference} should be rejected");
 
 			// Neither `elsewhere` nor the catalog broadcast answers it: the rendition names
 			// no broadcast at all.
-			match source.resolve(Some(&rel), None).await {
+			match source.resolve(Some(&rel)).await {
 				Err(crate::Error::EscapingBroadcast(_)) => {}
 				Err(err) => panic!("{reference} failed with the wrong error: {err:?}"),
 				Ok(_) => panic!("{reference} should not resolve to any broadcast"),
 			}
-			match source.subscribe_track(Some(&rel), None, "video").await {
+			match source.subscribe_track(Some(&rel), "video").await {
 				Err(crate::Error::EscapingBroadcast(_)) => {}
 				Err(err) => panic!("{reference} failed with the wrong error: {err:?}"),
 				Ok(_) => panic!("{reference} should not resolve to any broadcast"),
@@ -1175,7 +994,7 @@ mod tests {
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
 		let rel = Relative::new("./source").unwrap();
 		source
-			.subscribe_track(Some(&rel), None, "video")
+			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("referenced track should resolve");
 	}
@@ -1197,7 +1016,7 @@ mod tests {
 		let source = resolved(&origin, "a/source/transcode").await;
 		let rel = Relative::new(".").unwrap();
 		source
-			.subscribe_track(Some(&rel), None, "video")
+			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("dot should resolve to the catalog broadcast's parent");
 	}
@@ -1215,7 +1034,7 @@ mod tests {
 		let source = resolved(&origin, "top").await;
 		let rel = Relative::new(".").unwrap();
 		source
-			.subscribe_track(Some(&rel), None, "video")
+			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("dot should resolve to the empty root broadcast");
 	}

@@ -41,6 +41,10 @@ name: Nightly
 # `ClaimVectors.agda`, is checked current by every PR's tests; the proof itself only changes when the
 # rule does, which review checks.
 #
+# `kio-verify` proves kio's log (rs/kio/src/log.rs) with Verus, about half a
+# minute. The proof only fails on a change to the log's ordering, which review
+# checks (see rs/kio/AGENTS.md).
+#
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
 # Interop Runner, an hour of simulated links per peer, which only a moq-quic
 # change or a bumped pin moves.
@@ -459,15 +463,25 @@ jobs:
         # `rs v4l2` streams moq-v4l and moq-video V4L2 capture and output from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
+        # `rs sweep` runs kio's suite under its adversarial sim schedules with the lost-wakeup probe.
         # `test steady` runs one passthrough broadcast at 60 groups/s for 15 minutes and fails on
         # a heap slope after warm-up, too long for a pull request (see test/steady).
-        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
+        recipe: ["gh test-integration", "rs sweep", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
         include:
-          # Miri interprets moq-net's in-memory unsafe and moq-sock's and moq-uring's
+          # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
           - recipe: rs miri
             nightly: true
             components: miri, rust-src
+          # kio's thread-spawning tests across many random Miri schedules, beside the
+          # single-schedule lane above. Random, not exhaustive.
+          - recipe: rs miri-seeds
+            nightly: true
+            components: miri, rust-src
+          # kio's library suite under ThreadSanitizer, at near-native speed.
+          - recipe: rs tsan
+            nightly: true
+            components: rust-src
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -504,7 +518,7 @@ jobs:
           sudo udevadm settle
           # The runner user is not in the video group.
           sudo chmod a+rw /dev/video*
-      # Inside the job's hour, so a recipe that overruns fails the job, where the
+      # Inside the job's timeout, so a recipe that overruns fails the job, where the
       # failure-based triage sees it, instead of cancelling it.
       - name: Test
         id: test
@@ -579,6 +593,20 @@ jobs:
       # No dev shell: the proof brings its own Agda pin (nix/route-proof.nix).
       - name: Type-check
         run: nix shell --inputs-from . nixpkgs#just --command just test route-proof
+
+  kio-verify:
+    name: kio log proof (Verus)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # Not the dev shell: Verus brings its own toolchain pin (nix/verus.nix).
+      - name: Prove
+        run: nix develop .#verus --command just rs verify
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has

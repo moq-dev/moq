@@ -45,6 +45,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -344,6 +345,39 @@ class SmokeTest {
             assertEquals(0uL, fetched.start())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    @Test
+    fun `a metadata subscription reads frame headers`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track =
+                broadcast.publishTrack(
+                    "video",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
+            val meta = broadcast.consume().subscribeMeta("video", null)
+            assertEquals(1_000_000uL, meta.info().timescale)
+
+            val group = track.appendGroup(Timestamp(0uL, 1_000_000uL))
+            group.writeFrame(
+                Frame(payload = "key".encodeToByteArray(), timestamp = Timestamp(0uL, 1_000_000uL))
+            )
+            group.writeFrame(Frame(payload = ByteArray(0), timestamp = Timestamp(1uL, 1_000_000uL)))
+            group.finish()
+            track.finish()
+
+            val groups = meta.groupsAsArrived().map { it.start() to it.headers().toList() }.toList()
+            assertEquals(
+                listOf(
+                    0uL to
+                        listOf(
+                            FrameHeader(size = 3uL, timestamp = Timestamp(0uL, 1_000_000uL)),
+                            FrameHeader(size = 0uL, timestamp = Timestamp(1uL, 1_000_000uL)),
+                        )
+                ),
+                groups,
+            )
         }
     }
 

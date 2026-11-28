@@ -1,4 +1,5 @@
 import { TransportCode, TransportError } from "./error.ts";
+import { MAX_STREAMS } from "./frame.ts";
 import { VarInt } from "./varint.ts";
 
 /** Decide the new receive-window limit to advertise (MAX_DATA / MAX_STREAM_DATA).
@@ -256,7 +257,10 @@ export class StreamLimit {
 	/** Advertise the returned slots once they would let the peer open past the limit. */
 	#raise(): void {
 		if (this.#closed === 0n || this.#opened + 2n * this.#closed <= this.#max) return;
-		this.#max += this.#closed;
+		// MAX_STREAMS cannot carry more than 2^60, so the slots past it are never returned.
+		const max = this.#max + this.#closed;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
+		this.#max = max > MAX_STREAMS ? MAX_STREAMS : max;
 		this.#closed = 0n;
 		if (this.#pending) return;
 		this.#pending = true;

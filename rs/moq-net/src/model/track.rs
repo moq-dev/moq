@@ -106,6 +106,46 @@ pub(super) struct ExpiryScan {
 /// viewer.
 pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 
+/// What a broadcast holds a track under: its name, and whether the entry is the metadata
+/// copy, each frame's header alone, kept apart from the payload copy so no payload reader
+/// is ever handed it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Key {
+	pub name: Arc<str>,
+	pub meta: bool,
+}
+
+impl Key {
+	/// The payload copy of `name`.
+	pub fn payload(name: impl Into<Arc<str>>) -> Self {
+		Self {
+			name: name.into(),
+			meta: false,
+		}
+	}
+}
+
+impl From<&str> for Key {
+	fn from(name: &str) -> Self {
+		Self::payload(name)
+	}
+}
+
+impl From<Arc<str>> for Key {
+	fn from(name: Arc<str>) -> Self {
+		Self::payload(name)
+	}
+}
+
+impl std::fmt::Display for Key {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.meta {
+			true => write!(f, "{} (metadata)", self.name),
+			false => self.name.fmt(f),
+		}
+	}
+}
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -712,6 +752,9 @@ impl TimeStart {
 
 #[derive(Default)]
 pub(crate) struct TrackState {
+	// Whether this is a metadata copy, holding each frame's header alone: a broadcast entry
+	// apart from the payload copy, which no payload reader is ever handed.
+	meta: bool,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`] or [`Request`].
 	// Every group written into the track meters against it, whether the publisher wrote
 	// it live or it answers a fill. Empty (no-op) for an untagged broadcast.
@@ -742,6 +785,10 @@ pub(crate) struct TrackState {
 	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
 	// track's largest position once it was reported: anything received past that outdates it.
 	object_edge: Option<((u64, u64), Position)>,
+	// The narrowest budget any upstream subscription feeding this copy asked, `None` while none
+	// asked a live join: a group whose stream that upstream reset as too old may have been
+	// judged under it, so the verdict stands only for a reader no wider.
+	judging: Option<Duration>,
 
 	// Cached groups by key: the single source of truth for what is cached. The
 	// two orderings below hold bare keys and validate against this map, so a
@@ -3678,9 +3725,10 @@ impl TrackState {
 	/// The account holds a [`kio::Weak`] back to this state: a group must be able to
 	/// settle the track's eviction debt as it writes, but the track owns its cached
 	/// groups, so anything stronger would make the pair immortal.
-	fn spawn(broadcast: Arc<broadcast::Info>) -> kio::Producer<Self> {
+	fn spawn(broadcast: Arc<broadcast::Info>, meta: bool) -> kio::Producer<Self> {
 		let state = kio::Producer::new(Self {
 			broadcast: broadcast.clone(),
+			meta,
 			..Default::default()
 		});
 		let cache = cache::Track::new(
@@ -3697,6 +3745,16 @@ impl TrackState {
 		new.cache = cache;
 		drop(new);
 		state
+	}
+
+	/// A new group of this track, charged to its cache and metered as ingress: a metadata
+	/// copy's holds each frame's header alone.
+	fn new_group(&self, info: group::Info, track: Info) -> group::Producer {
+		let group = match self.meta {
+			true => group::Producer::new_meta(info, track, self.cache.clone()),
+			false => group::Producer::new(info, track, self.cache.clone()),
+		};
+		group.with_meter(self.ingress.meter())
 	}
 
 	/// Record a written key. It raises the largest too, so a later group below it never
@@ -4962,8 +5020,7 @@ impl TrackState {
 			self.displace(key);
 		}
 
-		let mut group =
-			group::Producer::new(group::Info { start: key }, info, self.cache.clone()).with_meter(self.ingress.meter());
+		let mut group = self.new_group(group::Info { start: key }, info);
 		if let Some(content) = content {
 			group.handle().share_content(content);
 		}
@@ -5039,8 +5096,7 @@ impl TrackState {
 			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
-		let mut group = group::Producer::new(group::Info { start: key }, info.clone(), self.cache.clone())
-			.with_meter(self.ingress.meter());
+		let mut group = self.new_group(group::Info { start: key }, info.clone());
 		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
 		// its own content rather than the cached copy's, whose inflated copy is further on.
 		if !info.compressed() {
@@ -5580,9 +5636,17 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
-		let name = name.into();
-		let info = info.into().unwrap_or_default();
-		let state = TrackState::spawn(broadcast.clone());
+		Self::create(broadcast, name.into(), info.into().unwrap_or_default(), false)
+	}
+
+	/// [`Self::new`] for a metadata copy, which a test reads a metadata Group Stream into.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn new_meta(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>, info: Info) -> Self {
+		Self::create(broadcast, name.into(), info, true)
+	}
+
+	fn create(broadcast: Arc<broadcast::Info>, name: Arc<str>, info: Info, meta: bool) -> Self {
+		let state = TrackState::spawn(broadcast.clone(), meta);
 		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
@@ -5759,7 +5823,7 @@ impl Producer {
 		let track = state.info.clone().unwrap();
 		// Whatever holds the key lets it go; readers draining it keep their own handle.
 		state.displace(info.start);
-		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(state.ingress.meter());
+		let mut group = state.new_group(info, track);
 		if start != 0 {
 			group.bound(group::Bounds { start, end: None })?;
 		}
@@ -5831,8 +5895,7 @@ impl Producer {
 
 		let track = state.info.clone().unwrap();
 
-		let group =
-			group::Producer::new(group::Info { start }, track, state.cache.clone()).with_meter(state.ingress.meter());
+		let group = state.new_group(group::Info { start }, track);
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
 		state.appended(start);
@@ -6461,6 +6524,18 @@ impl Producer {
 		}
 	}
 
+	/// An upstream subscription feeding this copy asks a live join under `budget`, before it
+	/// reaches the wire: that upstream may judge a group too old under it from then on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn judge_under(&self, budget: Duration) {
+		if self.state.read().judging.is_some_and(|judging| judging <= budget) {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.judging = Some(state.judging.map_or(budget, |judging| judging.min(budget)));
+		}
+	}
+
 	/// Record the upstream Object ID separately from the frame ordinal readers count.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
@@ -6690,10 +6765,7 @@ impl Producer {
 
 	/// Create a weak reference that doesn't prevent auto-close.
 	pub(super) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		TrackWeak::new(self.name.clone(), &self.state)
 	}
 
 	/// A handle that aborts the track without keeping it open, for an owner that hands this
@@ -7432,11 +7504,19 @@ impl AbortHandle {
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(super) struct TrackWeak {
-	name: Arc<str>,
+	key: Key,
 	state: kio::ProducerWeak<TrackState>,
 }
 
 impl TrackWeak {
+	fn new(name: Arc<str>, state: &kio::Producer<TrackState>) -> Self {
+		let meta = state.read().meta;
+		Self {
+			key: Key { name, meta },
+			state: state.weak(),
+		}
+	}
+
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
 	/// The count moves under the same lock an idle teardown closes the track under: a
@@ -7467,10 +7547,15 @@ impl TrackWeak {
 		self.state.consume_weak()
 	}
 
-	/// The shared name handle, for use as a broadcast lookup key (clone is a
-	/// refcount bump, and the same `Arc` is shared with the track's handles).
+	/// The broadcast lookup key (clone is a refcount bump, and the same name `Arc` is shared
+	/// with the track's handles).
+	pub(super) fn key(&self) -> &Key {
+		&self.key
+	}
+
+	/// The shared name handle.
 	pub(super) fn name(&self) -> &Arc<str> {
-		&self.name
+		&self.key.name
 	}
 
 	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
@@ -7515,7 +7600,7 @@ impl TrackWeak {
 
 	/// A [`Demand`] on the cached track, for a broadcast to watch.
 	pub(super) fn demand(&self) -> Demand {
-		Demand::new(self.name.clone(), self.state.clone())
+		Demand::new(self.key.name.clone(), self.state.clone())
 	}
 
 	/// [`Self::subscription`] without its ranges, costing none of them.
@@ -7916,6 +8001,8 @@ impl ArrivalRead<'_> {
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
+	// Whether a broadcast lookup resolves the metadata copy rather than the payload one.
+	meta: bool,
 	// The broadcast this track belongs to, so a catalog track can name the path its
 	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
 	// that handle's view, which may name the broadcast differently than its producer did.
@@ -7983,9 +8070,13 @@ impl Consumer {
 	}
 
 	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
-		let broadcast = state.read().broadcast.clone();
+		let (broadcast, meta) = {
+			let state = state.read();
+			(state.broadcast.clone(), state.meta)
+		};
 		Self {
 			name,
+			meta,
 			broadcast,
 			source: Source::Track(state),
 			stats: stats::Scope::default(),
@@ -7993,17 +8084,18 @@ impl Consumer {
 		}
 	}
 
-	/// A handle resolving `name` through `broadcast` on each request. Called by
+	/// A handle resolving `key` through `broadcast` on each request. Called by
 	/// [`broadcast::Consumer::track`] with that handle's view of the broadcast, and the
-	/// track it serves under the name now, if any.
+	/// track it serves under the key now, if any.
 	pub(super) fn lookup(
-		name: Arc<str>,
+		key: Key,
 		info: Arc<broadcast::Info>,
 		broadcast: broadcast::Consumer,
 		current: Option<kio::ConsumerWeak<TrackState>>,
 	) -> Self {
 		Self {
-			name,
+			name: key.name,
+			meta: key.meta,
 			broadcast: info,
 			source: Source::Broadcast(Box::new(broadcast), current),
 			stats: stats::Scope::default(),
@@ -8016,11 +8108,11 @@ impl Consumer {
 	fn resolve(&self, subscription: Option<&Subscription>) -> (kio::Consumer<TrackState>, Option<Preferences>) {
 		let state = match &self.source {
 			Source::Track(state) => state.clone(),
-			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.name, subscription) {
+			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.key(), subscription) {
 				Ok(resolved) => return resolved,
 				Err(Error::Unroutable) if let Some(current) = current => current.clone(),
 				Err(err) => {
-					let request = Request::new(self.broadcast.clone(), self.name.clone());
+					let request = Request::new(self.broadcast.clone(), self.key());
 					let state = request.peek();
 					request.reject(err);
 					state
@@ -8036,7 +8128,15 @@ impl Consumer {
 	fn with_state<R>(&self, f: impl FnOnce(Option<&kio::ConsumerWeak<TrackState>>) -> R) -> R {
 		match &self.source {
 			Source::Track(state) => f(Some(state)),
-			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.name, current.as_ref()).as_ref()),
+			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.key(), current.as_ref()).as_ref()),
+		}
+	}
+
+	/// What a broadcast holds this track under.
+	fn key(&self) -> Key {
+		Key {
+			name: self.name.clone(),
+			meta: self.meta,
 		}
 	}
 
@@ -8105,6 +8205,12 @@ impl Consumer {
 			Ok(start) => Poll::Ready(start),
 			Err(state) => Poll::Ready(state.start.key()),
 		}
+	}
+
+	/// The narrowest budget an upstream subscription feeding this copy asked (see
+	/// [`Producer::judge_under`]), `None` while none asked one.
+	pub(crate) fn judged_under(&self) -> Option<Duration> {
+		self.with_state(|state| state?.read().judging)
 	}
 
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
@@ -8740,6 +8846,15 @@ impl Consumer {
 		self.with_state(|state| state.map_or(0, |state| state.read().skipped_below(key)))
 	}
 
+	/// The freshness bound this track holds every reader to, `None` when unlimited.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		if let Some(serving) = self.serving() {
+			return serving.max_age_bound();
+		}
+		self.with_state(|state| state.and_then(|state| state.read().max_age_bound()))
+	}
+
 	/// Ready once [`Self::latest_key`] is `Some`: the track holds a group. Stays pending
 	/// on a track that closed without one.
 	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -8941,6 +9056,7 @@ impl Resolving {
 	pub fn track(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
+			meta: self.state.read().meta,
 			broadcast: self.broadcast.clone(),
 			source: Source::Track(self.state.weak()),
 			stats: self.stats.clone(),
@@ -9391,7 +9507,7 @@ struct Drift {
 
 /// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
 /// resolve.
-type Coverage = Option<(Cover, Option<u64>)>;
+pub(super) type Coverage = Option<(Cover, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
@@ -9402,7 +9518,7 @@ type Coverage = Option<(Cover, Option<u64>)>;
 /// that very cap, else the verdict may rest on groups above the cap it never sees. Any other
 /// reader treats the run as unknown, and fills it on a request of its own: the upstream
 /// subscription never delivers a group it dropped.
-fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
+pub(super) fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
 	let Some(stale) = hole.stale_budget() else {
 		return true;
 	};
@@ -14003,6 +14119,16 @@ impl Subscriber {
 		}
 	}
 
+	/// The freshness bound the track holds this reader to, whatever budget it asks: `None`
+	/// when unlimited. A run stale under it stays stale under any wider budget.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().max_age_bound(),
+			Inner::Resume(resume, _) => resume.max_age_bound(),
+		}
+	}
+
 	/// When the latest group the track's cache holds at `keys` landed here, `None` when it
 	/// holds none: a group evicted since leaves no trace.
 	fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
@@ -14264,9 +14390,11 @@ impl Subscriber {
 	/// empty range. Both bounds are assigned, in either direction: an omitted start is
 	/// group 0 and an omitted end removes the cap. Lowering the floor or raising the cap
 	/// offers the groups it newly covers that the cache still holds and this reader never
-	/// handed out, in its [`Order`]; a group is never handed out twice. Groups past the cap
-	/// stay cached, and lowering the cap below the cursor waits until it rises again or
-	/// the track finishes. [`Self::poll_largest`] reports within these bounds.
+	/// handed out, in its [`Order`]; a group is never handed out twice while the
+	/// subscription's ranges hold it (see [`Self::update`]). Groups past the cap stay cached,
+	/// and lowering the cap below the cursor waits until it rises again or the track
+	/// finishes, unless bounded subscription ranges have nothing left to deliver, which
+	/// ends the read. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
@@ -14332,9 +14460,10 @@ impl Subscriber {
 	/// here (see [`Producer::subscription`]). Replaced ranges resolve again here, a live
 	/// join placed behind the latest group now, and widening them offers
 	/// the cached groups they newly cover, even ones that arrived before the groups
-	/// already read. Returns [`Error::Closed`]
-	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored.
+	/// already read. A group read stays read while the ranges hold it; ranges replaced off it
+	/// may forget it, so ranges holding it again may hand it out again, as a new subscription
+	/// would. Returns [`Error::Closed`] if the track already ended; the update is meaningless
+	/// at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.update_stamped(subscription, [])
 	}
@@ -15335,8 +15464,9 @@ enum RequestedStart {
 }
 
 impl Request {
-	pub(super) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
-		Self::with_state(name.into(), TrackState::spawn(broadcast))
+	pub(super) fn new(broadcast: Arc<broadcast::Info>, key: impl Into<Key>) -> Self {
+		let key = key.into();
+		Self::with_state(key.name, TrackState::spawn(broadcast, key.meta))
 	}
 
 	/// Ask for a track again on the state its last producer left, so the readers still
@@ -15601,10 +15731,14 @@ impl Request {
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		TrackWeak::new(self.name.clone(), &self.state)
+	}
+
+	/// Whether the request is for the metadata copy, which its handler fills with each
+	/// frame's header alone: a metadata subscription where its session carries one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn meta(&self) -> bool {
+		self.state.read().meta
 	}
 }
 
@@ -18814,7 +18948,7 @@ mod test {
 	/// refuse history an unlimited publisher still serves.
 	#[test]
 	fn a_fill_before_metadata_claims_no_max_age() {
-		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()), false);
 		let _group = state
 			.write()
 			.ok()
@@ -18831,7 +18965,7 @@ mod test {
 	/// joins the eviction order, so pool pressure and idle expiry can still reclaim it.
 	#[test]
 	fn a_refusal_releases_the_live_edge_a_fill_cached() {
-		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()), false);
 		let mut guard = state.write().ok().unwrap();
 		let _group = guard
 			.insert_group_request(0, group::Bounds::default(), None)

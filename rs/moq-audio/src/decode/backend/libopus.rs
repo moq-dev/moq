@@ -3,11 +3,6 @@
 //! Every stream goes through the multistream decoder, which is also how a
 //! family 0 (mono/stereo) stream decodes: one stream, coupled when stereo.
 
-use moq_opus::{
-	OPUS_OK, OPUS_RESET_STATE, OPUS_SET_GAIN_REQUEST, OpusMSDecoder, opus_multistream_decode_float,
-	opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
-};
-
 use std::collections::VecDeque;
 
 use super::Backend;
@@ -19,12 +14,8 @@ pub(super) const NAME: &str = "libopus";
 /// Opus packets cap at 120 ms (RFC 6716 §2.1.4).
 const MAX_FRAME_MS: usize = 120;
 
-/// The family 0 streams: one stream, coupled when stereo, decoded in order.
-const MONO: &[u8] = &[0];
-const STEREO: &[u8] = &[0, 1];
-
 pub(super) struct Libopus {
-	inner: *mut OpusMSDecoder,
+	inner: moq_opus::Decoder,
 	layout: Layout,
 	/// For each canonical channel, the Vorbis-order channel it comes from, when they differ.
 	reorder: Option<&'static [usize]>,
@@ -40,9 +31,6 @@ pub(super) struct Libopus {
 	ready: VecDeque<Decoded>,
 }
 
-// SAFETY: the decoder is owned exclusively and libopus keeps no thread-local state.
-unsafe impl Send for Libopus {}
-
 impl Libopus {
 	/// Decodes at 48 kHz with the pre-skip and output gain the OpusHead
 	/// `description` declares; its input rate is metadata. A missing description
@@ -56,19 +44,20 @@ impl Libopus {
 		let head = opus::head(catalog)?;
 		let channel_count = head.channel_count;
 
-		let (streams, coupled, table, layout, reorder) = match &head.mapping {
+		let (mapping, layout, reorder) = match &head.mapping {
 			None => {
-				let table = match opus::validate_channels(channel_count)? {
-					1 => MONO,
-					_ => STEREO,
-				};
-				let layout = Layout::from_channels(channel_count)?;
-				(1, table.len() as i32 - 1, table, layout, None)
+				let mapping = moq_opus::Mapping::family0(opus::validate_channels(channel_count)?)
+					.map_err(|err| opus::error(err, "create"))?;
+				(mapping, Layout::from_channels(channel_count)?, None)
 			}
 			Some(mapping) if mapping.family() == 1 => {
 				let (layout, reorder) = vorbis(channel_count)?;
-				let (streams, coupled) = (mapping.streams() as i32, mapping.coupled() as i32);
-				(streams, coupled, mapping.table(), layout, reorder)
+				let mapping = moq_opus::Mapping {
+					streams: mapping.streams(),
+					coupled: mapping.coupled(),
+					table: mapping.table().to_vec(),
+				};
+				(mapping, layout, reorder)
 			}
 			Some(mapping) => {
 				return Err(Error::Unsupported(format!(
@@ -78,46 +67,24 @@ impl Libopus {
 			}
 		};
 
-		let mut err = 0i32;
-		// SAFETY: `table` holds one entry per output channel, the count we pass,
-		// and the out-pointer is valid; inner is checked for null below.
-		let inner = unsafe {
-			opus_multistream_decoder_create(
-				opus::DECODE_RATE as i32,
-				table.len() as i32,
-				streams,
-				coupled,
-				table.as_ptr(),
-				&mut err,
-			)
-		};
-		if err != OPUS_OK || inner.is_null() {
-			return Err(opus::error(err, "opus_multistream_decoder_create"));
-		}
+		let mut inner =
+			moq_opus::Decoder::new(opus::DECODE_RATE, &mapping).map_err(|err| opus::error(err, "create"))?;
+		// Same Q7.8 dB units as OpusHead, and it survives a reset.
+		inner
+			.set_gain(head.output_gain)
+			.map_err(|err| opus::error(err, "set gain"))?;
 
-		// Owned before the gain ctl so a failure there still destroys the decoder.
-		let decoder = Self {
+		Ok(Box::new(Self {
 			inner,
 			layout,
 			reorder,
-			streams: streams as u8,
+			streams: mapping.streams,
 			pre_skip: head.pre_skip as usize,
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
 			last_frame_size: None,
 			in_dtx: false,
 			ready: VecDeque::new(),
-		};
-
-		// Same Q7.8 dB units as OpusHead, and it survives OPUS_RESET_STATE.
-		// SAFETY: `inner` owns a live decoder and OPUS_SET_GAIN takes one i32.
-		let rc = unsafe {
-			opus_multistream_decoder_ctl_impl(decoder.inner, OPUS_SET_GAIN_REQUEST, varargs![head.output_gain as i32])
-		};
-		if rc != OPUS_OK {
-			return Err(opus::error(rc, "OPUS_SET_GAIN"));
-		}
-
-		Ok(Box::new(decoder))
+		}))
 	}
 }
 
@@ -169,25 +136,11 @@ impl Backend for Libopus {
 			self.max_frame_size
 		};
 		let mut out = vec![0.0f32; frame_size * channels];
-		// SAFETY: `inner` owns a live OpusMSDecoder; packet/out slices are bounded by
-		// the lengths we pass.
-		let samples = unsafe {
-			opus_multistream_decode_float(
-				self.inner,
-				packet.as_ptr(),
-				packet.len() as i32,
-				out.as_mut_ptr(),
-				frame_size as i32,
-				0,
-			)
-		};
-		if samples < 0 {
-			return Err(opus::decode_error(samples));
-		}
+		let samples = self.inner.decode_float(packet, &mut out).map_err(opus::decode_error)?;
 		if !packet.is_empty() {
-			self.last_frame_size = Some(samples as usize);
+			self.last_frame_size = Some(samples);
 		}
-		out.truncate(samples as usize * channels);
+		out.truncate(samples * channels);
 
 		if let Some(order) = self.reorder {
 			let mut vorbis = [0.0f32; 8];
@@ -215,11 +168,7 @@ impl Backend for Libopus {
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {
-		// SAFETY: `inner` owns a live decoder and OPUS_RESET_STATE takes no arguments.
-		let rc = unsafe { opus_multistream_decoder_ctl_impl(self.inner, OPUS_RESET_STATE, varargs![]) };
-		if rc != OPUS_OK {
-			return Err(opus::error(rc, "OPUS_RESET_STATE"));
-		}
+		self.inner.reset().map_err(|err| opus::error(err, "reset"))?;
 		self.in_dtx = false;
 		// A reset decoder has no history to conceal from.
 		self.last_frame_size = None;
@@ -248,20 +197,8 @@ impl Backend for Libopus {
 	}
 }
 
-impl Drop for Libopus {
-	fn drop(&mut self) {
-		// SAFETY: `inner` is a live OpusMSDecoder that nothing else aliases.
-		unsafe { opus_multistream_decoder_destroy(self.inner) };
-	}
-}
-
 #[cfg(test)]
 mod tests {
-	use moq_opus::{
-		OPUS_APPLICATION_AUDIO, opus_multistream_encode_float, opus_multistream_encoder_destroy,
-		opus_multistream_surround_encoder_create,
-	};
-
 	use crate::Error;
 	use crate::decode::{Config, Decoder};
 	use crate::layout::Speaker::{self, *};
@@ -299,48 +236,75 @@ mod tests {
 		}
 	}
 
+	/// The family 1 streams, coupled streams, and mapping table for each channel
+	/// count (RFC 7845 §5.1.1.2), as libopus's surround encoder lays them out.
+	const MAPPINGS: [(u8, u8, &[u8]); 8] = [
+		(1, 0, &[0]),
+		(1, 1, &[0, 1]),
+		(2, 1, &[0, 2, 1]),
+		(2, 2, &[0, 1, 2, 3]),
+		(3, 2, &[0, 4, 1, 2, 3]),
+		(4, 2, &[0, 4, 1, 2, 3, 5]),
+		(4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+		(5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+	];
+
 	/// Encode `channels` of Vorbis-ordered tones as a family 1 stream, returning
 	/// its OpusHead and packets.
+	///
+	/// Each stream is its own mono or stereo encoder, and each packet joins their
+	/// packets, every one but the last self-delimited (RFC 6716 Appendix B).
 	fn surround(channels: usize) -> (bytes::Bytes, Vec<Vec<u8>>) {
 		let speakers = VORBIS[channels - 1];
-		let (mut streams, mut coupled, mut mapping) = (0i32, 0i32, [0u8; 8]);
-		let mut err = 0i32;
-		// SAFETY: every out-pointer is valid and `mapping` holds `channels` entries.
-		let encoder = unsafe {
-			opus_multistream_surround_encoder_create(
-				RATE as i32,
-				channels as i32,
-				1,
-				&mut streams,
-				&mut coupled,
-				mapping.as_mut_ptr(),
-				OPUS_APPLICATION_AUDIO,
-				&mut err,
-			)
-		};
-		assert!(err == 0 && !encoder.is_null(), "encoder create failed: {err}");
+		let (streams, coupled, table) = MAPPINGS[channels - 1];
+		// The input channels each stream codes: the left and right of a coupled
+		// stream, or the one channel of a mono stream.
+		let inputs: Vec<Vec<usize>> = (0..streams)
+			.map(|stream| {
+				let decoded: Vec<u8> = match stream < coupled {
+					true => vec![2 * stream, 2 * stream + 1],
+					false => vec![coupled + stream],
+				};
+				let channel = |index| table.iter().position(|&entry| entry == index).unwrap();
+				decoded.into_iter().map(channel).collect()
+			})
+			.collect();
+		let mut encoders: Vec<_> = inputs
+			.iter()
+			.map(|input| moq_opus::Encoder::new(RATE as u32, input.len() as u8, moq_opus::Application::Audio).unwrap())
+			.collect();
 
 		let packets = (0..PACKETS)
 			.map(|packet| {
-				let mut pcm = Vec::with_capacity(FRAME * channels);
-				for i in packet * FRAME..(packet + 1) * FRAME {
-					for &speaker in speakers {
-						let phase = std::f32::consts::TAU * tone(speaker) * i as f32 / RATE as f32;
-						pcm.push(phase.sin() * 0.5);
+				let mut joined = Vec::new();
+				for (index, (encoder, input)) in encoders.iter_mut().zip(&inputs).enumerate() {
+					let mut pcm = Vec::with_capacity(FRAME * input.len());
+					for i in packet * FRAME..(packet + 1) * FRAME {
+						for &channel in input {
+							let phase = std::f32::consts::TAU * tone(speakers[channel]) * i as f32 / RATE as f32;
+							pcm.push(phase.sin() * 0.5);
+						}
 					}
+					let mut out = [0u8; 1500];
+					let len = encoder.encode_float(&pcm, &mut out).unwrap();
+					let (toc, frame) = (out[0], &out[1..len]);
+					joined.push(toc);
+					if index + 1 < inputs.len() {
+						// Self-delimiting a one-frame packet puts the frame's length after the TOC.
+						assert_eq!(toc & 0x3, 0, "a 20 ms packet holds one frame");
+						match frame.len() {
+							len @ 0..252 => joined.push(len as u8),
+							len => {
+								let first = 252 + (len & 0x3);
+								joined.extend_from_slice(&[first as u8, ((len - first) >> 2) as u8]);
+							}
+						}
+					}
+					joined.extend_from_slice(frame);
 				}
-				let mut out = vec![0u8; 4000];
-				// SAFETY: `encoder` is live, `pcm` holds FRAME frames, and `out` is as long as we say.
-				let len = unsafe {
-					opus_multistream_encode_float(encoder, pcm.as_ptr(), FRAME as i32, out.as_mut_ptr(), 4000)
-				};
-				assert!(len > 0, "encode failed: {len}");
-				out.truncate(len as usize);
-				out
+				joined
 			})
 			.collect();
-		// SAFETY: `encoder` is live and not used again.
-		unsafe { opus_multistream_encoder_destroy(encoder) };
 
 		let mut head = moq_mux::codec::opus::Config::new(RATE as u32, 2)
 			.encode()
@@ -348,8 +312,8 @@ mod tests {
 			.to_vec();
 		head[9] = channels as u8;
 		head[18] = 1;
-		head.extend_from_slice(&[streams as u8, coupled as u8]);
-		head.extend_from_slice(&mapping[..channels]);
+		head.extend_from_slice(&[streams, coupled]);
+		head.extend_from_slice(table);
 		(head.into(), packets)
 	}
 

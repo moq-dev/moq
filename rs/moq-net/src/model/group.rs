@@ -146,13 +146,26 @@ pub(super) struct Partial {
 	scratch: bool,
 }
 
+/// What [`Producer::write_stored`] writes as one whole frame.
+enum Stored {
+	/// A payload frame's bytes.
+	Payload(Bytes),
+	/// A metadata copy's frame header: its declared plain size, and the object fields it
+	/// arrived with.
+	Header {
+		size: u64,
+		fields: Option<Arc<super::object::Fields>>,
+	},
+}
+
 /// A completed frame as a group stores it, with what egress needs beside it.
 pub(super) struct Entry {
 	owner: Mutex<Option<frame::Shared>>,
 	frame: Cached,
 	// The IETF object fields it arrived with, for a relay to forward.
 	fields: Option<Arc<super::object::Fields>>,
-	// A compressed group's inflated size of the stored slice; zero on a plain group.
+	// A compressed group's inflated size of the stored slice, or a metadata copy's declared
+	// frame size beside its empty payload; zero on a plain group.
 	inflated: u64,
 	// Where the frame ends on its copy's [`Pace`] scale, set as it enters the log.
 	end: u64,
@@ -189,9 +202,9 @@ impl Entry {
 		}
 	}
 
-	/// The header and whole payload a reader gets: on a `compressed` group, the stored
-	/// slice with its inflated size.
-	fn read(&self, compressed: bool) -> (frame::Header, frame::Source) {
+	/// The header and whole payload a reader gets: on a `sized` group (compressed, or a
+	/// metadata copy), the stored slice with its declared plain size.
+	fn read(&self, sized: bool) -> (frame::Header, frame::Source) {
 		let info = frame::Info {
 			size: self.frame.payload.len() as u64,
 			timestamp: self.frame.timestamp,
@@ -199,7 +212,7 @@ impl Entry {
 		let header = frame::Header {
 			info,
 			fields: self.fields.clone(),
-			inflated: compressed.then_some(self.inflated),
+			inflated: sized.then_some(self.inflated),
 		};
 		(header, frame::Source::Complete(self.frame.payload.clone()))
 	}
@@ -228,6 +241,9 @@ pub(super) struct GroupState {
 	relay: Option<Box<Relay>>,
 	// Compressed-track state, boxed so a plain group pays one pointer.
 	flate: Option<Box<Flate>>,
+	// Whether this is a metadata copy: each frame its header alone, an empty payload with
+	// its declared size beside it (see [`Producer::write_header`]).
+	meta: bool,
 
 	// The single in-flight frame, if one is open.
 	pub(super) partial: Option<Partial>,
@@ -401,6 +417,8 @@ pub(super) struct Head {
 	entries: Vec<Entry>,
 	// Whether `entries` are a compressed group's stored slices.
 	compressed: bool,
+	// Whether `entries` are a metadata copy's headers, which no payload copy adopts.
+	meta: bool,
 }
 
 /// A copy's [`Head`], shared by every reader that could resume its group elsewhere.
@@ -1406,7 +1424,7 @@ impl GroupState {
 					fields: entry.fields.clone(),
 				})));
 			}
-			let (header, source) = entry.read(self.flate.is_some());
+			let (header, source) = entry.read(self.sized());
 			self.pace.took(entry.end);
 			return Poll::Ready(Ok(Some(Source::Ready(header, source))));
 		}
@@ -1594,7 +1612,7 @@ impl GroupState {
 			Spec {
 				key,
 				size: entry.frame.payload.len() as u64,
-				inflated: self.flate.as_ref().map(|_| entry.inflated),
+				inflated: self.sized().then_some(entry.inflated),
 			},
 			input,
 			&self.charge,
@@ -1608,6 +1626,12 @@ impl GroupState {
 	/// The cache account of the track this copy belongs to, kept after its frames are freed.
 	pub(super) fn account(&self) -> Option<&Arc<cache::Track>> {
 		self.charge.account()
+	}
+
+	/// Whether each entry carries a declared plain size beside its stored payload: a
+	/// compressed group's slices, or a metadata copy's headers.
+	fn sized(&self) -> bool {
+		self.flate.is_some() || self.meta
 	}
 
 	/// Whether Object IDs left the frame ordinals, so ordinal recovery cannot stitch.
@@ -1664,6 +1688,7 @@ impl GroupState {
 			first_object: start == self.offset && self.first_object(),
 			entries: self.entries(start, self.committed()).cloned().collect(),
 			compressed: self.flate.is_some(),
+			meta: self.meta,
 		})
 	}
 
@@ -1859,6 +1884,8 @@ struct Alive {
 	pace: Arc<Pace>,
 	// When the group was created here, on the ambient clock; see [`Consumer::arrived`].
 	arrived: crate::time::Instant,
+	// Whether this is a metadata copy, mirroring `GroupState::meta` for reads without its lock.
+	meta: bool,
 }
 
 impl Drop for Producer {
@@ -1921,12 +1948,25 @@ impl Producer {
 	/// Charges the group into `cache`, so its cached bytes count against the budget the
 	/// track evicts toward under memory pressure.
 	pub(super) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
+		Self::create(info, track, cache, false)
+	}
+
+	/// [`Self::new`] for a metadata copy, which holds each frame's header alone, written with
+	/// [`Self::write_header`]. It stores no compressed stream whatever its track declares,
+	/// since it holds no payload to compress.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn new_meta(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
+		Self::create(info, track, cache, true)
+	}
+
+	fn create(info: Info, track: track::Info, cache: Arc<cache::Track>, meta: bool) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
 		let (log, pace) = {
 			let mut state = state.write().ok().expect("a new group is open");
-			if track.compressed() {
+			state.meta = meta;
+			if track.compressed() && !meta {
 				state.flate = Some(Box::new(Flate::new(
 					Arc::new(Plain::new(charge.extra())),
 					charge.extra(),
@@ -1948,6 +1988,7 @@ impl Producer {
 			log,
 			pace,
 			arrived: super::clock::now(),
+			meta,
 		});
 		Self {
 			handle: Handle {
@@ -1974,11 +2015,11 @@ impl Producer {
 		self.handle.track.timescale
 	}
 
-	/// Whether the parent track compresses, so a received frame arrives as a stored slice
-	/// with its inflated size ([`frame::Header::inflated`]).
+	/// Whether the parent track compresses and this is no metadata copy, so a received frame
+	/// arrives as a stored slice with its inflated size ([`frame::Header::inflated`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn compressed(&self) -> bool {
-		self.handle.track.compressed()
+		self.handle.compressed()
 	}
 
 	/// The track to check this group's start against, while frame 0 may still be unwritten.
@@ -2051,8 +2092,36 @@ impl Producer {
 	/// is [`Timestamp::unscaled`] at this group's start; a frame that doesn't match its track
 	/// is [`Error::TimestampMismatch`].
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
+		// A metadata copy holds no payload, so nothing writes one into it.
+		if self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
+		self.write_stored(timestamp, Stored::Payload(data.into_bytes()))
+	}
+
+	/// Write the `header` of a frame of `header.info.size` plain bytes into a metadata copy
+	/// (see [`Self::new_meta`]), as a metadata subscription delivers it: no payload, and no
+	/// frame or byte billed. Its object fields are kept for a relay to forward.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn write_header(&mut self, header: frame::Header) -> Result<()> {
+		if !self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
+		let stored = Stored::Header {
+			size: header.info.size,
+			fields: header.fields,
+		};
+		self.write_stored(header.info.timestamp, stored)
+	}
+
+	/// Write one whole frame as the group stores it: a payload, or a metadata copy's empty
+	/// one with its declared size beside it.
+	fn write_stored(&mut self, timestamp: Timestamp, stored: Stored) -> Result<()> {
+		let (payload, declared, fields) = match stored {
+			Stored::Payload(payload) => (payload, None, None),
+			Stored::Header { size, fields } => (Bytes::new(), Some(size), fields),
+		};
 		let timestamp = self.handle.track.rescale_in(timestamp, self.handle.info.start)?;
-		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
@@ -2072,27 +2141,41 @@ impl Producer {
 		state.admit(next_index)?;
 		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
-		let inflated = payload.len() as u64;
+		let inflated = declared.unwrap_or(payload.len() as u64);
 		let payload = match &mut state.flate {
 			Some(flate) => flate.deflate(&payload),
 			None => payload,
 		};
 		let size = payload.len() as u64;
-		if !state.trim(size) {
+		let metadata_bytes = fields.as_ref().map_or(0, |fields| fields.heap());
+		if !state.trim(size.saturating_add(metadata_bytes)) {
 			return Err(self.abort_too_large(state));
 		}
-		let inflated = if state.flate.is_some() { inflated } else { 0 };
+		let inflated = if state.sized() { inflated } else { 0 };
 		let frame = Cached {
 			timestamp,
 			payload: payload.into(),
 			arrived: super::clock::now(),
 		};
-		let mut entry = Entry::plain(frame, inflated);
+		let object_id = fields.as_ref().map_or(state.next_index as u64, |fields| fields.id);
+		let mut entry = Entry {
+			fields,
+			..Entry::plain(frame, inflated)
+		};
 		// Checked here too, so a group without shared content skips the call.
 		if state.content.is_some()
 			&& let Err(err) = state.canonicalize(state.next_index, &mut entry)
 		{
 			return Err(self.abort_conflict(state, err));
+		}
+		if metadata_bytes > 0 {
+			state.relay().bytes += metadata_bytes;
+			state.charge.add(metadata_bytes);
+		}
+		let index = state.next_index as u64;
+		if let Some(wire) = state.wire_mut() {
+			wire.last = Some(object_id);
+			wire.sparse |= object_id != index;
 		}
 		let now = state.commit(entry);
 		state.next_index = next_index;
@@ -2119,9 +2202,11 @@ impl Producer {
 			self.handle.cache.wakes().presented(timestamp);
 		}
 
-		// Ingress payload: one whole frame written.
-		self.stats.frames(1);
-		self.stats.bytes(size);
+		// Ingress payload: one whole frame written. A header alone delivers no frame.
+		if declared.is_none() {
+			self.stats.frames(1);
+			self.stats.bytes(size);
+		}
 		Ok(())
 	}
 
@@ -2136,6 +2221,9 @@ impl Producer {
 	/// unless it fails the group: too large, or held differently by another copy.
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
+		if self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
 		for frame in frames.filled() {
 			self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
@@ -2286,7 +2374,12 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
-		let (info, buf, admission) = match self.open_frame(frame) {
+		// A metadata copy holds no payload, so nothing streams one into it.
+		let opened = match self.handle.alive.meta {
+			true => Err(Error::Unsupported),
+			false => self.open_frame(frame),
+		};
+		let (info, buf, admission) = match opened {
 			Ok(opened) => opened,
 			Err(err) => {
 				let _ = self.handle.abort(err.clone());
@@ -2637,8 +2730,9 @@ impl Producer {
 	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
 	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
 	///
-	/// Ready at once while no reader holds the group, so a group nobody watches keeps
-	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
+	/// Ready at once while no reader is owed the group (see [`Handle::poll_unowed`]), so a
+	/// group nobody watches keeps writing and sheds its front, and once it is closed, so the
+	/// next write surfaces why.
 	/// A reader that took every committed frame is waiting on the writer, so a frame
 	/// larger than the window never stalls it, and one whose next frame was shed has
 	/// fallen off the group and is not waited on.
@@ -2649,8 +2743,8 @@ impl Producer {
 		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
-		// Either wakes the writer: the last reader leaving, or the group closing.
-		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
+		// Either wakes the writer: nobody left to read the rest, or the group closing.
+		if self.handle.poll_unowed(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
 		match pace.paced(pace.park(waiter), partial, window) {
@@ -2667,7 +2761,7 @@ impl Producer {
 		if self.handle.state.is_closed() {
 			return None;
 		}
-		self.handle.alive.pace.room(partial, window, self.handle.state.wanted())
+		self.handle.alive.pace.room(partial, window, || self.handle.owed())
 	}
 
 	/// The non-writing observer used by the cache and built-in sessions.
@@ -3051,7 +3145,7 @@ impl Handle {
 		};
 		let offset = state.offset;
 		let reaches = head.start.saturating_add(head.entries.len()) >= offset;
-		let same_form = head.compressed == state.flate.is_some();
+		let same_form = head.compressed == state.flate.is_some() && head.meta == state.meta;
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
 		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
@@ -3154,10 +3248,16 @@ impl Handle {
 		self.state.read().next_index
 	}
 
-	/// Whether the parent track compresses; see [`Producer::compressed`].
-	#[cfg(feature = "async")]
+	/// Whether this copy stores compressed slices; see [`Producer::compressed`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn compressed(&self) -> bool {
-		self.track.compressed()
+		self.track.compressed() && !self.alive.meta
+	}
+
+	/// Whether this is a metadata copy, holding each frame's header alone.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_meta(&self) -> bool {
+		self.alive.meta
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
@@ -3580,14 +3680,18 @@ impl Handle {
 	/// Create a new consumer for the group.
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn consume(&self) -> Consumer {
-		self.consumer(self.state.consume())
+		let state = self.state.consume();
+		self.alive.pace.hold();
+		self.consumer(state)
 	}
 
 	/// Create a consumer, or `None` once the group is aborted. Paired with
 	/// [`abort_unwanted`](Self::abort_unwanted): the closed check and the count share its
 	/// lock, so a consumer either exists in time to decline the abort or is never made.
 	pub(super) fn try_consume(&self) -> Option<Consumer> {
-		self.state.weak().try_consume().map(|state| self.consumer(state))
+		let state = self.state.weak().try_consume()?;
+		self.alive.pace.hold();
+		Some(self.consumer(state))
 	}
 
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
@@ -3608,7 +3712,7 @@ impl Handle {
 				prefetch: Prefetch::default(),
 				raw: false,
 				partial: false,
-				compressed: self.track.compressed(),
+				compressed: self.track.compressed() && !self.alive.meta,
 				cache: self.cache.clone(),
 				alive: self.alive.clone(),
 				refreshed: self.cache.pool().now(),
@@ -3695,6 +3799,59 @@ impl Handle {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_wanted_changed(waiter, true).map(drop)
+	}
+
+	/// Whether a reader is owed the rest of the group: one holds it, or none has yet and its
+	/// track still has a subscriber to hand it to.
+	fn owed(&self) -> bool {
+		// Held before counted: a reader is marked only once it counts, so seeing the mark first
+		// means its count shows too, unless it already left.
+		let held = self.alive.pace.held();
+		self.state.wanted() || (!held && self.cache.track().is_some_and(|track| track.wanted()))
+	}
+
+	/// Poll until no reader is owed the rest of the group: none holds it, and either one did
+	/// and left, or none has yet and its track has nobody left to hand it to. Ready once the
+	/// group closes too.
+	///
+	/// A group not yet handed out is owed to its track's subscribers, since a session ingests
+	/// only groups some reader asked for, and the first to pick it up reads from the start:
+	/// reading on before then would hold more than a window, or shed what that reader wants.
+	fn poll_unowed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			// Read before the count, as in `owed`.
+			let held = self.alive.pace.held();
+			if self.state.wanted() {
+				match self.state.poll_wanted_changed(waiter, true) {
+					Poll::Pending => return Poll::Pending,
+					Poll::Ready(Ok(_)) => continue,
+					Poll::Ready(Err(_)) => return Poll::Ready(()),
+				}
+			}
+			if held {
+				return Poll::Ready(());
+			}
+			// Nobody consuming the track, or the track gone or closed, leaves nobody to hand it to.
+			let Some(track) = self.cache.track() else {
+				return Poll::Ready(());
+			};
+			if track.poll_wanted_changed(waiter, true).is_ready() {
+				return Poll::Ready(());
+			}
+			match self.state.poll_wanted_changed(waiter, false) {
+				Poll::Ready(Ok(_)) => continue,
+				Poll::Ready(Err(_)) => return Poll::Ready(()),
+				// A reader that arrived and left before that registered shows only here.
+				// One that arrived since is still counted, and its arrival wakes `waiter`.
+				Poll::Pending => {
+					return if self.alive.pace.held() && !self.state.wanted() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					};
+				}
+			}
+		}
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
@@ -3951,8 +4108,8 @@ impl Prefetch {
 	/// A compressed group fills its stored slices, with `raw` their inflated sizes beside
 	/// them, and otherwise returns the job [`Self::inflate`] runs once the guard is released.
 	fn fill(&mut self, state: &GroupState, index: usize, budget: usize, raw: bool) -> Result<Option<Inflate>> {
-		let compressed = state.flate.is_some();
-		self.reset(compressed && raw);
+		let sized = state.sized();
+		self.reset(sized && (raw || state.meta));
 		let end = index.saturating_add(budget.min(Self::CAP));
 		// Below the stored slices, a plain read takes the inflated copy's frames as they are.
 		if index < state.held()
@@ -3971,7 +4128,7 @@ impl Prefetch {
 			.enumerate()
 			.take_while(|(at, entry)| {
 				inflated = inflated.saturating_add(entry.inflated);
-				*at == 0 || raw || inflated <= MAX_CACHE_BYTES
+				*at == 0 || raw || state.meta || inflated <= MAX_CACHE_BYTES
 			})
 			.count();
 		// Taken before any slot is written, so a refusal leaves the batch empty.
@@ -3981,7 +4138,7 @@ impl Prefetch {
 		};
 		let mut end = 0;
 		for entry in state.entries(index, index + count) {
-			end = self.push(entry, compressed && raw);
+			end = self.push(entry, sized && (raw || state.meta));
 		}
 		// The batch is the reader's whatever the group sheds, so it counts as taken.
 		state.pace.took(end);
@@ -4845,7 +5002,6 @@ impl Consumer {
 
 	/// Give up the payload of the frame last handed out, as a header-only read does, so a copy
 	/// failing partway through that frame tears nothing and the read goes on from another route.
-	#[cfg(feature = "async")]
 	pub(crate) fn forget_payload(&mut self) {
 		self.cursor.partial = false;
 	}
@@ -5632,7 +5788,7 @@ impl Cursor {
 		let committed = match !self.compressed || raw {
 			true => self.log.read().get(index as u64).ok().flatten().map(|entry| {
 				self.alive.pace.took(entry.end);
-				entry.read(self.compressed)
+				entry.read(self.compressed || self.alive.meta)
 			}),
 			false => None,
 		};
@@ -5706,10 +5862,13 @@ impl Cursor {
 		// The batch is drained: refill it from the log without the lock, unless a plain
 		// read of a compressed group has to inflate under it.
 		if (!self.compressed || self.raw)
-			&& self
-				.prefetch
-				.fill_log(&mut self.log, &self.alive.pace, index, budget, self.compressed)
-				> 0
+			&& self.prefetch.fill_log(
+				&mut self.log,
+				&self.alive.pace,
+				index,
+				budget,
+				self.compressed || self.alive.meta,
+			) > 0
 		{
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();
@@ -5847,6 +6006,7 @@ mod test {
 				.map(|ms| Entry::plain(Frame::new(Timestamp::from_millis(ms).unwrap(), Bytes::new()).into(), 0))
 				.collect(),
 			compressed: false,
+			meta: false,
 		};
 		for tail in [None, Some(20), Some(120)] {
 			let mut group = Info { start: 0 }.produce();
@@ -5962,6 +6122,62 @@ mod test {
 		}
 
 		drop((objects, mixed));
+		group.abort(Error::Cancel).unwrap();
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// A metadata copy keeps each header's object fields, so a relay forwards sparse object
+	/// IDs and properties from it as it would from a payload copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn metadata_headers_keep_their_object_fields() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let mut group = Producer::new_meta(Info::from(0u64), track::Info::default(), cache);
+		group
+			.set_wire(Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (id, size) in [(0, 5), (7, 3)] {
+			group
+				.write_header(frame::Header {
+					info: frame::Info {
+						size,
+						timestamp: Timestamp::unscaled(0),
+					},
+					fields: (id != 0).then(|| {
+						Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})
+					}),
+					inflated: None,
+				})
+				.unwrap();
+		}
+		let wire = group.wire().unwrap();
+		assert!(wire.sparse, "object 7 at index 1 is sparse");
+		assert_eq!(wire.last, Some(7));
+
+		let group = group.finish().unwrap();
+		let mut objects = group.consume();
+		let waiter = kio::Waiter::noop();
+		for (id, size) in [(None, 5), (Some(7), 3)] {
+			let Poll::Ready(Ok(Some(object))) = objects.poll_read_object(&waiter) else {
+				panic!("object {id:?} is ready");
+			};
+			assert_eq!(object.fields.map(|fields| fields.id), id);
+			assert_eq!(object.inflated, Some(size));
+			assert!(object.frame.payload.is_empty());
+		}
+		drop(objects);
 		group.abort(Error::Cancel).unwrap();
 		assert_eq!(pool.used(), 0);
 	}
@@ -6630,6 +6846,7 @@ mod test {
 				0,
 			)],
 			compressed: false,
+			meta: false,
 		};
 		adopter.adopt_head(&head);
 		assert_eq!(
@@ -6657,6 +6874,7 @@ mod test {
 			first_object: true,
 			entries: vec![entry; count],
 			compressed: false,
+			meta: false,
 		};
 		adopter.adopt_head(&head);
 		assert_eq!(adopter.state.read().offset, count, "the head's slots do not fit");
@@ -6688,6 +6906,7 @@ mod test {
 				},
 			],
 			compressed: false,
+			meta: false,
 		};
 		let wire = Wire {
 			sparse: false,
@@ -6767,6 +6986,7 @@ mod test {
 				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(), 0),
 			],
 			compressed: false,
+			meta: false,
 		};
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
@@ -8482,6 +8702,7 @@ mod test {
 			first_object: true,
 			entries: vec![entry; 64],
 			compressed: false,
+			meta: false,
 		};
 		let before = adopter.state.read().charge.size();
 		adopter.adopt_head(&head);

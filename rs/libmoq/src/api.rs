@@ -451,10 +451,6 @@ pub struct moq_video_config {
 	pub broadcast: *const c_char,
 	/// Length of `broadcast` in bytes.
 	pub broadcast_len: usize,
-	/// The stream identity `broadcast` must resolve to, or NULL for whichever resolves first.
-	pub identity: *const c_char,
-	/// Length of `identity` in bytes.
-	pub identity_len: usize,
 	/// The track's name in its broadcast, or NULL when it is `name`.
 	pub track: *const c_char,
 	/// Length of `track` in bytes.
@@ -537,10 +533,6 @@ pub struct moq_audio_config {
 	pub broadcast: *const c_char,
 	/// Length of `broadcast` in bytes.
 	pub broadcast_len: usize,
-	/// The stream identity `broadcast` must resolve to, or NULL for whichever resolves first.
-	pub identity: *const c_char,
-	/// Length of `identity` in bytes.
-	pub identity_len: usize,
 	/// The track's name in its broadcast, or NULL when it is `name`.
 	pub track: *const c_char,
 	/// Length of `track` in bytes.
@@ -683,6 +675,22 @@ pub struct moq_frame {
 
 	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
+}
+
+/// A frame's header without its payload, as a metadata subscription reads it
+/// ([moq_consume_meta]).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_header {
+	/// The start of the frame's group, in its track's timescale, which names it within the track.
+	pub group: u64,
+	/// The frame's index within its group.
+	pub frame: u64,
+	/// The frame's declared plain payload size in bytes; 0 for a real empty frame.
+	pub size: u64,
+	/// The presentation timestamp of the frame, or on a scale-less track its group's unscaled
+	/// key (`has_scale` false).
+	pub timestamp: moq_timestamp,
 }
 
 /// One encoded media read; `kind` selects the filled field and the others are zeroed.
@@ -2899,7 +2907,7 @@ pub unsafe extern "C" fn moq_identity_text(identity: u32, dst: *mut moq_string) 
 
 /// Whether a session minted the identity for a route whose wire carries none: 1 if minted, 0 if
 /// named, or a negative code on failure. A minted identity names the announcement, not the
-/// publisher's stream, so signing refuses it and a catalog's identity check skips it.
+/// publisher's stream, so signing refuses it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_identity_minted(identity: u32) -> i32 {
 	ffi::enter(move || {
@@ -3464,10 +3472,9 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
-		(video.broadcast, video.identity, video.track) = unsafe {
+		(video.broadcast, video.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
-				(config.identity, config.identity_len),
 				(config.track, config.track_len),
 			)?
 		};
@@ -3476,12 +3483,8 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 	})
 }
 
-/// A rendition's broadcast reference, identity, and track name.
-type Reference = (
-	Option<moq_net::path::Relative>,
-	Option<moq_net::Identity>,
-	Option<String>,
-);
+/// A rendition's broadcast reference and track name.
+type Reference = (Option<moq_net::path::Relative>, Option<String>);
 
 /// A rendition's reference fields, as [moq_video_config] and [moq_audio_config] carry them.
 ///
@@ -3489,7 +3492,6 @@ type Reference = (
 /// - Each non-NULL pointer must be valid for its length.
 unsafe fn parse_reference(
 	broadcast: (*const c_char, usize),
-	identity: (*const c_char, usize),
 	track: (*const c_char, usize),
 ) -> Result<Reference, Error> {
 	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
@@ -3497,15 +3499,10 @@ unsafe fn parse_reference(
 		.map(moq_net::path::Relative::new)
 		.transpose()
 		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
-	let identity = unsafe { ffi::parse_str_optional(identity.0, identity.1)? }
-		.filter(|identity| !identity.is_empty())
-		.map(moq_net::Identity::from_str)
-		.transpose()
-		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
 	let track = unsafe { ffi::parse_str_optional(track.0, track.1)? }
 		.filter(|track| !track.is_empty())
 		.map(str::to_string);
-	Ok((broadcast, identity, track))
+	Ok((broadcast, track))
 }
 
 /// Add or replace an audio rendition in a broadcast's catalog.
@@ -3555,10 +3552,9 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 		audio.warmup = config
 			.has_warmup
 			.then(|| std::time::Duration::from_micros(config.warmup_us));
-		(audio.broadcast, audio.identity, audio.track) = unsafe {
+		(audio.broadcast, audio.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
-				(config.identity, config.identity_len),
 				(config.track, config.track_len),
 			)?
 		};
@@ -5156,6 +5152,78 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.raw_track_close(track)
+	})
+}
+
+/// Subscribe to a track's metadata by name: each frame's header, without its payload.
+///
+/// A subscription of its own beside any [moq_consume_track] of the same track. Over moq-lite-07
+/// no payload crosses a hop for it; over an older version it rides the track's payload
+/// subscription and drops the payload. To read the payload after all, subscribe to the track
+/// from the group reached.
+///
+/// `on_header` is called with each frame's header, group by group in arrival order, borrowed
+/// only for the call: copy what you keep. It is then called exactly once more with a NULL header
+/// and a terminal code: `0` (closed cleanly) or a negative error. After the terminal callback,
+/// `on_header` is never called again and `user_data` is never touched again, so release
+/// `user_data` there. The terminal callback fires even after [moq_consume_meta_cancel]. Pass
+/// NULL for `subscription` to use the [moq_consume_track] defaults.
+///
+/// Returns a non-zero handle to the subscription on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
+///   whose `ranges` is NULL or points to `ranges_len` ranges.
+/// - The caller must keep `user_data` valid until the terminal (NULL header) `on_header` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_meta(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	subscription: *const moq_subscription,
+	on_header: ffi::moq_header_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let subscription = unsafe { subscription.as_ref() }
+			.map(|subscription| unsafe { parse_subscription(subscription) })
+			.transpose()?;
+		let on_header = unsafe { ffi::OnHeader::new(user_data, on_header)? };
+		State::lock()
+			.consume
+			.meta_track(broadcast, name, subscription, on_header)
+	})
+}
+
+/// Update a metadata subscription's delivery preferences, as [moq_consume_track_update] does.
+///
+/// # Safety
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
+///   whose `ranges` is NULL or points to `ranges_len` ranges.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_meta_update(meta: u32, subscription: *const moq_subscription) -> i32 {
+	ffi::enter(move || {
+		let meta = ffi::parse_id(meta)?;
+		let subscription = unsafe { subscription.as_ref() }
+			.map(|subscription| unsafe { parse_subscription(subscription) })
+			.transpose()?;
+		State::lock().consume.meta_track_update(meta, subscription)
+	})
+}
+
+/// Stop a metadata subscription's background task.
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`; the [moq_consume_meta] `on_header` callback still fires once more with a NULL
+/// header and a terminal `0` (or a negative error), which is where `user_data` should be released.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_meta_cancel(meta: u32) -> i32 {
+	ffi::enter(move || {
+		let meta = ffi::parse_id(meta)?;
+		State::lock().consume.meta_track_close(meta)
 	})
 }
 

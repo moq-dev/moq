@@ -269,3 +269,31 @@ pinned core, since wall time on the shared host varied by up to 30% between runs
   leaving 498,500. Accepted: the remaining 2.3% pays for serving held groups in Group
   Order, where a newest-first read judges the oldest group it holds before handing out a
   newer one. Fastest-of-six cycles agree: +2.4% on `main`, +1.4% with #9747, not +11%.
+
+Triaged 2026-11-27 (maintainer, /quest-plan). No scheduled run had finished since 11-26's
+[45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463), and the 11 dispatched
+runs since are the automated bisect of its paired regressions, at commits from before the 11-27
+fixes, so the triage read them only for failures that predate no fix. New children: the Firefox
+player's lifecycle steps, which failed 6 of 15 runs at a different step almost every time
+([interop green](/quest/m0/interop-green/README.md); every failure predates
+[moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561)'s 100 ms audio groups, so
+[moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809) deleted it), and the MediaCodec
+keyframe test (fixed by [moq-dev/moq#9814](https://github.com/moq-dev/moq/pull/9814)). Fixed by
+[moq-dev/moq#9785](https://github.com/moq-dev/moq/pull/9785): `Features (rs features)`'s
+`concurrent_ephemeral_groups_all_bind`, where an ephemeral group failed with `Overlap` on a port
+another address's group had locked. Fixed on `main` since: the resume model's seed `478520378`
+(passes at `f7a41c3ea5`), moq-ffi's `server_client_run_end_draft22`
+([moq-dev/moq#9722](https://github.com/moq-dev/moq/pull/9722)), and the benches, cli-export, and
+route-sweep, which failed only at commits before
+[moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747),
+[moq-dev/moq#9662](https://github.com/moq-dev/moq/pull/9662), and
+[moq-dev/moq#9751](https://github.com/moq-dev/moq/pull/9751). Owned by open PRs: Audio quality
+([moq-dev/moq#9783](https://github.com/moq-dev/moq/pull/9783)), mutants
+([moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750),
+[moq-dev/moq#9623](https://github.com/moq-dev/moq/pull/9623)), Windows
+([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545)), and quic-interop
+([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
+[moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
+[moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)). Scheduled run
+[46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705) (`f7a41c3ea5`), the first
+with those fixes, goes to the next triage.

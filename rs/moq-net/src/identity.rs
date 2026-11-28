@@ -60,9 +60,9 @@ impl Identity {
 
 	/// Whether a session minted this identity, for a route whose wire (an older moq-lite, or
 	/// moq-transport) carries none. It names the announcement rather than the publisher's
-	/// stream, so it can neither match nor contradict an identity the publisher named
-	/// elsewhere, such as in a catalog. Hops that forward it keep the flag, and only a
-	/// session sets it: parsing text never builds a minted identity.
+	/// stream, so it can neither match nor contradict an identity the publisher named. Hops
+	/// that forward it keep the flag, and only a session sets it: parsing text never builds a
+	/// minted identity.
 	pub fn is_minted(&self) -> bool {
 		self.minted
 	}

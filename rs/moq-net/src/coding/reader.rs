@@ -604,7 +604,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
-		self.frame = header.info.size;
+		self.frame = group.payload(header);
 		let window = self.stream.window();
 		let paced = group.poll_admit(waiter, header, window);
 		self.poll_pace(waiter, paced, || group.room(window), 0)

@@ -103,7 +103,7 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
-kio = { workspace = true, features = ["manual", "sim"] }
+kio = { path = "../kio", features = ["manual", "sim"] }
 # The integration tests build congestion controllers directly, including the candidates the
 # real-socket comparisons run.
 moq-congestion = { path = "../moq-congestion", features = ["lab"] }

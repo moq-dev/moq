@@ -483,7 +483,7 @@ jobs:
       # does). `--status` exits non-zero when there is no shim.
       - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
-          version: 1.17.0
+          version: 1.31.0
           github-cache-mode: objects
           cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-cloudflare-
@@ -527,7 +527,7 @@ jobs:
       # does). `--status` exits non-zero when there is no shim.
       - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
-          version: 1.17.0
+          version: 1.31.0
           github-cache-mode: objects
           cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-objects-moxygen-
