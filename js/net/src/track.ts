@@ -3576,7 +3576,7 @@ export interface WireRecord {
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
 	/**
 	 * Forget what was recorded of `[start, end)` without going out on the wire, keeping what a
-	 * front's copies reported; `hooks.untell` forgets theirs too. Mirrors the Rust `Record::untell`.
+	 * front's copies reported; `hooks.untellCopies` forgets theirs. Mirrors the Rust `Record::untell`.
 	 */
 	untell(start: bigint, end: bigint): void;
 }
@@ -5518,6 +5518,9 @@ export class Subscriber {
 			subscriber.#reported.set(start, end);
 			// A copy that is itself a front has copies of its own that reported it.
 			subscriber.#resume?.untell(start, end);
+		};
+		hooks.untellCopies = (subscriber, start, end) => {
+			if (start < end) subscriber.#resume?.untell(start, end);
 		};
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;

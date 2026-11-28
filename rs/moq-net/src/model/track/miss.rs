@@ -1898,6 +1898,13 @@ impl Misses {
 		widened
 	}
 
+	/// The parts of `range` given up as stale, which a widening may take back.
+	pub fn stale_within(&self, range: &ops::Range<u64>) -> Vec<ops::Range<u64>> {
+		(self.stale.overlapping(range))
+			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
+			.collect()
+	}
+
 	/// Judge `run` afresh: no longer given up, and judged again by the next probe.
 	pub fn reopen(&mut self, run: ops::Range<u64>) {
 		self.given_up.remove(run.clone());

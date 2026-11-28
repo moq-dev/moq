@@ -5937,11 +5937,6 @@ struct TrackRun {
 	// SUBSCRIBE_START has gone out yet, as a range following an edge this hop does not know
 	// yet leaves it. A subscriber reads none before the subscription's first START.
 	withheld: Option<RangeMap<u64, Hole>>,
-	// The final runs given up below where delivery starts that its wire was never told of,
-	// though the record holds them told so no later scan gives them up again, one by one. Named
-	// once owed: those reaching up to a group served below the start, and those a lowered start
-	// reaches (see [`Self::lower_start`]).
-	unsent: RangeMap<u64, Hole>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -6114,7 +6109,6 @@ impl TrackRun {
 			end_sent: false,
 			held_end: None,
 			withheld: None,
-			unsent: RangeMap::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -6538,8 +6532,8 @@ impl TrackRun {
 	}
 
 	/// Move where delivery starts down to `start`, owing the subscriber what was given up from
-	/// there: the runs [`Self::unsent`] holds there are forgotten, so the next drop scan, which
-	/// this asks for, gives them up again.
+	/// there: the record forgets the runs it holds unsent there, and a front's copies all they
+	/// reported there, so the next drop scan, which this asks for, gives them up again.
 	fn lower_start(&mut self, start: u64) {
 		let Start::Resolved(resolved) = &mut self.start else {
 			return;
@@ -6549,13 +6543,8 @@ impl TrackRun {
 		}
 		let lowered = start..*resolved;
 		*resolved = start;
-		let owed: Vec<_> = (self.unsent.overlapping(&lowered))
-			.map(|(run, _)| run.start.max(lowered.start)..run.end.min(lowered.end))
-			.collect();
-		for run in owed {
-			self.track.untell(run);
-		}
-		self.unsent.remove(lowered);
+		self.track.record_mut().release_unsent(lowered.clone());
+		self.track.untell_copies(lowered);
 		self.track.rescan_drops();
 	}
 
@@ -6889,7 +6878,7 @@ impl TrackRun {
 			&mut Start::Resolved(start) if unowed => {
 				let owed = self.owed(start);
 				for below in owed.gaps(&range) {
-					self.track.record_mut().untell(below);
+					self.track.untell_stale(below);
 				}
 				for part in owed.overlapping(&range) {
 					let part = part.start.max(range.start)..part.end.min(range.end);
@@ -7269,11 +7258,11 @@ impl TrackRun {
 		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
 		// past a stale run, a group still held, or a key nothing gave up, go unnamed: naming them
 		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
-		// one per group. A stale one is forgotten by this subscription's record alone, so a wider
-		// budget may still serve it: a front's copies keep it, or each would give it up again on
-		// every scan an update widening the budget asks for, one poll at a time ahead of every
-		// group. A final one stays told for the same reason; an update that asks below the start
-		// names it then. On lite-07, whose ranges bound what a stale verdict was judged within, a
+		// one per group. A stale one is forgotten, so a wider budget may still serve it, though a
+		// front's copies keep a cached group's (see [`track::Subscriber::untell_stale`]): each
+		// would otherwise give it up again on every scan an update widening the budget asks for,
+		// one poll at a time ahead of every group. A final one stays told for the same reason,
+		// held unsent in the record; an update that asks below the start names it then. On lite-07, whose ranges bound what a stale verdict was judged within, a
 		// run stale under the track's own freshness bound is final all the same (see
 		// [`Self::final_bound`]): a relay reading from the oldest group would otherwise wait on it
 		// forever.
@@ -7292,8 +7281,8 @@ impl TrackRun {
 		for (range, hole) in skipped.iter() {
 			for below in send.gaps(range) {
 				match reversible(hole, bound) {
-					true => self.track.record_mut().untell(below),
-					false => self.unsent.insert(below, hole.clone()),
+					true => self.track.untell_stale(below),
+					false => self.track.record_mut().hold_unsent(below, hole.clone()),
 				}
 			}
 			for part in send.overlapping(range) {
@@ -7344,11 +7333,7 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
 		let mut reach = key;
-		while let Some(below) = reach.checked_sub(1)
-			&& let Some((run, hole)) = self.unsent.get_key_value(&below)
-		{
-			let (run, hole) = (run.start..reach, hole.clone());
-			self.unsent.remove(run.clone());
+		while let Some((run, hole)) = self.track.record_mut().take_unsent_below(reach) {
 			reach = run.start;
 			self.forward_range(run, &hole, writer)?;
 		}
@@ -12169,9 +12154,11 @@ mod serve_group_test {
 	/// start names none of the rest: they lie past a group its budget skipped, which the
 	/// subscriber is not owed. Nor does one widening the budget, whose fresh scan would otherwise
 	/// give each up again ahead of any group. One lowering its start asks for them, so they are
-	/// named then, on a relay's front too, whose copies reported them once already.
+	/// named then. A relay's front, whose copies reported them once already, names what a plain
+	/// track does.
 	#[kio::test]
 	async fn a_join_names_no_gap_past_a_skipped_group() {
+		let mut plain_named = None;
 		for (version, routed) in [Version::Lite05, Version::Lite06]
 			.into_iter()
 			.flat_map(|v| [(v, false), (v, true)])
@@ -12259,12 +12246,23 @@ mod serve_group_test {
 			// One lowering the start asks for those keys, so each gap there is named then.
 			run.replace(update(Some(1), 200));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			let lowered: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
+			let mut all = drops(&mut writer, &log, version).await;
+			let lowered = all.split_off(named);
 			for key in (0..served - 20).step_by(20) {
 				assert!(
 					lowered.contains(&(key + 1, key + 19)),
 					"{version:?} routed {routed}: gap {key} after a lowered start"
 				);
+			}
+			let mut lowered = lowered;
+			lowered.sort();
+			match routed {
+				false => plain_named = Some(lowered),
+				true => assert_eq!(
+					Some(lowered),
+					plain_named.take(),
+					"{version:?}: a front names what a plain track does after a lowered start"
+				),
 			}
 		}
 	}

@@ -34,6 +34,10 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
+	/// The final runs reported that the reader's publisher has yet to tell its wire, with why:
+	/// given up below where delivery starts, and named once owed. Each is in `reported` too, so
+	/// no scan gives it up again, and billed and folded as reported runs are.
+	unsent: RangeMap<u64, Hole>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
 	floor: u64,
@@ -151,6 +155,35 @@ impl Record {
 			self.reported.remove(range);
 		}
 	}
+
+	/// Hold `range`, reported final as `hole` says, as not told to the wire yet.
+	pub fn hold_unsent(&mut self, range: Range<u64>, hole: Hole) {
+		if !range.is_empty() {
+			self.unsent.insert(range, hole);
+		}
+	}
+
+	/// Take the run held unsent that reaches up to `end`, cut off there.
+	pub fn take_unsent_below(&mut self, end: u64) -> Option<(Range<u64>, Hole)> {
+		let (run, hole) = self.unsent.get_key_value(&end.checked_sub(1)?)?;
+		let (run, hole) = (run.start..end, hole.clone());
+		self.unsent.remove(run.clone());
+		Some((run, hole))
+	}
+
+	/// Forget every report of `range` held unsent, so the next scan gives it up again.
+	pub fn release_unsent(&mut self, range: Range<u64>) {
+		if range.is_empty() {
+			return;
+		}
+		let held: Vec<_> = (self.unsent.overlapping(&range))
+			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
+			.collect();
+		for run in held {
+			self.reported.remove(run);
+		}
+		self.unsent.remove(range);
+	}
 }
 
 impl Accounted for Record {
@@ -243,7 +276,8 @@ impl Record {
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
-			+ self.reported.len()) as u64
+			+ self.reported.len()
+			+ self.unsent.len()) as u64
 	}
 
 	/// Whether the track left this reader a debt to pay: what its record holds back, such as
@@ -369,6 +403,7 @@ impl Record {
 		for run in &forgot {
 			self.delivered.remove(run.clone());
 			self.reported.remove(run.clone());
+			self.unsent.remove(run.clone());
 		}
 		forgot
 	}
@@ -428,6 +463,7 @@ impl Record {
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
 		self.reported.remove(0..floor);
+		self.unsent.remove(0..floor);
 	}
 
 	/// Settle `stretch` as one handed-out and reported run.
@@ -435,6 +471,7 @@ impl Record {
 		self.delivered.insert_run(stretch.clone());
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
+		self.unsent.remove(stretch.clone());
 		self.reported.insert(stretch, Report::Settled);
 	}
 
@@ -603,6 +640,29 @@ mod test {
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
 		drop(record);
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// The runs a publisher holds unsent bill as the reports they shadow do, and a debt folds
+	/// them away with those: what its wire was never told costs what the record holds.
+	#[test]
+	fn a_debt_folds_what_is_held_unsent() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		for key in (0..10).step_by(2) {
+			record.delivered.insert(key);
+			record.tell(key + 1..key + 2, Report::Dropped);
+			record.hold_unsent(key + 1..key + 2, Hole::Skip);
+		}
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(
+			pool.used(),
+			(4 + 5 + 5) * RUN_OVERHEAD,
+			"each held run bills beside its report"
+		);
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(pool.used(), 0, "all of it folded");
+		assert_eq!(record.take_unsent_below(10), None, "folded, so told for good");
 	}
 
 	/// Under a debt its track could not pay, a record folds what is final into its floor:

@@ -13527,16 +13527,51 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget what this reader reported of `range`, which its publisher never told its wire: a
-	/// run given up below where delivery starts. Ranges that later ask for it report it again,
-	/// on a front through whichever copy serves then.
+	/// Forget what a front's copies reported of `range`, now that a lowered start owes it, so
+	/// whichever copy serves then gives up again what its wire was never told. The reader's own
+	/// record keeps what was.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
+	pub(crate) fn untell_copies(&mut self, range: ops::Range<u64>) {
+		if let Inner::Resume(resume, _) = &mut self.inner {
+			resume.untell(range);
+		}
+	}
+
+	/// Forget what this reader reported of a stale run in `range` its publisher never told its
+	/// wire, so a wider budget may still serve it. A front's copies forget only what their fills
+	/// gave up, which a widening asks again only while untold (see [`Cursor::rejudge`]); each
+	/// re-offers a cached group it skipped regardless, so keeping that told spares re-reporting
+	/// every one on each widening.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn untell_stale(&mut self, range: ops::Range<u64>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.record.untell(range),
 			Inner::Resume(resume, logical) => {
 				logical.record.untell(range.clone());
-				resume.untell(range);
+				resume.untell_misses(range);
+			}
+		}
+	}
+
+	/// Forget what this copy reported of the parts of `range` its fills gave up as stale,
+	/// returning them; see [`Self::untell_stale`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn untell_misses(&mut self, range: ops::Range<u64>) -> RangeSet<u64> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let stale = (cursor.misses.as_ref()).map_or_else(Vec::new, |misses| misses.stale_within(&range));
+				for run in &stale {
+					cursor.record.untell(run.clone());
+				}
+				stale.into_iter().collect()
+			}
+			// A copy that is itself a front reported what its own copies did.
+			Inner::Resume(resume, logical) => {
+				let untold = resume.untell_misses(range);
+				for run in untold.iter() {
+					logical.record.untell(run.clone());
+				}
+				untold
 			}
 		}
 	}
@@ -36852,6 +36887,46 @@ mod test {
 			panic!("the wider budget asks for the stale run");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 3));
+	}
+
+	/// A stale run a wire publisher gave up below its start and never told is asked of a fill
+	/// once its budget widens, on a front as on one track: the serving copy forgets it too.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_run_untold_below_the_start_asks_a_fill_once_widened() {
+		for routed in [false, true] {
+			let mut producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
+			producer.start_at(3).unwrap();
+			write_group(&producer, 3);
+			let budget = Duration::from_millis(500);
+			producer.give_up(0..3, Hole::stale(budget));
+			let routes = super::super::resume::Producer::new();
+			let logical = Request::new(Arc::new(broadcast::Info::default()), "test")
+				.routes(routes.consume())
+				.accept(Info::timed());
+			routes.serve(producer.consume());
+			let narrow = within(budget, None);
+			let mut subscribing = match routed {
+				true => logical.consume(),
+				false => producer.consume(),
+			}
+			.subscribe(narrow.clone());
+			let Poll::Ready(Ok(mut subscriber)) = kio::Task::poll(&mut *subscribing, &kio::Waiter::noop()) else {
+				panic!("the track info is available");
+			};
+			let waiter = kio::Waiter::noop();
+			assert_eq!(drain_groups(&mut subscriber), [3], "routed {routed}");
+			assert_eq!(drained_drops(&mut subscriber), [(0, 3)], "routed {routed}");
+			subscriber.untell_stale(0..3);
+			assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "routed {routed}");
+			subscriber.update(narrow.with_max(Duration::from_secs(60))).unwrap();
+			assert!(subscriber.poll_next_group(&waiter).is_pending());
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+				panic!("routed {routed}: the wider budget asks for the stale run");
+			};
+			assert_eq!((fill.start().group, fill.end()), (0, 3));
+		}
 	}
 
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds

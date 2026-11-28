@@ -1977,9 +1977,10 @@ export class Publisher {
 		// Mirrors the Rust `TrackRun::lower_start`.
 		const lowerStart = (start: bigint) => {
 			if (startKey === undefined || start >= startKey) return;
-			// A front's copies forget them too, so they give them up again.
 			for (const run of record ? unsent.overlapping(start, startKey) : [])
-				hooks.untell(track, max(run.start, start), min(run.end, startKey));
+				record?.untell(max(run.start, start), min(run.end, startKey));
+			// A front's copies forget all they reported there, so they give it up again.
+			hooks.untellCopies(track, start, startKey);
 			unsent.set(start, startKey);
 			startKey = start;
 		};

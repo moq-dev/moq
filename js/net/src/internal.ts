@@ -1339,10 +1339,16 @@ export const hooks: {
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
 	 * Forget what a subscriber reported of `[start, end)`, which its wire was never told, and what
-	 * each of its route copies did, so ranges that later ask for it report it again. Mirrors the Rust
-	 * `track::Subscriber::untell`.
+	 * each of its route copies did, so ranges that later ask for it report it again. Mirrors what the
+	 * Rust `Reader::untell` does to each copy.
 	 */
 	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	/**
+	 * Forget what a front's route copies reported of `[start, end)`, now that a lowered start owes
+	 * it, keeping what the subscriber's own record holds. Mirrors the Rust
+	 * `track::Subscriber::untell_copies`.
+	 */
+	untellCopies: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1884,6 +1890,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	untell: () => {
+		throw new Error("track.ts not loaded");
+	},
+	untellCopies: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
