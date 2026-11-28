@@ -1,18 +1,69 @@
-publishing smoke-js-web-4049-7235.hang (fake camera, vite) to https://relay.moqtail.dev
+publishing smoke-js-web-4241-8625.hang (fake camera, vite) to https://relay.moqtail.dev
 [page] negotiated protocol: moqt-22
-[page] announced: broadcast=moqtail/ch07_vod active=true
-[page] announced: broadcast=moqtail/ch02 active=true
-[page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moqtail/ch07_all active=true
-[page] announced: broadcast=moqtail/testsrc active=true
-[page] announced: broadcast=moqtail/ch00 active=true
 [page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=moqtail/ch07_vod active=true
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=moqtail/ch00 active=true
 [page] announced: broadcast=moqtail/ch04 active=true
+[page] announced: broadcast=moqtail/testsrc active=true
+[page] announced: broadcast=moqtail/ch02 active=true
 [page] announced: broadcast=moqtail/ch07 active=true
-[page] announced: broadcast=moqtail/ch03 active=true
-[page] announced: broadcast=moqtail/ch05 active=true
-[page] announced: broadcast=moqtail/ch01 active=true
 [page] announced: broadcast=moqtail/ch06 active=true
-[page] publish ok: broadcast=smoke-js-web-4049-7235.hang track=catalog.json
-[page] publish done: broadcast=smoke-js-web-4049-7235.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4049-7235.hang track=catalog.json error=remote error: 0
+[page] announced: broadcast=moqtail/ch01 active=true
+[page] announced: broadcast=moqtail/ch03 active=true
+[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 active=true
+[page] announced: broadcast=moqtail/ch07_all active=true
+[page] announced: broadcast=moqtail/ch05 active=true
+[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 rerouted
+[page] publish ok: broadcast=smoke-js-web-4241-8625.hang track=catalog.json
+[page] announced: broadcast=moq-test/data-datagram/03da752d9127274490804cfd25916925 active=false
+[page] error processing bidi stream Stream: remote error: 0
+    at Ge (http://localhost:44755/assets/index-DYbY3AOv.js:1:15528)
+    at http://localhost:44755/assets/index-DYbY3AOv.js:1:98650
+    at async #s (http://localhost:44755/assets/index-DYbY3AOv.js:1:98613)
+    at async bs.done (http://localhost:44755/assets/index-DYbY3AOv.js:1:100714)
+    at async Sf.runPublishNamespace (http://localhost:44755/assets/index-DYbY3AOv.js:1:223424)
+    at async #p (http://localhost:44755/assets/index-DYbY3AOv.js:1:229325)
+[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e active=true
+[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e rerouted
+[page] announced: broadcast=moq-test/data-datagram-eog/73d7b59464b7b40e9b7cc1027c87490e active=false
+[page] error processing bidi stream Stream: remote error: 0
+    at Ge (http://localhost:44755/assets/index-DYbY3AOv.js:1:15528)
+    at http://localhost:44755/assets/index-DYbY3AOv.js:1:98650
+    at async #s (http://localhost:44755/assets/index-DYbY3AOv.js:1:98613)
+    at async bs.done (http://localhost:44755/assets/index-DYbY3AOv.js:1:100714)
+    at async Sf.runPublishNamespace (http://localhost:44755/assets/index-DYbY3AOv.js:1:223424)
+    at async #p (http://localhost:44755/assets/index-DYbY3AOv.js:1:229325)
+[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 active=true
+[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 rerouted
+[page] announced: broadcast=moq-test/data-extensions/07677e7aefeadc49dd73e409cd338461 active=false
+[page] error processing bidi stream Stream: remote error: 0
+    at Ge (http://localhost:44755/assets/index-DYbY3AOv.js:1:15528)
+    at http://localhost:44755/assets/index-DYbY3AOv.js:1:98650
+    at async #s (http://localhost:44755/assets/index-DYbY3AOv.js:1:98613)
+    at async bs.done (http://localhost:44755/assets/index-DYbY3AOv.js:1:100714)
+    at async Sf.runPublishNamespace (http://localhost:44755/assets/index-DYbY3AOv.js:1:223424)
+    at async #p (http://localhost:44755/assets/index-DYbY3AOv.js:1:229325)
+[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec active=true
+[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec rerouted
+[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec rerouted
+[page] announced: broadcast=moq-test/data-increments/f9945eb105058db99e536fc932203aec active=false
+[page] error processing bidi stream Stream: remote error: 0
+    at Ge (http://localhost:44755/assets/index-DYbY3AOv.js:1:15528)
+    at http://localhost:44755/assets/index-DYbY3AOv.js:1:98650
+    at async #s (http://localhost:44755/assets/index-DYbY3AOv.js:1:98613)
+    at async bs.done (http://localhost:44755/assets/index-DYbY3AOv.js:1:100714)
+    at async Sf.runPublishNamespace (http://localhost:44755/assets/index-DYbY3AOv.js:1:223424)
+    at async #p (http://localhost:44755/assets/index-DYbY3AOv.js:1:229325)
+[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 active=true
+[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 rerouted
+[page] announced: broadcast=moq-test/data-forward-zero/177b25f8ef473a397a0da544e3192a81 active=false
+[page] error processing bidi stream Stream: remote error: 0
+    at Ge (http://localhost:44755/assets/index-DYbY3AOv.js:1:15528)
+    at http://localhost:44755/assets/index-DYbY3AOv.js:1:98650
+    at async #s (http://localhost:44755/assets/index-DYbY3AOv.js:1:98613)
+    at async bs.done (http://localhost:44755/assets/index-DYbY3AOv.js:1:100714)
+    at async Sf.runPublishNamespace (http://localhost:44755/assets/index-DYbY3AOv.js:1:223424)
+    at async #p (http://localhost:44755/assets/index-DYbY3AOv.js:1:229325)
+[page] publish done: broadcast=smoke-js-web-4241-8625.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-4241-8625.hang track=catalog.json error=remote error: 0

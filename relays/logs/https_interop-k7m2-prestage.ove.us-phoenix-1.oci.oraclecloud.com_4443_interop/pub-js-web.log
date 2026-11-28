@@ -1,4 +1,4 @@
-publishing smoke-js-web-4049-11093.hang (fake camera, vite) to https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop
+publishing smoke-js-web-4241-10653.hang (fake camera, vite) to https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop
 [page] negotiated protocol: moqt-22
-[page] subscribe_namespace written: requestId=2
-[page] announced: broadcast=smoke-js-web-4049-11093.hang active=true
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=smoke-js-web-4241-10653.hang active=true

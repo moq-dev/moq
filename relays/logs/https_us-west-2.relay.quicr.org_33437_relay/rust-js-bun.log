@@ -2,17 +2,21 @@ https://us-west-2.relay.quicr.org:33437/relay connected via WebTransport
 https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
 connected version=moq-transport-18
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4049-2930.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4049-2930.hang track=catalog.json
+announced: broadcast=moq-test/data-subgroup-basic/c78c591202aea701ea6ad3578ec08771 active=true
+announced: broadcast=smoke-rust-4241-9894.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4241-9894.hang track=catalog.json
 announced: broadcast=metrics/us-west-2.relay.public active=true
-subscribe written: id=2 broadcast=smoke-rust-4049-2930.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4049-2930.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4049-2930.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4049-2930.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4049-2930.hang track=0.avc3
-received 7474 bytes from smoke-rust-4049-2930.hang
+subscribe written: id=2 broadcast=smoke-rust-4241-9894.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4241-9894.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4241-9894.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4241-9894.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4241-9894.hang track=0.avc3
+received 7474 bytes from smoke-rust-4241-9894.hang
+announced: broadcast=moq-test-00/1/0/0/1/3/4/64/32/2/1/1/0/-1/-1/0 active=true
+announced: broadcast=moq-test-00/1/0/0/1/3/4/64/32/2/1/1/0/-1/-1/0 active=false
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-rust-4049-2930.hang active=false
+announced: broadcast=moq-test/data-subgroup-basic/c78c591202aea701ea6ad3578ec08771 active=false
+announced: broadcast=smoke-rust-4241-9894.hang active=false
 announced: broadcast=metrics/us-west-2.relay.public active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
@@ -47,5 +51,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-rust-4049-2930.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4049-2930.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4241-9894.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4241-9894.hang track=0.avc3 error=remote error: 0 (connection error: closed)

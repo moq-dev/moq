@@ -3,12 +3,13 @@
 [page] announce: prefix=
 [page] announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/b767c775-2ef2-492f-b8b6-d0827cce48d3/~idexfouo1ola active=true
 [page] announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-[page] announced: broadcast=smoke-rust-4049-28563.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4049-28563.hang track=catalog.json
+[page] announced: broadcast=moq-test/cmsf-late-join-idle-catalog/e0758cd61d32f9d3cd9849281d5cc906 active=true
+[page] announced: broadcast=smoke-rust-4241-30435.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4241-30435.hang track=catalog.json
 [page] announced: broadcast=sp-blume-town-test active=true
-[page] announced: broadcast=vs-adceb373ab23d507fa4a9d5eacf23676 active=true
-[page] subscribe ok: id=0 broadcast=smoke-rust-4049-28563.hang track=catalog.json
-[page] received catalog hang smoke-rust-4049-28563.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4049-28563.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4049-28563.hang track=0.avc3
-decoded 21 frames from smoke-rust-4049-28563.hang (vite)
+[page] announced: broadcast=vs-9fc4f2187fe848a33b29c8f7c1f30d5d active=true
+[page] subscribe ok: id=0 broadcast=smoke-rust-4241-30435.hang track=catalog.json
+[page] received catalog hang smoke-rust-4241-30435.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4241-30435.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4241-30435.hang track=0.avc3
+decoded 24 frames from smoke-rust-4241-30435.hang (vite)

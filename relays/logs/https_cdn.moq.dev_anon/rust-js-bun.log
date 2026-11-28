@@ -2,19 +2,20 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
+announce: prefix=
 announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/b767c775-2ef2-492f-b8b6-d0827cce48d3/~idexfouo1ola active=true
 announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-announced: broadcast=smoke-rust-4049-28563.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-4049-28563.hang track=catalog.json
+announced: broadcast=moq-test/cmsf-late-join-idle-catalog/e0758cd61d32f9d3cd9849281d5cc906 active=true
+announced: broadcast=smoke-rust-4241-30435.hang active=true
+subscribe start: id=0 broadcast=smoke-rust-4241-30435.hang track=catalog.json
 announced: broadcast=sp-blume-town-test active=true
-announced: broadcast=vs-adceb373ab23d507fa4a9d5eacf23676 active=true
-announce: prefix=
-subscribe ok: id=0 broadcast=smoke-rust-4049-28563.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-4049-28563.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-4049-28563.hang track=0.avc3
-received 6709 bytes from smoke-rust-4049-28563.hang
-subscribe close: id=0 broadcast=smoke-rust-4049-28563.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-4049-28563.hang track=0.avc3
+announced: broadcast=vs-9fc4f2187fe848a33b29c8f7c1f30d5d active=true
+subscribe ok: id=0 broadcast=smoke-rust-4241-30435.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-rust-4241-30435.hang track=0.avc3
+subscribe ok: id=1 broadcast=smoke-rust-4241-30435.hang track=0.avc3
+received 6709 bytes from smoke-rust-4241-30435.hang
+subscribe close: id=0 broadcast=smoke-rust-4241-30435.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-rust-4241-30435.hang track=0.avc3
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
