@@ -84,6 +84,15 @@ impl Import {
 		self.track.burst(duration)
 	}
 
+	/// Close the current group at `end`, or without declaring an end when none is known, so the
+	/// producer doesn't extrapolate one from the gap before the last frame.
+	pub(crate) fn close(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		match end {
+			Some(end) => self.track.cut(Some(end)),
+			None => self.track.cut_unended(),
+		}
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

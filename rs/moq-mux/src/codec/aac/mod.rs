@@ -417,19 +417,23 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 }
 
 /// How long one access unit of the AudioSpecificConfig `asc` plays: 1024 core samples, or 960 by
-/// its frameLengthFlag, at the core's rate, which SBR and PS double along with the samples. `None`
-/// for an object type that codes frames of another length, or a config that doesn't parse.
+/// its frameLengthFlag (512 or 480 for low delay), at the core's rate, which SBR and PS double
+/// along with the samples. `None` for an object type that codes frames of another length, or a
+/// config that doesn't parse.
 pub(crate) fn frame_duration(mut asc: &[u8]) -> Option<moq_net::Timestamp> {
 	let mut reader = BitReader::new(&mut asc);
 	let (object_type, core_rate, _) = read_header(&mut reader).ok()?;
 	let (core, _) = read_core(&mut reader, object_type, core_rate).ok()?;
-	// Main, LC, SSR, and LTP; the GASpecificConfig leads with frameLengthFlag.
-	if !(1..=4).contains(&core) {
-		return None;
-	}
+	// Main, LC, SSR, and LTP, and ER AAC LD and ELD; the GASpecificConfig or ELDSpecificConfig
+	// leads with frameLengthFlag.
+	let (long, short) = match core {
+		1..=4 => (1024, 960),
+		23 | 39 => (512, 480),
+		_ => return None,
+	};
 	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
-		0 => 1024,
-		_ => 960,
+		0 => long,
+		_ => short,
 	};
 	moq_net::Timestamp::from_scale(samples, core_rate.into()).ok()
 }
@@ -887,8 +891,11 @@ mod tests {
 		assert_eq!(micros(&FDKAAC_HE_AAC_V2), Some(42_666));
 		// The same SBR config with frameLengthFlag set: 960 core samples.
 		assert_eq!(micros(&[0x2B, 0x11, 0x8A, 0x00]), Some(40_000));
-		// ER AAC LD codes 480 or 512 samples.
-		assert_eq!(micros(&[0xB9, 0x90, 0x00]), None);
+		// ER AAC LD at 48 kHz: 512 samples, or 480 with frameLengthFlag set.
+		assert_eq!(micros(&[0xB9, 0x90, 0x00]), Some(10_666));
+		assert_eq!(micros(&[0xB9, 0x94, 0x00]), Some(10_000));
+		// ER BSAC codes frames of another length.
+		assert_eq!(micros(&[0xB0, 0x90, 0x00]), None);
 	}
 
 	#[test]

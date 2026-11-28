@@ -217,7 +217,48 @@ pub struct Track {
 	kind: TrackKind,
 
 	/// Where the open audio group closes. Unused for video, which groups at its keyframes.
+	audio: Grouping,
+}
+
+/// When an audio track closes its open group.
+#[derive(Default)]
+struct Grouping {
 	join: crate::container::Join,
+	/// The open group holds a packet with audio in it, rather than only DTX packets.
+	voiced: bool,
+}
+
+impl Grouping {
+	/// Count a written frame into the open group, and return `Some` with where it ends, when known,
+	/// once the group should close.
+	///
+	/// A frame that doesn't say how long it plays counts as a point, so its group closes on the
+	/// first frame starting a span past it instead. An Opus encoder entering DTX sends a
+	/// header-only `pause` packet, so the first one after audio closes the group rather than
+	/// leaving it open through the silence; further ones fill groups like any other packet.
+	fn fill(&mut self, written: Written, pause: bool) -> Option<Option<moq_net::Timestamp>> {
+		// The duration counts samples at the codec's rate, which the timestamp's scale may not share.
+		let end = written
+			.duration
+			.zip(written.timestamp.scale())
+			.and_then(|(duration, scale)| written.timestamp.checked_add(duration.convert(scale).ok()?).ok());
+		let full = self.join.fill(written.timestamp, end.unwrap_or(written.timestamp));
+		let silenced = pause && self.voiced;
+		self.voiced |= !pause;
+		if full.is_none() && !silenced {
+			return None;
+		}
+		self.reset();
+		// A full group ends past its furthest frame, which a rewound frame's own end can fall below,
+		// so a group closed for silence before it is full declares no end.
+		Some(end.and(full))
+	}
+
+	/// Forget the open group, which closed some other way.
+	fn reset(&mut self) {
+		self.join.reset();
+		self.voiced = false;
+	}
 }
 
 /// What an audio codec importer wrote: the frame's timestamp, which may come from the clock, and
@@ -319,31 +360,8 @@ impl Track {
 	fn from_kind(kind: TrackKind) -> Self {
 		Self {
 			kind,
-			join: crate::container::Join::default(),
+			audio: Grouping::default(),
 		}
-	}
-
-	/// Count a written audio frame into the open group, closing it once the group holds its span.
-	///
-	/// A frame that doesn't say how long it plays counts as a point, so its group closes on the
-	/// first frame starting a span past it instead. An Opus encoder entering DTX sends one
-	/// header-only packet and then nothing until speech resumes, so that packet closes the group
-	/// too rather than leaving it open through the silence.
-	fn join(&mut self, written: Written, pause: bool) -> Result<()> {
-		// The duration counts samples at the codec's rate, which the timestamp's scale may not share.
-		let end = written
-			.duration
-			.zip(written.timestamp.scale())
-			.and_then(|(duration, scale)| written.timestamp.checked_add(duration.convert(scale).ok()?).ok());
-		let full = self.join.fill(written.timestamp, end.unwrap_or(written.timestamp));
-		if full.is_none() && !pause {
-			return Ok(());
-		}
-		self.join.reset();
-		// A full group ends past its furthest frame, which a rewound frame's own end can fall below,
-		// so a paused group that isn't full leaves its end to the producer.
-		let end = end.and(full);
-		import!(&mut self.kind, import => import.cut(end))
 	}
 
 	/// Decode one whole frame.
@@ -397,20 +415,28 @@ impl Track {
 			// group runs until it holds its span.
 			TrackKind::Aac(ref mut import) => {
 				let written = import.write(frame.into_bytes(), pts)?;
-				self.join(written, false)?;
+				if let Some(end) = self.audio.fill(written, false) {
+					import.close(end)?;
+				}
 			}
 			TrackKind::Opus(ref mut import) => {
 				let pause = frame.as_ref().len() <= 2;
 				let written = import.write(frame.into_bytes(), pts)?;
-				self.join(written, pause)?;
+				if let Some(end) = self.audio.fill(written, pause) {
+					import.close(end)?;
+				}
 			}
 			TrackKind::Mp3(ref mut import) => {
 				let written = import.write(frame.into_bytes(), pts)?;
-				self.join(written, false)?;
+				if let Some(end) = self.audio.fill(written, false) {
+					import.close(end)?;
+				}
 			}
 			TrackKind::Flac(ref mut import) => {
 				let written = import.write(frame.into_bytes(), pts)?;
-				self.join(written, false)?;
+				if let Some(end) = self.audio.fill(written, false) {
+					import.close(end)?;
+				}
 			}
 		}
 
@@ -459,15 +485,17 @@ impl Track {
 	/// Audio closes its own groups once they hold their span; this closes one early, and the next
 	/// span starts from the frame after.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
-		self.join.reset();
-		import!(&mut self.kind, import => import.cut(end))
+		// A rejected end leaves the group open, still measured from its start.
+		import!(&mut self.kind, import => import.cut(end))?;
+		self.audio.reset();
+		Ok(())
 	}
 
 	/// Mark a timeline break, clearing partial frames and restarting handoff measurement.
 	///
 	/// Publishes a marker without lowering advertised values; resumed timestamps must continue forward.
 	pub fn discontinuity(&mut self) -> Result<()> {
-		self.join.reset();
+		self.audio.reset();
 		self.reset_split();
 		import!(&mut self.kind, import => import.discontinuity())
 	}
@@ -498,7 +526,7 @@ impl Track {
 
 	/// Close the current group and open the next one at `start`.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.join.reset();
+		self.audio.reset();
 		self.reset_split();
 		import!(&mut self.kind, import => import.seek(start))
 	}
@@ -1209,8 +1237,9 @@ mod tests {
 		assert_eq!(collect_groups(subscriber).await, vec![3, 5, 2]);
 	}
 
-	/// An encoder entering DTX sends one header-only packet and then nothing, so that packet closes
-	/// its group instead of leaving it open through the silence.
+	/// The first DTX packet after audio closes its group instead of leaving it open through the
+	/// silence, while an encoder that keeps sending DTX packets still gets 100 ms groups, not one
+	/// per packet.
 	#[tokio::test(start_paused = true)]
 	async fn a_dtx_packet_closes_its_audio_group() {
 		let (mut broadcast, catalog) = new_broadcast();
@@ -1222,9 +1251,12 @@ mod tests {
 				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
 				.unwrap();
 		}
-		import
-			.decode(b"a", Some(Timestamp::from_micros(40_000).unwrap()))
-			.unwrap();
+		// Header-only 20 ms packets: the first closes the voiced group, the rest fill their own.
+		for index in 2..9 {
+			import
+				.decode(b"a", Some(Timestamp::from_micros(index * 20_000).unwrap()))
+				.unwrap();
+		}
 		for ts in [2_000_000, 2_020_000] {
 			import
 				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
@@ -1232,7 +1264,40 @@ mod tests {
 		}
 		let _finished = import.finish().unwrap();
 
-		assert_eq!(collect_groups(subscriber).await, vec![3, 2]);
+		// The first packet after the silence starts past the open group's span, so it closes it.
+		assert_eq!(collect_groups(subscriber).await, vec![3, 5, 2, 1]);
+	}
+
+	/// A group closed on a frame of unknown length declares no end, so the producer doesn't
+	/// extrapolate one from the gap before it and move the next group's frames past it.
+	#[tokio::test(start_paused = true)]
+	async fn an_unknown_length_leaves_the_group_end_open() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+		let mut media = crate::container::Consumer::new(
+			subscriber,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+
+		// A code-3 packet whose count byte is missing says nothing of its length.
+		let unknown: &[u8] = &[0x03];
+		let written = [0, 10_000, 150_000, 160_000];
+		for ts in written {
+			import
+				.decode(unknown, Some(Timestamp::from_micros(ts).unwrap()))
+				.unwrap();
+		}
+		let _finished = import.finish().unwrap();
+
+		for ts in written {
+			let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap();
+			assert_eq!(frame.timestamp, Timestamp::from_micros(ts).unwrap());
+		}
 	}
 
 	/// Each audio codec times its frames from its config or header, so its groups close on the
