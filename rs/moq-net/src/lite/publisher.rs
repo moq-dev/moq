@@ -7109,9 +7109,11 @@ impl TrackRun {
 		if polled.is_pending() && matches!(admit, Admit::Best) {
 			self.gave_way = false;
 		}
-		// Ranked anew, the group still waiting may take credit now the cursor had its look. Not
-		// before: a drop or start answered above returns ahead of it.
-		if std::mem::take(&mut self.rerank) && polled.is_pending() {
+		// Ranked anew, the group still waiting may take credit once the cursor found no group to
+		// take its place. Not before: a drop or start answered above returns ahead of the cursor,
+		// and a boundary or a group passed over below leaves the next contender unlooked at.
+		let reranked = std::mem::take(&mut self.rerank);
+		if reranked && polled.is_pending() {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 		if let Poll::Ready(res) = polled {
@@ -7123,6 +7125,7 @@ impl TrackRun {
 					// the subscriber settled it for good.
 					let key = group.start;
 					if self.answer.emits_range() && self.track.record_mut().told(key) {
+						self.rerank = reranked;
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					let Some(group) = position_group(group, &self.frames, !self.ctx.version.has_ranges()) else {
@@ -7138,6 +7141,7 @@ impl TrackRun {
 								self.drop_range(key..key + 1, &hole, writer)?;
 							}
 						}
+						self.rerank = reranked;
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
 					match &mut self.answer {
@@ -7160,6 +7164,7 @@ impl TrackRun {
 					// even if trailing groups (below it) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
+					self.rerank = reranked;
 					match &mut self.answer {
 						Answer::Single(Single::Waiting { held_end, .. }) => *held_end = Some(end),
 						_ => writer.buffer(&lite::SubscribeResponse::End(end))?,
@@ -12382,10 +12387,17 @@ mod serve_group_test {
 	/// A group waiting for credit that ages out of its live join into a lower history rank is
 	/// ranked anew against the groups waiting in the cache before it may take credit, so one that
 	/// now outranks it takes its place without a track event first, credit freeing as it ages or
-	/// not, and an upstream drop forwarded on that pass or not.
+	/// not, an upstream drop forwarded on that pass or not, and the first contender missing its
+	/// head, so the cursor passes it for the next.
 	#[kio::test]
 	async fn lite07_a_waiting_group_aging_down_lets_a_cached_one_take_its_place() {
-		for (credit, upstream_drop) in [(false, false), (true, false), (true, true)] {
+		let cases = [
+			(false, false, false),
+			(true, false, false),
+			(true, true, false),
+			(true, false, true),
+		];
+		for (credit, upstream_drop, headless) in cases {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
@@ -12411,7 +12423,19 @@ mod serve_group_test {
 			while run.poll_step(&mut writer, &waiter).is_ready() {}
 			assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(5));
 			// Only the history range wants group 1, below the live group waiting.
-			open.push(write_open(&mut track, 1));
+			match headless {
+				// Its head is gone, so group 2 behind it is the cached contender.
+				true => {
+					let mut group = track.create_group(group::Info { start: 1 }).unwrap();
+					group.start_at(1).unwrap();
+					group
+						.write_frame(Timestamp::from_millis(1).unwrap(), b"x".as_slice())
+						.unwrap();
+					open.push(group);
+					open.push(write_open(&mut track, 2));
+				}
+				false => open.push(write_open(&mut track, 1)),
+			}
 			while run.poll_step(&mut writer, &waiter).is_ready() {}
 			assert_eq!(
 				run.opening.as_ref().map(|serve| serve.key),
@@ -12435,11 +12459,12 @@ mod serve_group_test {
 			}
 			while run.poll_step(&mut writer, &waiter).is_ready() {}
 			let first = log.orders().first().map(|(_, order)| *order);
+			let contender = if headless { 2 } else { 1 };
 			match credit {
 				true => assert_eq!(
 					first,
-					Some(crate::priority::in_group(1, 0, Order::Ascending)),
-					"group 1 opened first"
+					Some(crate::priority::in_group(contender, 0, Order::Ascending)),
+					"group {contender} opened first"
 				),
 				false => assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(1), "group 5 gave way"),
 			}

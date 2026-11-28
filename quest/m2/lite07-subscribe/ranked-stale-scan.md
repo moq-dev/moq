@@ -6,9 +6,9 @@ A ranked read (`Pick::Ranked`, which a lite-07 publisher uses while a group wait
 
 ## Plan
 
-- `Cursor::best_unread` (`rs/moq-net/src/model/track.rs`) calls `first_unread` once per range on every read, and `first_unread` walks the range's run past every group `wants` rejects. Remember, per range, how far a scan proved the run stale, and resume from there on the next read. A group's staleness can only change when a later group arrives (its successor moves), the edge moves, or the range's budget changes, so reset the mark on any of those: late arrivals below the mark, a range edit or retune, and a drift edge change.
+- `Cursor::best_unread` (`rs/moq-net/src/model/track.rs`) calls `first_unread` once per range on every read, and `first_unread` walks the range's run past every group `wants` rejects. Remember, per range, how far a scan proved the run stale, and resume from there on the next read. A group's staleness can only change when its successor changes (a later group arrives, or the successor aborts and a newer one takes its place), the edge moves, or the range's budget changes, so reset the mark on any of those: late arrivals and aborts below the mark, a range edit or retune, and a drift edge change.
 - Recommended over a partition search by age, which needs an ordered index the cache does not keep.
-- Test, failing first on a cost counter: a backlog of N groups stale for the live range and owed to history, drained by ranked reads, checks O(N) groups in all. A second test lands a late group inside the proven-stale stretch and expects it to be picked once fresh.
+- Test, failing first on a cost counter: a backlog of N groups stale for the live range and owed to history, drained by ranked reads, checks O(N) groups in all. Two more land a late group inside the proven-stale stretch, and abort the successor of a group in it, each expecting the group that turns fresh to be picked.
 - Measure with the track benches before and after, swept over backlog size.
 
 Public API: none. Wire: none.
