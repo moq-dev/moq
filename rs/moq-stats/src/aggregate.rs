@@ -1928,6 +1928,22 @@ mod tests {
 		assert!(traffic.inner.retired.is_empty());
 	}
 
+	#[tokio::test]
+	#[should_panic(expected = "grace must be non-zero")]
+	async fn a_zero_grace_is_refused() {
+		Consumer::new(produce_origin().consume(), Config::new().with_grace(Duration::ZERO));
+	}
+
+	#[test]
+	fn peer_counters_saturate() {
+		let mut total = Traffic::default();
+		total.bytes = u64::MAX - 1;
+		let mut other = Traffic::default();
+		other.bytes = 5;
+		total.add(other);
+		assert_eq!(total.bytes, u64::MAX);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn churn_keeps_nodes_bounded() {
 		// Distinct nodes come and go, as identities make every restart do. The

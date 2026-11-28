@@ -1,12 +1,9 @@
-# [S] moq-stats stops stalling on a failed node subscribe and rejects zero settings
+# [XS] moq-stats stops stalling on a failed node subscribe
 
 ## Goal
 
 `moq-stats` keeps reading a node whose stats subscription failed while its
-track stays listed, ends the producer's delta groups with GROUP_END when the
-next group's start is known, rejects a zero publish interval or a zero grace
-at setup, and never panics or wraps on counters a peer sends. Not here: the
-stats layout or any new counter.
+track stays listed. Not here: the stats layout or any new counter.
 
 ## Plan
 
@@ -31,19 +28,16 @@ elapsed), and the same-tick reclaim and re-adopt collision.
    in a test first. Recommended: resume on a MoQ signal, such as departing
    and re-resolving the node as the arm without a listing does (its `rearmed`
    guard stops a hot loop), not a timer.
-2. **GROUP_END** (`rs/moq-stats/src/produce.rs` around `:653`): the group
-   closed because the next one starts should use `finish_at(start)`, so a
-   lite-07 reader accounts the span. The other two `finish()` calls (around
-   `:668` and `:672`) have no next start and stay.
-3. **Zero settings**: `Config::with_interval(Duration::ZERO)` (documented
-   non-zero) divides by zero in `Drain::stamp`, and `grace == 0` folds an
-   adopted restart's counters and then re-adds them. Nothing sets either
-   today (the relay rejects a zero interval), so recommended: refuse both
-   loudly where the producer and aggregator are built rather than adding
-   machinery for them.
-4. **Counter overflow** (`rs/moq-net/src/stats.rs`, `Content::add`,
-   `Traffic::add`, `Presence::add`): the `u64` fields are deserialized from
-   peers, so a hostile node's counters can overflow the aggregate's `+=`
-   (a panic in debug, a wrap in release). Use saturating adds.
+
+Done in the PR: `finish_at(start)` on the group closed by the next, `Producer::new` and
+`Consumer::new` panic on a zero interval or grace, and the peer-fed counter adds saturate.
+
+Reproduction attempt: a node whose track was aborted before the aggregator polled
+did not stall (the aborted track is not left listed), so the repro needs a
+subscribe that fails while the listing still offers the track. Recommended fix:
+`Node` remembers the track name it subscribed to and clears it on the listing's
+`Removed`/`Finished`; a subscribe error with that name still listed and no newer
+offer departs and re-resolves once (the `rearmed` guard), otherwise it keeps
+waiting as today.
 
 Public API: none beyond the loud refusal of zero values. Wire: none.

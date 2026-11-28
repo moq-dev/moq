@@ -1702,6 +1702,12 @@ mod tests {
 		assert_eq!(snapshot.largest, Some(6_000), "the next change is a delta");
 	}
 
+	#[test]
+	#[should_panic(expected = "interval must be non-zero")]
+	fn a_zero_interval_is_refused() {
+		let _ = Producer::new(Config::new().with_interval(Duration::ZERO));
+	}
+
 	/// A group closed because the next one starts ends where that one begins, so a
 	/// lite-07 reader accounts the span between them.
 	#[tokio::test]
