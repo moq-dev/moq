@@ -1332,42 +1332,6 @@ int main()
 	}
 	report("an all-disabled section clears the playing rendition");
 
-	// A rendition's stream identity is part of what names it, for the active and the pending
-	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
-	{
-		TestRelay relay;
-		reset(relay.Url());
-		Publisher publisher(relay, "obs/test");
-		void *source = createSource();
-		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
-		auto snapshot = CatalogSnapshot(publisher);
-		auto *ctx = static_cast<moq_source *>(source);
-		{
-			std::lock_guard<std::mutex> lock(ctx->mutex);
-			const auto &conn = ctx->connection;
-			snapshot.video.begin()->second.identity = "01900000-0000-7000-8000-000000000001";
-			snapshot.audio.begin()->second.identity = "01900000-0000-7000-8000-000000000001";
-			moq_source_subscribe_video(ctx, conn, snapshot);
-			moq_source_subscribe_audio(ctx, conn, snapshot);
-			CHECK(conn->pending_video && conn->pending_audio);
-			const auto pending_video = conn->pending_video;
-			const auto pending_audio = conn->pending_audio;
-			// The same identity keeps the pending track.
-			moq_source_subscribe_video(ctx, conn, snapshot);
-			moq_source_subscribe_audio(ctx, conn, snapshot);
-			CHECK(conn->pending_video == pending_video && conn->pending_audio == pending_audio);
-			// Another identity replaces it.
-			snapshot.video.begin()->second.identity = "01900000-0000-7000-8000-000000000002";
-			snapshot.audio.begin()->second.identity = "01900000-0000-7000-8000-000000000002";
-			moq_source_subscribe_video(ctx, conn, snapshot);
-			moq_source_subscribe_audio(ctx, conn, snapshot);
-			CHECK(conn->pending_video && conn->pending_video != pending_video);
-			CHECK(conn->pending_audio && conn->pending_audio != pending_audio);
-		}
-		destroySource(source);
-	}
-	report("identity change resubscribes");
-
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
 		TestRelay relay;
@@ -1588,13 +1552,11 @@ int main()
 		auto config = snapshot->video.begin()->second;
 		std::shared_ptr<moq::Route> hidden;
 		if (sibling) {
-			// A different stream than the one the rendition pins, hidden until announced.
+			// A sibling without the rendition's track, hidden until announced.
 			moq::RouteOptions options;
 			options.hidden = true;
-			options.identity = TestOk(moq::Identity::parse("obs-test-other"), "identity");
 			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
-			config.identity = "obs-test-pinned";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
@@ -1614,8 +1576,8 @@ int main()
 			// An unannounced sibling stays pending, without interrupting current playback.
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-			// A different stream is a real resolution failure.
-			TestOk(hidden->announce(), "announce mismatched sibling");
+			// A sibling without the track is a real subscription failure.
+			TestOk(hidden->announce(), "announce the sibling");
 		}
 		CHECK(WaitFor([] {
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);

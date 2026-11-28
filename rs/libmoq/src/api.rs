@@ -2907,7 +2907,7 @@ pub unsafe extern "C" fn moq_identity_text(identity: u32, dst: *mut moq_string) 
 
 /// Whether a session minted the identity for a route whose wire carries none: 1 if minted, 0 if
 /// named, or a negative code on failure. A minted identity names the announcement, not the
-/// publisher's stream, so signing refuses it and a catalog's identity check skips it.
+/// publisher's stream, so signing refuses it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_identity_minted(identity: u32) -> i32 {
 	ffi::enter(move || {

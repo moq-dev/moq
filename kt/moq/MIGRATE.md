@@ -200,11 +200,9 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 
-### Catalog references carry their instance
+### `resolve` takes the catalog rendition
 
-`Video` and `Audio` gain `instance`, the publisher instance their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` and `instance` from it.
-Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another instance.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` from it.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
