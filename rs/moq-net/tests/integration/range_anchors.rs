@@ -23,8 +23,6 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-04",
-	"moq-lite-05",
-	"moq-lite-06",
 	"moq-lite-07-wip",
 	"moq-transport-18",
 	"moq-transport-22",
@@ -235,7 +233,7 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 		let mut oldest = read(Some(version), Range::ALL).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
-			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4000],
+			"moq-lite-03" | "moq-lite-04" | "moq-transport-18" | "moq-transport-22" => &[4000],
 			_ => &[0, 1000, 2000, 3000, 4000],
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");

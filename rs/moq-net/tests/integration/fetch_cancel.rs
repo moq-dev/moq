@@ -165,13 +165,8 @@ async fn abandoned_fetches_reach_the_publisher(version: &str) {
 }
 
 #[kio::test]
-async fn abandoned_fetch_reaches_the_publisher_lite05() {
-	abandoned_fetches_reach_the_publisher("moq-lite-05").await;
-}
-
-#[kio::test]
-async fn abandoned_fetch_reaches_the_publisher_lite06() {
-	abandoned_fetches_reach_the_publisher("moq-lite-06").await;
+async fn abandoned_fetch_reaches_the_publisher_lite07() {
+	abandoned_fetches_reach_the_publisher("moq-lite-07-wip").await;
 }
 
 /// A group fetched through a relay is still there for the next fetch shortly after the
@@ -230,11 +225,6 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 		}
 	};
 	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
-}
-
-#[kio::test]
-async fn a_refetch_within_the_linger_stays_on_the_relay_lite06() {
-	a_refetch_within_the_linger_stays_on_the_relay("moq-lite-06").await;
 }
 
 #[kio::test]

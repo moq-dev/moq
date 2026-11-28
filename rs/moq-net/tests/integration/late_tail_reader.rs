@@ -111,9 +111,13 @@ async fn each_late_reader_reads_the_finished_group() {
 
 			let budget = Duration::from_secs(60);
 			let oldest = Subscription::default().with_max(budget);
-			let from_zero = Subscription::default()
-				.with_ranges([support::keys(0..)])
-				.with_max(budget);
+			// A lite-05/06 copy refuses a start by key, so it reads from the oldest group twice.
+			let from_zero = match support::keyed(&second.parse().unwrap()) {
+				true => Subscription::default()
+					.with_ranges([support::keys(0..)])
+					.with_max(budget),
+				false => oldest.clone(),
+			};
 
 			let (frames, end) = read(&relay, first.parse().unwrap(), oldest.clone()).await;
 			assert_eq!(
@@ -176,8 +180,9 @@ async fn concurrent_late_readers_read_the_finished_group() {
 			let relay = relay.clone();
 			let version = ["moq-lite-07-wip", "moq-lite-06"][(index % 2) as usize];
 			let budget = Duration::from_secs([5, 60, 1][(index % 3) as usize]);
+			// A lite-05/06 copy refuses a start by key.
 			let subscription = match index % 3 {
-				0 => Subscription::default()
+				0 if support::keyed(&version.parse().unwrap()) => Subscription::default()
 					.with_ranges([support::keys(0..)])
 					.with_max(budget),
 				_ => Subscription::default().with_max(budget),
@@ -264,12 +269,12 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 				})
 			};
 			kio::clock::sleep(Duration::from_millis(stagger)).await;
-			for subscription in [
-				Subscription::default().with_max(budget),
-				Subscription::default()
-					.with_ranges([support::keys(0..)])
-					.with_max(budget),
-			] {
+			// A lite-05/06 copy refuses a start by key.
+			let from_zero = match support::keyed(&version.parse().unwrap()) {
+				true => Subscription::default().with_ranges([support::keys(0..)]),
+				false => Subscription::default(),
+			};
+			for subscription in [Subscription::default().with_max(budget), from_zero.with_max(budget)] {
 				let (frames, end) = read(&relay, version.parse().unwrap(), subscription).await;
 				assert_eq!(
 					(frames, end.is_ok()),

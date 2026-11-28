@@ -304,28 +304,14 @@ async fn drain(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 	got
 }
 
-const LITE06: &str = "moq-lite-06";
-
-/// Through a lite-06 hop, a group the publisher reported dropped stays dropped for every
-/// reader, whatever budget it widens to, with no session error. Lite-07 end to end, the stale
-/// report stays final on its subscription, but the widened reader still gets the group, which
-/// a request of the relay's own fetches from the publisher. A shrink sends no drops: what an
-/// update narrows away is still there for a later reader.
+/// A group the publisher reported dropped stays dropped on its subscription, but the stale
+/// report was judged under that subscription's budget: the widened reader still gets the group,
+/// which a request of the relay's own fetches from the publisher. A shrink sends no drops: what
+/// an update narrows away is still there for a later reader. A lite-05/06 hop can't carry it:
+/// its drops name sequence numbers, which key nothing in a copy.
 #[kio::test]
-async fn a_lite06_hop_keeps_a_reported_group_dropped() {
-	for versions in [[LITE07, LITE06], [LITE06, LITE06], [LITE07, LITE07]] {
-		reported_drop_through(versions).await;
-	}
-}
-
-/// [`a_lite06_hop_keeps_a_reported_group_dropped`] with the lite-06 hop upstream of a lite-07
-/// one: a lite-06 drop is final for the relay's subscription, but it was judged under that
-/// subscription's budget. The relay forwards it as a stale one, the widened viewer still wants
-/// it, and the group is fetched from the publisher, which still holds it, as the relay drills'
-/// FETCH recovery requires.
-#[kio::test]
-async fn a_lite06_upstream_drop_is_fetched_for_a_widened_lite07_viewer() {
-	reported_drop_through([LITE06, LITE07]).await;
+async fn a_reported_drop_is_fetched_for_a_widened_reader() {
+	reported_drop_through([LITE07, LITE07]).await;
 }
 
 async fn reported_drop_through(versions: [&str; 2]) {
@@ -348,19 +334,12 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		write(&chain.source, 7);
 		assert_eq!(received(&mut first).await, BTreeSet::new(), "{name}");
 
-		// Over a lite-07 viewer hop the widened reader still wants the stale group, which a
-		// request of its own fills from upstream; over a lite-06 viewer hop the drop is final.
-		let want: BTreeSet<u64> = match versions[1] == LITE06 {
-			true => (0..GROUPS).filter(|key| *key != 7).collect(),
-			false => (0..GROUPS).collect(),
-		};
-		// Widening a lite-07 viewer's live join keeps where it started, past the groups B1
-		// expired, so it takes back only the stale group above its start. Over a lite-06
-		// viewer hop the join reaches back to the oldest group, so the re-offer serves those.
-		let widened = match versions[1] == LITE06 {
-			true => &want - &[5, 6, 8, 9].into(),
-			false => [7].into(),
-		};
+		// The widened reader still wants the stale group, which a request of its own fills
+		// from upstream.
+		let want: BTreeSet<u64> = (0..GROUPS).collect();
+		// Widening a live join keeps where it started, past the groups B1 expired, so it takes
+		// back only the stale group above its start.
+		let widened: BTreeSet<u64> = [7].into();
 		first.update(reading(B2, [Range::ALL])).unwrap();
 		assert_eq!(received(&mut first).await, widened, "{name}: the widened reader");
 		let mut second = chain.subscribe(reading(B2, [Range::ALL])).await;
@@ -485,11 +464,11 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 	const EXPIRY: Duration = Duration::from_secs(10);
 	const PAYLOAD: usize = 16 * 1024;
 	const WRITTEN: u64 = 4;
-	for versions in [[LITE06, LITE06], [LITE07, LITE07]] {
+	for versions in [[LITE07, LITE07]] {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			// One stream of credit past the Announce Stream that lite-07 holds: group 0's, held from the relay,
 			// so the rest queue.
-			let credit = if versions == [LITE07, LITE07] { 2 } else { 1 };
+			let credit = 2;
 			let chain = Chain::with_credit(versions, [expiring(EXPIRY), forever(), forever()], Some(credit)).await;
 			// A budget bounds the wait on a group a hop judged stale; none would fill it instead.
 			let mut reader = chain

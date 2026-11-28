@@ -195,7 +195,6 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 async fn an_explicit_start_holds_on_an_untimed_track() {
 	for version in [
 		"moq-lite-03",
-		"moq-lite-06",
 		"moq-lite-07-wip",
 		"moq-transport-22",
 		"moq-transport-23",
@@ -280,11 +279,11 @@ async fn datagrams_arrive_as_published() {
 	}
 }
 
-/// A standalone FETCH of an untimed track answers with untimed objects, except that lite-05
-/// and lite-06 carry each one's group key.
+/// A standalone FETCH of an untimed track answers with untimed objects. A lite-05/06 copy
+/// refuses a fetch by key.
 #[kio::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
+	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0]
 			.route("room", moq_net::origin::RouteOptions::hidden())

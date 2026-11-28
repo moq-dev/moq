@@ -146,13 +146,12 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 }
 
 /// A group whose stream a newer one reset to make room is given up on its subscription, on
-/// each lite version: its reader ends with TOO_FAR_BEHIND after the frames that arrived, and a
+/// lite-07, whose copy can be fetched by key: its reader ends with TOO_FAR_BEHIND after the frames that arrived, and a
 /// FETCH returns it whole once it finishes. So does one on a lite-07 relay link, where the
 /// `ietf` extension changes nothing for a moq-lite track.
 #[kio::test]
 async fn a_reset_group_is_fetched_whole() {
 	for (version, ietf) in [
-		("moq-lite-06", false),
 		("moq-lite-07-wip", false),
 		("moq-lite-07-wip", true),
 	] {

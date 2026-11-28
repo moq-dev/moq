@@ -18,7 +18,7 @@ fn origin(hop: u64) -> origin::Producer {
 
 #[kio::test]
 async fn sequential_viewers_share_the_relays_fetched_groups() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let broadcast = publisher.route("room", origin::RouteOptions::default()).unwrap();

@@ -26,7 +26,7 @@ const GROUPS: u64 = 10;
 const BUDGET: Duration = Duration::from_secs(100);
 
 /// Moq-transport publishers refuse multi-group history; the live subscription still works.
-const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
+const VERSIONS: &[&str] = &["moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());

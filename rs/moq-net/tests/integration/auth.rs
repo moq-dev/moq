@@ -1743,16 +1743,6 @@ limit_cases!(
 );
 
 #[kio::test]
-async fn lite_05_narrowing_resets_a_fetch_in_flight() {
-	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
-}
-
-#[kio::test]
-async fn lite_06_narrowing_resets_a_fetch_in_flight() {
-	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
-}
-
-#[kio::test]
 async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
 }

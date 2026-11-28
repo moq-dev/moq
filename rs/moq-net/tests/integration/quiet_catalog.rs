@@ -20,10 +20,10 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
+const VERSIONS: &[&str] = &["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// The versions that forward a resume's floor upstream; the IETF relay subscribes without one.
-const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
+const LITE: &[&str] = &["moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());

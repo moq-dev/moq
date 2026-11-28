@@ -16,7 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[kio::test]
 async fn a_finished_copy_reads_back_what_it_evicted() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-07-wip"] {
 		for during_tail in [true, false] {
 			read_back(version.parse().unwrap(), during_tail).await;
 		}

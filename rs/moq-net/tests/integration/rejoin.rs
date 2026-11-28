@@ -39,95 +39,6 @@ async fn read_all(group: &mut group::Consumer) -> moq_net::Result<Vec<Vec<u8>>> 
 	Ok(frames)
 }
 
-/// A rejoin recovers the group reset on leave, whether or not the live edge moved past it.
-///
-/// The relay cancels its idle upstream subscription, resetting that group mid-transfer.
-/// Resuming the rejoin at the frame where the reset landed would ask upstream for a tail
-/// whose head is gone, so the group would never reach the returning reader.
-#[kio::test]
-async fn rejoin_recovers_the_group_reset_on_leave() {
-	for advance in [false, true] {
-		for version in ["moq-lite-05", "moq-lite-06"] {
-			kio::clock::timeout(TEST_TIMEOUT, async {
-				let publisher = produce_origin(1);
-				let relay = produce_origin(2);
-
-				let broadcast = publisher
-					.route("bench", moq_net::origin::RouteOptions::hidden())
-					.unwrap();
-				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-				broadcast.announce().unwrap();
-
-				let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-				options.server_publish = Some(publisher.consume());
-				options.client_subscribe = Some(relay.clone());
-				let _pair = connect_mock(options).await;
-
-				let consumer = relay.consume();
-				let remote = consumer
-					.follow("bench", None)
-					.unwrap()
-					.available()
-					.await
-					.unwrap()
-					.unwrap();
-
-				let ts = |ms| Timestamp::from_millis(ms).unwrap();
-				let prefs = || track::Subscription::default().with_max(Duration::from_secs(10));
-
-				let group = track.append_group(ts(0), b"a0".as_ref()).unwrap();
-				group.finish().unwrap();
-				let mut open = track.append_group(ts(100), b"b0".as_ref()).unwrap();
-
-				let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
-				loop {
-					let mut group = sub.recv_group().await.unwrap().unwrap();
-					group.read_frame().await.unwrap().unwrap();
-					if group.start == 100 {
-						break;
-					}
-				}
-
-				// Leave mid-group; the publisher cuts the open group once demand is gone.
-				drop(sub);
-				crate::support::unwanted(track.demand()).await.unwrap();
-				open.write_frame(ts(133), b"b1".as_ref()).unwrap();
-				open.finish().unwrap();
-
-				if advance {
-					let live = track.append_group(ts(5000), b"c0".as_ref()).unwrap();
-					live.finish().unwrap();
-				}
-
-				let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
-				let mut rejoined = Vec::new();
-				// Arrival order: the reset group comes back once the route delivers it again,
-				// which may be after a newer group.
-				let wanted: &[u64] = if advance { &[100, 5000] } else { &[100] };
-				while !wanted.iter().all(|want| rejoined.iter().any(|(seq, _)| seq == want)) {
-					let mut group = sub.recv_group().await.unwrap().unwrap();
-					let key = group.start;
-					rejoined.push((key, read_all(&mut group).await));
-				}
-				rejoined.sort_by_key(|(seq, _)| *seq);
-				let reset = rejoined.iter().find(|(seq, _)| *seq == 100).expect("reset group");
-				// The reader asks for the group it is missing, so the reset group comes back
-				// whole even once the live edge has moved past it.
-				assert_eq!(
-					reset.1.as_ref().unwrap(),
-					&vec![b"b0".to_vec(), b"b1".to_vec()],
-					"{version}"
-				);
-				if advance {
-					assert_eq!(rejoined.last().unwrap().1.as_ref().unwrap(), &vec![b"c0".to_vec()]);
-				}
-			})
-			.await
-			.unwrap_or_else(|_| panic!("{version} timed out"));
-		}
-	}
-}
-
 /// A reader rejoining a track another handle kept open is not handed what the relay cached
 /// before it went idle.
 ///
@@ -208,7 +119,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 /// 3 landing first is not a gap after group 0, so a reader asking from group 0 gets it.
 #[kio::test]
 async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-07-wip"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);

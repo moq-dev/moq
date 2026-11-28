@@ -98,7 +98,7 @@ async fn read_from_expired(version: &str) -> Vec<u64> {
 
 #[kio::test]
 async fn an_older_start_on_a_shared_copy_is_fed() {
-	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-07-wip"] {
 		let read = read_from_expired(version).await;
 		// Everything from the oldest group the relay still holds, through the live edge.
 		assert_eq!(

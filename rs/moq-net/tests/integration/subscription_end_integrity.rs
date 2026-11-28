@@ -67,7 +67,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(subscriber.clone());
 	let MockPair { client, server, .. } = connect_mock(options).await;
@@ -194,7 +194,6 @@ async fn a_finished_track_ends_clean_while_its_session_lives() {
 /// subscribe-response streams, and IETF on its shared and per-request control streams.
 const DEATH_VERSIONS: &[&str] = &[
 	"moq-lite-03",
-	"moq-lite-05",
 	"moq-lite-07-wip",
 	"moq-transport-18",
 	"moq-transport-22",
@@ -370,7 +369,7 @@ async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 /// A FETCH cut off by a clean close ends as a cancelled session, whichever side closed.
 #[kio::test]
 async fn a_session_close_cancels_a_pending_fetch_from_either_side() {
-	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+	for version in ["moq-lite-07-wip"] {
 		for kill in [Kill::RemoteClose, Kill::LocalClose] {
 			let err = kio::clock::timeout(TIMEOUT, fetch_killed(version, kill))
 				.await

@@ -223,7 +223,7 @@ async fn local_consumer_sees_only_announced_broadcasts() {
 
 #[kio::test]
 async fn remote_lite_consumer_sees_what_a_local_one_does() {
-	assert_eq!(lifecycle(Observer::Remote("moq-lite-05")).await, EXPECTED);
+	assert_eq!(lifecycle(Observer::Remote("moq-lite-07-wip")).await, EXPECTED);
 }
 
 #[kio::test]

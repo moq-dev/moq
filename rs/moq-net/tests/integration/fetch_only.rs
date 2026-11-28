@@ -538,9 +538,9 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 /// absolute start on every draft, draft 18 included.
 #[kio::test]
 async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
-	let versions = moq_net::Versions::all();
+	let versions = support::keyed_versions();
 	for max_age in [None, Some(Duration::from_secs(30))] {
-		for version in versions.iter().copied().chain(["moq-lite-07-wip".parse().unwrap()]) {
+		for version in versions.iter().copied() {
 			kio::clock::timeout(TIMEOUT, async {
 				let publisher = produce_origin(1);
 				let (broadcast, track) = publish_live(&publisher, timed().with_max_age(max_age), 1);

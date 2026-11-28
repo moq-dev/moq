@@ -24,7 +24,8 @@ const BUDGET: Duration = Duration::from_secs(60);
 /// A budget no group outlives, on the publisher.
 const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 
-const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
+/// Lite-05/06 copies refuse a range naming a key, which their upstream numbers by sequence.
+const LITE: &[&str] = &["moq-lite-07-wip"];
 
 const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 

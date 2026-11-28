@@ -40,7 +40,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let mut g1 = track.create_group(moq_net::Timestamp::unscaled(1), &b"1a"[..]).unwrap();
 
 	let client = produce_origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(client.clone());
 	let _pair = connect_mock(options).await;

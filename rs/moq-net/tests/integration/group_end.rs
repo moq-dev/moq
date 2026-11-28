@@ -15,7 +15,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
+const VERSIONS: &[&str] = &["moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());

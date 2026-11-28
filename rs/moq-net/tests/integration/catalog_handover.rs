@@ -499,8 +499,8 @@ macro_rules! fetch_tests {
 }
 
 // A fetch needs no identity. moq-transport is left out: its copy goes idle on the leave
-// and still answers from the open group it can no longer feed.
+// and still answers from the open group it can no longer feed, and a lite-05/06 copy refuses
+// a fetch by key.
 fetch_tests! {
-	fetch_lite_06: "moq-lite-06",
 	fetch_lite_07: "moq-lite-07-wip",
 }

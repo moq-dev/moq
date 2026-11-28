@@ -126,7 +126,7 @@ async fn history(version: Version, relay: bool, finished: bool) {
 #[kio::test]
 async fn a_range_of_history_reads_its_groups_and_ends() {
 	let mut failures = Vec::new();
-	for version in support::every_version() {
+	for version in support::keyed_versions() {
 		for relay in [false, true] {
 			for finished in [false, true] {
 				if kio::clock::sim::spawn(history(version, relay, finished)).await.is_err() {
@@ -158,7 +158,7 @@ async fn straddling(version: Version, relay: bool) {
 #[kio::test]
 async fn a_range_across_the_live_edge_reads_up_to_its_end() {
 	let mut failures = Vec::new();
-	for version in support::every_version() {
+	for version in support::keyed_versions() {
 		for relay in [false, true] {
 			if kio::clock::sim::spawn(straddling(version, relay)).await.is_err() {
 				failures.push((version, relay));
@@ -192,7 +192,7 @@ async fn back_to_back(version: Version, relay: bool, groups: &[u64], hold: bool)
 #[kio::test]
 async fn one_range_reads_back_to_back_each_complete() {
 	let mut failures = Vec::new();
-	for version in support::every_version() {
+	for version in support::keyed_versions() {
 		for relay in [false, true] {
 			for groups in [&[1, 2][..], &[2, 1, 0][..]] {
 				for hold in [false, true] {
@@ -255,7 +255,7 @@ async fn moved_off(version: Version, relay: bool) {
 #[kio::test]
 async fn a_held_history_group_outlives_its_ranges_moving_off_it() {
 	let mut failures = Vec::new();
-	for version in support::every_version() {
+	for version in support::keyed_versions() {
 		for relay in [false, true] {
 			if kio::clock::sim::spawn(moved_off(version, relay)).await.is_err() {
 				failures.push((version, relay));

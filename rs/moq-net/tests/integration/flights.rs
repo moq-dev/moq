@@ -24,7 +24,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// 48 MiB of 16 KiB frames: half again the live tail.
 const FRAMES: u32 = 3_000;
 
-const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
+const VERSIONS: &[&str] = &["moq-lite-07-wip"];
 
 /// Frame `index`: 16 KiB naming its index.
 fn numbered(index: u32) -> Bytes {

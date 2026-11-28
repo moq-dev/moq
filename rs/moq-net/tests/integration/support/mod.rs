@@ -291,6 +291,19 @@ pub fn every_version() -> Vec<moq_net::Version> {
 	moq_net::Version::ALL.to_vec()
 }
 
+/// Whether a copy received over `version` can be asked for a group by key: lite-05/06 number
+/// groups by sequence, so a copy over them answers only requests naming none.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn keyed(version: &moq_net::Version) -> bool {
+	!matches!(version.alpn(), "moq-lite-05" | "moq-lite-06")
+}
+
+/// [`every_version`] whose copies can be asked for a group by key; see [`keyed`].
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn keyed_versions() -> Vec<moq_net::Version> {
+	every_version().into_iter().filter(keyed).collect()
+}
+
 /// splitmix64, so every platform builds the same seeded cases.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub struct Rng(pub u64);

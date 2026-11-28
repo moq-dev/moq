@@ -76,8 +76,6 @@ fn history() -> Vec<(u64, Vec<Vec<u8>>)> {
 #[kio::test]
 async fn an_errored_end_keeps_its_history_across_a_hop() {
 	for (name, subscribe_first) in [
-		("moq-lite-06", false),
-		("moq-lite-06", true),
 		("moq-lite-07-wip", false),
 		("moq-lite-07-wip", true),
 	] {

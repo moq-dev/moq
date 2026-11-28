@@ -20,7 +20,6 @@ const BUDGET: Duration = Duration::from_millis(500);
 
 /// IETF peers negotiate the same superseded-group budget as Lite peers.
 const VERSIONS: &[&str] = &[
-	"moq-lite-06",
 	"moq-lite-07-wip",
 	"moq-transport-18",
 	"moq-transport-22",

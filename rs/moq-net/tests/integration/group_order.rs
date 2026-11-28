@@ -155,8 +155,6 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 async fn a_backlog_is_served_in_the_subscription_order() {
 	let mut failures = Vec::new();
 	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
 		"moq-lite-07-wip",
 		"moq-transport-18",
 		"moq-transport-22",

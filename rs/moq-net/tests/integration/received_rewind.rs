@@ -77,7 +77,7 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_ranges([support::keys(0..)])
+		.with_ranges([moq_net::track::Range::ALL])
 		.with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -123,12 +123,16 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 }
 
 /// A timed track's timestamps cross a lite-06 or moq-transport hop between two origins with
-/// their values, and the relay serves them on over every version.
+/// their values, and the relay serves them on over every version. A moq-transport subscriber
+/// fetches the late, older group by key, which a lite-06 copy refuses.
 #[kio::test]
 async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 	let mut failures = Vec::new();
 	for upstream in ["moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
+			if upstream == "moq-lite-06" && downstream.starts_with("moq-transport") {
+				continue;
+			}
 			let (timescale, got) = relay(upstream, downstream).await;
 			let ok = timescale == Some(moq_net::Timescale::MILLI)
 				&& matches!(

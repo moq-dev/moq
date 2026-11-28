@@ -17,7 +17,6 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 const VERSIONS: &[&str] = &[
-	"moq-lite-05",
 	"moq-lite-07-wip",
 	"moq-transport-18",
 	"moq-transport-22",
