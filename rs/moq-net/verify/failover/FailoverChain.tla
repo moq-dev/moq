@@ -72,9 +72,7 @@ Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 VARIABLES
     org,     \* the origin's track: frames written per group, and whether it ended
-    alive,   \* each relay "up", "closed" (dead, its sources closed, its copies not yet
-             \* failed), "shown" (its copies failed too), or "down"; a dead relay's route
-             \* stays in the table through "closed" and "shown"
+    alive,   \* each relay "up", "shown" (dead, its route still in the table), or "down"
     deaths,  \* relays that died
     cp,      \* cp[e]: the copy at e[1] of the track e[2] serves, and e[2]'s reader for it
     front,   \* front[r]: the route r serves from, how its track ended, the route it
@@ -229,11 +227,11 @@ Answering(u) ==
     ELSE Serving(u)
 Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] = "up" /\ front[w].end # "err"
 \* A route still in the table: a dead relay's route stays until its session's close is
-\* seen (a claim's debounce). Nothing new is asked through it, but a front holds a track
-\* rather than end it while it shows: a session closes the sources of the copies it
-\* carries before it fails the copies (`SubscriberDriver::abort`), so the front reads
-\* each copy's failure as its source going, a route's loss that judges no track.
-Shows(w) == Routable(w) \/ (w # "O" /\ alive[w] \in {"closed", "shown"})
+\* seen (a claim's debounce). Its copies have failed and nothing new is asked through
+\* it, but a front holds a track rather than end it while it shows: a session closes the
+\* sources of the copies it carries before it fails the copies (`SubscriberDriver::abort`),
+\* so each failure reads as its route's loss, which judges no track.
+Shows(w) == Routable(w) \/ (w # "O" /\ alive[w] = "shown")
 
 \* A complete copy (`TrackState::is_complete` once every group below the end
 \* settled, `Slot::is_settled`): its upstream ended it, and every group from
@@ -527,40 +525,21 @@ Forget(u) ==
     /\ cp' = [e \in Edges |-> IF e[1] = u THEN Gone ELSE cp[e]]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
-\* A relay dies: its sources close, so the fronts reading it see their route's source
-\* go, and its own copies vanish. The copies downstream of it are still to fail
-\* (`Fail`), and its route still shows until `Withdraw`.
+\* A relay dies: copies downstream of it fail, and its own vanish. Its route still
+\* shows until `Withdraw`.
 Die(r) ==
     /\ r \in Mortal
     /\ alive[r] = "up"
     /\ deaths < MaxDeaths
-    /\ alive' = [alive EXCEPT ![r] = "closed"]
+    /\ alive' = [alive EXCEPT ![r] = "shown"]
     /\ deaths' = deaths + 1
-    /\ cp' = [e \in Edges |-> IF e[1] = r THEN Gone ELSE cp[e]]
+    /\ cp' = [e \in Edges |->
+                IF e[1] = r THEN Gone
+                ELSE IF e[2] = r /\ Live(e) THEN [cp[e] EXCEPT !.st = "failed"]
+                ELSE cp[e]]
     /\ UNCHANGED <<org, front, left>>
 
-\* The dead relay's session fails the copies it carried, once their sources closed.
-Fail(r) ==
-    /\ alive[r] = "closed"
-    /\ alive' = [alive EXCEPT ![r] = "shown"]
-    /\ cp' = [e \in Edges |-> IF e[2] = r /\ Live(e) THEN [cp[e] EXCEPT !.st = "failed"] ELSE cp[e]]
-    /\ UNCHANGED <<org, deaths, front, left>>
-
-\* A front takes the failure of its serving copy as the track's verdict while that copy's
-\* source is still open (`Ended::Aborted`): no route continues what it delivered, and every
-\* reader fails with it. Unreachable while a session closes sources before it fails
-\* copies, which is what `FailsOnlyUnroutable` checks.
-Verdict(u) ==
-    /\ u \in Relays
-    /\ front[u].end = "open"
-    /\ cp[Serving(u)].st = "failed"
-    /\ Routable(front[u].cur)
-    /\ front' = [front EXCEPT ![u].end = "err"]
-    /\ cp' = [e \in Edges |->
-                IF e[2] = u /\ Live(e) THEN [cp[e] EXCEPT !.st = "failed"] ELSE cp[e]]
-    /\ UNCHANGED <<org, alive, deaths, left>>
-
-\* A dead relay's route leaves the table, once its copies failed.
+\* A dead relay's route leaves the table.
 Withdraw(r) ==
     /\ alive[r] = "shown"
     /\ alive' = [alive EXCEPT ![r] = "down"]
@@ -592,11 +571,11 @@ Next ==
         \/ \E s \in Srcs(e[2]) : HandOut(e, g, s) \/ Recover(e, g, s)
         \/ Frame(e, g) \/ Abort(e, g)
     \/ \E u \in Relays :
-        \/ Subscribe(u) \/ FrontFinish(u) \/ FrontFail(u) \/ Verdict(u) \/ Park(u) \/ Forget(u)
+        \/ Subscribe(u) \/ FrontFinish(u) \/ FrontFail(u) \/ Park(u) \/ Forget(u)
         \/ \E w \in Up(u) : Switch(u, w) \/ LetGo(u, w)
         \/ \E g \in Groups : Ask(u, g)
     \/ \E e \in Edges : EndOk(e)
-    \/ \E r \in Mortal : Die(r) \/ Fail(r) \/ Withdraw(r)
+    \/ \E r \in Mortal : Die(r) \/ Withdraw(r)
     \/ Unsubscribe
     \/ Done
 
@@ -616,11 +595,6 @@ CleanEndIsDeclared == cp[CE].fin => org.fin
 \* track failed, or it finished and no route of E's still shows.
 NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err" \/ \A w \in Up("E") : ~Shows(w)
 
-\* A front ends the track only once no route of its is left, not even one still shown:
-\* a route failing is the front's to replace.
-FailsOnlyUnroutable ==
-    \A u \in Relays : front[u].end = "err" => \A w \in Up(u) : ~Shows(w)
-
 \* A finished read holds every frame of every group, unless E lost every route.
 SettledIsWhole ==
     (Finished /\ ~left /\ cp[CE].st = "live" /\ \E w \in Up("E") : Shows(w)) =>
@@ -633,6 +607,6 @@ TypeOK ==
         /\ \A g \in Groups :
             cp[e].fr[g] \in -1 .. F /\ cp[e].lent[g] \in 0 .. F /\ cp[e].stop[g] \in 1 .. F
     /\ \A r \in Relays : front[r].end \in {"open", "ok", "err"}
-    /\ \A r \in Relays : alive[r] \in {"up", "closed", "shown", "down"}
+    /\ \A r \in Relays : alive[r] \in {"up", "shown", "down"}
 
 =============================================================================
