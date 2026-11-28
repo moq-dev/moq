@@ -161,7 +161,9 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's loss and rate by the change in its
 `sentBytes`, so they hold however many broadcasts it carries; a report without
 `sentBytes`, or one whose previous transport sample is stale, leaves both
-`unknown`. Native QUIC counts overhead and retransmissions in `sentBytes` and a
+`unknown`; the headroom's bitrate spans the reports' interval widened by the earlier
+transport `age` and narrowed by the later's, since native QUIC counters are cached
+samples up to 100 ms old. Native QUIC counts overhead and retransmissions in `sentBytes` and a
 browser's WebTransport does not. The transport limits were measured on one paced TS feed
 through a shaped link over five-second intervals, dividing by media bytes. The rendition limits are not
 measured against real traffic, and no CLI viewer reports `late`, `errors`, or

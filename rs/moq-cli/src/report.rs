@@ -141,6 +141,7 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 		transport.rate = rate.map(moq_net::bandwidth::Rate::as_bps);
 		transport.lost_bytes = stats.bytes_lost;
 		transport.lost_packets = stats.packets_lost;
+		transport.age = stats.age;
 		if matches!(direction, Direction::Send(_)) {
 			transport.sent_bytes = stats.bytes_sent;
 		}

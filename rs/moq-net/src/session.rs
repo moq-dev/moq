@@ -102,6 +102,8 @@ impl Closing {
 struct StatsState {
 	/// The latest sample the driver took (or the construction-time snapshot).
 	sample: Stats,
+	/// When `sample` was taken.
+	sampled: crate::time::Instant,
 	/// A handle read the stats since the last sample: keep sampling.
 	demanded: bool,
 }
@@ -152,6 +154,12 @@ pub struct Stats {
 	/// Total time the sender spent blocked on the peer's connection-level credit, across
 	/// [`Self::credit_stalls`]. A wait in progress counts up to the transport's latest step.
 	pub credit_stalled: Option<Duration>,
+
+	/// How long ago the transport's counters above were sampled. A read asks the driver for a fresh
+	/// sample, so a diff of two reads spans the interval between the reads, widened by the earlier
+	/// read's age and narrowed by the later's. The session's own counters, such as
+	/// [`Self::datagrams_unrouted`], are read live.
+	pub age: Option<Duration>,
 
 	/// Total datagrams received for a subscription with no datagram track: one this session
 	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
@@ -339,6 +347,7 @@ impl Session {
 			state.demanded = true;
 		}
 		Stats {
+			age: Some(crate::time::Instant::now().saturating_duration_since(state.sampled)),
 			datagrams_unrouted: self
 				.datagrams_unrouted
 				.as_ref()
@@ -621,6 +630,7 @@ impl Session {
 		let closed_consumer = closed.consume();
 		let stats = kio::Shared::new(StatsState {
 			sample,
+			sampled: runtime.now(),
 			demanded: false,
 		});
 		let work = session.work().clone();
@@ -1027,6 +1037,7 @@ impl Supervisor {
 		let sample = self.sample();
 		let mut stats = self.stats.lock();
 		stats.sample = sample;
+		stats.sampled = self.runtime.now();
 		stats.demanded = false;
 		drop(stats);
 		let next = crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL);
@@ -1133,6 +1144,7 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		credit_stalls: wire.as_ref().map(crate::transport::Wire::credit_stalls),
 		credit_stalled: wire.as_ref().map(crate::transport::Wire::credit_stalled),
 		// Counted by the protocol, not the transport: filled in by `Session::stats`.
+		age: None,
 		datagrams_unrouted: None,
 	}
 }

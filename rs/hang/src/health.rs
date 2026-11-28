@@ -528,7 +528,15 @@ fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connectio
 	)];
 	if role == Role::Publisher {
 		let loss = lost_bytes.zip(sent).and_then(|(lost, sent)| ratio(lost, sent));
-		let media = sent.zip(link.interval).map(|(sent, interval)| bitrate(sent, interval));
+		// The counters were sampled `age` before each report, so they span the interval
+		// between the reports, widened by the earlier sample's age and narrowed by the later's.
+		let span = link.interval.zip(previous).and_then(|(interval, previous)| {
+			interval
+				.saturating_add(previous.age.unwrap_or_default())
+				.checked_sub(link.current.age.unwrap_or_default())
+				.filter(|span| !span.is_zero())
+		});
+		let media = sent.zip(span).map(|(sent, span)| bitrate(sent, span));
 		let headroom = link
 			.current
 			.rate

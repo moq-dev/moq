@@ -364,7 +364,15 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 	const evidence = [above("rtt", link.current.rtt, rtt)];
 	if (role === "publisher") {
 		const loss = lostBytes === undefined || sent === undefined ? undefined : ratio(lostBytes, sent);
-		const media = sent === undefined || link.interval === undefined ? undefined : bitrate(sent, link.interval);
+		// The counters were sampled `age` before each report, so they span the interval between the
+		// reports, widened by the earlier sample's age and narrowed by the later's.
+		const span =
+			fresh && link.interval
+				? link.interval
+						.saturatingAdd(Duration.millis(fresh.age ?? 0))
+						.saturatingSub(Duration.millis(link.current.age ?? 0))
+				: undefined;
+		const media = sent === undefined || !span || span.isZero() ? undefined : bitrate(sent, span);
 		const rate = link.current.rate;
 		const headroom = rate !== undefined && media ? rate / media : undefined;
 		evidence.push(above("loss", loss, limits.loss));
