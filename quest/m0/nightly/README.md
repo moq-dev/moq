@@ -323,7 +323,7 @@ PRs or quests: Windows' CRLF crate names
 quic-interop's moq-quic client against quic-go `handshakeloss`, a runner miscount
 ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445), which now conflicts with `main`),
 and Chromium lite-06 stream credit
-([lite-06 lost reset](/quest/m0/test-flakes-5/lite06-lost-reset-hang.md)). Dropped as
+([moq-dev/moq#9864](https://github.com/moq-dev/moq/pull/9864) fixes it). Dropped as
 one-night failures (re-check if one repeats): `moq-relay/http_auth`'s paired
 `relay_http_admission` +10 to 15% (each night flags a different unrelated bench at that size),
 the TS congested path (passed on 11-28), and `relay_fill_javascript`'s lite-07
