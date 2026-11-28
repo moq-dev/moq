@@ -12362,8 +12362,11 @@ impl Cursor {
 					});
 					self.filter.arrived = arrived.into_inner();
 					self.index = index.get();
-					// A moved window moved the servable edge `drift` was judged against.
-					if polled.is_pending() && self.watch_time() {
+					// A moved window moved the servable edge `drift` was judged against. A feed found
+					// ended settles the window first: the end may have landed since the sync above, and a
+					// join waiting on its upstream places only once it has, maybe over a group the walk
+					// passed.
+					if matches!(polled, Poll::Pending | Poll::Ready(Ok(false))) && self.watch_time() {
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 						self.expire_heads(&drift, waiter);
@@ -12752,8 +12755,9 @@ impl Cursor {
 					.poll_next_in_range(floor, end, window)
 					.map_ok(|group| (group, state.cached))
 			});
-			// A moved window moved the servable edge `drift` was judged against.
-			if polled.is_pending() && self.watch_time() {
+			// A moved window moved the servable edge `drift` was judged against. A feed found ended
+			// settles the window first, as the arrival read does.
+			if matches!(polled, Poll::Pending | Poll::Ready(Ok((None, _)))) && self.watch_time() {
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
@@ -21329,6 +21333,44 @@ mod test {
 		producer.finish_at(Position::group(1)).unwrap();
 		assert_eq!(drain_groups(&mut reader), vec![0]);
 		group.finish().unwrap();
+	}
+
+	/// A received copy's end can land on another thread between a read settling its window
+	/// and walking the track: a join that waited on its upstream then places at the group the
+	/// walk passed, rather than the read ending without it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_read_finding_the_end_places_its_waiting_join_first() {
+		for ordered in [false, true] {
+			let mut producer = track_producer("test", Info::default());
+			producer.received();
+			producer.anchored();
+			producer.proven();
+			producer.answers_joins();
+			let mut reader = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+			let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(Timestamp::unscaled(0), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+			assert_eq!(drain_groups(&mut reader), Vec::<u64>::new(), "waits on its upstream");
+
+			let Inner::Plain(cursor) = &mut reader.inner else {
+				unreachable!("a plain track");
+			};
+			let noop = kio::Waiter::noop();
+			cursor.sync();
+			producer.finish_at(Position::group(1)).unwrap();
+			let Poll::Ready(Ok(drift)) = cursor.poll_drift(&cursor.servable, &noop) else {
+				panic!("a drift");
+			};
+			let peeked = match ordered {
+				true => cursor.poll_next_with(cursor.next_key.max(cursor.floor()), drift, &noop),
+				false => cursor.poll_recv_with(drift, &noop),
+			};
+			let Poll::Ready(Ok(Some(peeked))) = peeked else {
+				panic!("ordered={ordered}: the read ended without the group");
+			};
+			assert_eq!(peeked.group.start, 0, "ordered={ordered}");
+		}
 	}
 
 	/// An untimed copy whose upstream answers no join, such as a moq-transport one, places a
