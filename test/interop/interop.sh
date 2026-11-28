@@ -298,6 +298,16 @@ pinned_version() {
     [[ "$VERSION" == auto ]] || printf '%s' "$VERSION"
 }
 
+# The version a case reading a finished track's history pins in this pass, or nothing to skip it:
+# a relay's copy over moq-lite-05/06 serves live media alone, so the `auto` pass pins lite-07.
+history_version() {
+    case "$VERSION" in
+        auto) printf '%s' moq-lite-07-wip ;;
+        moq-lite-05 | moq-lite-06) ;;
+        *) printf '%s' "$VERSION" ;;
+    esac
+}
+
 # The one version <lang> offers in this pass, or nothing for its defaults.
 # shellcheck disable=SC2329  # reached from functions 'harness_spawn' invokes
 cell_version() {
@@ -332,10 +342,12 @@ SUITE=interop
 [[ "$NEGATIVE" -eq 0 ]] || SUITE=interop-negative
 [[ "$MEDIA" -eq 0 ]] || SUITE=media
 
-# The lite drafts the finite-track drop lanes cross between Rust and Node.
-DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
-# The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
-COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
+# The lite drafts the finite-track drop lanes cross between Rust and Node. They read the track
+# from group 0, which a relay's copy over moq-lite-05/06 cannot serve.
+DROP_VERSIONS=(moq-lite-07-wip)
+# The lite drafts the compressed-track lanes cross: lite-07 carries the flag. They read from group 0
+# too; the compressed catalog lanes cover a lite-06 reader of inflated bytes.
+COMPRESS_VERSIONS=(moq-lite-07-wip)
 # The compressed catalog's concurrent readers: lite-07 carries the flag, and lite-06 and a
 # moq-transport reader that does not offer FLATE share the relay's one inflated copy.
 CATALOG_VERSIONS=(moq-lite-07-wip moq-lite-06 moq-transport-22)
@@ -1656,6 +1668,8 @@ run_round() {
 run_finish_client() {
     local lang="$1" role="$2" broadcast="$3" url="$4" ack="${5:-}" version limit read_limit
     version=$(cell_version "$lang")
+    # Late readers take the finished tail from the relay's history.
+    [[ -n "$version" || "$role" != publish ]] || version=$(history_version)
     # Setup and the read phase each have a deadline. The latter includes the real media linger.
     read_limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 2 }')
     limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 4 }')
@@ -1777,12 +1791,17 @@ finish_marker() {
 run_finishes() {
     local pub sub name broadcast grant pid ack ack_fd reader_fd i started late
     # moq-transport does not deliver a finished broadcast's late tail, withdrawal, and
-    # same-session health across clients, so a pinned moq-transport pass records the case as
-    # skipped rather than red.
-    if [[ "$VERSION" == moq-transport-* ]]; then
+    # same-session health across clients, and a relay's moq-lite-05/06 copy holds no late tail, so
+    # those pinned passes record the case as skipped rather than red.
+    local unsupported=""
+    case "$VERSION" in
+        moq-transport-*) unsupported="moq-transport finish: not supported" ;;
+        moq-lite-05 | moq-lite-06) unsupported="a moq-lite-05/06 copy serves live media alone" ;;
+    esac
+    if [[ -n "$unsupported" ]]; then
         for pub in "${PUB_LIST[@]}"; do
             for sub in "${SUB_LIST[@]}"; do
-                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: not supported"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="$unsupported"
             done
         done
         return
@@ -1986,6 +2005,16 @@ run_tail_pair() {
     local pub="$1" sub="$2" kind="${3:-tail}" version="${4:-}" pid subscriber_pid started=$SECONDS from read
     local name="${kind// /-}-$1-$2${4:+-$4}" label="$kind${4:+ $4}"
     local fifo="$LOGS/tail-ack" broadcast="$name-$$-$RANDOM" mode="" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
+    local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    # A tail reads from group 0, the relay's history.
+    if [[ -z "$version" && "$kind" == tail ]]; then
+        version=$(history_version)
+        if [[ -z "$version" ]]; then
+            echo "  SKIP  $label $pub -> $sub (a moq-lite-05/06 copy serves live media alone)"
+            record skip "${cell[@]}" detail="a moq-lite-05/06 copy serves live media alone"
+            return
+        fi
+    fi
     [[ -n "$version" ]] || version=$(pinned_version)
     # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
     # the time the relay answers, so the reader takes any contiguous run through the last group.
@@ -2005,7 +2034,6 @@ run_tail_pair() {
         mode="meta"
         want='tail meta clean end=4 groups=0,1,2,3 frames=4'
     fi
-    local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     [[ -z "${4:-}" ]] || cell+=(version="$version")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
@@ -2140,13 +2168,19 @@ run_fetch_round() {
         record skip "${cell[@]}" detail="a JS publisher refuses moq-transport FETCH"
         return
     fi
+    # The group comes from the relay's history.
+    version=$(history_version)
+    if [[ -z "$version" ]]; then
+        echo "  SKIP  $label $pub -> $sub (a moq-lite-05/06 copy serves live media alone)"
+        record skip "${cell[@]}" detail="a moq-lite-05/06 copy serves live media alone"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
     fi
-    version=$(pinned_version)
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
@@ -2560,7 +2594,10 @@ run_hls_grid() {
     mkfifo "$fifo"
     exec 9<>"$fifo"
     for publisher in rust "$runtime"; do
-        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher")" "$broadcast-$publisher"
+        # A native JS publisher defaults to moq-lite-06, whose relay copy serves live media alone.
+        local version=()
+        [[ "$publisher" == rust ]] || version=("$(history_version)")
+        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher")" "$broadcast-$publisher" ${version[@]+"${version[@]}"}
         pid="$HARNESS_PID"
         harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher")" "$broadcast-$publisher"
         harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"

@@ -69,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
 	let path = &args[3];
 	let mut config = moq_tokio::connect::Config::default();
 	config.websocket.enabled = Some(false);
+	// The reader takes each rendition's groups from history, which a moq-lite-05/06 copy never serves.
+	config.version = vec!["moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?];
 	let client = config.init(Default::default())?.with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 

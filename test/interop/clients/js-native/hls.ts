@@ -4,7 +4,7 @@
  * harness acknowledges. The harness reads both publishers' interval and groups with
  * `interop-hls read` and requires them identical.
  *
- *     node --import tsx hls.ts URL BROADCAST
+ *     node --import tsx hls.ts URL BROADCAST [VERSION]
  *
  * Keep the schedule in step with `test/interop/clients/rust/hls.rs`.
  *
@@ -22,8 +22,8 @@ import { install } from "@moq/web-transport";
 install();
 console.debug = console.error;
 console.info = console.error;
-const [url, path] = process.argv.slice(2);
-if (!url || !path) throw new Error("usage: hls.ts URL BROADCAST");
+const [url, path, version] = process.argv.slice(2);
+if (!url || !path) throw new Error("usage: hls.ts URL BROADCAST [VERSION]");
 
 /** One frame: its pts in milliseconds and whether it opens a group. */
 type Frame = { ms: number; key: boolean };
@@ -47,6 +47,7 @@ const connection = await Moq.Connection.connect({
 	url: new URL(url),
 	websocket: { enabled: false },
 	publish: origin.consume(),
+	...(version ? { versions: [version] } : {}),
 });
 try {
 	const publication = origin.route(Moq.Path.from(path), { hidden: true });

@@ -78,7 +78,7 @@ const trackInfoBytes = await write((w) => trackInfo.encode(w, version));
 const lengthFirst = hasLengthFirst(version);
 const g = reader(input.group);
 const group = await Group.decode(g, version);
-const decode = frameDecoder({ scale: 1_000_000, start: group.key, lengthFirst });
+const decode = frameDecoder({ scale: 1_000_000, start: group.key, frameStart: group.frameStart, lengthFirst });
 const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
@@ -95,7 +95,9 @@ const groupBytes = await write(async (w) => {
 	for (const [index, { timestamp, payload }] of frames.entries()) {
 		const delta = timestamp - prev;
 		prev = timestamp;
-		await w.write(frameHeader(version, delta, undefined, payload.byteLength, lengthFirst, index === 0));
+		// Only frame 0 sits at the group's start with no delta.
+		const implicit = index === 0 && group.frameStart === 0;
+		await w.write(frameHeader(version, delta, undefined, payload.byteLength, lengthFirst, implicit));
 		await w.write(payload);
 	}
 });
@@ -107,7 +109,9 @@ if (untimed) {
 	const untimedGroup = await Group.decode(u, version);
 	const untimedFrames: Uint8Array[] = [];
 	for (;;) {
-		const frame = await u.decodeMaybe(frameDecoder({ scale: 0, start: untimedGroup.key, lengthFirst }));
+		const frame = await u.decodeMaybe(
+			frameDecoder({ scale: 0, start: untimedGroup.key, frameStart: untimedGroup.frameStart, lengthFirst }),
+		);
 		if (!frame) break;
 		if ("end" in frame) throw new Error("a fixture frame decoded as GROUP_END");
 		assert.equal(frame.timestamp, undefined);
