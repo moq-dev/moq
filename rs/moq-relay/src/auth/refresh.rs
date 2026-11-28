@@ -534,9 +534,11 @@ impl Refresh {
 
 /// A credential's grant changed, expired, or was revoked by the decider.
 async fn changed(consumer: &mut lease::Consumer, expires: Option<kio::clock::Instant>) -> Change {
+	// Boxed so a credential that never expires does not reserve room for the timer.
+	let mut sleep = expires.map(|at| Box::pin(kio::clock::sleep_until(at)));
 	let expire = async {
-		match expires {
-			Some(at) => kio::clock::sleep_until(at).await,
+		match &mut sleep {
+			Some(sleep) => sleep.await,
 			None => std::future::pending().await,
 		}
 	};

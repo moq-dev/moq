@@ -27,17 +27,18 @@ Landed: both maps box their values (`BTreeMap<u64, Box<Attached>>`,
 iteration (`live`, oldest-first links) is unchanged. A counting allocator
 puts one entry at 3,360 B inline against 488 B boxed for `Attached` (296 B),
 and 3,008 B against 456 B for `Credential` (264 B): 5.4 KiB saved per
-connection, about 4.5 KiB left in the layer.
+connection. `Refresh::arm_changes`' boxed watch future also shrank from
+528 B to 272 B by boxing its expiry timer, which a credential without an
+expiry (the profiled `--auth-public ""` case) no longer reserves. That
+leaves about 4.1 KiB in the layer.
 
-Remaining, to reach the goal's 4 KiB:
+Remaining:
 
-- `Refresh::arm_changes`' boxed watch future is 528 B, of which the
-  `lease::Consumer::changed` future is 192 B and the rest is the expiry
-  `sleep_until` it reserves even for a credential that never expires. Boxing
-  one future per case would save about 0.3 KiB for non-expiring credentials
-  only; a token with an `exp` pays the same.
 - Confirm the saving with a heap profile once the epic's `idle` workload
-  exists, since this was sized by allocation, not by `jeprof`.
+  exists, since this was sized by allocation and `size_of`, not by `jeprof`.
+- `Attached::issued` and `Attached::slots` are further `BTreeMap`s (`Grant`
+  is 64 B). If an idle session fills either, its leaf is another 0.8 KiB or
+  so; the profile will say, and boxing them is the same change.
 
 ## Waiting
 
