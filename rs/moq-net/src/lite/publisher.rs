@@ -7171,9 +7171,13 @@ impl TrackRun {
 					}
 				}
 				Recv::Finished => {
-					// A group waiting for credit is still in flight too.
+					// A group waiting for credit is still in flight too. One whose open this pass
+					// skipped to re-rank it gets that open now, since nothing is left to outrank it.
 					if !self.children.is_empty() || self.opening.is_some() {
-						return Poll::Pending;
+						return match reranked {
+							true => Poll::Ready(Ok(ControlFlow::Continue(()))),
+							false => Poll::Pending,
+						};
 					}
 					// A relay's copy places a range only as its upstream would, so one its upstream
 					// has yet to answer may start below every group held: nothing it owes is final
@@ -12937,6 +12941,48 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		assert_eq!(log.resets(), Vec::<u32>::new(), "group 0 still goes first");
 		assert!(run.opening.is_some(), "group 1000 still waits");
+	}
+
+	/// The last group, waiting for credit, still opens when a retune re-ranks it as the track
+	/// ends and credit frees: the cursor finding nothing left lets the open run.
+	#[kio::test]
+	async fn lite07_a_reranked_last_group_opens_once_the_track_ends() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume()).with_groups();
+		let log = session.log.clone();
+		let range = history_at(2, Order::Descending);
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[range]);
+		let waiter = kio::Waiter::noop();
+		let open = write_open(&mut track, 0);
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(0));
+
+		let retuned = range.with_policy(lite::Policy {
+			priority: 7,
+			order: Order::Descending,
+		});
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 7,
+			max_delay: None,
+			ranges: lite::Applied::Edit {
+				retired: Vec::new(),
+				added: Vec::new(),
+				retuned: vec![(0, retuned)],
+			},
+			order: Order::Descending,
+		});
+		track.finish_at(track::Position::group(1)).unwrap();
+		*gate.write().ok().unwrap() = true;
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), None, "group 0 opened");
+		assert_eq!(log.orders().len(), 1, "its stream opened");
+		drop(open);
 	}
 
 	/// An update retuning a range's priority moves the in-flight groups it ranks.
