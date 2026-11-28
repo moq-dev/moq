@@ -58,6 +58,15 @@ runs:
           echo "::error::only one of the B2 key id and key is set; check the MBX_B2_* secrets"
           exit 1
         fi
+        # A Cargo.lock change starts a new task manifest, which mbx seeds from
+        # earlier lockfile states in Git history only while none exists. A
+        # shallow writer publishes it unseeded, holding just its own build's
+        # predictions, and every later job on the new lockfile loads that one
+        # instead of history and misses everything a different build compiled.
+        if [ "$WRITE" = "true" ] && [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+          echo "::error::a cache writer needs Git history; check out with fetch-depth: 0 and filter: blob:none"
+          exit 1
+        fi
         {
           echo "AWS_ACCESS_KEY_ID=$KEY_ID"
           echo "AWS_SECRET_ACCESS_KEY=$SECRET"
