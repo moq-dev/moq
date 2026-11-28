@@ -12677,6 +12677,7 @@ mod tests {
 				publish: crate::Prefixes::new(),
 				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				expires: None,
+				..Default::default()
 			},
 		);
 		// We let the peer announce only "other".
@@ -12684,6 +12685,7 @@ mod tests {
 			publish: crate::Prefix::try_from("other").unwrap().into(),
 			subscribe: crate::Prefixes::new(),
 			expires: None,
+			..Default::default()
 		});
 		assert!(
 			!auth.within_limit(crate::auth::Direction::Subscribe, "room/alice"),
@@ -12716,6 +12718,7 @@ mod tests {
 			publish: crate::Prefixes::all(),
 			subscribe: crate::Prefixes::new(),
 			expires: secs.map(|s| runtime.now().checked_add(std::time::Duration::from_secs(s)).unwrap()),
+			..Default::default()
 		}
 	}
 	/// An out-of-band request token, the only kind a session verifies.
@@ -12998,6 +13001,7 @@ mod tests {
 			publish: crate::Prefix::try_from(subtree).unwrap().into(),
 			subscribe: crate::Prefixes::new(),
 			expires: None,
+			..Default::default()
 		};
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&limit("room"));
@@ -13090,6 +13094,7 @@ mod tests {
 			publish: crate::Prefix::try_from("other").unwrap().into(),
 			subscribe: crate::Prefixes::new(),
 			expires: None,
+			..Default::default()
 		});
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -13646,6 +13651,7 @@ mod tests {
 				publish: crate::Prefix::try_from("other").unwrap().into(),
 				subscribe: crate::Prefixes::new(),
 				expires: None,
+				..Default::default()
 			});
 			settle().await;
 			assert!(probe.state.lock().broadcasts.is_empty(), "{version}: held");
@@ -14440,11 +14446,13 @@ mod tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefixes::all(),
 			expires: None,
+			..Default::default()
 		};
 		let write_only = crate::auth::Grant {
 			publish: crate::Prefixes::all(),
 			subscribe: crate::Prefixes::new(),
 			expires: None,
+			..Default::default()
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
 			let (mut subscriber, mut requests, consumer, session) =

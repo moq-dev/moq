@@ -4260,6 +4260,7 @@ mod announce_test {
 			publish: crate::Prefixes::new(),
 			subscribe: subtrees(paths),
 			expires: None,
+			..Default::default()
 		};
 		auth.handle().authorize(&limit(&["a/b"]));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
@@ -4368,6 +4369,7 @@ mod announce_test {
 				.map(|prefix| crate::Prefix::try_from(*prefix).unwrap())
 				.collect(),
 			expires: None,
+			..Default::default()
 		};
 		auth.handle().authorize(&limit(&["a", "x"]));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
@@ -4423,6 +4425,7 @@ mod announce_test {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
+			..Default::default()
 		};
 		auth.handle().authorize(&limit("a"));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
@@ -4469,6 +4472,7 @@ mod announce_test {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefix::try_from("a/x").unwrap().into(),
 			expires: None,
+			..Default::default()
 		});
 		let waiter = kio::Waiter::noop();
 		let disjoint = (origin.consume())

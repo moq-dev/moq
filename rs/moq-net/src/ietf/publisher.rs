@@ -3096,7 +3096,8 @@ impl Publisher {
 					this.auth.clone(),
 					msg.track_namespace.clone(),
 					crate::auth::Direction::Publish,
-				);
+				)
+				.with_kind(crate::auth::RequestKind::TrackStatus);
 				// Owned, since the task outlives the body it was read from.
 				let msg = msg.into_owned();
 				let mut task = TrackStatusServe::new(this, stream, msg, gate);
@@ -3523,7 +3524,8 @@ impl Publisher {
 	fn fetch_gate(&self, msg: &ietf::Fetch<'_>) -> FetchGate {
 		match &msg.fetch_type {
 			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => FetchGate::Standalone(
-				crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish),
+				crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish)
+					.with_kind(crate::auth::RequestKind::Fetch),
 			),
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -3575,7 +3577,8 @@ impl Publisher {
 			self.auth.clone(),
 			msg.track_namespace.clone(),
 			crate::auth::Direction::Publish,
-		);
+		)
+		.with_kind(crate::auth::RequestKind::TrackStatus);
 		self.serve_track_status_stream(stream, msg, gate)
 	}
 
@@ -6499,7 +6502,7 @@ impl NamespaceServe {
 			stream,
 			prefix: msg.namespace,
 			wants_hidden: msg.hidden,
-			gate: gate.discovery(),
+			gate: gate.with_kind(crate::auth::RequestKind::Discover),
 			state: NamespaceServeState::Start(msg.authorization_token),
 		})
 	}
@@ -12019,6 +12022,7 @@ mod serve_tests {
 			publish: Default::default(),
 			subscribe: Default::default(),
 			expires: None,
+			..Default::default()
 		};
 		let unauthorized = |version| request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
 
@@ -12155,6 +12159,7 @@ mod serve_tests {
 				publish: Default::default(),
 				subscribe: Default::default(),
 				expires: None,
+				..Default::default()
 			});
 			let Ok(mut writable) = bi.write() else {
 				panic!("request stream gate closed");
@@ -16097,6 +16102,7 @@ mod serve_tests {
 			publish: Default::default(),
 			subscribe: Default::default(),
 			expires: None,
+			..Default::default()
 		};
 		let location = Location { group: 0, object: 0 };
 
@@ -16224,6 +16230,7 @@ mod serve_tests {
 				publish: Default::default(),
 				subscribe: Default::default(),
 				expires: None,
+				..Default::default()
 			});
 			let res = kio::clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
@@ -16333,6 +16340,7 @@ mod serve_tests {
 					publish: Default::default(),
 					subscribe: Default::default(),
 					expires: None,
+					..Default::default()
 				});
 				let res = kio::clock::timeout(std::time::Duration::from_secs(1), fetch)
 					.await
@@ -17766,6 +17774,7 @@ mod serve_tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefixes::all(),
 			expires: secs.map(|s| runtime.now().checked_add(Duration::from_secs(s)).unwrap()),
+			..Default::default()
 		}
 	}
 
@@ -17782,6 +17791,7 @@ mod serve_tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
+			..Default::default()
 		});
 		assert!(
 			!auth.allows(crate::auth::Direction::Publish, "room"),
@@ -17943,6 +17953,59 @@ mod serve_tests {
 				"the renewal did not extend the subscription past the old expiry"
 			);
 			settle().await;
+		}
+	}
+
+	/// A REQUEST_UPDATE whose token the acceptor renews without SUBSCRIBE among its kinds is
+	/// refused, and the live subscription ends with it.
+	#[kio::test]
+	async fn a_renewal_without_the_subscribe_kind_ends_the_subscription() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (auth, mut requests, _cred) = auth_covering_other();
+			let h = serve_with_auth(version, auth, subscribe_update_with_token(version, true).await);
+			let rt = h.publisher.runtime.clone();
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let acceptor = async move {
+				let mut held = Vec::new();
+				held.push(requests.next().await.unwrap().accept(grant_all_expiring(&rt, None)));
+				held.push(requests.next().await.unwrap().accept(crate::auth::Grant {
+					kinds: crate::auth::RequestKinds::all().without(crate::auth::RequestKind::Subscribe),
+					..grant_all_expiring(&rt, None)
+				}));
+				std::future::pending::<()>().await
+			};
+			let serving = h.publisher.clone().run_subscribe_stream(stream, token_subscribe());
+			let served = kio::clock::timeout(Duration::from_secs(5), async {
+				futures::pin_mut!(acceptor, serving);
+				match futures::future::select(acceptor, serving).await {
+					futures::future::Either::Right((served, _)) => served,
+					futures::future::Either::Left(_) => unreachable!("the acceptor never ends"),
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the subscription outlived its refused renewal"));
+			assert!(matches!(served, Err(Error::Unauthorized)), "{version}: {served:?}");
+
+			let wire = Wire::read(&h.log, version);
+			let (code, _) = wire.request_error.expect("REQUEST_ERROR was sent");
+			assert_eq!(
+				code,
+				request::to_code(&Error::Unauthorized, request::Kind::Subscribe, version),
+				"{version}: request error code"
+			);
+			let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+			assert_eq!(
+				status,
+				ietf::PublishDoneStatus::UpdateFailed.code(),
+				"{version}: UPDATE_FAILED"
+			);
 		}
 	}
 
@@ -18853,17 +18916,150 @@ mod serve_tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefixes::all(),
 			expires: None,
+			..Default::default()
 		};
 		let write_only = crate::auth::Grant {
 			publish: crate::Prefixes::all(),
 			subscribe: crate::Prefixes::new(),
 			expires: None,
+			..Default::default()
 		};
 		let nothing = Some(crate::auth::Grant::default());
 		let (_auth, _h, mut serving) = serve_token_subscribe(read_only, nothing.clone()).await;
 		assert!(still_serving(&mut serving).await, "a read grant admits it");
 		let (_auth, _h, mut serving) = serve_token_subscribe(write_only, nothing).await;
 		assert!(!still_serving(&mut serving).await, "a write grant refuses it");
+	}
+
+	/// A grant whose kinds admit only SUBSCRIBE keeps the subscription it answered and refuses
+	/// a TRACK_STATUS, a standalone FETCH, and a SUBSCRIBE_NAMESPACE that reuse its token at
+	/// the same path, without asking the acceptor again. A grant of every kind, the default,
+	/// admits all three as before.
+	#[kio::test]
+	async fn a_grant_admits_only_its_request_kinds_on_a_shared_token() {
+		use crate::auth::RequestKind;
+
+		for version in ALL_VERSIONS {
+			for narrowed in [true, false] {
+				let case = format!("{version} narrowed={narrowed}");
+				let auth = crate::auth::Link::new(false);
+				let mut requests = auth.handle().requests();
+				// The session's own scope covers nothing, so the token alone decides.
+				auth.handle().authorize(&crate::auth::Grant::default());
+				let mut h = serve_with_auth(version, auth, Vec::new());
+				publish_pairs(&mut h, 1, None);
+				settle().await;
+
+				let subscribing = ScriptedSession::new(Vec::new());
+				let stream = Stream::open(&crate::driver::Transport::new(subscribing.clone()), version)
+					.await
+					.unwrap();
+				let mut subscription: Running =
+					Box::pin(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+				let request = taken_token(&mut subscription, &mut requests).await;
+				let mut grant = crate::auth::Grant::all();
+				if narrowed {
+					grant.kinds = RequestKind::Subscribe.into();
+				}
+				let _issued = request.accept(grant);
+				for _ in 0..10 {
+					assert!(futures::poll!(subscription.as_mut()).is_pending(), "{case}: subscribed");
+					settle().await;
+				}
+
+				// A FETCH joining the subscription rides its grant, so SUBSCRIBE alone admits it.
+				// Only some drafts carry a joining FETCH.
+				if JOINING_DRAFTS.contains(&version) {
+					registered(&h, subscription.as_mut()).await;
+					let mut live = h.track.create_group(group::Info { start: 1 }).unwrap();
+					live.write_frame(live.key_time(), b"live".as_slice()).unwrap();
+					let mark = h.log.writes.lock().unwrap().len();
+					let joined = kio::clock::timeout(Duration::from_secs(5), joining_fetch(&h, mark))
+						.await
+						.unwrap_or_else(|_| panic!("{case}: joining FETCH never answered"))
+						.unwrap();
+					assert_eq!(refusal_code(&joined, version), None, "{case}: joining FETCH");
+				}
+
+				let refused = |kind| narrowed.then(|| request::to_code(&Error::Unauthorized, kind, version));
+
+				let status = ietf::TrackStatus {
+					authorization_token: Some(request_token()),
+					request_id: RequestId(REQUEST_ID + 2),
+					track_namespace: crate::Path::from_static("room"),
+					track_name: "video".into(),
+					properties_wanted: true,
+				};
+				let mut body = Vec::new();
+				status
+					.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+					.unwrap();
+				assert_eq!(
+					answer_code(&h, body, version).await,
+					refused(request::Kind::TrackStatus),
+					"{case}: TRACK_STATUS"
+				);
+
+				let fetch = ietf::Fetch {
+					authorization_token: Some(request_token()),
+					request_id: RequestId(REQUEST_ID + 4),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: fetch_range(
+						version,
+						"video",
+						Location { group: 0, object: 0 },
+						Location { group: 0, object: 0 },
+					),
+					range_filters: false,
+					fill_timeout: false,
+					properties_wanted: true,
+				};
+				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let mark = h.log.writes.lock().unwrap().len();
+				h.publisher.clone().run_fetch_stream(stream, fetch).await.unwrap();
+				assert_eq!(
+					refusal_code(&h.log.writes.lock().unwrap()[mark..], version),
+					refused(request::Kind::Fetch),
+					"{case}: standalone FETCH"
+				);
+
+				let discovering = ScriptedSession::new(Vec::new());
+				let stream = Stream::open(&crate::driver::Transport::new(discovering.clone()), version)
+					.await
+					.unwrap();
+				let discover = ietf::SubscribeNamespace {
+					authorization_token: Some(request_token()),
+					request_id: RequestId(REQUEST_ID + 6),
+					namespace: crate::Path::from_static("room"),
+					hidden: false,
+				};
+				let mut discovery: Running =
+					Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, discover));
+				for _ in 0..10 {
+					if futures::poll!(discovery.as_mut()).is_ready() {
+						break;
+					}
+					settle().await;
+				}
+				assert_eq!(
+					refusal_code(&discovering.log.writes.lock().unwrap(), version),
+					refused(request::Kind::SubscribeNamespace),
+					"{case}: SUBSCRIBE_NAMESPACE"
+				);
+
+				assert!(
+					requests.poll_next(&kio::Waiter::noop()).is_pending(),
+					"{case}: the reused token shares the first verdict"
+				);
+				assert!(
+					futures::poll!(subscription.as_mut()).is_pending(),
+					"{case}: the subscription stands"
+				);
+			}
+		}
 	}
 
 	/// A request token stands in for the limit this side set on the peer, so a SUBSCRIBE the
@@ -18880,6 +19076,7 @@ mod serve_tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
+			..Default::default()
 		});
 		assert!(
 			still_serving(&mut serving).await,
@@ -18936,6 +19133,7 @@ mod serve_tests {
 			publish: crate::Prefixes::new(),
 			subscribe: crate::Prefix::try_from(subtree).unwrap().into(),
 			expires: None,
+			..Default::default()
 		};
 		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
 		assert!(
@@ -19196,6 +19394,7 @@ mod serve_tests {
 				publish: crate::Prefix::try_from("other").unwrap().into(),
 				subscribe: crate::Prefixes::new(),
 				expires: None,
+				..Default::default()
 			},
 		);
 		auth.handle().authorize(&crate::auth::Grant::default());
