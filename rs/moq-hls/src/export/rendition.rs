@@ -157,7 +157,7 @@ impl Media {
 	) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
-			binding: Arc::new(source.bind(rel, reference.identity())?),
+			binding: Arc::new(source.bind(rel)?),
 			track: None,
 		};
 		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
@@ -595,12 +595,12 @@ impl Rendition {
 	}
 
 	/// Whether this rendition follows `previous` onto the same media track: the same track name in
-	/// the same broadcast and identity, whose group sequences continue across the two.
+	/// the same broadcast, whose group sequences continue across the two.
 	fn continues(&self, previous: &Rendition) -> bool {
 		use hang::catalog::Reference;
 		let source = |rendition: &Rendition| match &rendition.config {
-			Config::Video(config) => (config.broadcast().cloned(), config.identity().cloned()),
-			Config::Audio(config) => (config.broadcast().cloned(), config.identity().cloned()),
+			Config::Video(config) => config.broadcast().cloned(),
+			Config::Audio(config) => config.broadcast().cloned(),
 		};
 		self.track() == previous.track() && source(self) == source(previous)
 	}
@@ -859,9 +859,7 @@ impl Rendition {
 			return None;
 		};
 		let size = |config: &VideoConfig| config.coded_width.zip(config.coded_height);
-		let same_track = successor.track(&self.name) == self.track()
-			&& successor.broadcast() == current.broadcast()
-			&& successor.identity() == current.identity();
+		let same_track = successor.track(&self.name) == self.track() && successor.broadcast() == current.broadcast();
 		let resized = claim.resized?;
 		let (unplaced, _) = claim.unplaced?;
 		let resizes = size(successor).is_some_and(|size| size == resized.size) && size(successor) != size(current);

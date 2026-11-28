@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Identity, Error as NetError, Path, Track } from "@moq/net";
+import { Error as NetError, Path, Track } from "@moq/net";
 import {
 	Derived,
 	Effect,
@@ -19,11 +19,10 @@ import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
-	identity?: Catalog.ReferenceIdentity;
 };
 
 // Whether a rendition's reference names something this consumer can play.
-type Usable = (rel: Path.Relative | undefined, identity: Moq.Identity.Valid | undefined) => boolean;
+type Usable = (rel: Path.Relative | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
@@ -33,16 +32,8 @@ function filterRenditions<T extends ReferencedRendition>(
 	usable: Usable,
 ): Record<string, T> {
 	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.identity)),
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast)),
 	);
-}
-
-// Whether `active` is proven to be another stream than `identity` names. A route over a wire
-// that carries no identity has one its session minted, which proves nothing, so only a known
-// mismatch counts.
-function provesOther(active: Moq.Broadcast.Consumer | undefined, identity: Moq.Identity.Valid | undefined): boolean {
-	if (identity === undefined || active?.identity === undefined) return false;
-	return !Identity.isMinted(active.identity) && active.identity !== identity;
 }
 
 // Whether an announced route covers `path`, and whether the origin has heard every attached
@@ -94,8 +85,8 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 	};
 }
 
-// An include whose catalog has been read: its ID, its broadcast's path, and the stream it names.
-type Included = { id: string; path: Moq.Path.Valid; identity?: Catalog.ReferenceIdentity; catalog: Catalog.Root };
+// An include whose catalog has been read: its ID and its broadcast's path.
+type Included = { id: string; path: Moq.Path.Valid; catalog: Catalog.Root };
 
 type Rendition = Catalog.VideoConfig | Catalog.AudioConfig;
 
@@ -131,14 +122,10 @@ function mergeRenditions<T extends Rendition>(
 			if (seen.has(key)) continue;
 			const broadcast = target === base ? undefined : Path.relative(target, base);
 			if (target !== base && broadcast === undefined) continue;
-
-			// One reading the include's own broadcast inherits the stream its entry names.
-			const identity = target === include.path ? (config.identity ?? include.identity) : config.identity;
-			if (!usable(broadcast, identity)) continue;
-			const { broadcast: _broadcast, identity: _identity, ...rest } = config;
+			if (!usable(broadcast)) continue;
+			const { broadcast: _broadcast, ...rest } = config;
 			const rebased = { ...rest, track } as T;
 			if (broadcast !== undefined) rebased.broadcast = broadcast;
-			if (identity !== undefined) rebased.identity = identity;
 
 			merged.push([name, rebased]);
 			first ??= include;
@@ -401,27 +388,21 @@ export class Broadcast {
 		this.#out.status.set(connecting ? "connecting" : "offline");
 	}
 
-	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us, or one whose broadcast proves another identity than it
-	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
-	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
-	// broadcast does. Only a rendition naming an identity resolves its broadcast here, sharing the
-	// request playback uses.
+	// Publish the catalog minus every rendition naming a broadcast that isn't announced to us.
+	// Selecting one would render nothing, since `relativeBroadcast` resolves it to no broadcast at
+	// all. Reruns as announcements arrive, so a rendition appears once its broadcast does.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
 		if (!raw) return;
 
 		const included: Included[] = [];
 		for (const [id, child] of effect.get(this.#included)) {
-			const entry = raw.include && Object.hasOwn(raw.include, id) ? raw.include[id] : undefined;
+			const listed = raw.include !== undefined && Object.hasOwn(raw.include, id);
 			const catalog = effect.get(child.out.catalog);
-			if (entry && catalog)
-				included.push({ id, path: effect.get(child.in.name), identity: entry.identity, catalog });
+			if (listed && catalog) included.push({ id, path: effect.get(child.in.name), catalog });
 		}
 
-		const usable: Usable = (rel, identity) =>
-			this.#relativeTarget(effect, rel) !== undefined &&
-			(identity === undefined || !provesOther(this.#relativeActive(effect, rel), identity));
+		const usable: Usable = (rel) => this.#relativeTarget(effect, rel) !== undefined;
 		effect.set(
 			this.#out.catalog,
 			withIncludes(raw, filterCatalog(raw, usable), effect.get(this.in.name), included, usable),
@@ -721,30 +702,9 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 *
-	 * `identity` is the rendition's `identity` field, the stream the reference names. Returns
-	 * `undefined` while the followed broadcast is proven to be another stream, rather than
-	 * reading it. A route over a wire that carries no identity cannot prove one, so there it is
-	 * best effort.
-	 *
 	 * @internal
 	 */
-	relativeBroadcast(
-		effect: Effect,
-		rel: Path.Relative | undefined,
-		identity?: Moq.Identity.Valid,
-	): Moq.Broadcast.Consumer | undefined {
-		const active = this.#relativeActive(effect, rel);
-		if (!active || !provesOther(active, identity)) return active;
-		console.warn(
-			"ignoring rendition: its broadcast serves another identity",
-			active.path,
-			active.identity,
-			identity,
-		);
-		return undefined;
-	}
-
-	#relativeActive(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
+	relativeBroadcast(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
 		const target = this.#relativeTarget(effect, rel);
 		if (!target) return undefined;
 		if (target.local) return effect.get(this.out.active);
@@ -764,9 +724,8 @@ export class Broadcast {
 	 * as its own broadcast, such as to play it apart from the root. The child tracks
 	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
 	 * its request: while following announcements it follows the include's restarts, and
-	 * otherwise it requests the first identity once. With an `identity` it is offline while its
-	 * broadcast resolves another stream. An absent entry leaves the child disabled, and an
-	 * unavailable include reads as offline. Its rendition IDs are its own catalog's, and it never
+	 * otherwise it requests the first identity once. An absent entry leaves the child disabled,
+	 * and an unavailable include reads as offline. Its rendition IDs are its own catalog's, and it never
 	 * expands its own includes.
 	 *
 	 * ```ts
@@ -780,7 +739,7 @@ export class Broadcast {
 	 */
 	include(effect: Effect, id: string): Broadcast {
 		// Each computed notifies only on a real change, so an update that leaves the child's path
-		// alone (such as a new `identity`) never restarts its catalog.
+		// alone (such as a new `version`) never restarts its catalog.
 		const entry = effect.computed((run) => {
 			// The published catalog, since the effective one is derived from this include's own.
 			const include = run.get(this.#raw)?.include;
@@ -800,7 +759,7 @@ export class Broadcast {
 		});
 		child.#resolve.set((run) => {
 			const selected = run.get(entry);
-			return selected && this.relativeBroadcast(run, selected.broadcast, selected.identity);
+			return selected && this.relativeBroadcast(run, selected.broadcast);
 		});
 		effect.cleanup(() => child.close());
 		return child;

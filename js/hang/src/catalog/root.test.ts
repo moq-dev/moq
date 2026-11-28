@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceIdentity, RelativeBroadcast } from "./path.ts";
+import type { RelativeBroadcast } from "./path.ts";
 import {
 	checkRenditions,
 	DuplicateRendition,
@@ -59,47 +59,6 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	}
 });
 
-// Mirrors Rust's `reference_identities_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional identity", () => {
-	const IDENTITY = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceIdentity;
-	const catalog = (identity: string) => ({
-		include: { c: { broadcast: "./a", identity } },
-		video: {
-			renditions: {
-				v: { broadcast: "./a", identity, codec: "avc1.64001f", container: { kind: "legacy" } },
-			},
-		},
-		audio: {
-			renditions: {
-				a: {
-					broadcast: "./a",
-					identity,
-					codec: "opus",
-					sampleRate: 48000,
-					numberOfChannels: 2,
-					container: { kind: "legacy" },
-				},
-			},
-		},
-		text: { renditions: { t: { broadcast: "./a", identity, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", identity, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", identity, mode: "snapshot" } } },
-	});
-
-	const parsed = RootSchema.parse(catalog(IDENTITY));
-	if (!parsed.video) throw new Error("missing video section");
-	if (!parsed.audio) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.identity).toBe(IDENTITY);
-	expect(parsed.audio.renditions.a?.identity).toBe(IDENTITY);
-	expect(parsed.text?.renditions.t?.identity).toBe(IDENTITY);
-	expect(parsed.json?.tracks.j?.identity).toBe(IDENTITY);
-	expect(parsed.binary?.tracks.b?.identity).toBe(IDENTITY);
-	expect(parsed.include?.c?.identity).toBe(IDENTITY);
-
-	// An empty identity refuses the catalog, as in Rust.
-	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
-});
-
 // Mirrors Rust's `includes_roundtrip_and_refuse_malformed_entries`.
 test("an include parses beside a same-ID rendition and a malformed one is refused", () => {
 	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
@@ -117,7 +76,6 @@ test("an include parses beside a same-ID rendition and a malformed one is refuse
 		{ alice: null },
 		{ alice: {} },
 		{ alice: { broadcast: 42 } },
-		{ alice: { broadcast: "./alice.hang", identity: "" } },
 	]) {
 		expect(RootSchema.safeParse({ include }).success).toBe(false);
 	}

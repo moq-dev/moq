@@ -132,8 +132,8 @@ struct State {
 	waiting: BTreeMap<Key, (Held, Owner)>,
 }
 
-/// Where a rendition's media track is: its broadcast, identity, and track name.
-type Held = (Option<moq_net::path::Relative>, Option<moq_net::Identity>, String);
+/// Where a rendition's media track is: its broadcast and track name.
+type Held = (Option<moq_net::path::Relative>, String);
 
 /// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
@@ -694,19 +694,11 @@ impl Producer {
 	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, (Held, Owner)>) {
 		use hang::catalog::Reference;
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
-			let reference = (
-				config.broadcast.clone(),
-				config.identity.clone(),
-				config.track(name).to_string(),
-			);
+			let reference = (config.broadcast.clone(), config.track(name).to_string());
 			((Kind::Video, name.clone()), reference)
 		});
 		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
-			let reference = (
-				config.broadcast.clone(),
-				config.identity.clone(),
-				config.track(name).to_string(),
-			);
+			let reference = (config.broadcast.clone(), config.track(name).to_string());
 			((Kind::Audio, name.clone()), reference)
 		});
 		let listed: BTreeMap<Key, Held> = video.chain(audio).collect();
@@ -716,8 +708,8 @@ impl Producer {
 			if waiting.contains_key(&key) {
 				continue;
 			}
-			let (broadcast, identity, track) = &held;
-			let Ok(binding) = source.bind(broadcast.as_ref(), identity.as_ref()) else {
+			let (broadcast, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref()) else {
 				continue;
 			};
 			let owner = self.fanout.spawn(Hold {

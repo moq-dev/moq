@@ -1516,14 +1516,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut tracks = Vec::new();
 	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
-		if let Some(identity) = config.identity() {
-			// MSF has nowhere to name an identity, so its readers take whichever resolves first.
-			tracing::warn!(
-				rendition = id,
-				?identity,
-				"MSF cannot carry a reference identity; advertising without it"
-			);
-		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
 			Some(rel) => {
