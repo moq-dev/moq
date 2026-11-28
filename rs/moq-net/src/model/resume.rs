@@ -16298,77 +16298,96 @@ mod test {
 
 	/// A leased copy's unread group stops holding back the fold once its track's max age bound
 	/// passed, as no widened budget reads it then: the reader's record of the serving route's
-	/// later gaps stays compact however long the lease lasts.
+	/// later gaps stays compact however long the lease lasts. So it does when the copy is an
+	/// inner front serving that track.
 	#[kio::test]
 	async fn an_expired_copy_past_its_max_age_bound_holds_back_no_gap() {
 		let ms = Duration::from_millis;
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let info = crate::track::Info::timed().with_max_age(ms(2000));
-		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, ms(1000));
-		write(&a, 0);
-		write(&a, 5);
-		// Held, so the replaced copy stays subscribed once it expires.
-		let _held = recv(&mut sub);
-		assert_eq!(drain(&mut sub, false), [0]);
-		let b = copy();
-		routes.serve(b.consume());
-		write(&b, 6);
-		kio::clock::sleep(ms(900)).await;
-		assert_eq!(drain(&mut sub, false), [6]);
-		kio::clock::sleep(ms(50)).await;
-		for key in [4, 2, 1] {
-			write(&a, key);
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let info = crate::track::Info::timed().with_max_age(ms(2000));
+			let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+			let inner_routes = Producer::new();
+			let inner = self::logical(&inner_routes);
+			if nested {
+				inner_routes.serve(a.consume());
+				routes.serve(inner.consume());
+			} else {
+				routes.serve(a.consume());
+			}
+			let mut sub = subscribe(&logical, ms(1000));
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed once it expires.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			routes.serve(b.consume());
+			write(&b, 6);
+			kio::clock::sleep(ms(900)).await;
+			assert_eq!(drain(&mut sub, false), [6]);
+			kio::clock::sleep(ms(50)).await;
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			write(&b, 7);
+			// Newest first, so the late groups are left unread.
+			assert_eq!(recv(&mut sub).start, 7);
+			for key in (9..40).step_by(2) {
+				kio::clock::sleep(ms(1100)).await;
+				write(&b, key);
+				assert_eq!(drain(&mut sub, false), [key], "nested {nested}");
+			}
+			// No more than after the first of them, however long the lease lasts.
+			assert_eq!(sub.delivered_runs(), 3, "nested {nested}");
 		}
-		write(&b, 7);
-		// Newest first, so the late groups are left unread.
-		assert_eq!(recv(&mut sub).start, 7);
-		for key in (9..40).step_by(2) {
-			kio::clock::sleep(ms(1100)).await;
-			write(&b, key);
-			assert_eq!(drain(&mut sub, false), [key]);
-		}
-		// No more than after the first of them, however long the lease lasts.
-		assert_eq!(sub.delivered_runs(), 3);
 	}
 
 	/// An expired copy's unread group still fresh by its own successor at the track's max age
 	/// stays owed, so a budget widened past that age reads it, while one stale even at that age
-	/// is forgotten.
+	/// is forgotten. So it does when the copy is an inner front serving that track.
 	#[kio::test]
 	async fn a_widened_budget_reads_an_expired_copys_group_fresh_at_its_max_age() {
 		let ms = Duration::from_millis;
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let info = crate::track::Info::timed().with_max_age(ms(2000));
-		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, ms(1000));
-		write(&a, 0);
-		write(&a, 5);
-		// Held, so the replaced copy stays subscribed once it expires.
-		let _held = recv(&mut sub);
-		assert_eq!(drain(&mut sub, false), [0]);
-		let b = copy();
-		routes.serve(b.consume());
-		write(&b, 6);
-		assert_eq!(drain(&mut sub, false), [6]);
-		kio::clock::sleep(ms(900)).await;
-		// 3 lands with its successor 4, while 4's successor 5 landed long before.
-		write(&a, 3);
-		write(&a, 4);
-		write(&b, 7);
-		// Newest first, so the late groups are left unread.
-		assert_eq!(recv(&mut sub).start, 7);
-		// The replaced copy expires, past the track's max age since it was replaced.
-		kio::clock::sleep(ms(1200)).await;
-		write(&b, 8);
-		assert_eq!(drain(&mut sub, false), [8]);
-		// Wider than the max age, which still keeps 3 fresh by 4, but not 4 by 5.
-		sub.update(Subscription::default().with_max(ms(3000))).unwrap();
-		assert_eq!(drain(&mut sub, false), [3]);
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let info = crate::track::Info::timed().with_max_age(ms(2000));
+			let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+			let inner_routes = Producer::new();
+			let inner = self::logical(&inner_routes);
+			if nested {
+				inner_routes.serve(a.consume());
+				routes.serve(inner.consume());
+			} else {
+				routes.serve(a.consume());
+			}
+			let mut sub = subscribe(&logical, ms(1000));
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed once it expires.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			routes.serve(b.consume());
+			write(&b, 6);
+			assert_eq!(drain(&mut sub, false), [6]);
+			kio::clock::sleep(ms(900)).await;
+			// 3 lands with its successor 4, while 4's successor 5 landed long before.
+			write(&a, 3);
+			write(&a, 4);
+			write(&b, 7);
+			// Newest first, so the late groups are left unread.
+			assert_eq!(recv(&mut sub).start, 7);
+			// The replaced copy expires, past the track's max age since it was replaced.
+			kio::clock::sleep(ms(1200)).await;
+			write(&b, 8);
+			assert_eq!(drain(&mut sub, false), [8]);
+			// Wider than the max age, which still keeps 3 fresh by 4, but not 4 by 5.
+			sub.update(Subscription::default().with_max(ms(3000))).unwrap();
+			assert_eq!(drain(&mut sub, false), [3], "nested {nested}");
+		}
 	}
 
 	/// A replaced copy a full budget past the newer group that superseded it hands out none of
