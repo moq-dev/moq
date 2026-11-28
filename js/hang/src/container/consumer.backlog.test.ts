@@ -11,6 +11,7 @@ import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
+import { hooks } from "../../../net/src/internal.ts";
 
 let clock: Manual;
 let installed: Installed;
@@ -49,7 +50,7 @@ async function play(
 	try {
 		for (const [at, sequence, media] of events) {
 			await clock.advance(Duration.millis(base + at).saturatingSub(now().since(Instant.ZERO)));
-			const group = track.createGroup(BigInt(sequence));
+			const group = hooks.createEmpty(track, BigInt(sequence));
 			const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 			group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 			group.finish();
@@ -161,7 +162,7 @@ function joining(from: bigint, largest: () => bigint | Promise<bigint>) {
 			largest: async () => ({ group: await largest(), frame: 0 }),
 		});
 	const write = (sequence: number, media: number) => {
-		const group = track.createGroup(BigInt(sequence));
+		const group = hooks.createEmpty(track, BigInt(sequence));
 		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 		group.finish();
@@ -310,7 +311,7 @@ test("a range capped below the largest still delivers", async () => {
 	// largest: the consumer reports no backlog, but delivers what it can read.
 	const track = new Track.Producer("audio").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	for (let sequence = 0; sequence <= 5; sequence++) {
-		const group = track.createGroup(BigInt(sequence));
+		const group = hooks.createEmpty(track, BigInt(sequence));
 		const media = sequence * 20;
 		group.writeFrame({
 			payload: new Uint8Array([...Varint.encode(media * 1000), 1]),

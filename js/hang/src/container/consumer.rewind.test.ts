@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
+import { hooks } from "../../../net/src/internal.ts";
 
 // Frozen at 200ms: nothing in these tests waits on time.
 let installed: Installed;
@@ -30,7 +31,7 @@ function setup() {
 }
 
 function group(track: Track.Producer, timestamps: number[], end?: number) {
-	const group = track.appendGroup(Time.Timestamp.fromMicros(timestamps[0]));
+	const group = hooks.appendEmpty(track, Time.Timestamp.fromMicros(timestamps[0]));
 	for (const timestamp of timestamps) {
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(timestamp),
@@ -94,7 +95,7 @@ test("Consumer rejects a later frame below the previous group start", async () =
 	try {
 		group(track, [100_000]);
 		await frame(consumer);
-		const current = track.appendGroup(Time.Timestamp.fromMicros(200_000));
+		const current = hooks.appendEmpty(track, Time.Timestamp.fromMicros(200_000));
 		current.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(200_000),
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(200_000)),

@@ -5,6 +5,7 @@ import { Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 import type { Frame } from "./types.ts";
+import { hooks } from "../../../net/src/internal.ts";
 
 // Counts decoded samples, so a test can tell how many the consumer holds ahead of its reads.
 class Counting extends Format {
@@ -65,9 +66,9 @@ test("Consumer holds frames sharing a timestamp within the max buffer", async ()
 		// Frames packed into one timestamp have no span, so the age budget never skips the stalled
 		// group they queue behind. They fill the max buffer instead, which skips it once its one frame
 		// is read, so nothing decoded is dropped.
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
-		const packed = track.createGroup(1n);
+		const packed = hooks.createEmpty(track, 1n);
 		for (let i = 0; i < 2_000; i++) write(packed, 10_000);
 		packed.finish();
 		track.finish();
@@ -97,10 +98,10 @@ test("Consumer holds many groups within the max buffer and reaches the live edge
 		maxBuffer,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
 		for (let g = 1n; g <= 500n; g++) {
-			const group = track.createGroup(g);
+			const group = hooks.createEmpty(track, g);
 			write(group, Number(g) * 1_000);
 			group.finish();
 		}
@@ -133,9 +134,9 @@ test("Consumer skips a stalled group once group overhead alone fills the max buf
 		maxBuffer: 512,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
-		const next = track.createGroup(1n);
+		const next = hooks.createEmpty(track, 1n);
 		write(next, 10_000);
 		next.finish();
 
@@ -160,10 +161,10 @@ test("Consumer reaches a readable group past a stalled successor once group over
 		maxBuffer: 768,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
-		track.createGroup(1n);
-		const readable = track.createGroup(2n);
+		hooks.createEmpty(track, 1n);
+		const readable = hooks.createEmpty(track, 2n);
 		write(readable, 10_000);
 		write(readable, 20_000);
 		readable.finish();
@@ -190,7 +191,7 @@ test("Consumer admits reads completing together one at a time against the max bu
 	try {
 		// Ten open groups park on their first read with room to spare, then large frames land in all of
 		// them at once.
-		const groups = Array.from({ length: 10 }, (_, sequence) => track.createGroup(BigInt(sequence)));
+		const groups = Array.from({ length: 10 }, (_, sequence) => hooks.createEmpty(track, BigInt(sequence)));
 		await flush();
 		const large = new Uint8Array(2_000);
 		for (const group of groups) {
@@ -223,9 +224,9 @@ test("Consumer charges a small view of a large wire frame the wire frame", async
 		maxBuffer: 16 * 1024,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
-		const padded = track.createGroup(1n);
+		const padded = hooks.createEmpty(track, 1n);
 		const padding = new Uint8Array(60_000);
 		for (let i = 0; i < 8; i++) {
 			padded.writeFrame({
@@ -266,7 +267,7 @@ test("Consumer stamps frames the max buffer held back with when they landed, not
 		maxBuffer: 300,
 	});
 	try {
-		const group = track.createGroup(0n);
+		const group = hooks.createEmpty(track, 0n);
 		write(group, 0);
 		await clock.advance(Duration.millis(250));
 		write(group, 10_000);
@@ -302,11 +303,11 @@ test("Consumer expires a hole behind a full max buffer from when the group past 
 	});
 	try {
 		for (const sequence of [0n, 1n]) {
-			const group = track.createGroup(sequence);
+			const group = hooks.createEmpty(track, sequence);
 			write(group, Number(sequence) * 10_000);
 			group.finish();
 		}
-		const marker = track.createGroup(3n);
+		const marker = hooks.createEmpty(track, 3n);
 		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(30_000) });
 		marker.finish();
 		// The reader is slow: the hole before group 3 expired before anything is read.
@@ -334,9 +335,9 @@ for (const maxBuffer of [0, 256]) {
 			maxBuffer,
 		});
 		try {
-			const stalled = track.createGroup(0n);
+			const stalled = hooks.createEmpty(track, 0n);
 			write(stalled, 0);
-			const next = track.createGroup(1n);
+			const next = hooks.createEmpty(track, 1n);
 			write(next, 10_000);
 			next.finish();
 
@@ -364,12 +365,12 @@ test("Consumer moves past a stalled backlog group below the cursor once the max 
 		maxBuffer: 512,
 	});
 	try {
-		const active = track.createGroup(3n);
+		const active = hooks.createEmpty(track, 3n);
 		write(active, 30_000);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 3n });
 
-		track.createGroup(1n);
-		const newer = track.createGroup(4n);
+		hooks.createEmpty(track, 1n);
+		const newer = hooks.createEmpty(track, 4n);
 		write(newer, 40_000);
 		newer.finish();
 
@@ -395,14 +396,14 @@ test("Consumer reads what a promoted head already holds before skipping it under
 		maxBuffer: 1024,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
 
 		// A later group's large frame fills the max buffer, then a frame lands in the group between,
 		// stamped on the wire before the later group's.
-		const between = track.createGroup(1n);
-		const later = track.createGroup(2n);
+		const between = hooks.createEmpty(track, 1n);
+		const later = hooks.createEmpty(track, 2n);
 		const early = Time.Timestamp.now();
 		later.writeFrame({
 			payload: encodeFrame(new Uint8Array(2_000), Duration.micros(20_000)),
@@ -444,13 +445,13 @@ test("Consumer raises a malformed frame in a head promoted under pressure", asyn
 		maxBuffer: 1024,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
 
 		// A later group's large frame fills the max buffer, then a malformed frame lands in the open group between.
-		const between = track.createGroup(1n);
-		const later = track.createGroup(2n);
+		const between = hooks.createEmpty(track, 1n);
+		const later = hooks.createEmpty(track, 2n);
 		const early = Time.Timestamp.now();
 		later.writeFrame({
 			payload: encodeFrame(new Uint8Array(2_000), Duration.micros(20_000)),
@@ -476,11 +477,11 @@ test("Consumer raises a malformed group an age skip passes after the track finis
 		delay: { max: Duration.millis(500) },
 	});
 	try {
-		const first = track.createGroup(0n);
+		const first = hooks.createEmpty(track, 0n);
 		write(first, 0);
 		first.finish();
-		const malformed = track.createGroup(1n);
-		const later = track.createGroup(2n);
+		const malformed = hooks.createEmpty(track, 1n);
+		const later = hooks.createEmpty(track, 2n);
 		track.finish();
 		expect(await within(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
 		await flush();
@@ -508,13 +509,13 @@ test("Consumer reads a finished marker group's end before skipping under pressur
 		maxBuffer: 1024,
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
 
 		// A later group's large frame fills the max buffer, then the group between finishes as a data marker.
-		const between = track.createGroup(1n);
-		const later = track.createGroup(2n);
+		const between = hooks.createEmpty(track, 1n);
+		const later = hooks.createEmpty(track, 2n);
 		const early = Time.Timestamp.now();
 		later.writeFrame({
 			payload: encodeFrame(new Uint8Array(2_000), Duration.micros(20_000)),
@@ -547,10 +548,10 @@ test("Consumer reads a group whose frame fails to read as cut short while the re
 		delay: { max: Duration.millis(5_000) },
 	});
 	try {
-		const stalled = track.createGroup(0n);
+		const stalled = hooks.createEmpty(track, 0n);
 		write(stalled, 0);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
-		const next = track.createGroup(1n);
+		const next = hooks.createEmpty(track, 1n);
 		write(next, 10_000);
 		next.finish();
 

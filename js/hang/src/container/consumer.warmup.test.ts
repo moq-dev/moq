@@ -5,6 +5,7 @@ import { type Group, Time, Track } from "@moq/net";
 import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
+import { hooks } from "../../../net/src/internal.ts";
 
 const BUDGET = 500;
 
@@ -64,7 +65,7 @@ function write(group: Group.Producer, timestamp: number) {
 }
 
 function group(track: Track.Producer, sequence: bigint, timestamps: number[]): Group.Producer {
-	const group = track.createGroup(sequence);
+	const group = hooks.createEmpty(track, sequence);
 	for (const timestamp of timestamps) write(group, timestamp);
 	return group;
 }

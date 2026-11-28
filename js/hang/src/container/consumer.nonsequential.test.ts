@@ -6,6 +6,7 @@ import { AudioConfigSchema } from "../catalog/audio.ts";
 import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
+import { hooks } from "../../../net/src/internal.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
@@ -71,7 +72,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
-	const a = track.createGroup(1_000_000n);
+	const a = hooks.createEmpty(track, 1_000_000n);
 	a.writeFrame({
 		payload: encodeLegacyFrame(0, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.fromMicros(0),
@@ -88,7 +89,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// Open group B at a large jump (+90_000, NOT +1) with a frame far past A's last PTS, and leave it
 	// open. Legacy has no duration, so A's end is unknown -- B could be continuous, or group 1_000_001
 	// could still be coming. We cannot tell, so B must NOT surface yet.
-	const b = track.createGroup(1_090_000n);
+	const b = hooks.createEmpty(track, 1_090_000n);
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.fromMicros(1_000_000),
@@ -120,7 +121,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 		}
 	};
 
-	const first = track.createGroup(0n);
+	const first = hooks.createEmpty(track, 0n);
 	write(first, [0, 100_000, 200_000, 300_000, 400_000]);
 	for (let i = 0; i < 5; i++) expect((await nextFrame(consumer))?.group).toBe(0n);
 	// The first group finishes, read to its end but not yet passed, followed by an adjacent empty group
@@ -128,9 +129,9 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	// frame, so the age skip passes the first group cleanly, then the empty one, which ends without a
 	// frame and leaves only the skipped group's end to show the timeline goes on.
 	first.finish();
-	const empty = track.createGroup(1n);
+	const empty = hooks.createEmpty(track, 1n);
 	await clock.advance(Duration.ZERO);
-	const last = track.createGroup(20n);
+	const last = hooks.createEmpty(track, 20n);
 	write(last, [400_000, 1_000_000]);
 	last.finish();
 	empty.finish();
@@ -166,7 +167,7 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	// Appending declares the starts between groups skipped; `after` is the start of the group before.
 	const publish = (start: number, after?: number) => {
 		if (after !== undefined) track.skipGroups(BigInt(after + 1), BigInt(start));
-		const group = track.createGroup(BigInt(start));
+		const group = hooks.createEmpty(track, BigInt(start));
 		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
 		group.finish();
 	};
@@ -204,13 +205,13 @@ test("Consumer judges a step onto a frameless group by its first frame, not the 
 	});
 	// One 20 ms CELT packet per group.
 	const packet = new Uint8Array([31 << 3, 0]);
-	const first = track.createGroup(0n);
+	const first = hooks.createEmpty(track, 0n);
 	first.writeFrame({ payload: encodeLegacyFrame(0, packet), timestamp: Time.Timestamp.fromMicros(0) });
 	first.finish();
 	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
 
 	// Key 1 is never written, and the track finishes while group 2 is open and still empty.
-	const last = track.createGroup(2n);
+	const last = hooks.createEmpty(track, 2n);
 	track.finish();
 	const next = consumer.next();
 	expect(await poll(next)).toBe("pending");
@@ -237,7 +238,7 @@ test("Consumer reads on without a gap past an aged group the publisher's skips f
 		delay: { max: Duration.millis(500) },
 	});
 	const append = (timestamps: number[]) => {
-		const group = track.appendGroup(Time.Timestamp.fromMicros(timestamps[0]));
+		const group = hooks.appendEmpty(track, Time.Timestamp.fromMicros(timestamps[0]));
 		for (const timestamp of timestamps) {
 			group.writeFrame({
 				payload: encodeLegacyFrame(timestamp, new Uint8Array([0x01])),
@@ -276,13 +277,13 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 		[
 			"declared",
 			new LegacyFormat("data"),
-			(track: Track.Producer, start: number) => track.appendGroup(Time.Timestamp.fromMicros(start)),
+			(track: Track.Producer, start: number) => hooks.appendEmpty(track, Time.Timestamp.fromMicros(start)),
 		],
 		// Nothing declared: each 20 ms packet ends where the next group starts.
 		[
 			"contiguous",
 			new LegacyFormat(opus),
-			(track: Track.Producer, start: number) => track.createGroup(BigInt(start)),
+			(track: Track.Producer, start: number) => hooks.createEmpty(track, BigInt(start)),
 		],
 	] as const) {
 		const track = micro();
@@ -319,7 +320,7 @@ async function legacyVideo(groups: number[][]): Promise<string[]> {
 		delay: { min: null, max: Duration.millis(10_000) },
 	});
 	for (const pictures of groups) {
-		const group = track.createGroup(BigInt(pictures[0]));
+		const group = hooks.createEmpty(track, BigInt(pictures[0]));
 		// A group's transport times never decrease, so a reordered picture rides at the newest one
 		// so far; its payload keeps its own presentation time.
 		let newest = pictures[0];
@@ -424,7 +425,7 @@ test("MP2 groups at sparse sequences run back to back", async () => {
 	});
 	// Two 24 ms frames per group. The group starting at 96 ms never arrives.
 	for (const start of [0, 48_000, 144_000]) {
-		const group = track.createGroup(BigInt(start));
+		const group = hooks.createEmpty(track, BigInt(start));
 		for (const at of [start, start + 24_000]) {
 			group.writeFrame({
 				payload: encodeLegacyFrame(at, new Uint8Array([0xff, 0xfd])),
