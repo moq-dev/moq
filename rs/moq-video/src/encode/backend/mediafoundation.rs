@@ -28,7 +28,7 @@ use std::ptr;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
-use windows::Win32::Foundation::{VARIANT_BOOL, VARIANT_TRUE};
+use windows::Win32::Foundation::{S_OK, VARIANT_BOOL, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
@@ -826,10 +826,16 @@ impl Rate {
 		let capped = rate_modes(codec_api).contains(&(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32));
 		Self {
 			mode: if capped { Mode::Capped } else { Mode::Constant },
-			floor: unsafe { codec_api.IsSupported(&CODECAPI_AVEncVideoMinQP) }.is_ok(),
-			buffer: unsafe { codec_api.IsSupported(&CODECAPI_AVEncCommonBufferSize) }.is_ok(),
+			floor: supports(codec_api, &CODECAPI_AVEncVideoMinQP),
+			buffer: supports(codec_api, &CODECAPI_AVEncCommonBufferSize),
 		}
 	}
+}
+
+/// Whether the MFT supports `api`. Only `S_OK` says so: the binding's `Result`
+/// would also take `S_FALSE`, a success code that answers no.
+fn supports(codec_api: &ICodecAPI, api: &GUID) -> bool {
+	unsafe { (Interface::vtable(codec_api).IsSupported)(Interface::as_raw(codec_api), api) == S_OK }
 }
 
 impl std::fmt::Display for Rate {
