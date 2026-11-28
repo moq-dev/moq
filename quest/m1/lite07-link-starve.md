@@ -43,6 +43,15 @@ Route-health failover would move a stalled track to another route, but it would
 hide this stall, not fix it, and the mesh's only lite-07 link has no lite-07
 alternative.
 
+Update 2026-11-28 (`/quest-start`): [`half-roll-hold.toml`](/test/mesh-replay/half-roll-hold.toml)
+(relays `a` and `b` rolled so `a-b` is the only lite-07 link, then a 10-minute `hold` that fails on
+any reader pause past `stall`, `--broadcasts 4,32`, all readers following every other relay's
+broadcasts) ran clean on `main` at `f24ac5065e`, on a loaded host: no reader paused past 0.5s in
+either hold. [#9564](https://github.com/moq-dev/moq/pull/9564) (its S5) merged on 2026-11-25, after
+all three reproducing commits, and Nightly's mesh replays passed at `5d86f05321` too, so the
+original runs' shape is still unknown and the stall may already be fixed. Before deleting this
+quest, reproduce it at a pre-#9564 build with the hold, or find the original runs' logs.
+
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
 [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md), per the milestone
 rules in [the questline](/quest/README.md), and this quest keeps any non-wire

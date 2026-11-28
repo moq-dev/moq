@@ -74,6 +74,12 @@ class MeshTest(unittest.TestCase):
         self.assertEqual([event["relays"] for event in script.events], [["a", "b"]])
         self.assertEqual(script.known, [])
 
+    def test_half_roll_hold_runs_untouched_after_the_roll(self):
+        mesh = replay.load_mesh(HERE / "ring6.toml")
+        script = replay.load_script(HERE / "half-roll-hold.toml", mesh)
+        self.assertEqual([event["kind"] for event in script.events], ["roll", "hold"])
+        self.assertEqual(script.events[1]["for"], 600.0)
+
     def test_ring(self):
         mesh = replay.load_mesh(mesh_file(RING))
         self.assertEqual(mesh.diameter(), 2)

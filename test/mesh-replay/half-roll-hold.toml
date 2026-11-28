@@ -1,0 +1,14 @@
+# The middle of a roll, held: relays a and b roll onto the new build, so the one link
+# between them speaks moq-lite-07, and the mesh then runs untouched. A reader that
+# pauses past `stall` anywhere in the hold fails the run, even if it recovers.
+start = "old"
+stall = "3s"
+
+[[events]]
+kind = "roll"
+to = "new"
+relays = ["a", "b"]
+
+[[events]]
+kind = "hold"
+for = "10m"

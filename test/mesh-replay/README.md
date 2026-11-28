@@ -90,7 +90,7 @@ The script ([`script.toml`](script.toml)) is the sequence of events:
 | `quiet` | How long no route or announce message may move for the mesh to count as quiet. |
 | `settle` | The longest an event waits for quiet and for every reader to read again. |
 | `stall` | How long a reader may read nothing and still count as fed, once it read since the fault ended. |
-| `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), with an optional `times`. An event naming no relay takes the one with the most links, and a `reopen-link` naming no link its first link every build dials. |
+| `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), or `hold` (`for = "10m"`: no fault, the mesh runs untouched), with an optional `times`. An event naming no relay takes the one with the most links, and a `reopen-link` naming no link its first link every build dials. |
 | `[[known]]` | A violation a quest already owns: `check`, its `kind`, optionally the event `kind`, and the `quest`. It is reported and does not fail the run, except at the start, before any fault. |
 
 A roll drains each relay in the mesh file's order with SIGTERM and starts the other
@@ -101,6 +101,8 @@ settles, then starts it again. After the script every publisher stops.
 
 [`half-roll.toml`](half-roll.toml) rolls only `a` and `b` and stops: the middle of a roll,
 where a new relay sits between a new one and an old one.
+[`half-roll-hold.toml`](half-roll-hold.toml) then holds that state for 10 minutes, a soak for a stall that
+recovers on its own: a reader that pauses past `stall` anywhere in a hold fails the run as **paused**.
 [`reopen.toml`](reopen.toml) runs the script's faults on the new build alone, with no roll.
 
 ## What fails a run
@@ -111,6 +113,7 @@ where a new relay sits between a new one and an old one.
   one whose groups stopped. A reader still unfed from an earlier event, having read
   nothing since, is reported as unfed since that event and matched against its known
   entries, so one strand fails the run once, not again at every later event.
+- **paused**: during a `hold`, a reader path paused for longer than `stall`, even if it read again.
 - **unrouted**: at the start, before any fault, a reader's relay does not show a live
   broadcast, so nothing behind it would be tested. A mesh starting on the new build with a link
   marked `upstream` may hide a route, so there it is only reported, as after every other
