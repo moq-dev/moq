@@ -268,6 +268,7 @@ export class Producer {
 			this.#tainted = false;
 		}
 		this.#marked = false;
+		const payload = encodeFrame(data, Duration.micros(timestamp));
 		if (opens) {
 			this.#close(timestamp);
 			// A track's first group says nothing came before it, so a reader can tell it is the first.
@@ -275,7 +276,8 @@ export class Producer {
 				const start = keyOf(this.#track, timestamp);
 				if (start > 0n) this.#track.skipGroups(0n, start);
 			}
-			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
+			// It starts past every frame written, so its transport time is its own.
+			this.#group = this.#track.appendGroup({ payload, timestamp: Time.Timestamp.fromMicros(timestamp) });
 			this.#floor = this.#start;
 			this.#ceiling = this.#newest;
 			this.#skipping = false;
@@ -289,10 +291,7 @@ export class Producer {
 		// A group's transport times never decrease, so a B-frame or leading picture rides at the
 		// newest one so far; its payload carries its own presentation time.
 		const transport = this.#end !== undefined && timestamp < this.#end ? this.#end : timestamp;
-		this.#group?.writeFrame({
-			payload: encodeFrame(data, Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(transport),
-		});
+		if (!opens) this.#group?.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(transport) });
 
 		// The cadence follows the source, so a moved start never stretches the estimate after it.
 		// Either order stepping back is a reorder: a frame after a keyframe a group start moved can
@@ -362,15 +361,15 @@ export class Producer {
 
 		// The wire stamps whole microseconds, rounded down like every other conversion here.
 		const timestamp = Time.floorAt(marker, Time.Timescale.MICRO);
-		const group = this.#track.appendGroup(marker);
-		group.writeFrame({
-			payload:
-				this.#format.kind === "data"
-					? new Uint8Array()
-					: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
-			timestamp: marker,
-		});
-		group.finish();
+		this.#track
+			.appendGroup({
+				payload:
+					this.#format.kind === "data"
+						? new Uint8Array()
+						: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
+				timestamp: marker,
+			})
+			.finish();
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : Math.max(this.#liveEdge, timestamp);
 		this.#marked = true;
 	}

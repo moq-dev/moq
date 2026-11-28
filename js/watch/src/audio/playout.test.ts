@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { hooks } from "../../../net/src/internal.ts";
 import { STRETCH } from "../sync";
 import { maxDelay, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
@@ -108,7 +109,7 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 			clock.jump(Duration.millis(arrival).saturatingSub(clock.now().since(Instant.ZERO)));
 			for (; next < t.length && t[next].arrival === arrival; next++) {
 				const media = t[next].media * 1000;
-				const group = track.createGroup(BigInt(next));
+				const group = hooks.createEmpty(track, BigInt(next));
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
 				group.finish();
 			}

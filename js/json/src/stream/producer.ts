@@ -46,9 +46,8 @@ export class Producer<T> {
 	 * group there, and every record carries that group's key.
 	 */
 	append(value: T, at: Moq.Time.Timestamp): void {
-		// Encode first, so a value that can't be serialized doesn't publish an empty group that
-		// subscribers would advance into and wait on. Opening the group afterwards is safe because
-		// the record stays uncommitted until the write lands.
+		// Encode first: the group opens with its first record, and the record stays uncommitted until
+		// the write lands.
 		let record: Pending;
 		try {
 			record = this.#encoder.encode(value);
@@ -60,10 +59,12 @@ export class Producer<T> {
 			throw err;
 		}
 
-		this.#group ??= this.#track.appendGroup(at);
-
 		try {
-			this.#group.writeFrame({ payload: record.payload, timestamp: frameTime(this.#group, at) });
+			if (this.#group) {
+				this.#group.writeFrame({ payload: record.payload, timestamp: frameTime(this.#group, at) });
+			} else {
+				this.#group = this.#track.appendGroup({ payload: record.payload, timestamp: at });
+			}
 		} catch (err) {
 			// The group is live, so the record is a hole in the log and a second group would hand
 			// consumers that gap dressed up as a complete log.

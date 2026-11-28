@@ -26,7 +26,6 @@ import {
 	MAX_GROUPED_PLAINTEXT,
 	MAX_INVOCATIONS,
 	MAX_PLAINTEXT_BYTES,
-	MAX_U53,
 } from "./limits.ts";
 import { Pump } from "./pump.ts";
 import { Terminal } from "./terminal.ts";
@@ -185,9 +184,8 @@ test("path is opaque", async () => {
 
 test("grouped roundtrip", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("frame-zero") });
 	expect(group.start).toBe(1n);
-	await group.writeFrame(ms(1), text("frame-zero"));
 	await group.writeFrame(ms(2), text("frame-one"));
 	group.finish();
 
@@ -214,17 +212,13 @@ test("datagram roundtrip", async () => {
 test("sequences allocate monotonically", async () => {
 	const p = await pair("video");
 	const subscriber = p.dg.net.consume();
-	expect(p.producer.appendGroup(ms(0)).start).toBe(0n);
-	expect(p.producer.createGroup(5n).start).toBe(5n);
+	expect((await p.producer.appendGroup({ timestamp: ms(0), plaintext: text("x") })).start).toBe(0n);
+	expect((await p.producer.createGroup({ timestamp: ms(5), plaintext: text("x") })).start).toBe(5n);
 	expect(await p.dg.producer.append(ms(1), text("x"))).toBe(0n);
-	expect(p.producer.appendGroup(ms(6)).start).toBe(6n);
-	expect(thrown(() => p.producer.createGroup(6n))).toBe("reuse");
-	expect(thrown(() => p.producer.createGroup(3n))).toBe("reuse");
+	expect((await p.producer.appendGroup({ timestamp: ms(6), plaintext: text("x") })).start).toBe(6n);
+	expect(await failure(p.producer.createGroup({ timestamp: ms(6), plaintext: text("x") }))).toBe("reuse");
+	expect(await failure(p.producer.createGroup({ timestamp: ms(3), plaintext: text("x") }))).toBe("reuse");
 	expect(await failure(p.dg.producer.insert(0n, ms(1), text("x")))).toBe("reuse");
-	expect(thrown(() => p.producer.createGroup(BigInt(MAX_U53) + 1n))).toBe("identity");
-	expect(thrown(() => p.producer.createGroup(-1n))).toBe("identity");
-	// An untyped caller's fractional sequence is refused as an identity too.
-	expect(thrown(() => p.producer.createGroup(1.5 as unknown as bigint))).toBe("identity");
 
 	// Only the one admitted datagram reached the net track: a later sentinel is next.
 	expect((await subscriber.recv())?.sequence).toBe(0n);
@@ -237,9 +231,10 @@ test("oversize payloads are refused before an identity is spent", async () => {
 	expect(await failure(p.dg.producer.append(ms(1), new Uint8Array(MAX_DATAGRAM_PLAINTEXT + 1)))).toBe("oversize");
 	expect(await p.dg.producer.append(ms(1), new Uint8Array(MAX_DATAGRAM_PLAINTEXT))).toBe(0n);
 
-	const group = p.producer.appendGroup(ms(1));
-	expect(await failure(group.writeFrame(ms(1), new Uint8Array(MAX_GROUPED_PLAINTEXT + 1)))).toBe("oversize");
-	await group.writeFrame(ms(1), text("ok"));
+	const huge = new Uint8Array(MAX_GROUPED_PLAINTEXT + 1);
+	expect(await failure(p.producer.appendGroup({ timestamp: ms(1), plaintext: huge }))).toBe("oversize");
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("ok") });
+	expect(await failure(group.writeFrame(ms(1), huge))).toBe("oversize");
 	group.finish();
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
 });
@@ -255,8 +250,7 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 		net.consume(),
 		generation.credential.consume(generation.epoch),
 	).subscribe("video", { ranges: [{}] });
-	const group = video.appendGroup(ms(1));
-	await group.writeFrame(ms(1), text("frame"));
+	const group = await video.appendGroup({ timestamp: ms(1), plaintext: text("frame") });
 	group.finish();
 	expect(await readText(await recvGroup(consumer))).toBe("frame");
 	consumer.close();
@@ -364,8 +358,7 @@ test("a new epoch authenticates while the old one does not", async () => {
 
 	const net = netTrack(await fresh.name("video"));
 	const producer = await fresh.produce(net, "video");
-	const group = producer.appendGroup(ms(1));
-	await group.writeFrame(ms(1), text("fresh"));
+	const group = await producer.appendGroup({ timestamp: ms(1), plaintext: text("fresh") });
 	group.finish();
 
 	const consumer = cred.consume(fresh.epoch).consume(subscribe(net), "video");
@@ -416,14 +409,11 @@ test("failed opens spend the key", async () => {
 
 test("grouped authentication failure ends the track", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(0));
-	await group.writeFrame(ms(1), text("ok"));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("ok") });
 	group.finish();
 
 	// A forged second group, written straight to the net track.
-	const bad = p.net.createGroup(1n);
-	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok", true) });
-	bad.finish();
+	p.net.createGroup({ timestamp: ms(2), payload: await sealed(p, GROUP, 2n, 0, "ok", true) }).finish();
 
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
 	const forged = await recvGroup(p.consumer);
@@ -439,11 +429,9 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(demand.wanted.peek()).toBe(true);
 
 	// One authentic frame, then silence. The group and the track stay open.
-	const open = p.net.createGroup(0n);
-	open.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "ok") });
-	const bad = p.net.createGroup(1n);
+	const open = p.net.createGroup({ timestamp: ms(0), payload: await sealed(p, GROUP, 0n, 0, "ok") });
+	const bad = p.net.createGroup({ timestamp: ms(1), payload: await sealed(p, GROUP, 1n, 0, "nope", true) });
 	const badDemand = bad.demand();
-	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "nope", true) });
 
 	const good = await recvGroup(p.consumer);
 	expect(await readText(good)).toBe("ok");
@@ -469,8 +457,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 
 test("a grouped failure leaves the independent datagram track readable", async () => {
 	const p = await pair("audio");
-	const bad = p.net.createGroup(0n);
-	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
+	p.net.createGroup({ timestamp: ms(0), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
 	p.dg.net.insert({ sequence: 0n, timestamp: ms(2), payload: await sealed(p, DATAGRAM, 0n, 0, "late") });
 	const forged = await recvGroup(p.consumer);
 
@@ -493,10 +480,8 @@ test("a grouped failure leaves the independent datagram track readable", async (
 
 test("opens across a track's groups run one at a time", async () => {
 	const p = await pair("video");
-	const first = p.producer.appendGroup(ms(1));
-	await first.writeFrame(ms(1), text("a"));
-	const second = p.producer.appendGroup(ms(2));
-	await second.writeFrame(ms(2), text("b"));
+	await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("a") });
+	await p.producer.appendGroup({ timestamp: ms(2), plaintext: text("b") });
 	const a = await recvGroup(p.consumer);
 	const b = await recvGroup(p.consumer);
 
@@ -521,8 +506,7 @@ test("opens across a track's groups run one at a time", async () => {
 test("closing the track consumer releases demand while a group is held", async () => {
 	const p = await pair("video");
 	const demand = p.net.demand();
-	const open = p.producer.appendGroup(ms(1));
-	await open.writeFrame(ms(1), text("ok"));
+	const open = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("ok") });
 
 	const group = await recvGroup(p.consumer);
 	p.consumer.close();
@@ -538,8 +522,7 @@ test("closing the track consumer releases demand while a group is held", async (
 test("a bad datagram stays an event and keeps demand", async () => {
 	const p = await pair("audio");
 	const demand = p.net.demand();
-	const open = p.producer.appendGroup(ms(1));
-	await open.writeFrame(ms(1), text("ok"));
+	const open = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("ok") });
 	p.dg.net.insert({ sequence: 1n, timestamp: ms(2), payload: await sealed(p, DATAGRAM, 1n, 0, "nope", true) });
 
 	const good = await recvGroup(p.consumer);
@@ -632,8 +615,7 @@ test("duplicate datagrams are suppressed inside a bounded window", async () => {
 
 test("releasing an unfinished producer cancels queued writes and held groups", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
-	await group.writeFrame(ms(1), text("first"));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("first") });
 	const received = await recvGroup(p.consumer);
 	expect(await readText(received)).toBe("first");
 	const tail = received.readFrame().catch((error) => error);
@@ -651,8 +633,8 @@ test("releasing an unfinished producer cancels queued writes and held groups", a
 
 test("finish then release drains pending writes before the end", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
-	const writes = [group.writeFrame(ms(1), text("a")), group.writeFrame(ms(2), text("b"))];
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("a") });
+	const writes = [group.writeFrame(ms(2), text("b")), group.writeFrame(ms(3), text("c"))];
 	group.finish();
 	p.producer.finish();
 	p.producer.close();
@@ -661,26 +643,26 @@ test("finish then release drains pending writes before the end", async () => {
 	const received = await recvGroup(p.consumer);
 	expect(await readText(received)).toBe("a");
 	expect(await readText(received)).toBe("b");
+	expect(await readText(received)).toBe("c");
 	expect(await received.readFrame()).toBeUndefined();
 	expect(await p.consumer.recvGroup()).toBeUndefined();
 	expect(await group.closed).toBeNull();
 	expect(await p.producer.closed).toBeNull();
-	expect(await failure(group.writeFrame(ms(3), text("c"))).catch((err: Error) => err.message)).toBe(
+	expect(await failure(group.writeFrame(ms(4), text("d"))).catch((err: Error) => err.message)).toBe(
 		"group is closed",
 	);
 });
 
 test("a declared track end leaves existing groups writable and abortable", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
-	await group.writeFrame(ms(1), text("first"));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("first") });
 	const received = await recvGroup(p.consumer);
 	expect(await readText(received)).toBe("first");
 	p.producer.finish();
 	await group.writeFrame(ms(2), text("last"));
 	expect(await readText(received)).toBe("last");
 	expect(p.producer.closed.peek()).toBeUndefined();
-	expect(() => p.producer.appendGroup(ms(3))).toThrow("track is closed");
+	await expect(p.producer.appendGroup({ timestamp: ms(3), plaintext: text("x") })).rejects.toThrow("track is closed");
 	const aborted = new Error("unfinished group");
 	p.producer.abort(aborted);
 	expect(await p.producer.closed).toBe(aborted);
@@ -690,7 +672,7 @@ test("a declared track end leaves existing groups writable and abortable", async
 
 test("abort after declaring an end stops an in-flight seal and its queued writes", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("first") });
 	const encrypt = TrackKey.prototype.encrypt;
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => {
@@ -708,9 +690,9 @@ test("abort after declaring an end stops an in-flight seal and its queued writes
 		return encrypt.apply(this, args);
 	};
 	try {
-		const frame = group.writeFrame(ms(1), text("in flight"));
+		const frame = group.writeFrame(ms(2), text("in flight"));
 		await sealing;
-		const datagram = group.writeFrame(ms(2), text("queued"));
+		const datagram = group.writeFrame(ms(3), text("queued"));
 		const pending = Promise.allSettled([frame, datagram]);
 		p.producer.finish();
 		expect(p.producer.closed.peek()).toBeUndefined();
@@ -732,12 +714,14 @@ test("abort after declaring an end stops an in-flight seal and its queued writes
 
 test("the pump keeps frame ordinals in submit order", async () => {
 	const p = await pair("video");
-	const groups = [p.producer.appendGroup(ms(0)), p.producer.appendGroup(ms(1))];
 	const writes: Promise<void>[] = [];
 	const datagrams: Promise<bigint>[] = [];
-	for (let i = 0; i < 200; i++) {
+	const groups = await Promise.all(
+		[0, 1].map((i) => p.producer.appendGroup({ timestamp: ms(i), plaintext: text(`frame-${i}`) })),
+	);
+	for (let i = 2; i < 200; i++) {
 		writes.push(groups[i % 2].writeFrame(ms(i), text(`frame-${i}`)));
-		if (i % 50 === 0) datagrams.push(p.dg.producer.append(ms(i), text(`datagram-${i}`)));
+		if (i % 50 === 2) datagrams.push(p.dg.producer.append(ms(i), text(`datagram-${i}`)));
 	}
 	for (const group of groups) group.finish();
 	await Promise.all(writes);
@@ -748,13 +732,13 @@ test("the pump keeps frame ordinals in submit order", async () => {
 		for (let i = g; i < 200; i += 2) expect(await readText(received)).toBe(`frame-${i}`);
 		expect(await received.readFrame()).toBeUndefined();
 	}
-	for (let i = 0; i < 200; i += 50) expect(datagramText(await p.dg.consumer.recv())).toBe(`datagram-${i}`);
+	for (let i = 2; i < 200; i += 50) expect(datagramText(await p.dg.consumer.recv())).toBe(`datagram-${i}`);
 });
 
 test("concurrent reads open in transport order", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(0));
-	for (let i = 0; i < 50; i++) void group.writeFrame(ms(i), text(`frame-${i}`));
+	const group = await p.producer.appendGroup({ timestamp: ms(0), plaintext: text("frame-0") });
+	for (let i = 1; i < 50; i++) void group.writeFrame(ms(i), text(`frame-${i}`));
 	group.finish();
 	const received = await recvGroup(p.consumer);
 	const reads = Array.from({ length: 51 }, () => received.readFrame());
@@ -767,7 +751,7 @@ test("concurrent reads open in transport order", async () => {
 
 test("aborting a group rejects its pending writes", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("zero") });
 	const first = group.writeFrame(ms(1), text("a"));
 	const second = group.writeFrame(ms(2), text("b"));
 	const abort = new Error("cancelled");
@@ -779,27 +763,29 @@ test("aborting a group rejects its pending writes", async () => {
 	await expect(group.writeFrame(ms(3), text("c"))).rejects.toBe(abort);
 
 	// Other groups on the track carry on.
-	const next = p.producer.appendGroup(ms(4));
-	await next.writeFrame(ms(4), text("next"));
+	const next = await p.producer.appendGroup({ timestamp: ms(4), plaintext: text("next") });
 	next.finish();
 	const received = await recvGroup(p.consumer);
 	expect(received.start).toBe(1n);
+	expect(await readText(received)).toBe("zero");
 	expect(await received.readFrame().catch((err) => err)).toBe(abort);
 	expect(await readText(await recvGroup(p.consumer))).toBe("next");
 });
 
 test("aborting a track rejects pending writes on it and its groups", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("zero") });
 	const frame = group.writeFrame(ms(1), text("a"));
 	const datagram = group.writeFrame(ms(2), text("queued"));
+	const opening = p.producer.appendGroup({ timestamp: ms(3), plaintext: text("queued") });
 	const abort = new Error("cancelled");
 	p.producer.abort(abort);
-	expect(await Promise.allSettled([frame, datagram])).toEqual([
+	expect(await Promise.allSettled([frame, datagram, opening])).toEqual([
+		{ status: "rejected", reason: abort },
 		{ status: "rejected", reason: abort },
 		{ status: "rejected", reason: abort },
 	]);
-	expect(() => p.producer.appendGroup(ms(3))).toThrow(abort);
+	await expect(p.producer.appendGroup({ timestamp: ms(4), plaintext: text("x") })).rejects.toBe(abort);
 	expect(p.net.closed.peek()).toBe(abort);
 });
 
@@ -824,7 +810,7 @@ test("an abort stops queued datagrams before they seal", async () => {
 
 test("a finished group and a released declared track keep their promised drain", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("zero") });
 	const frame = group.writeFrame(ms(1), text("frame"));
 	group.finish();
 	group.abort(new Error("late"));
@@ -836,6 +822,7 @@ test("a finished group and a released declared track keep their promised drain",
 
 	expect(await p.net.closed).toBeNull();
 	const received = await recvGroup(p.consumer);
+	expect(await readText(received)).toBe("zero");
 	expect(await readText(received)).toBe("frame");
 	expect(await received.readFrame()).toBeUndefined();
 	expect(datagramText(await p.dg.consumer.recv())).toBe("datagram");
@@ -844,11 +831,13 @@ test("a finished group and a released declared track keep their promised drain",
 test("a refused timestamp does not burn the frame", async () => {
 	const p = await pair("video");
 	await p.net.info();
-	const group = p.producer.appendGroup(ms(1));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("ok") });
 	await expect(group.writeFrame(Time.Timestamp.unscaled(group.start), text("untimed"))).rejects.toThrow("timestamp");
-	await group.writeFrame(ms(1), text("ok"));
+	await group.writeFrame(ms(1), text("next"));
 	group.finish();
-	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
+	const received = await recvGroup(p.consumer);
+	expect(await readText(received)).toBe("ok");
+	expect(await readText(received)).toBe("next");
 });
 
 test("produce waits for an unaccepted track's timescale", async () => {
@@ -860,9 +849,11 @@ test("produce waits for an unaccepted track's timescale", async () => {
 	const producer = await producing;
 
 	// The timescale is known from the start, so mismatches spend neither a sequence nor a frame.
-	const group = producer.createGroup(1n);
-	await expect(group.writeFrame(Time.Timestamp.unscaled(group.start), text("untimed"))).rejects.toThrow("timestamp");
-	await group.writeFrame(ms(2), text("frame"));
+	await expect(
+		producer.createGroup({ timestamp: Time.Timestamp.unscaled(1n), plaintext: text("untimed") }),
+	).rejects.toThrow("timestamp");
+	const group = await producer.createGroup({ timestamp: ms(1), plaintext: text("frame") });
+	expect(group.start).toBe(1n);
 	group.finish();
 	expect(await readText(await recvGroup(consumer))).toBe("frame");
 
@@ -887,19 +878,19 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);
 
-	const group = producer.createGroup(1n);
+	await expect(producer.createGroup({ timestamp: huge, plaintext: text("x") })).rejects.toBeInstanceOf(
+		NetError.TimestampMismatch,
+	);
+	const group = await producer.createGroup({ timestamp: ms(1), plaintext: text("frame") });
 	await expect(group.writeFrame(huge, text("x"))).rejects.toBeInstanceOf(NetError.TimestampMismatch);
-	await group.writeFrame(ms(2), text("frame"));
 	group.finish();
 	expect(await readText(await recvGroup(consumer))).toBe("frame");
 });
 
 test("a grouped failure skips opens queued behind it", async () => {
 	const p = await pair("video");
-	const bad = p.net.createGroup(0n);
-	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
-	const good = p.net.createGroup(1n);
-	good.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok") });
+	p.net.createGroup({ timestamp: ms(0), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
+	p.net.createGroup({ timestamp: ms(1), payload: await sealed(p, GROUP, 1n, 0, "ok") });
 	p.dg.net.insert({ sequence: 0n, timestamp: ms(3), payload: await sealed(p, DATAGRAM, 0n, 0, "late") });
 	const forged = await recvGroup(p.consumer);
 	const held = await recvGroup(p.consumer);
@@ -920,8 +911,7 @@ test("a grouped failure skips opens queued behind it", async () => {
 
 test("a failed net write after encryption aborts the group", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(0));
-	await group.writeFrame(ms(0), text("first"));
+	const group = await p.producer.appendGroup({ timestamp: ms(0), plaintext: text("first") });
 	const failure = new Error("net write failed");
 	const write = spyOn(NetGroup.Producer.prototype, "writeFrame").mockImplementation(() => {
 		throw failure;
@@ -937,8 +927,7 @@ test("a failed net write after encryption aborts the group", async () => {
 
 test("a group read past the first frame opens at its transport index", async () => {
 	const p = await pair("video");
-	const group = p.producer.appendGroup(ms(1));
-	await group.writeFrame(ms(1), text("zero"));
+	const group = await p.producer.appendGroup({ timestamp: ms(1), plaintext: text("zero") });
 	await group.writeFrame(ms(2), text("one"));
 	group.finish();
 

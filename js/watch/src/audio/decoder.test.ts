@@ -6,6 +6,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { hooks } from "../../../net/src/internal.ts";
 import type { Broadcast } from "../broadcast";
 import { defined } from "../defined.test-util.ts";
 import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
@@ -1666,7 +1667,7 @@ async function livePlayback(burst: number, priority?: Signal<number>) {
 					held.push(frame * FRAME);
 					if (held.length < burst) continue;
 					for (const timestamp of held) {
-						const group = track.createGroup(sequence++);
+						const group = hooks.createEmpty(track, sequence++);
 						group.writeFrame(legacyFrame(Duration.millis(timestamp)));
 						group.finish();
 					}

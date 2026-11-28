@@ -13,9 +13,12 @@ async function poster(audio: boolean, buffered: boolean) {
 	const producer = producerRoute.broadcast;
 	const track = producer.createTrack("video");
 	if (!track) throw new Error("the track already exists");
-	const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
-	const audioGroup = audioTrack?.appendGroup(Time.Timestamp.unscaled(0n));
+	// Each track's one group, opened with its first frame. Scale-less, so every frame names key 0.
+	type Group = ReturnType<typeof track.appendGroup>;
+	let group: Group | undefined;
+	let audioGroup: Group | undefined;
+	const at = Time.Timestamp.unscaled(0n);
 	const catalog: Catalog.Root = {
 		video: {
 			renditions: {
@@ -83,25 +86,26 @@ async function poster(audio: boolean, buffered: boolean) {
 	const push = (timestamp: number) => {
 		const payload = chunks.get(timestamp);
 		if (!payload) throw new Error("missing encoded frame");
-		group.writeFrame({
-			payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.unscaled(group.start),
-		});
+		const frame = { payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)), timestamp: at };
+		if (group) group.writeFrame(frame);
+		else group = track.appendGroup(frame);
 	};
 	return {
 		push,
 		enabled: (value: boolean) => enabled.set(value),
 		paused: (value: boolean) => paused.set(value),
 		async audio() {
-			if (!audioGroup) throw new Error("no audio track");
+			if (!audioTrack) throw new Error("no audio track");
 			const encode = new AudioEncoder({
 				output(chunk) {
 					const data = new Uint8Array(chunk.byteLength);
 					chunk.copyTo(data);
-					audioGroup.writeFrame({
+					const frame = {
 						payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)),
-						timestamp: Time.Timestamp.unscaled(audioGroup.start),
-					});
+						timestamp: at,
+					};
+					if (audioGroup) audioGroup.writeFrame(frame);
+					else audioGroup = audioTrack.appendGroup(frame);
 				},
 				error(error) {
 					throw error;
@@ -139,7 +143,7 @@ async function poster(audio: boolean, buffered: boolean) {
 		},
 		close() {
 			player.close();
-			group.finish();
+			group?.finish();
 			audioGroup?.finish();
 			producer.close();
 			origin.close();

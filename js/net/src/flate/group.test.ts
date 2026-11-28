@@ -99,7 +99,7 @@ for (const readPlain of [false, true]) {
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.start) });
 	const reader = group.mirror();

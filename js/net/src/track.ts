@@ -21,6 +21,7 @@ import {
 	toStreamCode,
 } from "./error.ts";
 import { type Asker, FillState, type Lookup, type Requests, requestsOf } from "./fill.ts";
+import type { Info as FrameInfo, Producer as FrameProducer } from "./frame.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
@@ -1902,6 +1903,8 @@ export class Producer {
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.appendNext = (producer) => producer.#appendAt(producer.#received);
+		hooks.createEmpty = (producer, key) => producer.#createGroup(key, 0, { replace: true });
+		hooks.appendEmpty = (producer, start) => producer.#appendAt(producer.#keyOf(start));
 		hooks.supersedeStale = (producer) => {
 			const held = producer.#state.drops.all.filter((run) => run.stale !== undefined);
 			for (const run of held) producer.#setDrops(run.start, run.end);
@@ -2934,13 +2937,13 @@ export class Producer {
 	}
 
 	/**
-	 * Create the next group, starting at `start`: after every group this track holds. Mirrors the
-	 * Rust `append_group`.
+	 * Create the next group, after every group this track holds, whose first frame is `frame`: the
+	 * group starts at its timestamp. Mirrors the Rust `append_group`.
 	 *
-	 * A timed track converts `start` into its timescale, rounding down, as {@link writeFrame}
-	 * does; a scale-less track takes {@link Timestamp.unscaled} at the group's key. A `start` that
+	 * A timed track converts the timestamp into its timescale, rounding down, as {@link writeFrame}
+	 * does; a scale-less track takes {@link Timestamp.unscaled} at the group's key. A timestamp that
 	 * doesn't match the track, or at or before a group this track holds, throws
-	 * {@link TimestampMismatch}, like a rewound frame.
+	 * {@link TimestampMismatch}, like a rewound frame, before any group exists.
 	 *
 	 * Appending says the producer will not go back, so it skips every start below the new group
 	 * that it never produced, from just past its previous append (before the first, from the
@@ -2955,13 +2958,25 @@ export class Producer {
 	 * its media time does, or uses a new track name or identity. Reusing a start only corrupts
 	 * this broadcast for its readers. Datagram keys name no cached content and are exempt.
 	 *
-	 * Its frames must match the track's {@link Info.timescale}: a scaled timestamp on every frame
-	 * of a timed track, and on a scale-less one {@link Timestamp.unscaled} at the group's start,
-	 * or the write throws {@link TimestampMismatch}. So does a first frame that starts at or
-	 * before the group below it, or at or after the one above it: starts strictly increase.
+	 * Its later frames must match the track's {@link Info.timescale}: a scaled timestamp on every
+	 * frame of a timed track, and on a scale-less one {@link Timestamp.unscaled} at the group's
+	 * start, or the write throws {@link TimestampMismatch}.
 	 */
-	appendGroup(start: Timestamp): GroupProducer {
-		return this.#appendAt(this.#keyOf(start));
+	appendGroup(frame: Frame): GroupProducer {
+		const group = this.#appendAt(this.#keyOf(frame.timestamp));
+		return opened(group, () => {
+			group.writeFrame(frame);
+			return group;
+		});
+	}
+
+	/**
+	 * {@link appendGroup} with its first frame streamed: the group exists once this returns, and
+	 * {@link FrameProducer.finish} hands it back to write the rest. Mirrors the Rust `append_frame`.
+	 */
+	appendFrame(info: FrameInfo): FrameProducer {
+		const group = this.#appendAt(this.#keyOf(info.timestamp));
+		return opened(group, () => group.createFrame(info));
 	}
 
 	// Append a group at `key`, past every group held, skipping what it leaves below.
@@ -3054,7 +3069,21 @@ export class Producer {
 	}
 
 	/**
-	 * Create a new group with the given sequence number.
+	 * Record that the publisher gave up `[start, end)` with `error`: none will arrive, so a reader
+	 * waiting on one moves past it, a group still arriving in them ends with `error`, the declared
+	 * end does not wait for them, and a relay serving this track forwards the drop. For a producer
+	 * that knows a group existed but cannot produce it, such as a replay whose copy was pruned; one
+	 * that never will produce it says so with {@link skipGroups}. Mirrors the Rust `drop_groups`.
+	 */
+	dropGroups(start: bigint, end: bigint, error: Error): void {
+		checkKey(start);
+		checkEnd(end);
+		this.#drop(start, end, { error }, true);
+	}
+
+	/**
+	 * Create a group whose first frame is `frame`: the group starts at its timestamp, its key on the
+	 * track, converted as {@link appendGroup} converts it. Mirrors the Rust `create_group`.
 	 *
 	 * It says nothing about the keys around it: groups may be created out of order, and an
 	 * aborted or evicted key created again. A gap it leaves is skipped only once the
@@ -3067,8 +3096,21 @@ export class Producer {
 	 * same content, and nothing checks it, as with {@link appendGroup}. Its frames are checked
 	 * like {@link appendGroup}'s.
 	 */
-	createGroup(key: bigint): GroupProducer {
-		return this.#createGroup(key, 0, { replace: true });
+	createGroup(frame: Frame): GroupProducer {
+		const group = this.#createGroup(this.#keyOf(frame.timestamp), 0, { replace: true });
+		return opened(group, () => {
+			group.writeFrame(frame);
+			return group;
+		});
+	}
+
+	/**
+	 * {@link createGroup} with its first frame streamed: the group exists once this returns, and
+	 * {@link FrameProducer.finish} hands it back to write the rest. Mirrors the Rust `create_frame`.
+	 */
+	createFrame(info: FrameInfo): FrameProducer {
+		const group = this.#createGroup(this.#keyOf(info.timestamp), 0, { replace: true });
+		return opened(group, () => group.createFrame(info));
 	}
 
 	// `replace` lets a live copy of the key go; without it only a copy that failed, or one a
@@ -3491,15 +3533,18 @@ export class Producer {
 	 * frame, since nothing says where it ends. Mirrors the Rust `write_frame`.
 	 */
 	writeFrame(frame: Frame) {
-		const group = this.appendGroup(frame.timestamp);
-		try {
-			group.writeFrame(frame);
-		} catch (err) {
-			// Abort the group so no subscriber waits on a group that will never get its frame.
-			group.abort(err instanceof Error ? err : new Error(String(err)));
-			throw err;
-		}
-		group.finish();
+		this.appendGroup(frame).finish();
+	}
+}
+
+// Write a group's first frame with `write`, aborting the group if it is refused so no reader
+// waits on a group that will never get it.
+function opened<T>(group: GroupProducer, write: () => T): T {
+	try {
+		return write();
+	} catch (err) {
+		group.abort(err instanceof Error ? err : new Error(String(err)));
+		throw err;
 	}
 }
 
@@ -3594,7 +3639,9 @@ export interface Finished {
 	/** The track's info, once accepted. */
 	info(): Promise<Info>;
 	/** Create an older group below the end, which arrived late; see {@link Producer.createGroup}. */
-	createGroup(key: bigint): GroupProducer;
+	createGroup(frame: Frame): GroupProducer;
+	/** {@link createGroup} with its first frame streamed; see {@link Producer.createFrame}. */
+	createFrame(info: FrameInfo): FrameProducer;
 	/** Serve the groups readers miss below the end; see {@link Producer.requests}. */
 	requests(): Requests;
 	/** Subscribe to this in-process track; see {@link Producer.subscribe}. */

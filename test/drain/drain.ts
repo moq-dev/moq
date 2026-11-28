@@ -125,11 +125,10 @@ let lastPublished = -1;
 // Each group starts a millisecond after the last, so its start counts the groups.
 let next = 0;
 const ticker = setInterval(() => {
-	const at = Moq.Time.Timestamp.fromMillis(next++);
-	const group = track.appendGroup(at);
-	group.writeFrame({
-		payload: new TextEncoder().encode(String(group.start)),
-		timestamp: at,
+	const start = next++;
+	const group = track.appendGroup({
+		payload: new TextEncoder().encode(String(start)),
+		timestamp: Moq.Time.Timestamp.fromMillis(start),
 	});
 	group.finish();
 	lastPublished = Number(group.start);

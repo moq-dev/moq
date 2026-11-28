@@ -21,10 +21,9 @@ try {
 		for (let i = 0; i < count; i++) {
 			const track = publication.broadcast.createTrack(String(i));
 			if (!track) throw new Error(`the track ${i} already exists`);
-			const group = track.appendGroup(Moq.Time.Timestamp.unscaled(0n));
-			group.writeFrame({
+			track.appendGroup({
 				payload: new TextEncoder().encode(String(i)),
-				timestamp: Moq.Time.Timestamp.unscaled(group.start),
+				timestamp: Moq.Time.Timestamp.unscaled(0n),
 			});
 		}
 		publication.announce();

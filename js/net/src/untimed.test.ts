@@ -42,8 +42,8 @@ const WIRES: Wire[] = [
 ];
 
 /**
- * Serve one group of `timestamps` on a track with `timescale`, starting at `sequence` (the next
- * one by default), and read it back over `wire`.
+ * Serve one group of `timestamps` on a track with `timescale`, appended or, with `key`, created
+ * there, and read it back over `wire`. The group starts at its first frame.
  */
 async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], key?: bigint) {
 	const pair = createMockTransportPair(wire.protocol);
@@ -61,10 +61,9 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const track = request.accept({ timescale });
-			const group = key === undefined ? hooks.appendNext(track) : track.createGroup(key);
-			for (const [i, timestamp] of timestamps.entries()) {
-				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
-			}
+			const [first, ...rest] = timestamps.map((timestamp, i) => ({ payload: new Uint8Array([i]), timestamp }));
+			const group = key === undefined ? track.appendGroup(first) : track.createGroup(first);
+			for (const frame of rest) group.writeFrame(frame);
 			group.finish();
 		}
 	})();
@@ -94,7 +93,9 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			const groups = subscription.ordered();
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				// The same group, so a scale-less frame's key still names it.
-				const out = video.createGroup(group.start);
+				const first = await group.readFrame();
+				if (!first) continue;
+				const out = video.createGroup(first);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 				out.finish();
 			}
@@ -197,12 +198,15 @@ for (const wire of WIRES) {
 
 		if (wire.declares) {
 			expect(info.timescale).toBe(Timescale.MICRO);
-			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual(wire.perFrame ? [1_000, 1_234] : [0, 0]);
+			// A group starts at its first frame, so one carrying no time per frame stamps its start.
+			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual(
+				wire.perFrame ? [1_000, 1_234] : [1_000, 1_000],
+			);
 		} else {
 			// No trusted units on the wire, and no arrival time made up in their place: each frame
 			// carries only its group's key.
 			expect(info.timescale).toBeNull();
-			for (const frame of frames) expect(frame.timestamp).toEqual(Timestamp.unscaled(0n));
+			for (const frame of frames) expect(frame.timestamp).toEqual(Timestamp.unscaled(1_000n));
 		}
 	});
 }

@@ -61,7 +61,7 @@ const session = await Moq.Connection.connect({
 });
 
 // Written once and left open: the receiver has to give up on it.
-let partial: Moq.Group.Producer | undefined;
+let partial: Moq.Frame.Producer | undefined;
 
 try {
 	for await (const line of console) {
@@ -69,24 +69,21 @@ try {
 		// Bun yields a trailing empty line at EOF.
 		if (command === "") continue;
 		if (command === "low") {
-			partial = low.appendGroup(Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n));
 			// A whole frame can return credit at each sealed segment and finish before `high`
 			// reaches stdin. Keep this prefix unsealed until the receiver evicts its stream.
-			partial
-				.createFrame({ size: 2 * window, timestamp: Moq.Time.Timestamp.unscaled(partial.start) })
-				.write(new Uint8Array((window * 3) / 4).fill(1));
+			const timestamp = Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n);
+			partial = low.appendFrame({ size: 2 * window, timestamp });
+			partial.write(new Uint8Array((window * 3) / 4).fill(1));
 		} else if (command === "high") {
-			const group = high.appendGroup(Moq.Time.Timestamp.unscaled((high.largest()?.group ?? -1n) + 1n));
-			group.writeFrame({
+			const group = high.appendGroup({
 				payload: new Uint8Array(window / 2).fill(2),
-				timestamp: Moq.Time.Timestamp.unscaled(group.start),
+				timestamp: Moq.Time.Timestamp.unscaled((high.largest()?.group ?? -1n) + 1n),
 			});
 			group.finish();
 		} else if (command === "after") {
-			const group = low.appendGroup(Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n));
-			group.writeFrame({
+			const group = low.appendGroup({
 				payload: new TextEncoder().encode("after"),
-				timestamp: Moq.Time.Timestamp.unscaled(group.start),
+				timestamp: Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n),
 			});
 			group.finish();
 		} else {
@@ -94,8 +91,9 @@ try {
 		}
 	}
 } finally {
+	// The partial frame never completes, so its group can only end failed.
+	partial?.abort(new Error("sender closed"));
 	// End the live tracks, or the close waits out its deadline for them.
-	partial?.finish();
 	low.finish();
 	low.close();
 	high.finish();

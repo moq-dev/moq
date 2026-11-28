@@ -38,12 +38,10 @@ const responses: number[][] = [];
 const streams: number[][] = [];
 let next = 0n;
 function publishGroup() {
-	const group = track.appendGroup(Time.Timestamp.unscaled(next++));
-	for (let object = 0; object < 2; object++)
-		group.writeFrame({
-			payload: new Uint8Array([Number(group.start), object]),
-			timestamp: Time.Timestamp.unscaled(group.start),
-		});
+	const key = next++;
+	const timestamp = Time.Timestamp.unscaled(key);
+	const group = track.appendGroup({ payload: new Uint8Array([Number(key), 0]), timestamp });
+	group.writeFrame({ payload: new Uint8Array([Number(key), 1]), timestamp });
 	group.finish();
 }
 async function response(expected: number) {

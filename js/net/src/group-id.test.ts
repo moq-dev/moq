@@ -6,6 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { accept, connect } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -68,7 +69,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
-			const out = video.createGroup(group.start);
+			const out = hooks.createEmpty(video, group.start);
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 			out.finish();
 		}
@@ -112,7 +113,7 @@ for (const wire of WIRES) {
 		while (!demand.wanted.peek()) await demand.wanted.changed();
 
 		for (const key of [PAST_SAFE, MAX_QUIC]) {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			group.writeFrame({
 				payload: enc.encode(`first ${key}`),
 				timestamp: Timestamp.unscaled(group.start),
@@ -159,9 +160,9 @@ for (const wire of WIRES) {
 test("a group sequence that is not a non-negative bigint is refused where a caller passes one", async () => {
 	const track = defined(new BroadcastProducer().createTrack("video"));
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
-	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
-	expect(() => track.createGroup(-1n)).toThrow(RangeError);
-	expect(track.createGroup(MAX_QUIC).start).toBe(MAX_QUIC);
+	expect(() => hooks.createEmpty(track, 1 as unknown as bigint)).toThrow(TypeError);
+	expect(() => hooks.createEmpty(track, -1n)).toThrow(RangeError);
+	expect(hooks.createEmpty(track, MAX_QUIC).start).toBe(MAX_QUIC);
 	const consumer = new BroadcastProducer().consume().track("video");
 	await expect(consumer.fetchGroup(1 as unknown as bigint)).rejects.toThrow(TypeError);
 });

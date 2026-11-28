@@ -628,7 +628,7 @@ class Model {
 		}
 		if (entry.written === 0 && !entry.writer) {
 			try {
-				entry.writer = copy.track.createGroup(BigInt(group));
+				entry.writer = hooks.createEmpty(copy.track, BigInt(group));
 			} catch {
 				return;
 			}
@@ -672,7 +672,7 @@ class Model {
 		if (copy.groups.has(key)) return local();
 		const written = publisher.written.get(key) ?? 0;
 		if (key >= GROUPS || written === 0) throw new NotFound(`group ${key}`);
-		const writer = copy.track.createGroup(BigInt(key));
+		const writer = hooks.createEmpty(copy.track, BigInt(key));
 		copy.groups.set(key, { written: 0, writer });
 		const group = writer.consume();
 		this.write(identity, slot, key, written);

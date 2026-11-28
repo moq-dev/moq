@@ -100,7 +100,7 @@ function source() {
 		for (const start of c.groups ?? table.groups) {
 			if (live) writeTail(c, live);
 			const time = Timestamp.fromMillis(start);
-			const group = c.append === false ? track.createGroup(BigInt(start)) : track.appendGroup(time);
+			const group = c.append === false ? hooks.createEmpty(track, BigInt(start)) : hooks.appendEmpty(track, time);
 			frames(group, start, 0, head);
 			live = { start, group };
 		}

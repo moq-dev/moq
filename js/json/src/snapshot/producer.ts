@@ -138,23 +138,14 @@ export class Producer<T> {
 		if (encoded.payload.byteLength > MAX_FRAME_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		if (encoded.keyframe) {
-			// Opened before the previous group finishes, so a key at or before the newest group's is
-			// refused with the previous group still open.
-			const group = this.#track.appendGroup(at);
+			// Opened with its frame before the previous group finishes, so a key at or before the
+			// newest group's, or a frame the track refuses, leaves the previous group still open.
+			const group = this.#track.appendGroup({ payload: encoded.payload, timestamp: at });
 			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();
 			this.#group = undefined;
-			try {
-				group.writeFrame({ payload: encoded.payload, timestamp: at });
-			} catch (err) {
-				// The group carries no frames, so close it rather than leaving it open on the track. A
-				// rejected frame doesn't close the track, and a consumer that already advanced into this
-				// group would otherwise block until some later update opened a newer one.
-				group.finish();
-				throw err;
-			}
 
 			if (this.#deltas) {
 				// Keep the group open so future deltas can be appended.

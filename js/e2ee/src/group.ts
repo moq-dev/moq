@@ -20,7 +20,8 @@ export interface Frame {
 }
 
 /**
- * Exclusive writer for one group; frames are numbered from 0 in write order.
+ * Exclusive writer for one group; frames are numbered from 0 in write order, frame 0 being the
+ * one the track opened the group with.
  *
  * Writes run through the track's serial pump, so each frame's index is its net write order.
  */
@@ -30,8 +31,9 @@ export class Producer {
 
 	#inner: NetGroup.Producer;
 	#writer: Writer;
-	// Frames encrypted so far: the next frame's index, equal to the net group's frame count.
-	#next = 0;
+	// Frames encrypted so far: the next frame's index, equal to the net group's frame count. The
+	// track wrote frame 0.
+	#next = 1;
 	#closed = false;
 	#aborted?: Error;
 

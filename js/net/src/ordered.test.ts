@@ -27,7 +27,7 @@ function unanchoredTrack() {
 
 // A finished one-frame group, presenting at its key in milliseconds on a timed track.
 function put(producer: TrackProducer, key: bigint, timed = true) {
-	const group = producer.createGroup(key);
+	const group = hooks.createEmpty(producer, key);
 	group.writeFrame(textFrame("x", timed ? Timestamp.fromMillis(Number(key)) : Timestamp.unscaled(key)));
 	group.finish();
 }
@@ -80,7 +80,7 @@ test("an ordered read reports what it gives up, in key order, but no skip", () =
 	expect(items(ordered)).toEqual(["group 0", "gap 1..3 (delivery timeout)", "group 3", "group 6"]);
 
 	// A group handed out and then dropped is never reported again.
-	const cut = producer.createGroup(7n);
+	const cut = hooks.createEmpty(producer, 7n);
 	const read = ordered.tryNextItem();
 	expect(read?.group?.start).toBe(7n);
 	drop(producer, 7n, 8n);
@@ -624,7 +624,7 @@ test("a held group's successor bounds it by key, not by its first frame's time",
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
-	const ten = producer.createGroup(10n);
+	const ten = hooks.createEmpty(producer, 10n);
 	ten.writeFrame(textFrame("x", Timestamp.fromMillis(4)));
 	ten.finish();
 	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
@@ -642,7 +642,7 @@ test("a group held behind a gap is passed once an update's waiting time start li
 	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n, false);
 	drop(producer, 1n, 2n);
-	const group = producer.createGroup(2n);
+	const group = hooks.createEmpty(producer, 2n);
 	group.writeFrame(textFrame("x", Timestamp.unscaled(2n)));
 	group.finishAt(3n);
 	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
@@ -909,7 +909,7 @@ test("a time end between two groups ends an ordered read once the publisher crea
 test("a time end between appended groups ends either read at once", async () => {
 	const producer = new TrackProducer("test");
 	for (const key of [1000n, 2000n]) {
-		const group = producer.appendGroup(Timestamp.unscaled(key));
+		const group = hooks.appendEmpty(producer, Timestamp.unscaled(key));
 		group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
 		group.finish();
 	}
@@ -939,7 +939,7 @@ test("a time end between received groups ends an ordered read only once the skip
 test("an ordered read whose window ends past a group it passed as stale reports it first", () =>
 	withClock((clock) => {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
-		const first = producer.createGroup(0n);
+		const first = hooks.createEmpty(producer, 0n);
 		first.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		first.finishAt(10n);
 		clock.jump(Duration.millis(100));

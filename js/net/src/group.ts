@@ -632,6 +632,7 @@ export class Producer {
 					if (this.#open !== open) throw new Error("group is closed");
 					this.#open = undefined;
 					this.#writeFrame({ payload, timestamp });
+					return this;
 				},
 				abort: (error) => this.abort(error),
 			});
@@ -661,6 +662,7 @@ export class Producer {
 				// Wake whole-frame readers waiting for it to complete.
 				this.#state.frames.mutate(() => {});
 				for (const mirror of this.#mirrors?.keys() ?? []) mirror.frames.mutate(() => {});
+				return this;
 			},
 			abort: (error) => this.abort(error),
 		});

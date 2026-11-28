@@ -7,6 +7,7 @@ import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
 import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "../src/ietf/subscribe.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
+import { hooks } from "../src/internal.ts";
 import { Publisher as LitePublisher } from "../src/lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "../src/lite/subscribe.ts";
 import { ALPN_05, Version as LiteVersion } from "../src/lite/version.ts";
@@ -95,7 +96,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 	}, 0);
 	const start = performance.now();
 	for (let sequence = 0; sequence < groups; sequence++) {
-		const group = track.appendGroup(Timestamp.fromMicros(sequence * 2500));
+		const group = hooks.appendEmpty(track, Timestamp.fromMicros(sequence * 2500));
 		for (let frame = 0; frame < 128; frame++)
 			group.writeFrame({
 				payload: new Uint8Array(32),

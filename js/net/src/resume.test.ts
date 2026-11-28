@@ -93,7 +93,7 @@ function copyOf(producer: track.Producer) {
 	return {
 		producer,
 		write(key: bigint, frames = 1, close = true) {
-			const group = producer.createGroup(key);
+			const group = hooks.createEmpty(producer, key);
 			for (let frame = 0; frame < frames; frame++)
 				group.writeFrame({
 					payload: enc.encode(`${key}.${frame}`),
@@ -114,7 +114,7 @@ function timedCopy(source: BroadcastProducer) {
 	return {
 		producer,
 		write(key: bigint, frames = 1, close = true) {
-			const group = producer.createGroup(key);
+			const group = hooks.createEmpty(producer, key);
 			for (let frame = 0; frame < frames; frame++)
 				group.writeFrame({
 					payload: enc.encode(`${key}.${frame}`),
@@ -246,7 +246,7 @@ test("a pending refresh moves to the next copy when the one it asked closes", as
 	const handles = sources.map((source) => source.consume());
 	const tracks = sources.map((source) => {
 		const producer = defined(source.createTrack("seq", { maxAge: null, refresh: { interval: Duration.secs(5) } }));
-		const group = producer.createGroup(0n);
+		const group = hooks.createEmpty(producer, 0n);
 		group.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 		return producer;
@@ -267,7 +267,7 @@ test("a pending refresh moves to the next copy when the one it asked closes", as
 		expect(tracks[1].demand().refresh.peek()).toBe(true);
 		await refresh;
 
-		const group = tracks[1].createGroup(1n);
+		const group = hooks.createEmpty(tracks[1], 1n);
 		group.writeFrame({ payload: enc.encode("1"), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 		drain(sub);
@@ -2504,7 +2504,7 @@ test("a lagging same-identity replica resumes from one publisher's bytes exactly
 				for (;;) {
 					const group = await input.recvGroup();
 					if (!group) return;
-					const copy = output.createGroup(group.start);
+					const copy = hooks.createEmpty(output, group.start);
 					try {
 						for (let index = 0; ; index++) {
 							const frame = await group.readFrame();
@@ -3698,10 +3698,10 @@ test("a fetched group continued from an empty, already-closed copy releases that
 		const sub = front.consumer.track("seq").subscribe();
 
 		// Group 5 is empty: the first route fails it, the next holds it closed.
-		const failing = defined(a.createTrack("fetch")).createGroup(5n);
+		const failing = hooks.createEmpty(defined(a.createTrack("fetch")), 5n);
 		const group = await front.consumer.track("fetch").fetchGroup(5n);
 		const read = group.readFrame();
-		const whole = defined(b.createTrack("fetch")).createGroup(5n);
+		const whole = hooks.createEmpty(defined(b.createTrack("fetch")), 5n);
 		whole.finish();
 		front.serve(b.consume());
 		await settle();
@@ -3740,7 +3740,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		expect(drain(sub)).toEqual([0n]);
 
 		const fa = defined(a.createTrack("fetch"));
-		const failing = fa.createGroup(5n);
+		const failing = hooks.createEmpty(fa, 5n);
 		failing.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(failing.start) });
 		const fetching = front.consumer.track("fetch").fetchGroup(5n);
 		for (let turn = 0; turn < turns; turn++) await Promise.resolve();
@@ -3750,7 +3750,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		// The next route holds the fetched group whole; the old one still feeds the reader a
 		// group the new route never has.
 		const fb = defined(b.createTrack("fetch"));
-		const whole = fb.createGroup(5n);
+		const whole = hooks.createEmpty(fb, 5n);
 		whole.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(whole.start) });
 		whole.writeFrame({ payload: enc.encode("5.1"), timestamp: Timestamp.unscaled(whole.start) });
 		whole.finish();
@@ -4647,7 +4647,7 @@ test("a resumed reader drops a taken group outside its window when the offered o
 		tail.writeFrame({ payload: enc.encode("10.1"), timestamp: Timestamp.unscaled(10n) });
 		tail.finish();
 		for (const key of [80n, 100n, 120n]) {
-			const group = tb.createGroup(key);
+			const group = hooks.createEmpty(tb, key);
 			group.writeFrame({ payload: enc.encode(`${key}.0`), timestamp: Timestamp.unscaled(key) });
 			group.finish();
 		}
@@ -4737,7 +4737,7 @@ for (const [switched, widened] of [
 			defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI })),
 		);
 		const write = (producer: typeof ta, key: bigint) => {
-			const group = producer.createGroup(key);
+			const group = hooks.createEmpty(producer, key);
 			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
 			group.finish();
 		};
@@ -4803,7 +4803,7 @@ for (const placed of [2n, 4n]) {
 		const a = new BroadcastProducer();
 		const ta = defined(a.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
 		const write = (key: bigint) => {
-			const group = ta.createGroup(key);
+			const group = hooks.createEmpty(ta, key);
 			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
 			group.finish();
 		};
@@ -5306,7 +5306,7 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
-	const stalled = ta.createGroup(0n);
+	const stalled = hooks.createEmpty(ta, 0n);
 	stalled.writeFrame({ payload: enc.encode("0.0"), timestamp: Timestamp.unscaled(stalled.start) });
 	const group = sub.tryRecvGroup();
 	if (!group) throw new Error("expected group 0");
@@ -5382,7 +5382,7 @@ test("a fetch never reads a replacement refused for its track properties", async
 	const b = new BroadcastProducer();
 	defined(a.createTrack("seq", { priority: 1 }));
 	const tb = defined(b.createTrack("seq", { priority: 2 }));
-	const group = tb.createGroup(0n);
+	const group = hooks.createEmpty(tb, 0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	front.serve(a.consume());
@@ -5404,7 +5404,7 @@ test("the first fetch of a track says what the track is for later routes", async
 		[b, 2],
 	] as const) {
 		const producer = defined(source.createTrack("seq", { priority }));
-		const group = producer.createGroup(0n);
+		const group = hooks.createEmpty(producer, 0n);
 		group.writeFrame({ payload: enc.encode(`${priority}`), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
@@ -5461,7 +5461,7 @@ test("a fetch never hands out a group from a route refused for its properties", 
 	const b = new BroadcastProducer();
 	defined(a.createTrack("seq", { priority: 1 }));
 	const tb = defined(b.createTrack("seq", { priority: 2 }));
-	const group = tb.createGroup(0n);
+	const group = hooks.createEmpty(tb, 0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	front.serve(a.consume());
@@ -6302,7 +6302,7 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	// a answers what the track is only when told to.
 	const requests = wireOf(a).requested();
 	const tb = defined(b.createTrack("seq", { priority: 2 }));
-	const group = tb.createGroup(0n);
+	const group = hooks.createEmpty(tb, 0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	front.serve(a.consume());
@@ -8242,7 +8242,7 @@ test("an ordered read through a front returns the gap its copy gave up before en
 	const tail = hooks.receiveGroup(ta, { start: 0n, offset: 1 });
 	tail.writeFrame({ payload: enc.encode("0.1"), timestamp: Timestamp.unscaled(0n) });
 	tail.finish();
-	const past = ta.createGroup(2n);
+	const past = hooks.createEmpty(ta, 2n);
 	past.writeFrame({ payload: enc.encode("2.0"), timestamp: Timestamp.unscaled(2n) });
 	past.finish();
 	front.serve(a.consume());
@@ -8270,7 +8270,7 @@ test("a routed reader reports its serving copy's whole group spans", async () =>
 	const source = new BroadcastProducer();
 	const handle = source.consume();
 	const producer = defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
-	const group = producer.createGroup(3n);
+	const group = hooks.createEmpty(producer, 3n);
 	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(3) });
 	group.finishAt(10n);
 	front.serve(handle);
