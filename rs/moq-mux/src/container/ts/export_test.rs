@@ -13213,6 +13213,34 @@ async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
 	assert!(Clocked::of(&ts).rate() > Clocked::of(data).rate() + crate::container::ts::schedule::PACKET);
 }
 
+/// An FFmpeg TS of audio alone whose rate the import measures only after the export's tables, while
+/// its clock is still acquired, keeps its audio on time at the rate with any delay that carries the
+/// source: the send-ahead the rate needs grows before anything is due, since the anchor then gives
+/// the track sent latest the delay. A delay shorter than the source's PES packing drops frames at any
+/// rate, so it is not swept.
+#[tokio::test(start_paused = true)]
+async fn an_ffmpeg_audio_source_measured_while_its_clock_is_acquired_keeps_its_audio_on_time() {
+	for (name, data) in [
+		("aac", &include_bytes!("test_data/ffmpeg_aac.ts")[..]),
+		("aac_pulse", include_bytes!("test_data/ffmpeg_aac_pulse.ts")),
+		("ac3", include_bytes!("test_data/ffmpeg_ac3.ts")),
+		("eac3", include_bytes!("test_data/ffmpeg_eac3.ts")),
+		("mp2", include_bytes!("test_data/ffmpeg_mp2.ts")),
+		("opus", include_bytes!("test_data/ffmpeg_opus.ts")),
+	] {
+		let recorded = Clocked::of(data).rate();
+		for delay in [500, 2000, 3000].map(Duration::from_millis) {
+			let (ts, dropped) = paced_export(data, Rate::Measured, delay).await;
+			assert_eq!(dropped, 0, "{name}, {delay:?}: every frame made its deadline");
+			let out = Clocked::of(&ts).rate();
+			assert!(
+				out > recorded,
+				"{name}, {delay:?}: padded to {out} b/s, no more than the recorded {recorded}"
+			);
+		}
+	}
+}
+
 /// Where [`paced_export`] takes its multiplex rate from.
 #[derive(Clone, Copy, Debug)]
 enum Rate {

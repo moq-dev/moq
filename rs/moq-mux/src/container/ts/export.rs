@@ -2752,9 +2752,11 @@ where
 			track.kind = kind;
 			self.refresh(name, track, pid, entry.descriptors.clone());
 		}
-		// Every audio track follows the rate, a listed one too. Once the clock runs, a frame keyed
-		// further ahead has that much less of the delay to arrive in, so the send-ahead grows by
-		// no more than the frames have had to spare over the last second, less a slot.
+		// Every audio track follows the rate, a listed one too. Once the clock is anchored, a frame
+		// keyed further ahead has that much less of the delay to arrive in, so the send-ahead grows
+		// by no more than the frames have had to spare over the last second (or since the anchor,
+		// in the first), less a slot. Until then it grows freely, as before the tables: what it
+		// takes comes out of the delay, and no send-ahead reaches past half of it.
 		//
 		// Frames already keyed for less send-ahead would reach the new rate with too little of
 		// it, so a rate that sends audio further ahead waits twice that send-ahead past the
@@ -2762,13 +2764,15 @@ where
 		// ([`Track::release_key`]), and the frames keyed before it are due by the time the first
 		// of those goes out.
 		let window = schedule::slot(self.program.delay.as_nanos());
-		let spare = match self.program.psi {
+		// A replacement acquires its own clock beside the one playing, so it reads its own engine.
+		let seen = (self.program.psi.as_ref())
+			.and(self.program.tracks.values().next())
+			.and_then(|track| self.jitter.reading(&track.key).spare_seen());
+		let spare = match seen {
 			None => self.program.delay,
-			Some(_) => self
-				.jitter
-				.margin()
-				.and_then(|margin| Duration::try_from_secs_f64(margin).ok())
-				.map_or(Duration::ZERO, |margin| margin.saturating_sub(PCR_INTERVAL)),
+			Some(seen) => {
+				Duration::try_from_secs_f64(seen).map_or(Duration::ZERO, |seen| seen.saturating_sub(PCR_INTERVAL))
+			}
 		};
 		let mut grown = Duration::ZERO;
 		for track in self.program.tracks.values_mut() {

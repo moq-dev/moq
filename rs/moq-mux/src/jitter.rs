@@ -117,7 +117,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	fn reading<Q: Ord + ?Sized>(&self, key: &Q) -> &Engine<K, T>
+	/// The engine `key`'s frames go to: a pending replacement's, else the active one.
+	pub fn reading<Q: Ord + ?Sized>(&self, key: &Q) -> &Engine<K, T>
 	where
 		K: Borrow<Q>,
 	{
@@ -1669,6 +1670,13 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		self.margin
 	}
 
+	/// The least time a frame arrived before its deadline, in seconds: [`Self::margin`], or before
+	/// a second has passed, so far. `None` until a frame has a deadline, so while the clock is
+	/// still acquired, which anchors it on whatever the frames hold by then.
+	pub fn spare_seen(&self) -> Option<f64> {
+		self.margin.or(self.spare.map(|(_, spare)| spare))
+	}
+
 	/// How far the clock sits off the source's plus the delay, in seconds, as last measured:
 	/// positive holds the track sent latest longer than the delay, negative shorter. The
 	/// clock pulls it shut over [`RESPONSE`]. `None` until the clock has measured the source's
@@ -2177,17 +2185,24 @@ mod tests {
 	}
 
 	/// The margin is the least any frame had to spare over a whole second, a frame that missed
-	/// its deadline included, and holds until the next second has passed.
+	/// its deadline included, and holds until the next second has passed. Before a second has
+	/// passed, the spare seen is the least so far, and nothing while the clock is acquired.
 	#[tokio::test(start_paused = true)]
 	async fn the_margin_is_the_least_spare_over_a_second() {
 		let start = Instant::now();
 		let at = |ms: u64| start.saturating_add(Duration::from_millis(ms));
+		let mut acquiring = Buffer::new(DELAY);
+		assert_eq!(acquiring.push(1, arrival(at(0), 0, "v0")).unwrap(), Push::Queued);
+		assert_eq!(acquiring.spare_seen(), None, "no frame has a deadline yet");
+
 		let mut buffer = Buffer::new(DELAY).replay();
 		assert_eq!(buffer.push(1, arrival(at(0), 0, "v0")).unwrap(), Push::Queued);
 		assert_eq!(buffer.push(1, arrival(at(30), 40, "v40")).unwrap(), Push::Queued);
 		// Due at 180 ms.
 		assert_eq!(buffer.push(1, arrival(at(200), 80, "v80")).unwrap(), Push::Late);
 		assert_eq!(buffer.margin(), None, "no second has passed");
+		let seen = buffer.spare_seen().expect("frames have deadlines");
+		assert!((seen + 0.020).abs() < 1e-6, "seen {seen} s");
 
 		assert_eq!(
 			buffer.push(1, arrival(at(1_000), 1_000, "v1000")).unwrap(),
@@ -2195,6 +2210,11 @@ mod tests {
 		);
 		let margin = buffer.margin().expect("a second has passed");
 		assert!((margin + 0.020).abs() < 1e-6, "margin {margin} s");
+		assert_eq!(
+			buffer.spare_seen(),
+			Some(margin),
+			"the margin, once a second has passed"
+		);
 
 		assert_eq!(
 			buffer.push(1, arrival(at(1_500), 1_500, "v1500")).unwrap(),
