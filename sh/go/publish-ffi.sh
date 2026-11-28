@@ -18,9 +18,10 @@ set -euo pipefail
 # package-ffi.sh as `moq-ffi-${BUILD_VERSION}-go.tar.gz`. The version's time is
 # the checked-out commit's, so a rerun rebuilds an identical .info and .mod,
 # which the upload skips. A version whose .zip is already in the bucket was
-# uploaded by an earlier run, whose native build may differ by a byte, so that
-# zip stays: a rerun uploads only whatever .mod and .info the earlier run did
-# not, then relists and verifies it.
+# uploaded by an earlier run, whose native build may differ by a byte, or by
+# infra/go/backfill.sh, whose .info has the mirror commit's time, so its files
+# stay: a rerun uploads only whichever of .mod and .info the bucket lacks,
+# then relists and verifies it.
 
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
@@ -76,10 +77,12 @@ fi
 # shellcheck source=infra/go/r2.sh
 source "$INFRA_DIR/r2.sh"
 # Recursive from the bucket root, so a module with no versions yet lists empty.
-published=$(rclone lsf -R --files-only --include "/moq.dev/moq-ffi/@v/$VERSION.zip" "$BUCKET")
-if [[ -n "$published" ]]; then
+held=$(rclone lsf -R --files-only --include "/moq.dev/moq-ffi/@v/$VERSION.*" "$BUCKET" | sed 's|.*/||')
+if grep -qxF "$VERSION.zip" <<<"$held"; then
     echo "$VERSION's zip is already in the bucket: completing, relisting, and verifying it instead of uploading this build."
-    rm "$WORK/proxy/moq.dev/moq-ffi/@v/$VERSION.zip"
+    for name in $held; do
+        rm -f "$WORK/proxy/moq.dev/moq-ffi/@v/$name"
+    done
     "$INFRA_DIR/upload.sh" "$WORK/proxy"
     # verify.sh checks the version against sum.golang.org, which pinned the
     # first upload's hash.
