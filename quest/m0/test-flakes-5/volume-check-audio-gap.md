@@ -14,8 +14,8 @@ samples carried audio at the graph root`. Volume 1 had just passed at 1.000, so 
 200 ms of the 1.5 s window lost audio, not its scaling. Just before the failing step,
 the latecomer page sent a `subscribe update` for both its video and `audio/2`
 subscriptions, and the rendition switch back before it logged a 200 ms longest audio
-gap. Neither the 2026-11-22 to 2026-11-27 scheduled runs nor the last 12 failing
-Nightly runs repeat it, and [moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809)
+gap. No other scheduled run from 2026-11-22 to 2026-11-27 repeats it, nor do the
+last 12 failing Nightly runs, and [moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809)
 measured the whole media lane at 64 of 64 on `main`.
 
 ## Plan

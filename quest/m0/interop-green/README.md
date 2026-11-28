@@ -164,7 +164,7 @@ Three causes, plus one media flake:
   the browser the rest, idle under 5% in 40% of samples, so the high tier misses its 500 ms
   budget. On `main` at `02752605b1`, 4 of 36 lite-07 cells failed with a debug relay and 0 of 36
   with a release one (half a core, saturated in 5% of samples); with extra relay logging, 20 of
-  48 failed. Fixed in this quest's PR: the step builds the relay in release, about 4 minutes more
+  48 failed. Fixed in [moq-dev/moq#9840](https://github.com/moq-dev/moq/pull/9840): the step builds the relay in release, about 4 minutes more
   when cold. The same PR gives the step the run directory and results file the other harness
   steps have, so a failing cell uploads its relay log and report.
 - 11-26 Chromium media: `volume scales the output: volume 0.25: only 27/31 samples carried audio`,
