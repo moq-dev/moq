@@ -413,6 +413,12 @@ impl Misses {
 		self.filled.range(from..).copied()
 	}
 
+	/// The groups in `keys` a fill answered and not handed out yet, lowest first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn filled_in(&self, keys: std::ops::RangeInclusive<u64>) -> impl DoubleEndedIterator<Item = u64> + '_ {
+		self.filled.range(keys).copied()
+	}
+
 	/// Whether a fill still owes this reader a group in `groups`.
 	pub fn wants(&self, groups: &ops::Range<u64>) -> bool {
 		!groups.is_empty() && self.wanted.overlaps(groups)
@@ -485,7 +491,8 @@ impl Misses {
 		self.pick_up();
 	}
 
-	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more.
+	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more, or
+	/// a read handed it back unread.
 	pub fn refill(&mut self, key: u64) {
 		self.filled.insert(key);
 	}
@@ -3181,6 +3188,7 @@ mod tests {
 						let history = Range {
 							start: Start::Oldest,
 							end: Some(next(KEYS)),
+							..Default::default()
 						};
 						ranges.push((2, history));
 					}

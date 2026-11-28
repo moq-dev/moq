@@ -47,6 +47,7 @@ import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, saturatingSub } from "../util/key.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
+import { latestAt, type Policy, rangesPolicy, withPolicy } from "../window.ts";
 import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
@@ -505,11 +506,12 @@ export class Publisher {
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 			// Every other filter starts at the live edge, which resolves once subscribed.
 			return hooks.parked(
-				source.track(msg.trackName).subscribe({
-					priority: fromWire(msg.subscriberPriority),
-					order: msg.groupOrder,
-					...(fixed.start ? serveRequest(fixed) : LIVE_JOIN),
-				}),
+				source.track(msg.trackName).subscribe(
+					atPolicy(fixed.start ? serveRequest(fixed) : LIVE_JOIN, {
+						priority: fromWire(msg.subscriberPriority),
+						order: msg.groupOrder,
+					}),
+				),
 			);
 		};
 		// Before any await, so a subscriber waiting on this priority is not stuck behind setup.
@@ -545,7 +547,7 @@ export class Publisher {
 			if (selected.kind === "datagram") {
 				track.close();
 				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
-				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
+				track = hooks.parked(datagramTrack.subscribe(latestAt(fromWire(msg.subscriberPriority))));
 				return datagramTrackInfo(selected.info);
 			}
 			return selected.info;
@@ -769,7 +771,7 @@ export class Publisher {
 			// sink regardless. An absent start joins at the latest group, which is what
 			// moq-lite means by joining a live track. The range's end is the inclusive last
 			// group; the model's `endGroup` is exclusive.
-			track.update({ priority, order, ...serveRequest(range, msg.filter, edge) });
+			track.update(atPolicy(serveRequest(range, msg.filter, edge), { priority, order }));
 			const startGroup = range.start ? range.start.group : hooks.latestKey(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
 			// The live cursor's lowest group, which a fill-only update never lowers.
@@ -779,7 +781,8 @@ export class Publisher {
 			// subscription's cursor. Forked from this subscriber rather than resolved through
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, order, ranges: [{}] }) : undefined;
+			cache =
+				fill && fill.kind !== "empty" ? track.fork(atPolicy({ ranges: [{}] }, { priority, order })) : undefined;
 
 			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
@@ -900,7 +903,8 @@ export class Publisher {
 						// update() replaces every option, so carry the rest over as Rust does.
 						if (params.subscriberPriority !== undefined) {
 							const priority = fromWire(params.subscriberPriority);
-							track.update({ ...track.subscription.peek(), priority });
+							const held = track.subscription.peek() ?? { ranges: [] };
+							track.update(atPolicy(held, { ...rangesPolicy(held.ranges ?? []), priority }));
 							datagramPriority.set(priority);
 							if (datagramDemand) datagrams?.setPriority(priority);
 						}
@@ -971,8 +975,10 @@ export class Publisher {
 								if (group) serveGroup(group, slice);
 							}
 						}
-						if (params.groupOrder !== undefined)
-							track.update({ ...track.subscription.peek(), order: msg.groupOrder });
+						if (params.groupOrder !== undefined) {
+							const held = track.subscription.peek() ?? { ranges: [] };
+							track.update(atPolicy(held, { ...rangesPolicy(held.ranges ?? []), order: msg.groupOrder }));
+						}
 						// Every data stream closes before the pause is answered.
 						if (params.forward === false) throw new Paused(true);
 						const parameters = new Parameters();
@@ -980,11 +986,12 @@ export class Publisher {
 							parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
 						const source =
 							selected && selected.kind !== "empty"
-								? track.fork({
-										priority: fromWire(msg.subscriberPriority),
-										order: msg.groupOrder,
-										ranges: [{}],
-									})
+								? track.fork(
+										atPolicy(
+											{ ranges: [{}] },
+											{ priority: fromWire(msg.subscriberPriority), order: msg.groupOrder },
+										),
+									)
 								: undefined;
 						try {
 							await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
@@ -2624,6 +2631,12 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 const LIVE_JOIN: Pick<Subscription, "ranges"> = {
 	ranges: [{ start: { live: { min: Duration.ZERO, max: null } } }],
 };
+
+// `subscription` with every range at `policy`: moq-transport carries one priority and group order
+// for a whole subscription.
+function atPolicy(subscription: Subscription, policy: Policy): Subscription {
+	return { ...subscription, ranges: (subscription.ranges ?? []).map((range) => withPolicy(range, policy)) };
+}
 
 /**
  * What to ask for a {@link ServeRange} resolved from `filter` against `edge`. A filter other

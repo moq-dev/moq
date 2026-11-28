@@ -371,14 +371,14 @@
 		"name": "a metadata SUBSCRIBE ends with a Meta of 1 after its ranges",
 		"version": "moq-lite-07-wip",
 		"message": "subscribe",
-		"hex": "190104726f6f6d00000005766964656f830001020700020a0001",
+		"hex": "190104726f6f6d00000005766964656f018300020700020a0001",
 		"expect": "decoded"
 	},
 	{
 		"name": "a SUBSCRIBE whose Meta is neither 0 nor 1 is malformed",
 		"version": "moq-lite-07-wip",
 		"message": "subscribe",
-		"hex": "190104726f6f6d00000005766964656f830001020700020a0002",
+		"hex": "190104726f6f6d00000005766964656f018300020700020a0002",
 		"expect": "refused"
 	}
 ]

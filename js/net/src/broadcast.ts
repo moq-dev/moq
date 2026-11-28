@@ -342,17 +342,9 @@ async function fetchGroup(
 	meta = false,
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(
-		state,
-		name,
-		{
-			...track.Subscription.default(),
-			priority: options.priority,
-			ranges: [{ start: key, end: key }],
-			placed: new Map([[0, key]]),
-		},
-		meta,
-	);
+	const range: track.Range = { start: key, end: key };
+	if (options.priority !== undefined) range.priority = options.priority;
+	const subscriber = subscribe(state, name, { ranges: [range], placed: new Map([[0, key]]) }, meta);
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {

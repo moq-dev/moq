@@ -27,11 +27,11 @@ export function subscribeMedia(
 	const priority = getter(props.priority);
 	const subscriber = props.broadcast
 		.track(props.track)
-		.subscribe(Container.subscription(props.delay.peek(), { priority: priority.peek() }));
+		.subscribe(Container.subscription(props.delay.peek(), { ranges: [{ priority: priority.peek() }] }));
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		const asked = { priority: inner.get(priority) };
+		const asked = { ranges: [{ priority: inner.get(priority) }] };
 		const delay = inner.get(props.delay);
 		subscriber.update(Container.update(delay, subscriber.subscription.peek() ?? {}, asked));
 	});

@@ -7,7 +7,7 @@ import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, TooFarBehind } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { everyRange, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -380,10 +380,10 @@ test("a request exposes the aggregate subscription options", async () => {
 test("requested selects the highest current priority", async () => {
 	const consumer = new TestConsumer();
 
-	const first = consumer.track("first").subscribe({ priority: 1 });
-	consumer.track("second").subscribe({ priority: 5 });
+	const first = consumer.track("first").subscribe(everyRange({}, { priority: 1 }));
+	consumer.track("second").subscribe(everyRange({}, { priority: 5 }));
 	const updated = first.subscription.changed();
-	first.update({ priority: 9 });
+	first.update(everyRange({}, { priority: 9 }));
 	await updated;
 
 	expect((await wireOf(consumer).requested())?.name).toBe("first");

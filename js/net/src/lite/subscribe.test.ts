@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { ProtocolViolation, StreamCode } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Range } from "../track.ts";
@@ -9,11 +10,14 @@ import { MAX_MESSAGE_SIZE } from "./message.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
+	groupPolicy,
 	inclusiveGroupEnd,
 	LiveRanges,
 	legacyStart,
+	type Policy,
 	positionFrames,
 	positionStops,
+	type Retune,
 	rangeBounds,
 	rangeSize,
 	requestedPlaced,
@@ -27,9 +31,15 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 	spanOf,
+	subscriptionPolicy,
 	toWireRanges,
 	type WireRange,
+	withPolicy,
 } from "./subscribe.ts";
+
+/** A retune of a live join's max alone, at the default policy. */
+const max = (max: number | null): Retune => ({ priority: 0, order: "descending", max });
+
 import { Version } from "./version.ts";
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -217,11 +227,11 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 });
 
 test("a lite-07 list decodes its time anchors and starts with none", async () => {
-	// Priority and order as SubscribeUpdate writes them, then no Range ID to retire, the ranges it
-	// adds, no live join to retune, and an absent wanted group.
-	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 3);
+	// No Range ID to retire, the ranges it adds, each at priority 0 and descending (`P`), no range
+	// to retune, and an absent wanted group.
+	const P = [0x80, 0];
 	const update = async (ranges: number[]) => {
-		const body = [...head, 0, ...ranges, 0, 0];
+		const body = [0, ...ranges, 0, 0];
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
 			Version.DRAFT_07,
@@ -231,15 +241,15 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 
 	// Type 1 is a time, both ends inclusive, and type 0 none. A time names the group it keys, so
 	// the span covers it, and the model reads it as the same time, the end inclusive.
-	const timed = await update([2, 1, 40, 1, 90, 0, 0]);
+	const timed = await update([2, ...P, 1, 40, 1, 90, ...P, 0, 0]);
 	expect(timed.ranges).toEqual([{ start: { time: 40n }, end: { time: 90n } }, {}]);
 	expect([timed.startGroup, timed.endGroup]).toEqual([undefined, undefined]);
 	expect(requestedRanges(timed)).toEqual([{ start: 40n, end: 90n }, {}]);
-	const bounded = await update([1, 1, 40, 1, 90]);
+	const bounded = await update([1, ...P, 1, 40, 1, 90]);
 	expect([bounded.startGroup, bounded.endGroup]).toEqual([40n, 90n]);
 
 	// One ending before its start covers no group there, and keeps its place.
-	const reversed = await update([1, 1, 5, 1, 3]);
+	const reversed = await update([1, ...P, 1, 5, 1, 3]);
 	expect(requestedRanges(reversed)).toEqual([{ start: 5n, end: 3n }]);
 
 	// A time past what a JS number holds exactly reads at full width.
@@ -255,27 +265,27 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
 	// Type 3 is a live join's lag then its max, each plus one, 0 for none, which only a start may carry.
-	expect((await update([1, 3, 8, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
-	expect((await update([1, 3, 8, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
-	expect((await update([1, 3, 0, 5, 0])).ranges).toEqual([{ start: { live: { min: null, max: 4 } } }]);
-	await expect(update([1, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
+	expect((await update([1, ...P, 3, 8, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
+	expect((await update([1, ...P, 3, 8, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
+	expect((await update([1, ...P, 3, 0, 5, 0])).ranges).toEqual([{ start: { live: { min: null, max: 4 } } }]);
+	await expect(update([1, ...P, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
 	// Type 4 is a placed join's group, a frame that may be 0, then its max as type 3 carries it,
 	// which only a start may carry either.
-	expect((await update([1, 4, 9, 0, 5, 0])).ranges).toEqual([
+	expect((await update([1, ...P, 4, 9, 0, 5, 0])).ranges).toEqual([
 		{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } },
 	]);
-	await expect(update([1, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, ...P, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
 	// Position at frame 0 is valid as both start and end (exact group match / exclusive group end).
-	expect((await update([1, 2, 0, 0, 0])).ranges).toEqual([{ start: { absolute: 0n, frame: 0 } }]);
-	expect((await update([1, 1, 0, 2, 7, 0])).ranges).toEqual([
+	expect((await update([1, ...P, 2, 0, 0, 0])).ranges).toEqual([{ start: { absolute: 0n, frame: 0 } }]);
+	expect((await update([1, ...P, 1, 0, 2, 7, 0])).ranges).toEqual([
 		{ start: { time: 0n }, end: { absolute: 7n, frame: 0 } },
 	]);
-	expect((await update([1, 1, 0, 2, 7, 4])).ranges).toEqual([
+	expect((await update([1, ...P, 1, 0, 2, 7, 4])).ranges).toEqual([
 		{ start: { time: 0n }, end: { absolute: 7n, frame: 4 } },
 	]);
 	// Any other type is a violation.
-	await expect(update([1, 5, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 0, 5, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, ...P, 5, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, ...P, 0, 5, 0])).rejects.toThrow(ProtocolViolation);
 });
 
 // A placed live join rides as type 4: its group, a frame that may be 0, then its max age as a live
@@ -299,10 +309,10 @@ test("a joined start round-trips on lite-07", async () => {
 		{ start: { joined: { absolute: 9n, frame: 0, max: 2 } } },
 	]);
 
-	// The count, the type, group, frame, and max age plus one, then the end's type and time, 251
-	// and 9000 each in two bytes, then a payload `Meta`.
+	// The count, the range's priority and order, the type, group, frame, and max age plus one, then
+	// the end's type and time, 251 and 9000 each in two bytes, then a payload `Meta`.
 	const buf = await encodeMessage(version, new Subscribe({ ...props, ranges: [joined(5n, 0, 250)] }));
-	expect([...buf.slice(buf.length - 10)]).toEqual([1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0]);
+	expect([...buf.slice(buf.length - 12)]).toEqual([1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0]);
 
 	// An end can't be a join, placed or not.
 	await expect(
@@ -342,10 +352,10 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	const position = { start: { absolute: 7n, frame: 4 } };
 	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
 	const bytes = await encodeMessage(Version.DRAFT_07, update);
-	// One range: type 2, start 7, frame 4, then no end, no live join to retune, and an absent
-	// wanted group.
-	expect(Array.from(bytes.slice(-7))).toEqual([1, 2, 7, 4, 0, 0, 0]);
-	expect(rangeSize(position)).toBe(4);
+	// One range: its priority and order, type 2, start 7, frame 4, then no end, no range to
+	// retune, and an absent wanted group.
+	expect(Array.from(bytes.slice(-9))).toEqual([1, 0x80, 0, 2, 7, 4, 0, 0, 0]);
+	expect(rangeSize(position)).toBe(6);
 	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.ranges).toEqual([position]);
 	const span = spanOf(Version.DRAFT_07, got.ranges ?? []);
@@ -576,6 +586,30 @@ test("SubscribeDrop is restored on draft-07", async () => {
 	expect(await encode(Version.DRAFT_06, drop)).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
 });
 
+// A lite-07 OLD drop carries the max age it was judged under, in milliseconds plus one, so zero names
+// the publisher's own. No other drop, and no earlier version, carries one. Mirrors the Rust
+// `a_lite07_old_drop_carries_its_judged_max_age`.
+test("a lite-07 OLD drop carries its judged max age", async () => {
+	for (const [maxAge, wire] of [
+		[undefined, 0],
+		[0, 1],
+		[9, 10],
+	] as const) {
+		const drop: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, maxAge, Version.DRAFT_07) };
+		expect(await encode(Version.DRAFT_07, drop)).toEqual(new Uint8Array([2, 4, 1, 4, StreamCode.Old, wire]));
+		const got = await responseRoundtrip(Version.DRAFT_07, drop);
+		if (!("drop" in got)) throw new Error("expected drop");
+		expect([got.drop.error, got.drop.maxAge]).toEqual([StreamCode.Old, maxAge]);
+	}
+	// A drop depending on no budget settles every reader.
+	expect(SubscribeDrop.given(1n, 4n, new StreamError(StreamCode.Old), Version.DRAFT_07).maxAge).toBeUndefined();
+	const skip: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, 9, Version.DRAFT_07) };
+	skip.drop.error = StreamCode.Skip;
+	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([2, 3, 1, 4, 0x3a]));
+	const lite06: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, 9, Version.DRAFT_06) };
+	expect(await encode(Version.DRAFT_06, lite06)).toEqual(new Uint8Array([2, 3, 1, 3, 0]));
+});
+
 test("lite-07 carries skips in SubscribeDrop(SKIP) and rejects type 3", async () => {
 	const skip: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 4n, error: StreamCode.Skip }) };
 	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([2, 3, 1, 4, 0x3a]));
@@ -667,29 +701,86 @@ test("model group ends convert to the wire without an off-by-one", () => {
 	expect(() => inclusiveGroupEnd(0n)).toThrow("empty subscription range cannot be encoded");
 });
 
-// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and SUBSCRIBE_UPDATE
-// alike, and refuses a value it does not define.
-test.each(["ascending", "descending"] as const)("lite-07 round-trips a %s group order", async (order) => {
+// Lite-07 carries each range's `Priority` then `Group Order`, on a SUBSCRIBE's ranges and a
+// SUBSCRIBE_UPDATE's retunes alike, and refuses an order it does not define. Mirrors the Rust
+// `range_policy_roundtrips_on_lite07`.
+test.each(["ascending", "descending"] as const)("lite-07 round-trips a range at a %s group order", async (order) => {
 	const version = Version.DRAFT_07;
-	const subscribe = new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, order });
+	const range = withPolicy({ start: { time: 5n } }, { priority: 3, order });
+	const subscribe = new Subscribe({
+		id: 1n,
+		broadcast: Path.from("room"),
+		track: "video",
+		priority: 0,
+		ranges: [range],
+	});
 	const got = await Subscribe.decode(
 		new Reader(undefined, await encodeMessage(version, subscribe), version),
 		version,
 	);
-	expect(got.order).toBe(order);
+	expect(got.ranges).toEqual([range]);
+	// The subscription as a whole runs at its one range's policy.
+	expect([got.priority, got.order]).toEqual([3, order]);
 
-	const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, order, maxDelay: 250, ranges: [] }));
-	// The length prefix, the priority byte, then the order.
-	expect(update[1]).toBe(3 + 128);
-	expect(update[2]).toBe(order === "ascending" ? 1 : 0);
+	const retune: [bigint, Retune][] = [[0n, { priority: 3, order, max: null }]];
+	const update = await encodeMessage(version, new SubscribeUpdate({ priority: 0, ranges: [], retune }));
+	// The length prefix, no range to retire or add, one retune: its Range ID, priority, order, then
+	// no max age, then no wanted group.
+	expect([...update]).toEqual([8, 0, 0, 1, 0, 3 + 128, order === "ascending" ? 1 : 0, 0, 0]);
 	const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
-	expect(decoded.order).toBe(order);
+	expect(decoded.retune).toEqual(retune);
 
 	const invalid = new Uint8Array(update);
-	invalid[2] = 2;
+	invalid[6] = 2;
 	await expect(SubscribeUpdate.decode(new Reader(undefined, invalid, version), version)).rejects.toThrow(
 		ProtocolViolation,
 	);
+});
+
+// Ranges at different policies: the subscription runs at the highest priority, newest first if any
+// range there asks so.
+test("a subscription runs at its most urgent range's policy", () => {
+	expect(
+		subscriptionPolicy([
+			{ priority: 1, order: "ascending" },
+			{ priority: 5, order: "ascending" },
+		]),
+	).toEqual({ priority: 5, order: "ascending" });
+	expect(subscriptionPolicy([{ priority: 5, order: "ascending" }, { priority: 5 }])).toEqual({
+		priority: 5,
+		order: "descending",
+	});
+	expect(subscriptionPolicy([])).toEqual({ priority: 0, order: "descending" });
+});
+
+// A group goes out at the highest priority among the ranges still wanting it, at that priority's
+// order with newest first breaking a tie, and falls to the next once it ages past the budget of
+// every range at the top.
+test("lite draft-07: a group goes out at the top range still wanting it", () => {
+	const [short, long] = [1000, 2000];
+	const ranges = new Map<bigint, { policy: Policy; budget: number }>([
+		[0n, { policy: { priority: 5, order: "ascending" }, budget: long }],
+		[1n, { policy: { priority: 5, order: "descending" }, budget: short }],
+		[2n, { policy: { priority: 1, order: "ascending" }, budget: NO_MAX_DELAY }],
+		[3n, { policy: { priority: 1, order: "ascending" }, budget: short }],
+	]);
+	const steer = { whole: { priority: 9, order: "ascending" as const }, steering: (id: bigint) => ranges.get(id) };
+
+	const covers = [0n, 1n, 2n];
+	// Newest first breaks a tie.
+	expect(groupPolicy(steer, covers)).toEqual({ policy: { priority: 5, order: "descending" }, lasts: short });
+	// The order of the range left at the top.
+	expect(groupPolicy(steer, covers, short)).toEqual({ policy: { priority: 5, order: "ascending" }, lasts: long });
+	// History keeps the group at its own priority.
+	expect(groupPolicy(steer, covers, long)).toEqual({ policy: { priority: 1, order: "ascending" } });
+	// A range ranked below that ages first lowers nothing.
+	expect(groupPolicy(steer, [0n, 3n])).toEqual({ policy: { priority: 5, order: "ascending" } });
+	// A retired range leaves the subscription's.
+	expect(groupPolicy(steer, [7n])).toEqual({ policy: steer.whole });
+	expect(groupPolicy(steer, [])).toEqual({ policy: steer.whole });
+	// A retuned max age moves a group already aged past it.
+	ranges.set(0n, { policy: { priority: 5, order: "ascending" }, budget: short });
+	expect(groupPolicy(steer, [0n, 2n], short)).toEqual({ policy: { priority: 1, order: "ascending" } });
 });
 
 // No earlier wire has `Group Order`, so an ascending subscription falls back to descending,
@@ -923,7 +1014,7 @@ test("lite-07 retunes a live join in place", async () => {
 	const side = new LiveRanges(version, [live(100, 500), time]);
 
 	const edit = sent.edit([live(100, 2000), time]);
-	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, 2000]], fillIds: [], probeIds: [] });
+	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, max(2000)]], fillIds: [], probeIds: [] });
 	const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add, retune: edit.retune });
 	const got = await SubscribeUpdate.decode(
 		new Reader(undefined, await encodeMessage(version, update), version),
@@ -937,7 +1028,7 @@ test("lite-07 retunes a live join in place", async () => {
 	expect(lag).toEqual({ remove: [0n], add: [live(200, 2000)], retune: [], fillIds: [], probeIds: [] });
 	side.apply(new SubscribeUpdate({ priority: 0, remove: lag.remove, ranges: lag.add }));
 
-	const retune = (ranges: LiveRanges, retune: [bigint, number | null][]) =>
+	const retune = (ranges: LiveRanges, retune: [bigint, Retune][]) =>
 		ranges.apply(new SubscribeUpdate({ priority: 0, remove: [], ranges: [], retune }));
 	// Fresh copies of what `side` holds, since a refused edit ends the session: 0 retired, 1 a time
 	// start, 2 a live join.
@@ -947,15 +1038,19 @@ test("lite-07 retunes a live join in place", async () => {
 		return ranges;
 	};
 	expect(held().entries()).toEqual(side.entries());
-	expect(() => retune(held(), [[1n, null]])).toThrow(ProtocolViolation);
-	expect(() => retune(held(), [[0n, null]])).toThrow(ProtocolViolation);
+	// A time start has no max age, but takes a new policy.
+	expect(() => retune(held(), [[1n, max(5)]])).toThrow(ProtocolViolation);
+	expect(retune(held(), [[1n, { priority: 2, order: "ascending", max: null }]]).retuned).toEqual([
+		[1n, { ...time, priority: 2, order: "ascending" }],
+	]);
+	expect(() => retune(held(), [[0n, max(null)]])).toThrow(ProtocolViolation);
 	expect(() =>
 		retune(held(), [
-			[2n, null],
-			[2n, null],
+			[2n, max(null)],
+			[2n, max(null)],
 		]),
 	).toThrow(ProtocolViolation);
-	expect(retune(side, [[2n, null]]).retuned).toEqual([[2n, live(200, null)]]);
+	expect(retune(side, [[2n, max(null)]]).retuned).toEqual([[2n, live(200, null)]]);
 });
 
 // A placed join retunes its max age in place like a live one, kept where it was placed; one placed
@@ -968,7 +1063,7 @@ test("lite-07 retunes a placed join in place", () => {
 	const sent = new LiveRanges(version, [joined(5n, 500)]);
 	const side = new LiveRanges(version, [joined(5n, 500)]);
 	const edit = sent.edit([joined(5n, null)]);
-	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, null]], fillIds: [], probeIds: [] });
+	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, max(null)]], fillIds: [], probeIds: [] });
 	side.apply(new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add, retune: edit.retune }));
 	expect(side.entries()).toEqual([[0n, joined(5n, null)]]);
 

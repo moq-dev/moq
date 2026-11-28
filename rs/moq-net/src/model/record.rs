@@ -128,6 +128,11 @@ impl Record {
 		key < self.floor || self.reported.contains_key(&key)
 	}
 
+	/// Whether `key` was folded into the settled prefix, so it stays told for good.
+	pub fn folded(&self, key: u64) -> bool {
+		key < self.floor
+	}
+
 	/// The parts of `range` the wire was told nothing of.
 	pub fn untold(&self, range: Range<u64>) -> RangeSet<u64> {
 		let range = range.start.max(self.floor)..range.end;
@@ -170,6 +175,9 @@ pub(super) struct Standing {
 	pub from: u64,
 	/// The group this read hands out, which its publisher has yet to tell its wire of.
 	pub handed: Option<u64>,
+	/// A group handed out earlier that its publisher holds while it waits for stream credit,
+	/// and may still give back unread, which then takes back what it told its wire.
+	pub held: Option<u64>,
 	/// The groups the reader's ranges hold, once nothing in them is left to place: `None`
 	/// while a live join waits or a start is still being looked up, when no gap can be known
 	/// to lie outside them.
@@ -552,11 +560,14 @@ impl Record {
 				}
 			};
 			// The group this read hands out stays above: its publisher has yet to tell its wire
-			// of it, and would take one below the floor as told already.
-			let next = match reader.handed {
-				Some(handed) if end <= handed && handed < next => handed,
-				_ => next,
-			};
+			// of it, and would take one below the floor as told already. So does one it holds,
+			// whose report it may still take back.
+			let next = [reader.handed, reader.held]
+				.into_iter()
+				.flatten()
+				.filter(|key| end <= *key && *key < next)
+				.min()
+				.unwrap_or(next);
 			if next <= end {
 				break;
 			}

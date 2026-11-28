@@ -126,7 +126,7 @@ impl Source {
 		let mut priority = self.priority.lock().expect("priorities poisoned");
 		priority.value = value;
 		for control in priority.controls.values().filter_map(std::sync::Weak::upgrade) {
-			match control.update(control.subscription().with_priority(value)) {
+			match control.update(prioritized(control.subscription(), value)) {
 				Ok(()) | Err(moq_net::Error::Closed) => {}
 				Err(err) => return Err(err),
 			}
@@ -136,13 +136,13 @@ impl Source {
 
 	/// Start a new track at the program's current priority.
 	pub(crate) fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
-		subscription.with_priority(self.priority.lock().expect("priorities poisoned").value)
+		prioritized(subscription, self.priority.lock().expect("priorities poisoned").value)
 	}
 
 	/// Keep a track at its program's priority until the returned registration drops.
 	pub(crate) fn control(&self, control: moq_net::track::Control) -> moq_net::Result<Priority> {
 		let mut priority = self.priority.lock().expect("priorities poisoned");
-		match control.update(control.subscription().with_priority(priority.value)) {
+		match control.update(prioritized(control.subscription(), priority.value)) {
 			Ok(()) | Err(moq_net::Error::Closed) => {}
 			Err(err) => return Err(err),
 		}
@@ -511,6 +511,14 @@ impl Subscribe {
 	}
 }
 
+/// `subscription` with every range at the program's `priority`.
+fn prioritized(mut subscription: moq_net::track::Subscription, priority: i8) -> moq_net::track::Subscription {
+	for range in &mut subscription.ranges {
+		range.priority = priority;
+	}
+	subscription
+}
+
 /// A binding's follower, or the failure it ended with.
 type Following = Result<moq_net::origin::Following, moq_net::Error>;
 
@@ -589,6 +597,7 @@ mod tests {
 		let preferences = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(5),
 			end: Some(10),
+			..Default::default()
 		}]);
 		let first = track.subscribe(preferences.clone());
 		let held = source.control(first.control()).unwrap();
@@ -596,7 +605,7 @@ mod tests {
 		let _other = independent.control(other.control()).unwrap();
 
 		source.priority(-1).unwrap();
-		assert_eq!(first.subscription(), preferences.clone().with_priority(-1));
+		assert_eq!(first.subscription(), prioritized(preferences.clone(), -1));
 		assert_eq!(other.subscription(), preferences);
 		let late = track.subscribe(source.subscription(preferences.clone()));
 		let late_held = source.control(late.control()).unwrap();
