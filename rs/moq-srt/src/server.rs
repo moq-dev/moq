@@ -1261,6 +1261,7 @@ mod tests {
 		follow: Duration,
 		stitch: bool,
 	) -> (SrtSocket, tokio::task::JoinHandle<Result<()>>) {
+		kio::clock::host_time(); // real SRT sockets
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(300))
 			.await
 			.unwrap();
@@ -1377,7 +1378,6 @@ mod tests {
 	/// task and its socket until the follow runs out.
 	#[tokio::test]
 	async fn a_caller_hanging_up_during_the_follow_ends_the_egress() {
-		kio::clock::host_time(); // real SRT sockets
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut live = Identity::publish(&origin, "a.aac");

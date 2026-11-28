@@ -10,4 +10,4 @@ Run the `instructions` audit: `quest audit instructions` prints what it checks, 
 
 ## Required
 
-- [m0](/quest/m0/README.md) - the audit runs after it
+- [Release cut](/quest/m3/release/cut.md) - the release in flight ships before this run starts
