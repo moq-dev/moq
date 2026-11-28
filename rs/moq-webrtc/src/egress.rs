@@ -312,7 +312,6 @@ impl Rendition {
 		};
 		Target {
 			path: source.resolve_reference(config.broadcast()),
-			identity: config.identity().cloned(),
 			track: config.track(name).to_string(),
 		}
 	}
@@ -324,11 +323,11 @@ impl Rendition {
 
 		match &self {
 			Self::Audio(name, config) => {
-				let track = subscribe_live(&source, config.broadcast(), config.identity(), config.track(name)).await?;
+				let track = subscribe_live(&source, config.broadcast(), config.track(name)).await?;
 				codec::Track::opus(track, config)
 			}
 			Self::Video(name, config) => {
-				let track = subscribe_live(&source, config.broadcast(), config.identity(), config.track(name)).await?;
+				let track = subscribe_live(&source, config.broadcast(), config.track(name)).await?;
 				codec::Track::video(track, config)
 			}
 		}
@@ -341,14 +340,13 @@ impl Rendition {
 const MAX_DELAY: Duration = Duration::from_millis(100);
 
 /// Subscribe to a rendition's track with the [`MAX_DELAY`] budget, resolving its
-/// cross-broadcast reference (the catalog `broadcast` field) and `identity`.
+/// cross-broadcast reference (the catalog `broadcast` field).
 async fn subscribe_live(
 	source: &moq_mux::Source,
 	rel: Option<&moq_net::path::Relative>,
-	identity: Option<&moq_net::Identity>,
 	name: &str,
 ) -> Result<moq_net::track::Subscriber> {
-	let broadcast = source.resolve(rel, identity).await?;
+	let broadcast = source.resolve(rel).await?;
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
 			min: Some(MAX_DELAY),
@@ -368,12 +366,11 @@ fn pick_audio<'a>(
 	})
 }
 
-/// The track a rendition reads: its broadcast's path, the publisher identity that broadcast
-/// must be, and the track's name there. A catalog update that changes it moves the rendition.
+/// The track a rendition reads: its broadcast's path and the track's name there. A catalog
+/// update that changes it moves the rendition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: Option<moq_net::Path>,
-	identity: Option<moq_net::Identity>,
 	track: String,
 }
 

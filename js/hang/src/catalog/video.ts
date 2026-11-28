@@ -3,7 +3,7 @@ import { compareName, compareNumber } from "./compare.ts";
 import { ContainerSchema } from "./container.ts";
 import { hexSchema } from "./hex.ts";
 import { u8Schema, u53Schema } from "./integers.ts";
-import { IdentitySchema, RelativeBroadcastSchema } from "./path.ts";
+import { RelativeBroadcastSchema } from "./path.ts";
 import { codecNumber, countSchema, renditions } from "./section.ts";
 
 // av01.<profile>.<level><tier>.<bitDepth>, optionally followed by every one of .<monochrome>
@@ -117,11 +117,6 @@ export const VideoConfigSchema = z.object({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The identity of the stream the reference names, when known. Absent accepts whichever stream
-	// resolves first. A route of another identity fails the entry; a route over a wire that
-	// carries no identity has one its session minted, which proves nothing, so there it is best
-	// effort. Without `broadcast`, it names the catalog's own stream.
-	identity: z.optional(IdentitySchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),

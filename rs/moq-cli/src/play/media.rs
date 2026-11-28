@@ -822,7 +822,7 @@ where
 	// Each candidate's broadcast request, issued up front so every one is asked at once.
 	let mut bound = Vec::new();
 	for (name, config, reference) in candidates {
-		match source.bind(config.broadcast(), config.identity()) {
+		match source.bind(config.broadcast()) {
 			Ok(binding) => bound.push((name, config, reference, binding, Attempt::Waiting)),
 			Err(err) => reject(&name, &err),
 		}

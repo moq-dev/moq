@@ -95,7 +95,7 @@ impl Producer {
 				continue;
 			}
 			let current = kio::Producer::new(Current::Pending);
-			let owner = match source.follow(Some(&reference.broadcast), reference.identity.as_ref()) {
+			let owner = match source.follow(Some(&reference.broadcast)) {
 				Ok(identities) => Some(self.context.spawner.spawn(FollowIdentities {
 					identities,
 					current: current.clone(),

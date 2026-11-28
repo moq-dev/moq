@@ -525,7 +525,7 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 
 #[tokio::test(start_paused = true)]
 #[tracing_test::traced_test]
-async fn late_identities_replace_unpinned_entries_and_do_not_replace_pins() {
+async fn a_late_identity_replaces_an_include_entry() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Identity::random();
 	let root_url = crate::export::token(&root);
@@ -533,27 +533,17 @@ async fn late_identities_replace_unpinned_entries_and_do_not_replace_pins() {
 	let first_url = crate::export::token(&first);
 	let second = Identity::random();
 	let second_url = crate::export::token(&second);
-	let mut value = parent_catalog();
-	let mut pin = value.include["rung/a"].clone();
-	pin.identity = Some(first.clone());
-	value.include.insert("pinned".into(), pin);
-	let parent = publish(&origin, "room/live", &root, &value);
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, "include/", false).await;
 	let old = publish(&origin, "room/ladder", &first, &catalog());
 	let old_uri = format!("include/rung%2Fa/video/same/@{first_url}");
-	let listed = master(&server, &old_uri, true).await;
-	assert!(listed.contains(&format!("include/pinned/video/same/@{first_url}")));
+	master(&server, &old_uri, true).await;
 	assert!(!old.video.demand().wanted());
-	old.route.withdraw();
-	master(&server, "include/", false).await;
-	old.route.announce().unwrap();
-	master(&server, &format!("include/pinned/video/same/@{first_url}"), true).await;
 	let new = publish(&origin, "room/ladder", &second, &catalog());
 	let listed = master(&server, &format!("include/rung%2Fa/video/same/@{second_url}"), true).await;
-	assert!(!listed.contains("include/pinned/"));
 	assert!(!listed.contains(&old_uri));
 	assert!(!new.video.demand().wanted());
 	assert_eq!(
@@ -562,8 +552,6 @@ async fn late_identities_replace_unpinned_entries_and_do_not_replace_pins() {
 			.0,
 		StatusCode::NOT_FOUND
 	);
-	new.route.withdraw();
-	master(&server, &format!("include/pinned/video/same/@{first_url}"), true).await;
 }
 
 #[tokio::test(start_paused = true)]
