@@ -1,6 +1,6 @@
 name: Instructions
 
-# Nightly instruction counts for the deterministic Criterion benches, under stock
+# Nightly instruction counts for the deterministic benches, under stock
 # Valgrind through swole (`just rs instructions`). Kixel Quest reads them
 # and bisects a regression to its landing; nothing gates on them, and Nightly's
 # paired timing still measures every bench. See bench/README.md.
@@ -34,9 +34,10 @@ jobs:
     runs-on: ubuntu-24.04
     # Only `main` writes the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    # A full count takes over 3 hours: swole counts each CodSpeed bench five
-    # times, since it cannot see their threads (quest/m5/bench-harness.md).
-    timeout-minutes: 300
+    # Each benchmark counts once, as none starts another thread: 1,320 jobs
+    # took 17 minutes of Valgrind on a 32-core desktop, so a hosted runner's
+    # build and count fit about an hour.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

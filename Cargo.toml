@@ -14,7 +14,6 @@ members = [
     "rs/qmux/fuzz",
 ]
 default-members = [
-    "rs/bench-harness",
     "rs/kio",
     "rs/kio/macros",
     "rs/hang",
@@ -229,6 +228,8 @@ slab = "0.4.12"
 socket2 = "0.6"
 # default-features off drops str0m's aws-lc-rs crypto provider; rind-str0m supplies rind's.
 str0m = { version = "0.25", default-features = false }
+# The benchmark harness, a git dependency until its first crates.io release.
+swole = { git = "https://github.com/kixel-ai/swole" }
 tempfile = "3"
 thiserror = "2"
 time = "0.3"

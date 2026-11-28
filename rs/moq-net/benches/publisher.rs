@@ -20,10 +20,10 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench publisher`.
 
-use std::time::Duration;
+use std::fmt;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::fuzz::{CoverageBench, UpdateBench};
+use moq_net::fuzz::CoverageBench;
+use swole::bench;
 
 /// Ranges the source gave up before the wake.
 const SKIPPED: [u64; 4] = [1, 32, 1024, 8192];
@@ -31,88 +31,104 @@ const SKIPPED: [u64; 4] = [1, 32, 1024, 8192];
 /// Ranges subscribed: one more than the most given up, so one stays open.
 const RANGES: u64 = 8193;
 
-fn bench_covered_before_start(c: &mut Criterion) {
-	let mut group = c.benchmark_group("publisher_covered_before_start");
-	group.throughput(Throughput::Elements(1));
-	for skipped in SKIPPED {
-		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
-		let mut run = None;
-		group.bench_function(BenchmarkId::new("wake", skipped), |b| {
-			let run = run.get_or_insert_with(|| CoverageBench::new(RANGES, skipped));
-			b.iter(|| run.wake());
-		});
-		// The same record within one range, each group its own entry.
-		let mut run = None;
-		group.bench_function(BenchmarkId::new("adjacent", skipped), |b| {
-			let run = run.get_or_insert_with(|| CoverageBench::adjacent(skipped));
-			b.iter(|| run.wake());
-		});
+mod publisher_covered_before_start {
+	use moq_net::fuzz::CoverageBench;
+	use swole::bench;
+
+	use super::{RANGES, SKIPPED};
+
+	fn spread(skipped: u64) -> CoverageBench {
+		CoverageBench::new(RANGES, skipped)
 	}
-	group.finish();
+
+	#[bench(args = SKIPPED, setup = spread, items = |_: u64| 1)]
+	fn wake(run: &mut CoverageBench) {
+		run.wake()
+	}
+
+	/// The same record within one range, each group its own entry.
+	#[bench(args = SKIPPED, setup = CoverageBench::adjacent, items = |_: u64| 1)]
+	fn adjacent(run: &mut CoverageBench) {
+		run.wake()
+	}
 }
 
 /// Live ranges in the subscription, up to about the most one-group ranges a SUBSCRIBE fits.
 const LIVE: [u64; 3] = [16, 512, 8192];
 
-/// Ranges each update retires, and adds.
-const EDITED: [u64; 2] = [1, 16];
+mod publisher_update {
+	use moq_net::fuzz::UpdateBench;
+	use swole::bench;
 
-fn bench_update(c: &mut Criterion) {
-	let mut group = c.benchmark_group("publisher_update");
-	group.throughput(Throughput::Elements(1));
-	for ranges in LIVE {
-		for edited in EDITED {
-			let mut run = None;
-			group.bench_function(BenchmarkId::new(format!("edit{edited}"), ranges), |b| {
-				let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
-				b.iter(|| run.edit(edited));
-			});
-		}
-		let mut run = None;
-		group.bench_function(BenchmarkId::new("steer", ranges), |b| {
-			let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
-			b.iter(|| run.steer());
-		});
-		// The same on a relay's front, which mirrors each update into its route's copy.
-		for edited in EDITED {
-			let mut run = None;
-			group.bench_function(BenchmarkId::new(format!("routed_edit{edited}"), ranges), |b| {
-				let run = run.get_or_insert_with(|| UpdateBench::routed(ranges));
-				b.iter(|| run.edit(edited));
-			});
-		}
+	use super::LIVE;
+
+	#[bench(args = LIVE, setup = UpdateBench::new, items = |_: u64| 1)]
+	fn edit1(run: &mut UpdateBench) {
+		run.edit(1)
 	}
-	group.finish();
+
+	#[bench(args = LIVE, setup = UpdateBench::new, items = |_: u64| 1)]
+	fn edit16(run: &mut UpdateBench) {
+		run.edit(16)
+	}
+
+	#[bench(args = LIVE, setup = UpdateBench::new, items = |_: u64| 1)]
+	fn steer(run: &mut UpdateBench) {
+		run.steer()
+	}
+
+	// The same on a relay's front, which mirrors each update into its route's copy.
+
+	#[bench(args = LIVE, setup = UpdateBench::routed, items = |_: u64| 1)]
+	fn routed_edit1(run: &mut UpdateBench) {
+		run.edit(1)
+	}
+
+	#[bench(args = LIVE, setup = UpdateBench::routed, items = |_: u64| 1)]
+	fn routed_edit16(run: &mut UpdateBench) {
+		run.edit(16)
+	}
 }
 
 /// Ranges given up per measurement, and ranges subscribed besides the open one.
 const SWEEP: [u64; 4] = [1, 32, 1024, 8192];
 
-fn bench_drop(c: &mut Criterion) {
-	let mut group = c.benchmark_group("publisher_drop");
-	// The largest cell gives up 8192 ranges per sample.
-	group.sample_size(10);
-	group.measurement_time(Duration::from_secs(2));
-	for ranges in SWEEP {
-		for drops in SWEEP.into_iter().filter(|drops| *drops <= ranges) {
-			group.throughput(Throughput::Elements(drops));
-			group.bench_function(
-				BenchmarkId::new(format!("ranges={ranges}"), format!("drops={drops}")),
-				|b| {
-					b.iter_batched(
-						|| CoverageBench::spread(ranges + 1, drops),
-						|mut run| {
-							run.give_up(drops);
-							run
-						},
-						BatchSize::PerIteration,
-					)
-				},
-			);
-		}
-	}
-	group.finish();
+/// Ranges subscribed besides the open one and ranges given up, named `ranges=<ranges>/drops=<drops>`.
+#[derive(Clone, Copy)]
+struct Dropping {
+	ranges: u64,
+	drops: u64,
 }
 
-criterion_group!(benches, bench_covered_before_start, bench_update, bench_drop);
-criterion_main!(benches);
+impl fmt::Display for Dropping {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "ranges={}/drops={}", self.ranges, self.drops)
+	}
+}
+
+fn drops() -> Vec<Dropping> {
+	SWEEP
+		.into_iter()
+		.flat_map(|ranges| {
+			SWEEP
+				.into_iter()
+				.filter(move |drops| *drops <= ranges)
+				.map(move |drops| Dropping { ranges, drops })
+		})
+		.collect()
+}
+
+fn spread(case: Dropping) -> (CoverageBench, u64) {
+	(CoverageBench::spread(case.ranges + 1, case.drops), case.drops)
+}
+
+/// Returns the fixture, so its teardown stays unmeasured.
+#[bench(args = drops(), setup = spread, items = |case: Dropping| case.drops)]
+fn publisher_drop((mut run, drops): (CoverageBench, u64)) -> CoverageBench {
+	run.give_up(drops);
+	run
+}
+
+fn main() {
+	swole::main();
+}

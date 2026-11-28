@@ -9,16 +9,51 @@
 //! Both sweep the routes and the sessions publishing that origin:
 //! the others carry no auth for those routes, so their cost is waking on a change that
 //! sends nothing.
+//!
+//! Run with `cargo bench -p moq-net --features async --bench auth`.
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
 
+use std::{fmt, time::Duration};
+
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::future::join_all;
 use moq_net::{Session, Version, auth, origin};
-use std::time::Duration;
 use support::{harness, mock::create_mock_session_pair};
+use swole::bench;
+
+/// Two swept counts, named `<outer>/<inner>`: sessions and tokens, sessions and routes,
+/// tokens and paths, or tokens and naming requests.
+#[derive(Clone, Copy)]
+struct Case(usize, usize);
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.0, self.1)
+	}
+}
+
+fn cases(outer: [usize; 3], inner: [usize; 3]) -> Vec<Case> {
+	outer.into_iter().flat_map(|a| inner.map(|b| Case(a, b))).collect()
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap()
+}
+
+/// An origin that forwards every change at once, so a call times the work rather than the
+/// origin batching it.
+fn unheld(rt: &tokio::runtime::Runtime) -> origin::Producer {
+	let _guard = rt.enter();
+	let config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
+	let (origin, driver) = origin::Producer::new(config);
+	harness::spawn(driver);
+	origin
+}
 
 /// The one version that presents tokens in band: on moq-transport a token resolves at once
 /// and only rides the requests that name it, so no AUTH request ever reaches the peer.
@@ -92,29 +127,26 @@ impl Pair {
 	}
 }
 
-fn admission(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group(format!("auth/{INBAND}"));
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for sessions in [1, 16, 64] {
-		for tokens in [1, 16, 128] {
-			group.throughput(Throughput::Elements((sessions * tokens) as u64));
-			group.bench_with_input(
-				BenchmarkId::new(sessions.to_string(), tokens),
-				&(sessions, tokens),
-				|b, &(sessions, tokens)| {
-					let mut pairs = runtime.block_on(join_all((0..sessions).map(|_| pair(None))));
-					b.iter(|| runtime.block_on(join_all(pairs.iter_mut().map(|pair| pair.round(tokens)))));
-				},
-			);
-		}
-	}
-	group.finish();
+/// Sessions whose every call presents and withdraws `tokens` tokens. Declared before the
+/// runtime so they drop while it still runs.
+struct Admission {
+	pairs: Vec<Pair>,
+	tokens: usize,
+	rt: tokio::runtime::Runtime,
+}
+
+fn admitting(Case(sessions, tokens): Case) -> Admission {
+	let rt = runtime();
+	let pairs = rt.block_on(join_all((0..sessions).map(|_| pair(None))));
+	Admission { pairs, tokens, rt }
+}
+
+#[bench(args = cases([1, 16, 64], [1, 16, 128]), setup = admitting, items = |Case(sessions, tokens)| sessions * tokens)]
+fn admission(input: &mut Admission) {
+	let tokens = input.tokens;
+	input
+		.rt
+		.block_on(join_all(input.pairs.iter_mut().map(|pair| pair.round(tokens))));
 }
 
 /// A client publishing `origin` to its own server, whose session and token requests follow.
@@ -154,254 +186,300 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	(client, server, requests, subscribe)
 }
 
-fn renewal(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	for (name, single) in [("auth/renewal", false), ("auth/renewal_one", true)] {
-		let mut group = c.benchmark_group(name);
-		group.sample_size(10);
-		group.warm_up_time(Duration::from_millis(100));
-		group.measurement_time(Duration::from_millis(300));
-		for sessions in [1, 16, 64] {
-			for routes in [1, 16, 128] {
-				let touched = if single { 1 } else { routes };
-				group.throughput(Throughput::Elements(touched as u64));
-				group.bench_with_input(
-					BenchmarkId::new(sessions.to_string(), routes),
-					&(sessions, routes),
-					|b, &(sessions, routes)| {
-						let _guard = runtime.enter();
-						// No hold, so an iteration times the renewal rather than the origin batching it.
-						let config =
-							origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
-						let (origin, driver) = origin::Producer::new(config);
-						harness::spawn(driver);
-						let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
-						let (session, _, requests, _) = &mut publishers[0];
-						let handle = session.auth();
-						let auths = runtime.block_on(async {
-							let mut auths = Vec::new();
-							for route in 0..routes {
-								auths.push([
-									added(&handle, format!("a/{route}")).await.unwrap(),
-									added(&handle, format!("b/{route}")).await.unwrap(),
-								]);
-							}
-							auths
-						});
-						let mut accept = |count: usize| {
-							runtime.block_on(async {
-								let mut issued = Vec::with_capacity(count);
-								for _ in 0..count {
-									issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
-								}
-								issued
-							})
-						};
-						let broadcasts: Vec<_> = (0..routes)
-							.map(|route| {
-								origin
-									.route(
-										format!("room/{route}").as_str(),
-										origin::RouteOptions::default().with_auth(auths[route][0].clone()),
-									)
-									.unwrap()
-							})
-							.collect();
-						// Each round's grants replace the last round's, which drop once their
-						// renewals are accepted.
-						let mut held = accept(routes);
-						let mut next = 1;
-						b.iter(|| {
-							for (index, broadcast) in broadcasts.iter().take(touched).enumerate() {
-								broadcast.set_auth(Some(auths[index][next].clone())).unwrap();
-							}
-							let replacements = accept(touched);
-							drop(held.splice(..touched, replacements));
-							next ^= 1;
-						});
-					},
-				);
+/// One origin's routes, each holding one of two auths from the first session, which each
+/// call swaps on `touched` of them.
+struct Renewal {
+	_origin: origin::Producer,
+	publishers: Vec<(Session, Session, auth::Requests, origin::Producer)>,
+	auths: Vec<[auth::Credential; 2]>,
+	broadcasts: Vec<origin::Route>,
+	/// Each round's grants replace the last round's, which drop once their renewals are accepted.
+	held: Vec<auth::Issued>,
+	next: usize,
+	touched: usize,
+	rt: tokio::runtime::Runtime,
+}
+
+impl Renewal {
+	fn new(Case(sessions, routes): Case, single: bool) -> Self {
+		let rt = runtime();
+		let origin = unheld(&rt);
+		let mut publishers = {
+			let _guard = rt.enter();
+			rt.block_on(join_all((0..sessions).map(|_| publisher(&origin))))
+		};
+		let (session, _, requests, _) = &mut publishers[0];
+		let handle = session.auth();
+		let auths: Vec<_> = rt.block_on(async {
+			let mut auths = Vec::new();
+			for route in 0..routes {
+				auths.push([
+					added(&handle, format!("a/{route}")).await.unwrap(),
+					added(&handle, format!("b/{route}")).await.unwrap(),
+				]);
 			}
+			auths
+		});
+		let broadcasts = {
+			let _guard = rt.enter();
+			(0..routes)
+				.map(|route| {
+					origin
+						.route(
+							format!("room/{route}").as_str(),
+							origin::RouteOptions::default().with_auth(auths[route][0].clone()),
+						)
+						.unwrap()
+				})
+				.collect()
+		};
+		let held = rt.block_on(accept(requests, routes));
+		Self {
+			_origin: origin,
+			publishers,
+			auths,
+			broadcasts,
+			held,
+			next: 1,
+			touched: if single { 1 } else { routes },
+			rt,
 		}
-		group.finish();
 	}
+
+	fn swap(&mut self) {
+		let _guard = self.rt.enter();
+		for (index, broadcast) in self.broadcasts.iter().take(self.touched).enumerate() {
+			broadcast.set_auth(Some(self.auths[index][self.next].clone())).unwrap();
+		}
+		let replacements = self.rt.block_on(accept(&mut self.publishers[0].2, self.touched));
+		drop(self.held.splice(..self.touched, replacements));
+		self.next ^= 1;
+	}
+}
+
+/// Accept the next `count` token requests.
+async fn accept(requests: &mut auth::Requests, count: usize) -> Vec<auth::Issued> {
+	let mut issued = Vec::with_capacity(count);
+	for _ in 0..count {
+		issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
+	}
+	issued
+}
+
+fn renewing(case: Case) -> Renewal {
+	Renewal::new(case, false)
+}
+
+fn renewing_one(case: Case) -> Renewal {
+	Renewal::new(case, true)
+}
+
+#[bench(args = cases([1, 16, 64], [1, 16, 128]), setup = renewing, items = |Case(_, routes)| routes)]
+fn renewal(input: &mut Renewal) {
+	input.swap()
+}
+
+#[bench(args = cases([1, 16, 64], [1, 16, 128]), setup = renewing_one, items = |_: Case| 1)]
+fn renewal_one(input: &mut Renewal) {
+	input.swap()
 }
 
 /// Publications held behind unanswered tokens, sweeping both the token table and paths.
-fn waiting(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group(format!("auth/waiting/{INBAND}"));
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for tokens in [1, 16, 128] {
-		for paths in [1, 16, 128] {
-			group.throughput(Throughput::Elements(paths as u64));
-			group.bench_with_input(
-				BenchmarkId::new(tokens.to_string(), paths),
-				&(tokens, paths),
-				|b, &(tokens, paths)| {
-					let _guard = runtime.enter();
-					let config =
-						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
-					let (publish, driver) = origin::Producer::new(config);
-					harness::spawn(driver);
-					let (receive, driver) =
-						origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
-					harness::spawn(driver);
-					let mut pair = runtime.block_on(pair(Some(Origins {
-						publish: &publish,
-						subscribe: receive.clone(),
-					})));
-					let mut generation = 0;
-					b.iter(|| {
-						runtime.block_on(async {
-							let handle = pair.client.auth();
-							let mut presenting =
-								std::pin::pin!(join_all((0..tokens).map(|_| added(&handle, "pending"))));
-							assert!(futures::poll!(presenting.as_mut()).is_pending());
-							let mut pending = Vec::with_capacity(tokens);
-							for _ in 0..tokens {
-								pending.push(pair.requests.next().await.unwrap());
-							}
-							let prefix = format!("wait/{generation}/");
-							generation += 1;
-							let broadcasts: Vec<_> = (0..paths)
-								.map(|path| {
-									let broadcast = publish
-										.route(
-											format!("{prefix}{path}").as_str(),
-											moq_net::origin::RouteOptions::hidden(),
-										)
-										.unwrap();
-									broadcast.announce().unwrap();
-									broadcast
-								})
-								.collect();
-							// Let the session reach its admission wait before the final reply widens it.
-							tokio::task::yield_now().await;
-							let mut issued = Vec::with_capacity(tokens);
-							for (index, request) in pending.into_iter().enumerate() {
-								issued.push(request.accept(if index + 1 == tokens {
-									auth::Grant::all()
-								} else {
-									auth::Grant::default()
-								}));
-							}
-							let tokens: Vec<_> = presenting.await.into_iter().map(Result::unwrap).collect();
-							let mut announced = receive.consume().routes();
-							let mut seen = std::collections::HashSet::new();
-							while seen.len() < paths {
-								match announced.next().await.unwrap() {
-									moq_net::origin::RouteEvent {
-										kind:
-											moq_net::origin::RouteKind::Start
-											| moq_net::origin::RouteKind::Update
-											| moq_net::origin::RouteKind::Restart,
-										announce: update,
-										..
-									} if update.prefix.as_str().starts_with(&prefix) => {
-										seen.insert(update.prefix);
-									}
-									_ => {}
-								}
-							}
-							drop(broadcasts);
-							drop(tokens);
-							join_all(issued.iter().map(auth::Issued::closed)).await;
-						})
-					});
-				},
-			);
-		}
+struct Waiting {
+	publish: origin::Producer,
+	receive: origin::Producer,
+	pair: Pair,
+	generation: usize,
+	tokens: usize,
+	paths: usize,
+	rt: tokio::runtime::Runtime,
+}
+
+fn waiting_setup(Case(tokens, paths): Case) -> Waiting {
+	let rt = runtime();
+	let publish = unheld(&rt);
+	let receive = {
+		let _guard = rt.enter();
+		let (receive, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+		harness::spawn(driver);
+		receive
+	};
+	let pair = rt.block_on(pair(Some(Origins {
+		publish: &publish,
+		subscribe: receive.clone(),
+	})));
+	Waiting {
+		publish,
+		receive,
+		pair,
+		generation: 0,
+		tokens,
+		paths,
+		rt,
 	}
-	group.finish();
+}
+
+#[bench(args = cases([1, 16, 128], [1, 16, 128]), setup = waiting_setup, items = |Case(_, paths)| paths)]
+fn waiting(input: &mut Waiting) {
+	let Waiting {
+		publish,
+		receive,
+		pair,
+		generation,
+		tokens,
+		paths,
+		rt,
+	} = input;
+	let (tokens, paths) = (*tokens, *paths);
+	rt.block_on(async {
+		let handle = pair.client.auth();
+		let mut presenting = std::pin::pin!(join_all((0..tokens).map(|_| added(&handle, "pending"))));
+		assert!(futures::poll!(presenting.as_mut()).is_pending());
+		let mut pending = Vec::with_capacity(tokens);
+		for _ in 0..tokens {
+			pending.push(pair.requests.next().await.unwrap());
+		}
+		let prefix = format!("wait/{generation}/");
+		*generation += 1;
+		let broadcasts: Vec<_> = (0..paths)
+			.map(|path| {
+				let broadcast = publish
+					.route(
+						format!("{prefix}{path}").as_str(),
+						moq_net::origin::RouteOptions::hidden(),
+					)
+					.unwrap();
+				broadcast.announce().unwrap();
+				broadcast
+			})
+			.collect();
+		// Let the session reach its admission wait before the final reply widens it.
+		tokio::task::yield_now().await;
+		let mut issued = Vec::with_capacity(tokens);
+		for (index, request) in pending.into_iter().enumerate() {
+			issued.push(request.accept(if index + 1 == tokens {
+				auth::Grant::all()
+			} else {
+				auth::Grant::default()
+			}));
+		}
+		let tokens: Vec<_> = presenting.await.into_iter().map(Result::unwrap).collect();
+		let mut announced = receive.consume().routes();
+		let mut seen = std::collections::HashSet::new();
+		while seen.len() < paths {
+			match announced.next().await.unwrap() {
+				moq_net::origin::RouteEvent {
+					kind:
+						moq_net::origin::RouteKind::Start
+						| moq_net::origin::RouteKind::Update
+						| moq_net::origin::RouteKind::Restart,
+					announce: update,
+					..
+				} if update.prefix.as_str().starts_with(&prefix) => {
+					seen.insert(update.prefix);
+				}
+				_ => {}
+			}
+		}
+		drop(broadcasts);
+		drop(tokens);
+		join_all(issued.iter().map(auth::Issued::closed)).await;
+	})
 }
 
 /// Request-token lookup and shared withdrawal, sweeping distinct tokens and naming requests.
-fn shared_requests(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("auth/request_tokens");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for tokens in [1, 8, 32] {
-		for requests in [1, 8, 32] {
-			group.throughput(Throughput::Elements((tokens * requests) as u64));
-			group.bench_with_input(
-				BenchmarkId::new(tokens.to_string(), requests),
-				&(tokens, requests),
-				|b, &(tokens, requests)| {
-					let _guard = runtime.enter();
-					let config =
-						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
-					let (origin, driver) = origin::Producer::new(config);
-					harness::spawn(driver);
-					let (client, _server, mut pending, receive) = runtime.block_on(publisher(&origin));
-					let mut announced = receive.consume().routes();
-					let auths = runtime.block_on(async {
-						let mut auths = Vec::new();
-						for token in 0..tokens {
-							auths.push(added(&client.auth(), format!("token/{token}")).await.unwrap());
-						}
-						auths
-					});
-					let mut generation = 0;
-					b.iter(|| {
-						runtime.block_on(async {
-							let prefix = format!("round/{generation}");
-							generation += 1;
-							let mut broadcasts = Vec::new();
-							for (token, auth) in auths.iter().enumerate() {
-								for request in 0..requests {
-									broadcasts.push(
-										origin
-											.route(
-												format!("{prefix}/{token}/{request}").as_str(),
-												moq_net::origin::RouteOptions::default().with_auth(auth.clone()),
-											)
-											.unwrap(),
-									);
-								}
-							}
-							let mut issued = Vec::new();
-							for _ in 0..tokens {
-								issued.push(pending.next().await.unwrap().accept(auth::Grant::all()));
-							}
-							let mut seen = std::collections::HashSet::new();
-							while seen.len() < tokens * requests {
-								if let moq_net::origin::RouteEvent {
-									kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
-									announce: update,
-									..
-								} = announced.next().await.unwrap()
-									&& update.prefix.as_str().starts_with(&prefix)
-								{
-									seen.insert(update.prefix);
-								}
-							}
-							drop(broadcasts);
-							join_all(issued.iter().map(auth::Issued::closed)).await;
-						})
-					});
-				},
-			);
-		}
-	}
-	group.finish();
+struct RequestTokens {
+	origin: origin::Producer,
+	_client: Session,
+	_server: Session,
+	pending: auth::Requests,
+	_receive: origin::Producer,
+	announced: origin::Routes,
+	auths: Vec<auth::Credential>,
+	generation: usize,
+	requests: usize,
+	rt: tokio::runtime::Runtime,
 }
 
-criterion_group!(benches, admission, renewal, waiting, shared_requests);
-criterion_main!(benches);
+fn request_tokens_setup(Case(tokens, requests): Case) -> RequestTokens {
+	let rt = runtime();
+	let origin = unheld(&rt);
+	let (client, server, pending, receive) = {
+		let _guard = rt.enter();
+		rt.block_on(publisher(&origin))
+	};
+	let announced = receive.consume().routes();
+	let auths = rt.block_on(async {
+		let mut auths = Vec::new();
+		for token in 0..tokens {
+			auths.push(added(&client.auth(), format!("token/{token}")).await.unwrap());
+		}
+		auths
+	});
+	RequestTokens {
+		origin,
+		_client: client,
+		_server: server,
+		pending,
+		_receive: receive,
+		announced,
+		auths,
+		generation: 0,
+		requests,
+		rt,
+	}
+}
+
+#[bench(args = cases([1, 8, 32], [1, 8, 32]), setup = request_tokens_setup, items = |Case(tokens, requests)| tokens * requests)]
+fn request_tokens(input: &mut RequestTokens) {
+	let RequestTokens {
+		origin,
+		pending,
+		announced,
+		auths,
+		generation,
+		requests,
+		rt,
+		..
+	} = input;
+	let (tokens, requests) = (auths.len(), *requests);
+	rt.block_on(async {
+		let prefix = format!("round/{generation}");
+		*generation += 1;
+		let mut broadcasts = Vec::new();
+		for (token, auth) in auths.iter().enumerate() {
+			for request in 0..requests {
+				broadcasts.push(
+					origin
+						.route(
+							format!("{prefix}/{token}/{request}").as_str(),
+							moq_net::origin::RouteOptions::default().with_auth(auth.clone()),
+						)
+						.unwrap(),
+				);
+			}
+		}
+		let issued = accept(pending, tokens).await;
+		let mut seen = std::collections::HashSet::new();
+		while seen.len() < tokens * requests {
+			if let moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
+				announce: update,
+				..
+			} = announced.next().await.unwrap()
+				&& update.prefix.as_str().starts_with(&prefix)
+			{
+				seen.insert(update.prefix);
+			}
+		}
+		drop(broadcasts);
+		join_all(issued.iter().map(auth::Issued::closed)).await;
+	})
+}
+
+fn main() {
+	swole::main();
+}
 
 /// Present `token` on `handle` and wait for its first verdict.
 async fn added(

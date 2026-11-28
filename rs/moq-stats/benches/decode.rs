@@ -3,26 +3,18 @@
 //!
 //! Each tick is one merge-patch delta, applied and materialized the way [`moq_stats::Consumer`]
 //! does per yield. The encoded frames are built outside the measured section, and so is the
-//! track's own DEFLATE, which moq-net inflates before the reader sees a frame.
+//! track's own DEFLATE, which moq-net inflates before the reader sees a frame. After the last tick
+//! the decoder starts over from the snapshot, outside the measured section.
 //!
-//! Run `cargo bench -p moq-stats --bench decode` and compare the table across revisions.
-
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+//! Run with `cargo bench -p moq-stats --bench decode`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use moq_json::snapshot::{self, Decoder, Encoder};
 use moq_net::stats::Traffic;
 use moq_stats::{Bucket, BucketFrame};
+use swole::bench;
 
 /// A bucket frame as the producer writes it.
 #[derive(serde::Serialize)]
@@ -31,42 +23,7 @@ struct Body {
 	tiers: BTreeMap<String, Bucket>,
 }
 
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
-
-/// Ticks measured per configuration, after one warm-up delta.
+/// Ticks a decoder reads before it starts over from the snapshot, after one warm-up delta.
 const TICKS: u64 = 16;
 
 /// Broadcast `index` at `tick`: every tenth broadcast is live when `changed_percent` is 10, all of
@@ -115,51 +72,85 @@ fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u
 		.collect()
 }
 
-/// Mean allocations and time per tick.
-fn measure(broadcasts: usize, tiers: usize, changed_percent: usize) -> (usize, Duration) {
-	let mut frames = frames(broadcasts, tiers, changed_percent).into_iter();
-	let mut decoder = Decoder::<BucketFrame>::new(snapshot::consumer::Config::default());
-	let (snapshot, keyframe) = frames.next().unwrap();
-	assert!(keyframe);
-	decoder.snapshot(&snapshot).unwrap();
-	let (warm, _) = frames.next().unwrap();
-	decoder.delta(&warm).unwrap();
-	decoder.decode().unwrap();
-
-	let mut allocations = 0;
-	let mut elapsed = Duration::ZERO;
-	for _ in 0..TICKS {
-		let (payload, keyframe) = frames.next().unwrap();
-		ALLOCATIONS.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
-		let start = Instant::now();
-		// A large, busy group reaches its byte cap and opens a fresh one.
-		match keyframe {
-			true => decoder.snapshot(&payload).unwrap(),
-			false => decoder.delta(&payload).unwrap(),
-		}
-		let frame = decoder.decode().unwrap();
-		elapsed += start.elapsed();
-		COUNTING.store(false, Ordering::Relaxed);
-		allocations += ALLOCATIONS.load(Ordering::Relaxed);
-		drop(black_box(frame));
-	}
-	(allocations / TICKS as usize, elapsed / TICKS as u32)
+/// Broadcasts per tier, tiers, and the share that changed, named `<broadcasts>b_<tiers>t_<changed>pct`.
+#[derive(Clone, Copy)]
+struct Case {
+	broadcasts: usize,
+	tiers: usize,
+	changed: usize,
 }
 
-fn main() {
-	// Nextest lists all targets as potential test binaries.
-	if std::env::args().any(|arg| arg == "--list") {
-		return;
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}b_{}t_{}pct", self.broadcasts, self.tiers, self.changed)
 	}
-	println!("broadcasts tiers changed% allocs/tick us/tick");
+}
+
+fn cases() -> Vec<Case> {
+	let mut cases = Vec::new();
 	for changed in [10, 100] {
 		for tiers in [1, 4] {
 			for broadcasts in [1, 16, 256, 4096] {
-				let (allocations, elapsed) = measure(broadcasts, tiers, changed);
-				let micros = elapsed.as_secs_f64() * 1e6;
-				println!("{broadcasts:>10} {tiers:>5} {changed:>8} {allocations:>11} {micros:>8.1}");
+				cases.push(Case {
+					broadcasts,
+					tiers,
+					changed,
+				});
 			}
 		}
 	}
+	cases
+}
+
+/// A decoder partway through a run of frames.
+struct Reader {
+	decoder: Decoder<BucketFrame>,
+	frames: Vec<(Vec<u8>, bool)>,
+	/// The next frame to read.
+	next: usize,
+}
+
+impl Reader {
+	/// Read the snapshot and the warm-up delta, leaving the measured ticks.
+	fn rewind(&mut self) {
+		let (snapshot, keyframe) = &self.frames[0];
+		assert!(*keyframe);
+		self.decoder.snapshot(snapshot).unwrap();
+		self.decoder.delta(&self.frames[1].0).unwrap();
+		self.decoder.decode().unwrap();
+		self.next = 2;
+	}
+
+	/// Start over from the snapshot once every tick has been read.
+	fn ready(&mut self) {
+		if self.next == self.frames.len() {
+			self.rewind();
+		}
+	}
+}
+
+fn reader(case: Case) -> Reader {
+	let mut reader = Reader {
+		decoder: Decoder::new(snapshot::consumer::Config::default()),
+		frames: frames(case.broadcasts, case.tiers, case.changed),
+		next: 0,
+	};
+	reader.rewind();
+	reader
+}
+
+#[bench(args = cases(), setup = reader, before = Reader::ready)]
+fn tick(reader: &mut Reader) -> Option<BucketFrame> {
+	let (payload, keyframe) = &reader.frames[reader.next];
+	reader.next += 1;
+	// A large, busy group reaches its byte cap and opens a fresh one.
+	match keyframe {
+		true => reader.decoder.snapshot(payload).unwrap(),
+		false => reader.decoder.delta(payload).unwrap(),
+	}
+	reader.decoder.decode().unwrap()
+}
+
+fn main() {
+	swole::main();
 }

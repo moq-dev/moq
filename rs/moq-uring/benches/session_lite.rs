@@ -1,38 +1,31 @@
 //! The PR-4 ablation matrix at session level: a full moq-lite session pair on
 //! one worker, publisher to subscriber over loopback QUIC, toggling receive
-//! batching, GRO, and GSO exactly like the raw echo. Each iteration delivers
+//! batching, GRO, and GSO exactly like the raw echo. Each call delivers
 //! one group of 32 x 32 KiB frames (1 MiB, matching `echo_quic`'s unit), so
 //! the two matrices are directly comparable: the difference is the moq-net
 //! machine and container framing on top of the same wire path.
 //!
-//! Run it with `just rs bench-session` on a Linux 6.12+ kernel.
-
-use criterion::{criterion_group, criterion_main};
+//! Time it with `just bench -- -p moq-uring --bench session_lite` on a Linux 6.12+ kernel.
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
 #[path = "../tests/integration/support.rs"]
 mod support;
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "benchmarks measure themselves on the host clock"
-)]
 mod linux {
+	use std::fmt;
 	use std::net::UdpSocket;
-	use std::time::Instant;
+	use std::thread::JoinHandle;
 
-	use criterion::{BenchmarkId, Criterion, Throughput};
 	use moq_net::origin;
-	use moq_uring::{Config, Error, Worker, quic, udp};
+	use moq_uring::{Config, Worker, quic, udp};
 
 	use super::support;
 
-	/// Frames per group and bytes per frame: 1 MiB per iteration, the same
+	/// Frames per group and bytes per frame: 1 MiB per call, the same
 	/// unit as the echo matrix.
-	const FRAMES: usize = 32;
-	const FRAME_SIZE: usize = 32 * 1024;
+	pub const FRAMES: usize = 32;
+	pub const FRAME_SIZE: usize = 32 * 1024;
 
 	const ALPN: &str = "moq-lite-05";
 
@@ -43,64 +36,64 @@ mod linux {
 			.with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	struct Ablation {
-		name: &'static str,
-		config: udp::Config,
+	/// Which UDP features the worker's sockets use.
+	#[derive(Clone, Copy)]
+	pub enum Ablation {
+		AllOn,
+		NoGso,
+		NoGro,
+		Oneshot,
+		AllOff,
 	}
 
-	fn ablations() -> Vec<Ablation> {
-		let all = udp::Config::default();
-		let mut no_gso = all.clone();
-		no_gso.gso = false;
-		let mut no_gro = all.clone();
-		no_gro.gro = false;
-		let mut oneshot = all.clone();
-		oneshot.multishot = false;
-		let mut none = all.clone();
-		none.gso = false;
-		none.gro = false;
-		none.multishot = false;
-		vec![
-			Ablation {
-				name: "all-on",
-				config: all,
-			},
-			Ablation {
-				name: "no-gso",
-				config: no_gso,
-			},
-			Ablation {
-				name: "no-gro",
-				config: no_gro,
-			},
-			Ablation {
-				name: "oneshot",
-				config: oneshot,
-			},
-			Ablation {
-				name: "all-off",
-				config: none,
-			},
-		]
-	}
+	impl Ablation {
+		pub const ALL: [Self; 5] = [Self::AllOn, Self::NoGso, Self::NoGro, Self::Oneshot, Self::AllOff];
 
-	pub fn benchmark(c: &mut Criterion) {
-		// Kernel-gated like the tests: skip loudly below the 6.12 floor.
-		let probe = match Worker::new(Config::default()) {
-			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) => {
-				eprintln!("skipping io_uring session benchmark: {reason}");
-				return;
+		fn config(self) -> udp::Config {
+			let mut config = udp::Config::default();
+			match self {
+				Self::AllOn => {}
+				Self::NoGso => config.gso = false,
+				Self::NoGro => config.gro = false,
+				Self::Oneshot => config.multishot = false,
+				Self::AllOff => {
+					config.gso = false;
+					config.gro = false;
+					config.multishot = false;
+				}
 			}
-			Err(err) => panic!("worker setup failed: {err}"),
-		};
-		drop(probe);
+			config
+		}
+	}
 
-		let mut group = c.benchmark_group("session_lite");
-		group.throughput(Throughput::Bytes((FRAMES * FRAME_SIZE) as u64));
+	impl fmt::Display for Ablation {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str(match self {
+				Self::AllOn => "all-on",
+				Self::NoGso => "no-gso",
+				Self::NoGro => "no-gro",
+				Self::Oneshot => "oneshot",
+				Self::AllOff => "all-off",
+			})
+		}
+	}
 
-		for ablation in ablations() {
-			let mut worker = Worker::new(Config::default()).expect("worker");
+	/// A publisher and subscriber session pair on one worker, subscribed once so each group
+	/// measures steady state.
+	pub struct Session {
+		worker: Option<Worker>,
+		track: Option<moq_net::track::Producer>,
+		broadcast: Option<moq_net::origin::Route>,
+		sub_origin: Option<origin::Producer>,
+		origins: Option<JoinHandle<()>>,
+		frame: bytes::Bytes,
+		sub: moq_net::track::Subscriber,
+		_session: moq_net::Session,
+	}
+
+	impl Session {
+		pub fn new(ablation: Ablation) -> Self {
+			let mut worker = Worker::new(Config::default()).expect("io_uring worker");
 			let handle = worker.handle();
 
 			let (pub_origin, pub_driver) = origin::Producer::new(origin::Config::default());
@@ -127,11 +120,11 @@ mod linux {
 			let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 			let server_sock = handle
-				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config())
 				.expect("server socket");
 			let server_addr = server_sock.local_addr().expect("server addr");
 			let client_sock = handle
-				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config())
 				.expect("client socket");
 			let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 
@@ -152,8 +145,7 @@ mod linux {
 				session.closed().await;
 			});
 
-			// Establish and subscribe once; iterations measure steady state.
-			let (_session, mut sub) = worker
+			let (session, sub) = worker
 				.block_on(async {
 					let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
 						.await
@@ -190,68 +182,82 @@ mod linux {
 				})
 				.expect("worker");
 
-			let frame = bytes::Bytes::from(vec![0x5au8; FRAME_SIZE]);
-
-			group.bench_with_input(BenchmarkId::from_parameter(ablation.name), &ablation.config, |b, _| {
-				b.iter_custom(|iterations| {
-					worker
-						.block_on(async {
-							let start = Instant::now();
-							for _ in 0..iterations {
-								let mut writer = track
-									.append_group(
-										moq_net::Timestamp::from_millis(
-											track.largest().map_or(0, |largest| largest.group + 1),
-										)
-										.unwrap(),
-									)
-									.expect("append group");
-								for _ in 0..FRAMES {
-									writer
-										.write_frame(
-											moq_net::Timestamp::from_millis(writer.start).unwrap(),
-											frame.clone(),
-										)
-										.expect("write frame");
-								}
-								writer.finish().expect("finish group");
-
-								let mut reader = sub
-									.recv_group()
-									.await
-									.expect("recv group")
-									.expect("track closed prematurely");
-								let mut frames = 0;
-								while let Some(frame) = reader.read_frame().await.expect("read frame") {
-									assert_eq!(frame.payload.len(), FRAME_SIZE, "frame size");
-									frames += 1;
-								}
-								assert_eq!(frames, FRAMES, "lost frames");
-							}
-							start.elapsed()
-						})
-						.expect("worker")
-				});
-			});
-
-			// The worker (and with it the publisher session task) drops first,
-			// releasing the last origin handles so the drivers resolve.
-			drop(worker);
-			drop(track);
-			drop(broadcast);
-			drop(sub_origin);
-			origins.join().expect("origin drivers");
+			Self {
+				worker: Some(worker),
+				track: Some(track),
+				broadcast: Some(broadcast),
+				sub_origin: Some(sub_origin),
+				origins: Some(origins),
+				frame: bytes::Bytes::from(vec![0x5au8; FRAME_SIZE]),
+				sub,
+				_session: session,
+			}
 		}
 
-		group.finish();
+		/// Publishes one group and reads it back through the subscriber.
+		pub fn group(&mut self) {
+			let track = self.track.as_mut().expect("track");
+			let sub = &mut self.sub;
+			let frame = &self.frame;
+			self.worker
+				.as_mut()
+				.expect("worker")
+				.block_on(async {
+					let mut writer = track
+						.append_group(
+							moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1))
+								.unwrap(),
+						)
+						.expect("append group");
+					for _ in 0..FRAMES {
+						writer
+							.write_frame(moq_net::Timestamp::from_millis(writer.start).unwrap(), frame.clone())
+							.expect("write frame");
+					}
+					writer.finish().expect("finish group");
+
+					let mut reader = sub
+						.recv_group()
+						.await
+						.expect("recv group")
+						.expect("track closed prematurely");
+					let mut frames = 0;
+					while let Some(frame) = reader.read_frame().await.expect("read frame") {
+						assert_eq!(frame.payload.len(), FRAME_SIZE, "frame size");
+						frames += 1;
+					}
+					assert_eq!(frames, FRAMES, "lost frames");
+				})
+				.expect("worker");
+		}
+	}
+
+	impl Drop for Session {
+		fn drop(&mut self) {
+			// The worker (and with it the publisher session task) drops first,
+			// releasing the last origin handles so the drivers resolve.
+			drop(self.worker.take());
+			drop(self.track.take());
+			drop(self.broadcast.take());
+			drop(self.sub_origin.take());
+			if let Some(origins) = self.origins.take() {
+				origins.join().expect("origin drivers");
+			}
+		}
 	}
 }
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
-use linux::benchmark;
+use linux::{Ablation, FRAME_SIZE, FRAMES, Session};
+#[cfg(all(target_os = "linux", feature = "quic"))]
+use swole::bench;
 
-#[cfg(not(all(target_os = "linux", feature = "quic")))]
-fn benchmark(_: &mut criterion::Criterion) {}
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[bench(args = Ablation::ALL, setup = Session::new, bytes = |_: Ablation| FRAMES * FRAME_SIZE)]
+fn session_lite(session: &mut Session) {
+	session.group();
+}
 
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

@@ -54,7 +54,6 @@ webm-iterable = "0.7"
 
 [dev-dependencies]
 anyhow = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # The tests await hang's catalog subscription.
 hang = { path = "../hang", features = ["async"] }
@@ -64,6 +63,7 @@ moq-mux = { path = ".", features = ["async"] }
 # Mints an identity for a test, as a session of an older wire does.
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 proptest = { workspace = true }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }

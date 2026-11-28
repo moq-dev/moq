@@ -2,57 +2,55 @@
 //! loop, so the cost of a re-arm, swept over how many other timers are armed,
 //! shows whether the queue's cost grows with the table.
 
-use criterion::{criterion_group, criterion_main};
-
 #[cfg(target_os = "linux")]
-fn benchmark(c: &mut criterion::Criterion) {
+mod timers {
 	use std::time::Duration;
 
-	use criterion::BenchmarkId;
-	use moq_uring::{Config, Error, Worker};
+	use moq_uring::{Config, Timer, Worker};
+	use swole::bench;
 
-	let worker = match Worker::new(Config::default()) {
-		Ok(worker) => worker,
-		Err(Error::Unsupported(reason)) => {
-			eprintln!("skipping timer benchmark: {reason}");
-			return;
-		}
-		Err(err) => panic!("worker setup failed: {err}"),
-	};
-	let handle = worker.handle();
+	/// A timer that re-arms among `others`, all on one worker.
+	struct Table {
+		timer: Timer,
+		/// Two instants a re-arm alternates between, so every set moves it.
+		at: [kio::clock::Instant; 2],
+		flip: usize,
+		_others: Vec<Timer>,
+		_worker: Worker,
+	}
 
-	let mut group = c.benchmark_group("timers");
-	for armed in [1, 64, 1024, 16384] {
+	fn table(armed: u32) -> Table {
+		let worker = Worker::new(Config::default()).expect("io_uring worker");
+		let handle = worker.handle();
 		// The rest of the table, spread across a minute so the re-armed timer
 		// lands among them.
 		let now = kio::clock::now();
-		let _others: Vec<_> = (0..armed)
+		let others = (0..armed)
 			.map(|i| {
 				let mut timer = handle.timer();
 				timer.set(Some(now.saturating_add(Duration::from_secs(60) * i / armed)));
 				timer
 			})
 			.collect();
-
-		// Two instants a re-arm alternates between, so every set moves it.
-		let mut timer = handle.timer();
-		let at = [
-			now.saturating_add(Duration::from_secs(30)),
-			now.saturating_add(Duration::from_secs(31)),
-		];
-		let mut flip = 0;
-		group.bench_function(BenchmarkId::new("rearm", armed), |b| {
-			b.iter(|| {
-				flip ^= 1;
-				timer.set(Some(at[flip]));
-			});
-		});
+		Table {
+			timer: handle.timer(),
+			at: [
+				now.saturating_add(Duration::from_secs(30)),
+				now.saturating_add(Duration::from_secs(31)),
+			],
+			flip: 0,
+			_others: others,
+			_worker: worker,
+		}
 	}
-	group.finish();
+
+	#[bench(args = [1, 64, 1024, 16384], setup = table)]
+	fn rearm(table: &mut Table) {
+		table.flip ^= 1;
+		table.timer.set(Some(table.at[table.flip]));
+	}
 }
 
-#[cfg(not(target_os = "linux"))]
-fn benchmark(_: &mut criterion::Criterion) {}
-
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

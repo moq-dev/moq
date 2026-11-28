@@ -1,112 +1,140 @@
-//! Count allocations in one warmed snapshot update, swept over document size and changed fields.
+//! One warmed snapshot update, swept over document size and changed fields, for swole to count
+//! its allocations and time.
 //!
-//! Run `cargo bench -p moq-json --bench allocations` and compare the table across revisions.
-//! Payloads and input values are built outside the counted section. A new `Bytes` frame is
-//! necessarily owned; the count also includes the diff, patch merge, and optional inflation.
+//! Each call alternates between two documents, so every changed case encodes or decodes a delta.
+//! A new `Bytes` frame is necessarily owned; the encoder's cost also includes the diff and patch,
+//! the decoder's the merge.
+//!
+//! Run with `cargo bench -p moq-json --bench allocations`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::fmt;
 
+use bytes::Bytes;
 use moq_json::snapshot::{self, Decoder, Encoder};
 use serde_json::{Map, Value};
+use swole::bench;
 
-struct Counter;
+/// A document of `fields` fields with `changed_percent` of them changing, named `<fields>/<changed>%`.
+#[derive(Clone, Copy)]
+struct Case {
+	fields: usize,
+	changed_percent: usize,
+}
 
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.alloc(layout) }
+impl Case {
+	fn changed(&self) -> usize {
+		self.fields * self.changed_percent / 100
 	}
 
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+	fn docs(&self) -> [Value; 2] {
+		let mut old = Map::new();
+		let mut new = Map::new();
+		for index in 0..self.fields {
+			let key = format!("field_{index:05}");
+			old.insert(key.clone(), Value::from(index));
+			new.insert(key, Value::from(index + usize::from(index < self.changed())));
 		}
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
+		[Value::Object(old), Value::Object(new)]
 	}
 }
 
-fn count(f: impl FnOnce()) -> usize {
-	ALLOCATIONS.store(0, Ordering::Relaxed);
-	COUNTING.store(true, Ordering::Relaxed);
-	f();
-	COUNTING.store(false, Ordering::Relaxed);
-	ALLOCATIONS.load(Ordering::Relaxed)
-}
-
-fn docs(fields: usize, changed_percent: usize) -> (Value, Value) {
-	let mut old = Map::new();
-	let mut new = Map::new();
-	let changed = fields * changed_percent / 100;
-	for index in 0..fields {
-		let key = format!("field_{index:05}");
-		old.insert(key.clone(), Value::from(index));
-		new.insert(key, Value::from(index + usize::from(index < changed)));
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}%", self.fields, self.changed_percent)
 	}
-	(Value::Object(old), Value::Object(new))
 }
 
-fn measure(fields: usize, changed_percent: usize) -> (usize, usize) {
-	let (old, new) = docs(fields, changed_percent);
+fn cases() -> Vec<Case> {
+	[16, 128, 1024, 8192]
+		.into_iter()
+		.flat_map(|fields| {
+			[0, 1, 10, 100].map(|changed_percent| Case {
+				fields,
+				changed_percent,
+			})
+		})
+		.collect()
+}
+
+/// A seeded encoder and the two documents it alternates between.
+struct Encoding {
+	encoder: Encoder<Value>,
+	docs: [Value; 2],
+	next: usize,
+}
+
+fn encoding(case: Case) -> Encoding {
+	let docs = case.docs();
+	let mut encoder = Encoder::<Value>::new(snapshot::Config::default().with_deltas(true));
+	encoder.update(&docs[0]).unwrap().unwrap().commit();
+	// Warm the reusable key buffers, ending back on the first document.
+	for value in [&docs[1], &docs[0]] {
+		if let Some(frame) = encoder.update(value).unwrap() {
+			frame.commit();
+		}
+	}
+	Encoding { encoder, docs, next: 1 }
+}
+
+/// Restate the baseline so the group's frame cap never turns a delta into a snapshot.
+fn restate(state: &mut Encoding) {
+	state.encoder.snapshot().unwrap().expect("a seeded baseline").commit();
+}
+
+#[bench(args = cases(), setup = encoding, before = restate)]
+fn encode(state: &mut Encoding) -> Option<Bytes> {
+	let value = &state.docs[state.next];
+	state.next ^= 1;
+	let frame = state.encoder.update(value).unwrap()?;
+	let payload = frame.payload.clone();
+	frame.commit();
+	Some(payload)
+}
+
+/// A decoder holding the first document and the deltas that flip it to the second and back.
+struct Decoding {
+	decoder: Decoder<Value>,
+	deltas: [Bytes; 2],
+	next: usize,
+}
+
+fn decoding(case: Case) -> Decoding {
+	let [old, new] = case.docs();
 	let mut encoder = Encoder::<Value>::new(snapshot::Config::default().with_deltas(true));
 	let mut decoder = Decoder::<Value>::new(snapshot::consumer::Config::default());
 	let snapshot = encoder.update(&old).unwrap().unwrap();
 	decoder.snapshot(&snapshot.payload).unwrap();
 	snapshot.commit();
 
-	// Warm the reusable key buffers.
-	if let Some(frame) = encoder.update(&new).unwrap() {
-		decoder.delta(&frame.payload).unwrap();
+	let mut delta = |value: &Value| {
+		let frame = encoder.update(value).unwrap().expect("a changed document");
+		assert!(!frame.keyframe);
+		let payload = frame.payload.clone();
 		frame.commit();
+		payload
+	};
+	let deltas = [delta(&new), delta(&old)];
+	// Warm the reusable key buffers.
+	decoder.delta(&deltas[0]).unwrap();
+	decoder.delta(&deltas[1]).unwrap();
+	Decoding {
+		decoder,
+		deltas,
+		next: 0,
 	}
-	let mut encoded = 0;
-	let mut decoded = 0;
-	for index in 0..32 {
-		let value = if index % 2 == 0 { &old } else { &new };
-		let mut payload = None;
-		encoded += count(|| {
-			if let Some(frame) = encoder.update(value).unwrap() {
-				payload = Some(frame.payload.clone());
-				frame.commit();
-			}
-		});
-		if let Some(payload) = payload {
-			decoded += count(|| decoder.delta(&payload).unwrap());
-		}
-	}
-	(encoded / 32, decoded / 32)
+}
+
+/// The cases with a delta to decode: an unchanged document encodes none.
+fn changed_cases() -> Vec<Case> {
+	cases().into_iter().filter(|case| case.changed() > 0).collect()
+}
+
+#[bench(args = changed_cases(), setup = decoding)]
+fn decode(state: &mut Decoding) {
+	state.decoder.delta(&state.deltas[state.next]).unwrap();
+	state.next ^= 1;
 }
 
 fn main() {
-	// Nextest lists all targets as potential test binaries.
-	if std::env::args().any(|arg| arg == "--list") {
-		return;
-	}
-	println!("fields changed% encoder_allocs decoder_allocs");
-	for fields in [16, 128, 1024, 8192] {
-		for changed in [0, 1, 10, 100] {
-			let (encoder, decoder) = black_box(measure(fields, changed));
-			println!("{fields:>6} {changed:>8} {encoder:>14} {decoder:>14}");
-		}
-	}
+	swole::main();
 }

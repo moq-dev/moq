@@ -28,12 +28,12 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
 kio = { path = "../kio", features = ["manual"] }
 moq-crypto = { workspace = true, features = ["provider"] }
 object_store = { workspace = true, features = ["fs", "aws-base", "reqwest"] }
 s3s = "0.17"
 s3s-fs = "0.17"
+swole = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-util", "time"] }
 workspace-hack = { path = "../workspace-hack" }

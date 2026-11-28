@@ -1,11 +1,14 @@
 //! Revalidate one token while sweeping unrelated sessions and held credentials, and
 //! drain token batches while sweeping offered concurrency and payload size.
 //! The real relay/controller runs over loopback TCP; timings include one AUTH round trip.
+//!
+//! Run with `cargo bench -p moq-relay --bench auth`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fmt;
+
 use moq_auth::{Grant, lease};
 use moq_relay::{Connection, auth, cluster};
-use std::time::Duration;
+use swole::bench;
 
 fn grant(prefix: &str) -> Grant {
 	Grant::new(prefix.parse::<moq_auth::Prefix>().unwrap(), moq_auth::Prefixes::new())
@@ -116,29 +119,49 @@ impl Fixture {
 	}
 }
 
-fn refresh(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
+fn runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("relay_auth_refresh");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for sessions in [1, 16, 64] {
-		// QMux grants 100 bidirectional streams, including persistent control streams.
-		for tokens in [1, 16, 64] {
-			let mut fixture = runtime.block_on(Fixture::new(sessions, tokens));
-			group.bench_with_input(
-				BenchmarkId::new(sessions.to_string(), tokens),
-				&(sessions, tokens),
-				|b, _| {
-					b.iter(|| runtime.block_on(fixture.round()));
-				},
-			);
-		}
+		.unwrap()
+}
+
+/// A fixture beside the runtime it runs on, declared first so it drops before the runtime.
+struct Running<T> {
+	fixture: T,
+	runtime: tokio::runtime::Runtime,
+}
+
+/// Sessions on the relay and credentials each holds, named `<sessions>/<tokens>`.
+#[derive(Clone, Copy)]
+struct Held {
+	sessions: usize,
+	tokens: usize,
+}
+
+impl fmt::Display for Held {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.sessions, self.tokens)
 	}
-	group.finish();
+}
+
+fn held() -> Vec<Held> {
+	// QMux grants 100 bidirectional streams, including persistent control streams.
+	[1, 16, 64]
+		.into_iter()
+		.flat_map(|sessions| [1, 16, 64].map(|tokens| Held { sessions, tokens }))
+		.collect()
+}
+
+fn refreshing(held: Held) -> Running<Fixture> {
+	let runtime = runtime();
+	let fixture = runtime.block_on(Fixture::new(held.sessions, held.tokens));
+	Running { fixture, runtime }
+}
+
+#[bench(args = held(), setup = refreshing)]
+fn relay_auth_refresh(running: &mut Running<Fixture>) {
+	running.runtime.block_on(running.fixture.round());
 }
 
 /// One real session; each measured batch offers tokens before the decider drains them,
@@ -218,33 +241,42 @@ impl Queue {
 	}
 }
 
-fn queue(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("relay_auth_queue");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for offered in [1, 128, 256] {
-		for bytes in [16, 256, 4096] {
-			let mut fixture = runtime.block_on(Queue::new());
-			group.throughput(criterion::Throughput::Elements(offered as u64));
-			group.bench_with_input(
-				BenchmarkId::new(offered.to_string(), bytes),
-				&(offered, bytes),
-				|b, &(offered, bytes)| {
-					b.iter(|| runtime.block_on(fixture.round(offered, bytes)));
-				},
-			);
-		}
-	}
-	group.finish();
+/// Tokens offered at once and each token's size, named `<offered>/<bytes>`.
+#[derive(Clone, Copy)]
+struct Offer {
+	offered: usize,
+	bytes: usize,
 }
 
-criterion_group!(benches, refresh, queue);
-criterion_main!(benches);
+impl fmt::Display for Offer {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.offered, self.bytes)
+	}
+}
+
+fn offers() -> Vec<Offer> {
+	[1, 128, 256]
+		.into_iter()
+		.flat_map(|offered| [16, 256, 4096].map(|bytes| Offer { offered, bytes }))
+		.collect()
+}
+
+fn queued(offer: Offer) -> (Offer, Running<Queue>) {
+	let runtime = runtime();
+	let fixture = runtime.block_on(Queue::new());
+	(offer, Running { fixture, runtime })
+}
+
+#[bench(args = offers(), setup = queued, items = |offer: Offer| offer.offered)]
+fn relay_auth_queue((offer, running): &mut (Offer, Running<Queue>)) {
+	running
+		.runtime
+		.block_on(running.fixture.round(offer.offered, offer.bytes));
+}
+
+fn main() {
+	swole::main();
+}
 
 /// Present `token` on `handle` and wait for its first verdict.
 async fn added(

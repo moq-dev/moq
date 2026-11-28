@@ -15,21 +15,19 @@
 //! reference allocation before timing, so a variant cannot win by doing less.
 //!
 //! `BANDWIDTH_COUNTS=<iterations>` prints allocations, bytes allocated, wakes delivered
-//! and waker clones per operation instead of timing, checking every grant after every
+//! and waker clones per operation instead of benchmarking, checking every grant after every
 //! operation. A parked task that mints a fresh waiter clones its waker twice.
-//! `BANDWIDTH_CASE=<op>/<shape>` keeps one case and skips the checks, so `perf stat`
-//! can count instructions for it at two iteration counts and take the difference.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench bandwidth`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, criterion_group};
 use moq_net::bandwidth::{Allocator, Consumer, Producer, Rate, Reservation, Viewers};
 use moq_net::{broadcast, fuzz, track};
+use swole::bench;
 
 /// Reservations sharing the allocator.
 const RESERVATIONS: [usize; 4] = [1, 10, 1_000, 10_000];
@@ -50,47 +48,66 @@ fn table(count: usize) -> (Allocator, broadcast::Producer, Vec<track::Producer>,
 	(allocator, broadcast, tracks, reservations)
 }
 
-fn bench_update(c: &mut Criterion) {
-	let mut group = c.benchmark_group("bandwidth/update");
-	for count in RESERVATIONS {
-		group.bench_function(BenchmarkId::from_parameter(count), |b| {
-			let (allocator, _broadcast, _tracks, reservations) = table(count);
-			let mut target = fuzz::ProbeTarget::new(&allocator);
-			target.poll().expect("the first poll reports the target");
-			let touched = &reservations[count / 2];
-			let mut raised = false;
-			b.iter(|| {
-				raised = !raised;
-				touched.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }));
-				std::hint::black_box(target.poll().expect("the target moved"));
-			});
-		});
-	}
-	group.finish();
+/// A target following one rate among many, and the rate it toggles.
+struct Touched<T> {
+	target: fuzz::ProbeTarget,
+	/// Every handle, held so the target keeps counting them all.
+	held: T,
+	touched: usize,
+	raised: bool,
 }
 
-fn bench_viewers(c: &mut Criterion) {
-	let mut group = c.benchmark_group("bandwidth/viewers");
-	for count in RESERVATIONS {
-		group.bench_function(BenchmarkId::from_parameter(count), |b| {
-			let viewers = Viewers::default();
-			let watched: Vec<_> = (0..count)
-				.map(|_| viewers.watch(Rate::from_kbps(1_000)).expect("within the limit"))
-				.collect();
-			let mut target = fuzz::ProbeTarget::viewers(&viewers);
-			target.poll().expect("the first poll reports the target");
-			let touched = &watched[count / 2];
-			let mut raised = false;
-			b.iter(|| {
-				raised = !raised;
-				touched
-					.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }))
-					.expect("within the limit");
-				std::hint::black_box(target.poll().expect("the target moved"));
-			});
-		});
+impl<T> Touched<T> {
+	/// The rate the next toggle sets.
+	fn toggle(&mut self) -> Rate {
+		self.raised = !self.raised;
+		Rate::from_kbps(if self.raised { 2_000 } else { 1_000 })
 	}
-	group.finish();
+}
+
+type Table = (Allocator, broadcast::Producer, Vec<track::Producer>, Vec<Reservation>);
+
+fn update_table(count: usize) -> Touched<Table> {
+	let held = table(count);
+	let mut target = fuzz::ProbeTarget::new(&held.0);
+	target.poll().expect("the first poll reports the target");
+	Touched {
+		target,
+		held,
+		touched: count / 2,
+		raised: false,
+	}
+}
+
+/// One reservation's ceiling moves and the session reads the new target.
+#[bench(args = RESERVATIONS, setup = update_table)]
+fn update(table: &mut Touched<Table>) -> u64 {
+	let rate = table.toggle();
+	table.held.3[table.touched].update(rate);
+	table.target.poll().expect("the target moved")
+}
+
+fn watched(count: usize) -> Touched<(Viewers, Vec<moq_net::bandwidth::Viewer>)> {
+	let viewers = Viewers::default();
+	let watched: Vec<_> = (0..count)
+		.map(|_| viewers.watch(Rate::from_kbps(1_000)).expect("within the limit"))
+		.collect();
+	let mut target = fuzz::ProbeTarget::viewers(&viewers);
+	target.poll().expect("the first poll reports the target");
+	Touched {
+		target,
+		held: (viewers, watched),
+		touched: count / 2,
+		raised: false,
+	}
+}
+
+/// One viewer's ceiling moves and the session reads the new PROBE target.
+#[bench(args = RESERVATIONS, setup = watched)]
+fn viewers(viewers: &mut Touched<(Viewers, Vec<moq_net::bandwidth::Viewer>)>) -> u64 {
+	let rate = viewers.toggle();
+	viewers.held.1[viewers.touched].update(rate).expect("within the limit");
+	viewers.target.poll().expect("the target moved")
 }
 
 // ── counting ───────────────────────────────────────────────────────────────
@@ -183,9 +200,12 @@ impl Shape {
 			observers: 1,
 		}
 	}
+}
 
-	fn id(&self) -> String {
-		format!(
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(
+			f,
 			"{}c_{}r_{}t_{}i_{}o",
 			self.connections,
 			self.reservations,
@@ -465,36 +485,49 @@ const OPS: [(Op, &str); 4] = [
 	(Op::Peek, "peek"),
 ];
 
-fn bench_grants(c: &mut Criterion) {
-	for (op, name) in OPS {
-		let mut group = c.benchmark_group(format!("bandwidth/grants/{name}"));
-		group.warm_up_time(Duration::from_millis(200));
-		group.measurement_time(Duration::from_secs(1));
-		for shape in SHAPES {
-			group.bench_function(BenchmarkId::from_parameter(shape.id()), |b| {
-				let mut fixture = Fixture::new(&shape);
-				fixture.check();
-				// Both directions of the toggle, so either one doing less work shows here.
-				for _ in 0..2 {
-					fixture.run(op);
-					fixture.check();
-				}
-				b.iter(|| fixture.run(op));
-			});
-		}
-		group.finish();
+/// A checked fixture for `op`: every grant matches the reference before and after both
+/// directions of its toggle, so either one doing less work shows here.
+fn checked(shape: Shape, op: Op) -> Fixture {
+	let mut fixture = Fixture::new(&shape);
+	fixture.check();
+	for _ in 0..2 {
+		fixture.run(op);
+		fixture.check();
 	}
+	fixture
+}
+
+/// One change, then every observer drains its parked consumer; or, for `peek`, every
+/// reservation reads its slice.
+mod grants {
+	use swole::bench;
+
+	use super::{Fixture, Op, SHAPES, Shape, checked};
+
+	macro_rules! grant {
+		($name:ident, $setup:ident, $op:expr) => {
+			fn $setup(shape: Shape) -> Fixture {
+				checked(shape, $op)
+			}
+
+			#[bench(args = SHAPES, setup = $setup)]
+			fn $name(fixture: &mut Fixture) {
+				fixture.run($op);
+			}
+		};
+	}
+
+	grant!(estimate, estimate_fixture, Op::Estimate);
+	grant!(demand, demand_fixture, Op::Demand);
+	grant!(ceiling, ceiling_fixture, Op::Ceiling);
+	grant!(peek, peek_fixture, Op::Peek);
 }
 
 /// Deterministic counts per operation, checking every grant after each one.
-fn counts(iterations: usize, case: Option<&str>) {
+fn counts(iterations: usize) {
 	println!("op,shape,allocations,bytes,wakes,waker_clones");
 	for (op, name) in OPS {
 		for shape in SHAPES {
-			let label = format!("{name}/{}", shape.id());
-			if case.is_some_and(|case| case != label) {
-				continue;
-			}
 			let mut fixture = Fixture::new(&shape);
 			fixture.check();
 			let (mut allocations, mut bytes, mut wakes, mut waiters) = (0, 0, 0, 0);
@@ -509,15 +542,11 @@ fn counts(iterations: usize, case: Option<&str>) {
 				bytes += ALLOCATED.load(Ordering::Relaxed);
 				wakes += WAKES.load(Ordering::Relaxed);
 				waiters += WAITERS.load(Ordering::Relaxed);
-				// Skipped when counting instructions, which would otherwise count the check.
-				if case.is_none() {
-					fixture.check();
-				}
+				fixture.check();
 			}
 			let per = |total: usize| total as f64 / iterations as f64;
 			println!(
-				"{name},{},{:.1},{:.0},{:.1},{:.1}",
-				shape.id(),
+				"{name},{shape},{:.1},{:.0},{:.1},{:.1}",
 				per(allocations),
 				per(bytes),
 				per(wakes),
@@ -527,22 +556,10 @@ fn counts(iterations: usize, case: Option<&str>) {
 	}
 }
 
-criterion_group!(benches, bench_update, bench_viewers, bench_grants);
-
-// Let each harness initialize and finalize its own Criterion implementation.
-mod harness {
-	criterion::criterion_main!(super::benches);
-
-	pub(super) fn run() {
-		main();
-	}
-}
-
 fn main() {
 	if let Ok(iterations) = std::env::var("BANDWIDTH_COUNTS") {
-		let iterations = iterations.parse().expect("BANDWIDTH_COUNTS is an iteration count");
-		counts(iterations, std::env::var("BANDWIDTH_CASE").ok().as_deref());
+		counts(iterations.parse().expect("BANDWIDTH_COUNTS is an iteration count"));
 		return;
 	}
-	harness::run();
+	swole::main();
 }

@@ -7,9 +7,10 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench edges`.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::fmt;
+
 use moq_net::fuzz::LiveEdges;
-use std::time::Duration;
+use swole::bench;
 
 /// Edges holding a frame nobody read, ranked to pay before the written one.
 const QUIET: [usize; 3] = [1, 32, 1024];
@@ -17,22 +18,35 @@ const QUIET: [usize; 3] = [1, 32, 1024];
 /// Bytes per frame written.
 const FRAME: [usize; 2] = [1024, 64 * 1024];
 
-fn reclaim(c: &mut Criterion) {
-	let mut group = c.benchmark_group("reclaim");
-	group.sample_size(20);
-	group.warm_up_time(Duration::from_millis(500));
-	group.measurement_time(Duration::from_secs(2));
-	group.throughput(Throughput::Elements(1));
-	for quiet in QUIET {
-		for frame in FRAME {
-			let mut edges = LiveEdges::new(quiet, frame);
-			group.bench_function(BenchmarkId::new(format!("{frame}B"), quiet), |b| {
-				b.iter(|| edges.write())
-			});
-		}
-	}
-	group.finish();
+/// One shape, named `<frame>B/<quiet>`.
+#[derive(Clone, Copy)]
+struct Case {
+	quiet: usize,
+	frame: usize,
 }
 
-criterion_group!(benches, reclaim);
-criterion_main!(benches);
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}B/{}", self.frame, self.quiet)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	QUIET
+		.into_iter()
+		.flat_map(|quiet| FRAME.map(|frame| Case { quiet, frame }))
+		.collect()
+}
+
+fn edges(case: Case) -> LiveEdges {
+	LiveEdges::new(case.quiet, case.frame)
+}
+
+#[bench(args = cases(), setup = edges, items = |_: Case| 1)]
+fn reclaim(edges: &mut LiveEdges) {
+	edges.write()
+}
+
+fn main() {
+	swole::main();
+}

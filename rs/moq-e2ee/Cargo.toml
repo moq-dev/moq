@@ -32,13 +32,13 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Compile the generated wrappers used by the tests and benches.
 moq-e2ee = { path = ".", features = ["async"] }
 moq-net = { path = "../moq-net", features = ["async"] }
 serde_json = { workspace = true }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
 workspace-hack = { path = "../workspace-hack" }
 

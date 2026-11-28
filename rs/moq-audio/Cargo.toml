@@ -126,18 +126,14 @@ objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 # An HLS-only viewer starting an on-demand capture.
 moq-hls = { workspace = true, features = ["async"] }
 # Reads the jitter conformance corpus at doc/concept/audio-jitter/.
 serde = { workspace = true }
 serde_json = { workspace = true }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 workspace-hack = { path = "../workspace-hack" }
-
-# The batching bench counts the instructions each case retires.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-perf-event2 = "0.7.4"
 
 [[bench]]
 name = "batches"

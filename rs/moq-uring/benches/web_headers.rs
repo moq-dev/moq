@@ -1,6 +1,10 @@
 //! The cost of ready stream headers against independently stalled headers.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(target_os = "linux")]
+use std::{fmt, time::Duration};
+
+#[cfg(target_os = "linux")]
+use swole::{Iterations, bench};
 
 #[cfg(target_os = "linux")]
 #[path = "../tests/integration/web_headers.rs"]
@@ -9,31 +13,36 @@ mod headers;
 #[path = "../tests/integration/support.rs"]
 mod support;
 
-fn benchmark(c: &mut Criterion) {
-	#[cfg(target_os = "linux")]
-	{
-		match moq_uring::Worker::new(Default::default()) {
-			Ok(worker) => drop(worker),
-			Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
-				eprintln!("skipping io_uring header benchmark: {reason}");
-				return;
-			}
-			Err(err) => panic!("worker: {err}"),
-		}
-		let mut group = c.benchmark_group("web_headers");
-		for pending in [0, 64, 256] {
-			for ready in [1, 16] {
-				group.throughput(criterion::Throughput::Elements(2 * ready as u64));
-				group.bench_function(format!("pending-{pending}/ready-{ready}"), |b| {
-					b.iter_custom(|iterations| headers::run(pending, ready, iterations));
-				});
-			}
-		}
-		group.finish();
-	}
-	#[cfg(not(target_os = "linux"))]
-	let _ = c;
+/// Streams holding partial headers against ready uni and bi streams of each kind.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct Case {
+	pending: usize,
+	ready: usize,
 }
 
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+#[cfg(target_os = "linux")]
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "pending-{}/ready-{}", self.pending, self.ready)
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn cases() -> Vec<Case> {
+	[0, 64, 256]
+		.into_iter()
+		.flat_map(|pending| [1, 16].map(|ready| Case { pending, ready }))
+		.collect()
+}
+
+/// Times only the served rounds: the fixture is built for how many it serves.
+#[cfg(target_os = "linux")]
+#[bench(args = cases(), items = |case: Case| 2 * case.ready)]
+fn web_headers(case: Case, iterations: Iterations) -> Duration {
+	headers::run(case.pending, case.ready, iterations.get())
+}
+
+fn main() {
+	swole::main();
+}

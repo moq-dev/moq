@@ -9,7 +9,7 @@ is a smoke run that measures nothing.
 ## Plan
 
 Split from the benchmark trend site on 2026-10-20, when that quest became
-the m0 table. The Criterion targets, the JS benchmarks, the Rust benchmark
+the m0 table. The swole bench targets, the JS benchmarks, the Rust benchmark
 tests and the nightly shipping sizes feed it now
 ([moq-dev/moq#7510](https://github.com/moq-dev/moq/pull/7510) added the last
 two). The binding runners stay an unmeasured smoke run: rust2 measures them,

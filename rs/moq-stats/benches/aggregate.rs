@@ -6,26 +6,19 @@
 //! aggregate's cost follows the live nodes; an unbounded one (`grace` never elapsing) also pays for
 //! every departed node on each frame. Time is paused, so the churn ages past the grace instantly.
 //!
-//! Run `cargo bench -p moq-stats --bench aggregate` and compare the table across revisions.
-
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "custom timings measure the real time the work took, not the ambient clock"
-)]
+//! Run with `cargo bench -p moq-stats --bench aggregate`.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::fmt;
+use std::time::Duration;
 
 use moq_net::origin;
 use moq_net::stats::Traffic;
 use moq_stats::{Bucket, aggregate, bucket_track};
+use swole::bench;
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;
-
-/// Frames measured per configuration, after one warm-up frame.
-const FRAMES: u32 = 64;
 
 /// The grace configured when folding; the churn ages past it before measuring.
 const GRACE: Duration = Duration::from_secs(1);
@@ -115,94 +108,160 @@ async fn read_until(traffic: &mut aggregate::BucketConsumer, want: u64) {
 	}
 }
 
+/// Whether the live nodes keep their open pairs or resumed after they were closed.
 #[derive(Clone, Copy)]
-enum State {
+enum Metadata {
 	Known,
 	Resumed,
 }
 
-/// Mean wall time per merged frame with `live` nodes publishing after `departed` nodes left.
-async fn measure(live: usize, departed: usize, grace: Duration, state: State) -> Duration {
-	let (origin, driver) = origin::Producer::new(origin::Config::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
-	let mut traffic = agg.bucket(moq_net::Path::from_static("acme"));
-
-	// Every node contributes 1 byte per path, so the total counts nodes seen.
-	let mut total = 0;
-	for index in 0..departed {
-		let mut node = Node::new(&origin, &format!("gone-{index}"));
-		node.publish(1);
-		total += 1;
-		read_until(&mut traffic, total).await;
-	}
-
-	let mut nodes: Vec<Node> = (0..live)
-		.map(|index| Node::new(&origin, &format!("live-{index}")))
-		.collect();
-	for node in &mut nodes {
-		node.publish(1);
-		total += 1;
-		read_until(&mut traffic, total).await;
-	}
-	if matches!(state, State::Resumed) {
-		for node in &mut nodes {
-			node.source.withdraw();
-			loop {
-				let frame = traffic.next().await.unwrap().unwrap();
-				if first(&frame).unwrap().active_subscriptions() == live as u64 - 1 {
-					break;
-				}
-			}
-			node.source.announce().unwrap();
-			node.publish(1);
-			total += 1;
-			read_until(&mut traffic, total).await;
-		}
-	}
-	// Advance only after a read has seen the last departure, so every departed
-	// node is past its grace.
-	tokio::time::advance(GRACE * 2).await;
-
-	let mut elapsed = Duration::ZERO;
-	for frame in 0..=FRAMES {
-		let node = &mut nodes[frame as usize % live];
-		let start = Instant::now();
-		node.publish(1);
-		total += 1;
-		read_until(&mut traffic, total).await;
-		// The first frame folds the departed nodes; it is the warm-up.
-		if frame > 0 {
-			elapsed += start.elapsed();
-		}
-	}
-
-	drop(nodes);
-	driver.abort();
-	elapsed / FRAMES
+/// Live and departed nodes, the grace, and the live nodes' metadata, named
+/// `<live>/<departed>/<grace>/<metadata>`.
+#[derive(Clone, Copy)]
+struct Case {
+	live: usize,
+	departed: usize,
+	/// Whether departed nodes fold away after [`GRACE`], or never.
+	grace: bool,
+	metadata: Metadata,
 }
 
-fn main() {
-	// Nextest lists all targets as potential test binaries.
-	if std::env::args().any(|arg| arg == "--list") {
-		return;
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let grace = if self.grace { "1s" } else { "never" };
+		let metadata = match self.metadata {
+			Metadata::Known => "known",
+			Metadata::Resumed => "resumed",
+		};
+		write!(f, "{}/{}/{grace}/{metadata}", self.live, self.departed)
 	}
+}
+
+fn cases() -> Vec<Case> {
+	let mut cases = Vec::new();
+	for live in [1, 16, 128] {
+		for departed in [0, 256, 4096] {
+			for grace in [true, false] {
+				for metadata in [Metadata::Known, Metadata::Resumed] {
+					cases.push(Case {
+						live,
+						departed,
+						grace,
+						metadata,
+					});
+				}
+			}
+		}
+	}
+	cases
+}
+
+/// An aggregate with `live` nodes publishing after `departed` nodes left, past the warm-up frame.
+struct Aggregate {
+	traffic: aggregate::BucketConsumer,
+	nodes: Vec<Node>,
+	/// Every node contributes 1 byte per path, so the total counts nodes seen.
+	total: u64,
+	/// Frames published so far, which picks the next node to publish.
+	frames: usize,
+	_agg: aggregate::Consumer,
+	_origin: origin::Producer,
+	/// Last, so everything above drops while its driver task still exists.
+	runtime: tokio::runtime::Runtime,
+}
+
+impl Aggregate {
+	/// Publish one frame from the next node and read until the aggregate merged it.
+	fn frame(&mut self) {
+		let index = self.frames % self.nodes.len();
+		let node = &mut self.nodes[index];
+		self.frames += 1;
+		self.total += 1;
+		self.runtime.block_on(async {
+			node.publish(1);
+			read_until(&mut self.traffic, self.total).await;
+		});
+	}
+}
+
+fn aggregate(case: Case) -> Aggregate {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_time()
 		.start_paused(true)
 		.build()
 		.unwrap();
+	let grace = if case.grace { GRACE } else { Duration::MAX };
+	let live = case.live;
+	let (origin, agg, traffic, nodes, total) = runtime.block_on(async {
+		let (origin, driver) = origin::Producer::new(origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
+		let mut traffic = agg.bucket(moq_net::Path::from_static("acme"));
 
-	println!("live departed grace metadata    us/frame");
-	for live in [1, 16, 128] {
-		for departed in [0, 256, 4096] {
-			for (label, grace) in [("1s", GRACE), ("never", Duration::MAX)] {
-				for (metadata, state) in [("known", State::Known), ("resumed", State::Resumed)] {
-					let elapsed = runtime.block_on(measure(live, departed, grace, state));
-					let micros = elapsed.as_secs_f64() * 1e6;
-					println!("{live:>4} {departed:>8} {label:>5} {metadata:>8} {micros:>11.1}");
+		// Every departed node publishes before any leaves, so one read covers them all
+		// instead of one merge per node, which grows with every node seen.
+		let departed: Vec<Node> = (0..case.departed)
+			.map(|index| {
+				let mut node = Node::new(&origin, &format!("gone-{index}"));
+				node.publish(1);
+				node
+			})
+			.collect();
+		let mut total = case.departed as u64;
+		if total > 0 {
+			read_until(&mut traffic, total).await;
+		}
+		drop(departed);
+
+		let mut nodes: Vec<Node> = (0..live)
+			.map(|index| Node::new(&origin, &format!("live-{index}")))
+			.collect();
+		for node in &mut nodes {
+			node.publish(1);
+			total += 1;
+			read_until(&mut traffic, total).await;
+		}
+		if let Metadata::Resumed = case.metadata {
+			for node in &mut nodes {
+				node.source.withdraw();
+				loop {
+					let frame = traffic.next().await.unwrap().unwrap();
+					if first(&frame).unwrap().active_subscriptions() == live as u64 - 1 {
+						break;
+					}
 				}
+				node.source.announce().unwrap();
+				node.publish(1);
+				total += 1;
+				read_until(&mut traffic, total).await;
 			}
 		}
-	}
+		// Advance only after a read has seen the last departure, so every departed
+		// node is past its grace.
+		tokio::time::advance(GRACE * 2).await;
+		(origin, agg, traffic, nodes, total)
+	});
+
+	let mut aggregate = Aggregate {
+		traffic,
+		nodes,
+		total,
+		frames: 0,
+		_agg: agg,
+		_origin: origin,
+		runtime,
+	};
+	// The first frame folds the departed nodes; it is the warm-up.
+	aggregate.frame();
+	aggregate
+}
+
+/// One merged frame.
+#[bench(args = cases(), setup = aggregate)]
+fn frame(aggregate: &mut Aggregate) {
+	aggregate.frame();
+}
+
+fn main() {
+	swole::main();
 }

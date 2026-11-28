@@ -1,10 +1,6 @@
-//! Encoded retention cost and peak memory, swept over delay and bitrate.
+//! Encoded retention cost of a fresh playback buffer, swept over delay and bitrate.
+//!
 //! Run with `cargo bench -p moq-cli --bench play_buffer`.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "host time measures benchmark throughput"
-)]
 
 #[allow(
 	dead_code,
@@ -13,35 +9,63 @@
 #[path = "../src/play/buffer.rs"]
 mod buffer;
 
-use std::hint::black_box;
-use std::time::{Duration, Instant};
+use std::fmt;
+use std::time::Duration;
+
+use moq_mux::container::Frame;
+use swole::bench;
+
+/// Frames pushed per call: ten seconds of 30 fps video with a keyframe each second.
+const FRAMES: usize = 300;
+
+/// A retention window and frame size, named `delay_<ms>ms/payload_<bytes>B`.
+#[derive(Clone, Copy)]
+struct Case {
+	delay_ms: u64,
+	payload_bytes: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "delay_{}ms/payload_{}B", self.delay_ms, self.payload_bytes)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	[100, 2_000, 10_000]
+		.into_iter()
+		.flat_map(|delay_ms| {
+			[1_024, 65_536].map(|payload_bytes| Case {
+				delay_ms,
+				payload_bytes,
+			})
+		})
+		.collect()
+}
+
+fn frames(case: Case) -> (Vec<Frame>, Duration) {
+	let frames = (0..FRAMES as u64)
+		.map(|index| Frame {
+			timestamp: moq_net::Timestamp::from_millis(index * 33).unwrap(),
+			decode: None,
+			duration: None,
+			payload: bytes::Bytes::from(vec![128; case.payload_bytes]),
+			keyframe: index % 30 == 0,
+		})
+		.collect();
+	(frames, Duration::from_millis(case.delay_ms))
+}
+
+#[bench(args = cases(), setup = frames, items = |_| FRAMES)]
+fn push(input: &(Vec<Frame>, Duration)) -> buffer::Buffer {
+	let (frames, delay) = input;
+	let mut buffer = buffer::Buffer::default();
+	for frame in frames {
+		buffer.push(frame.clone(), *delay);
+	}
+	buffer
+}
 
 fn main() {
-	for delay_ms in [100, 2_000, 10_000] {
-		for payload_bytes in [1_024, 65_536] {
-			let frames: Vec<_> = (0..300)
-				.map(|index| moq_mux::container::Frame {
-					timestamp: moq_net::Timestamp::from_millis(index * 33).unwrap(),
-					decode: None,
-					duration: None,
-					payload: bytes::Bytes::from(vec![128; payload_bytes]),
-					keyframe: index % 30 == 0,
-				})
-				.collect();
-			let start = Instant::now();
-			let mut peak = 0;
-			for _ in 0..1_000 {
-				let mut buffer = buffer::Buffer::default();
-				for frame in &frames {
-					buffer.push(black_box(frame.clone()), Duration::from_millis(delay_ms));
-					peak = peak.max(buffer.bytes);
-				}
-				black_box(buffer);
-			}
-			println!(
-				"delay={delay_ms}ms payload={payload_bytes}B: {:.1} ns/frame, peak={peak}B",
-				start.elapsed().as_nanos() as f64 / 300_000.0
-			);
-		}
-	}
+	swole::main();
 }

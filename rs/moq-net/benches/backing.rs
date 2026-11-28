@@ -6,7 +6,7 @@
 //! copied into storage of its own. The pool bills each frame's length, so a small frame could
 //! keep a much larger receive allocation alive, including the other frames' bytes that were
 //! copied out of it. The session's frame reader therefore copies a whole frame of at most
-//! 2 KiB out of its chunk, and this bench guards that every backing stays near the control.
+//! 2 KiB out of its chunk, and this bench measures every backing beside the control.
 //!
 //! Each case receives [`SECONDS`] of media on `tracks` video and audio track pairs sharing one
 //! pool, through the session's frame reader ([`moq_net::fuzz::GroupRecv`]). Frames are
@@ -19,27 +19,15 @@
 //!   driver copies each receive into one reused `BytesMut` and splits datagrams off it.
 //!   A `moq-uring` GRO completion is one allocation of up to 64 KiB as well.
 //!
-//! Then the oldest video groups are evicted, keeping `keep` of them, while every audio group
-//! stays cached: the selective expiry that leaves a small audio frame holding a receive
-//! allocation whose video bytes the cache already dropped.
-//!
-//! `BACKING_ALLOCS=1` prints, for every case, the live heap the cache retains against
-//! [`cache::Pool::used`], the payload bytes retained, how many frames arrived whole, and the
-//! allocations and bytes allocated per frame received, instead of timing. The live heap
-//! counts each allocation once, however many frames slice it. An argument filters the cases
-//! by name. Timing covers only the cases that keep every group, since eviction adds a few
-//! aborts. The first time a timed case runs, it prints the same line for itself and for the
-//! two cases that evict its video groups, so a timed run such as the nightly one logs every
-//! case's memory. The ratio is reported, not asserted: the reader's unit test pins the copy.
+//! Each case keeps every group it receives.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench backing`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::fmt;
 
 use bytes::{Bytes, BytesMut};
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Timescale, Timestamp, broadcast, cache, fuzz::GroupRecv, group, track};
+use swole::bench;
 
 /// Stream bytes per packet: a 1200-byte datagram less its QUIC overhead.
 const PACKET: usize = 1150;
@@ -82,54 +70,6 @@ impl Backing {
 			Self::Datagram => "datagram",
 			Self::Recv => "recv64k",
 		}
-	}
-}
-
-/// How many of each video track's groups stay cached: all, the newest quarter, or none.
-const KEEP: [(&str, u64, u64); 3] = [("all", 1, 1), ("quarter", 1, 4), ("none", 0, 1)];
-
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-impl Counter {
-	fn count(size: usize) {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-			ALLOCATED.fetch_add(size, Ordering::Relaxed);
-		}
-	}
-}
-
-// Counting only. Every call forwards to the system allocator unchanged.
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		Self::count(layout.size());
-		LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		Self::count(layout.size());
-		LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		Self::count(new_size);
-		LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
-		unsafe { System.dealloc(ptr, layout) }
 	}
 }
 
@@ -210,10 +150,6 @@ impl Media {
 			payload,
 		}
 	}
-
-	fn is_video(&self, track: usize) -> bool {
-		track < self.tracks / 2
-	}
 }
 
 /// The transport's receive path: copies each datagram into its backing and hands out slices.
@@ -266,11 +202,11 @@ impl Driver {
 
 /// A receiving broadcast, its tracks sharing one pool.
 struct Cache {
-	pool: cache::Pool,
+	_pool: cache::Pool,
 	_broadcast: broadcast::Producer,
 	tracks: Vec<track::Producer>,
-	/// Each track's finished groups, oldest first, with their payload bytes.
-	groups: Vec<Vec<(group::Finished, usize)>>,
+	/// Each track's finished groups, held so the cache keeps them.
+	groups: Vec<group::Finished>,
 }
 
 impl Cache {
@@ -288,155 +224,97 @@ impl Cache {
 			})
 			.collect();
 		Self {
-			pool,
+			_pool: pool,
 			_broadcast: broadcast,
 			tracks,
-			groups: (0..media.tracks).map(|_| Vec::new()).collect(),
+			groups: Vec::new(),
 		}
 	}
 
-	/// Receive every frame, then evict all but `keep` of each video track's groups.
-	fn run(&mut self, media: &Media, backing: Backing, (_, num, den): (&str, u64, u64)) {
+	/// Receive every frame.
+	fn run(&mut self, media: &Media, backing: Backing) {
 		let mut driver = Driver::new(backing);
-		let mut open: Vec<Option<(GroupRecv, usize)>> = (0..media.tracks).map(|_| None).collect();
+		let mut open: Vec<Option<GroupRecv>> = (0..media.tracks).map(|_| None).collect();
 		for frame in &media.frames {
 			let slot = &mut open[frame.track];
 			if frame.start {
-				if let Some((recv, bytes)) = slot.take() {
-					self.groups[frame.track].push((recv.finish().unwrap(), bytes));
+				if let Some(recv) = slot.take() {
+					self.groups.push(recv.finish().unwrap());
 				}
 				// A group starts at its first frame's timestamp, in the track's milliseconds.
 				let group = self.tracks[frame.track]
 					.append_group(Timestamp::from_millis(frame.timestamp).unwrap())
 					.unwrap();
-				*slot = Some((GroupRecv::new(group), 0));
+				*slot = Some(GroupRecv::new(group));
 			}
-			let (recv, bytes) = slot.as_mut().expect("every track opens with a group");
+			let recv = slot.as_mut().expect("every track opens with a group");
 			let chunks: Vec<_> = frame.chunks.iter().map(|chunk| driver.chunk(media, *chunk)).collect();
-			*bytes += chunks.iter().map(Bytes::len).sum::<usize>();
 			let timestamp = Timestamp::new(frame.timestamp, Timescale::MILLI).unwrap();
 			recv.frame(timestamp, chunks).unwrap();
 		}
-		for (track, recv) in open.into_iter().enumerate() {
-			if let Some((recv, bytes)) = recv {
-				self.groups[track].push((recv.finish().unwrap(), bytes));
-			}
+		for recv in open.into_iter().flatten() {
+			self.groups.push(recv.finish().unwrap());
 		}
-		drop(driver);
-
-		for track in (0..media.tracks).filter(|track| media.is_video(*track)) {
-			let groups = &mut self.groups[track];
-			let keep = groups.len() as u64 * num / den;
-			let evict = groups.len() - keep as usize;
-			for (group, _) in groups.drain(..evict) {
-				group.abort(moq_net::Error::Evicted).unwrap();
-			}
-		}
-	}
-
-	/// Payload bytes still cached.
-	fn payload(&self) -> usize {
-		self.groups.iter().flatten().map(|(_, bytes)| bytes).sum()
 	}
 }
 
-/// Every `(name, tracks, video kbps, backing, keep)` case.
-fn cases() -> impl Iterator<Item = (String, usize, u64, Backing, (&'static str, u64, u64))> {
-	TRACKS.into_iter().flat_map(|tracks| {
-		VIDEO_KBPS.into_iter().flat_map(move |kbps| {
-			KEEP.into_iter().flat_map(move |keep| {
+/// One workload received through one backing, named `tracks=<tracks>/video=<kbps>k/<backing>`.
+#[derive(Clone, Copy)]
+struct Case {
+	tracks: usize,
+	kbps: u64,
+	backing: Backing,
+}
+
+impl Case {
+	fn payload(self) -> usize {
+		Media::new(self.tracks, self.kbps).payload
+	}
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "tracks={}/video={}k/{}", self.tracks, self.kbps, self.backing.name())
+	}
+}
+
+fn cases() -> Vec<Case> {
+	TRACKS
+		.into_iter()
+		.flat_map(|tracks| {
+			VIDEO_KBPS.into_iter().flat_map(move |kbps| {
 				Backing::ALL
 					.into_iter()
-					.map(move |backing| (name(tracks, kbps, keep, backing), tracks, kbps, backing, keep))
+					.map(move |backing| Case { tracks, kbps, backing })
 			})
 		})
-	})
+		.collect()
 }
 
-/// A case's name within the `backing` group.
-fn name(tracks: usize, kbps: u64, keep: (&str, u64, u64), backing: Backing) -> String {
-	format!("tracks={tracks}/video={kbps}k/keep={}/{}", keep.0, backing.name())
+/// A case's workload and the empty cache it is received into.
+struct Receiving {
+	media: Media,
+	backing: Backing,
+	cache: Cache,
 }
 
-/// The live heap, once the cache's deferred frees have run.
-fn live() -> isize {
-	// The group log frees evicted entries through epoch-based reclamation.
-	for _ in 0..64 {
-		crossbeam_epoch::pin().flush();
+fn receiving(case: Case) -> Receiving {
+	let media = Media::new(case.tracks, case.kbps);
+	let cache = Cache::new(&media);
+	Receiving {
+		media,
+		backing: case.backing,
+		cache,
 	}
-	LIVE.load(Ordering::Relaxed)
 }
 
-/// Receive one case once, describing the live heap it retains against the pool's bill, the
-/// payload retained, and the allocations and bytes allocated per frame received.
-fn measure(media: &Media, backing: Backing, keep: (&str, u64, u64)) -> String {
-	let before = live();
-	let mut cache = Cache::new(media);
-	let empty = live();
-
-	ALLOCATIONS.store(0, Ordering::Relaxed);
-	ALLOCATED.store(0, Ordering::Relaxed);
-	COUNTING.store(true, Ordering::Relaxed);
-	cache.run(media, backing, keep);
-	COUNTING.store(false, Ordering::Relaxed);
-
-	let retained = live() - empty;
-	let used = cache.pool.used();
-	let payload = cache.payload();
-	drop(cache);
-	let left = live() - before;
-
-	// The frames the cache can keep as the chunk they arrived in.
-	let whole = media.frames.iter().filter(|frame| frame.chunks.len() == 1).count();
-	let frames = media.frames.len();
-	let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames as f64;
-	let allocated = ALLOCATED.load(Ordering::Relaxed) as f64 / frames as f64;
-	format!(
-		"retained {retained} B, pool {used} B ({:.2}x), payload {payload} B, {whole} of {frames} frames whole, \
-		 {allocations:.2} allocations and {allocated:.0} B allocated per frame, {left} B left after drop",
-		retained as f64 / used as f64,
-	)
+/// Returns what it received, so tearing the cache down stays unmeasured.
+#[bench(args = cases(), setup = receiving, bytes = Case::payload)]
+fn backing(mut input: Receiving) -> Receiving {
+	input.cache.run(&input.media, input.backing);
+	input
 }
 
-fn bench(c: &mut Criterion) {
-	// Every case's memory, without timing.
-	if std::env::var_os("BACKING_ALLOCS").is_some() {
-		let filter = std::env::args().skip(1).find(|arg| !arg.starts_with('-'));
-		for (name, tracks, kbps, backing, keep) in cases() {
-			if filter.as_deref().is_none_or(|filter| name.contains(filter)) {
-				println!("{name}: {}", measure(&Media::new(tracks, kbps), backing, keep));
-			}
-		}
-		return;
-	}
-
-	// Eviction is a handful of aborts, so only the cases keeping every group are timed. The
-	// first run of one, which Criterion's filter allows only for a selected case, prints the
-	// memory of every case sharing its media and backing, untimed.
-	let mut group = c.benchmark_group("backing");
-	for (id, tracks, kbps, backing, keep) in cases().filter(|(.., keep)| keep.0 == "all") {
-		let media = Media::new(tracks, kbps);
-		let mut measured = false;
-		group.throughput(Throughput::Bytes(media.payload as u64));
-		group.bench_function(BenchmarkId::from_parameter(id), |b| {
-			if !std::mem::replace(&mut measured, true) {
-				for other in KEEP {
-					let case = name(tracks, kbps, other, backing);
-					eprintln!("backing/{case}: {}", measure(&media, backing, other));
-				}
-			}
-			b.iter_batched(
-				|| Cache::new(&media),
-				|mut cache| {
-					cache.run(&media, backing, keep);
-					cache
-				},
-				BatchSize::PerIteration,
-			)
-		});
-	}
-	group.finish();
+fn main() {
+	swole::main();
 }
-
-criterion_group!(benches, bench);
-criterion_main!(benches);

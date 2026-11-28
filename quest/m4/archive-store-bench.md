@@ -9,7 +9,7 @@ change that adds store round trips to archive reads fails.
 ## Plan
 
 - The cost is store round trips (per refresh, one LIST of the archive prefix
-  plus one per track; one GET per object), which an `InMemory` Criterion
+  plus one per track; one GET per object), which an `InMemory` swole
   bench would hide ([moq-dev/moq#6262](https://github.com/moq-dev/moq/pull/6262)).
 - Count them with the crate's test store, `rs/moq-archive/src/mock.rs`, which
   already logs every GET, PUT, DELETE, and LIST (`Mock::take`), as

@@ -51,12 +51,12 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 kio = { path = "../kio", features = ["sim"] }
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`.
 moq-tokio = { path = "../moq-tokio" }
 rind-rustls = { workspace = true }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }

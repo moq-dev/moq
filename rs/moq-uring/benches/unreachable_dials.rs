@@ -5,24 +5,20 @@
 //! handshakes the endpoint is carrying, so the per-dial time stays flat across
 //! the `handshakes` axis.
 
-use criterion::{criterion_group, criterion_main};
-
 #[cfg(target_os = "linux")]
 mod linux {
 	use std::future::Future;
-	use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+	use std::net::UdpSocket;
 	use std::os::fd::AsRawFd;
 	use std::pin::Pin;
 	use std::task::Poll;
-	use std::time::Duration;
 
-	use criterion::{BenchmarkId, Criterion, Throughput};
-	use moq_uring::{Config, Error, Worker, quic, udp};
+	use moq_uring::quic;
 	use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn6, bind, setsockopt, socket, sockopt};
 
-	type Dial<'a> = Pin<Box<dyn Future<Output = Result<quic::Connection, quic::Error>> + 'a>>;
+	pub type Dial<'a> = Pin<Box<dyn Future<Output = Result<quic::Connection, quic::Error>> + 'a>>;
 
-	fn dial_config() -> quic::client::Config {
+	pub fn dial_config() -> quic::client::Config {
 		// Nothing ever answers, so nothing is verified.
 		let mut tls = moq_tokio::tls::Connect::default();
 		tls.insecure = Some(true);
@@ -33,7 +29,7 @@ mod linux {
 
 	/// An IPv6-only socket, which Linux refuses to send to a v4-mapped address
 	/// with `ENETUNREACH`: an unroutable family without touching the routes.
-	fn v6_only() -> UdpSocket {
+	pub fn v6_only() -> UdpSocket {
 		let fd = socket(AddressFamily::Inet6, SockType::Datagram, SockFlag::empty(), None).expect("socket");
 		setsockopt(&fd, sockopt::Ipv6V6Only, &true).expect("IPV6_V6ONLY");
 		let local: std::net::SocketAddrV6 = "[::1]:0".parse().expect("addr");
@@ -42,7 +38,7 @@ mod linux {
 	}
 
 	/// Poll every dial until it resolves, returning how many failed.
-	async fn settle(mut dials: Vec<Dial<'_>>) -> usize {
+	pub async fn settle(mut dials: Vec<Dial<'_>>) -> usize {
 		let mut failed = 0;
 		std::future::poll_fn(|cx| {
 			dials.retain_mut(|dial| match dial.as_mut().poll(cx) {
@@ -61,81 +57,120 @@ mod linux {
 		.await;
 		failed
 	}
+}
 
-	pub fn benchmark(c: &mut Criterion) {
-		let mut group = c.benchmark_group("unreachable_dials");
-		// The background dials end at the 30s handshake timeout, so each point
-		// has to finish well inside it.
-		group
-			.sample_size(10)
-			.warm_up_time(Duration::from_millis(500))
-			.measurement_time(Duration::from_secs(2));
+#[cfg(target_os = "linux")]
+use std::{
+	fmt,
+	net::{Ipv4Addr, SocketAddr, UdpSocket},
+	rc::Rc,
+	task::Poll,
+};
 
-		for handshakes in [1, 256, 4096] {
-			for destinations in [1u16, 8, 64] {
-				let mut worker = match Worker::new(Config::default()) {
-					Ok(worker) => worker,
-					Err(Error::Unsupported(reason)) => {
-						eprintln!("skipping unreachable dial benchmark: {reason}");
-						return;
-					}
-					Err(err) => panic!("worker setup failed: {err}"),
-				};
-				let handle = worker.handle();
-				let endpoint = quic::Endpoint::new(
-					quic::endpoint::Config::default(),
-					handle.udp(v6_only(), udp::Config::default()).expect("socket"),
-				)
-				.expect("endpoint");
+#[cfg(target_os = "linux")]
+use moq_uring::{Config, Worker, quic, udp};
+#[cfg(target_os = "linux")]
+use swole::bench;
 
-				// Handshakes into a socket nobody reads stay in flight for the run.
-				let hole = UdpSocket::bind("[::1]:0").expect("bind");
-				let into_hole = hole.local_addr().expect("addr");
-				let config = dial_config();
-				let mut background: Vec<Dial<'_>> = (0..handshakes)
-					.map(|_| Box::pin(endpoint.connect(&config, into_hole, "localhost")) as Dial<'_>)
-					.collect();
-				worker
-					.block_on(std::future::poll_fn(|cx| {
-						for dial in &mut background {
-							assert!(dial.as_mut().poll(cx).is_pending(), "a dial into a hole resolved");
-						}
-						Poll::Ready(())
-					}))
-					.expect("worker");
+#[cfg(target_os = "linux")]
+use linux::{Dial, dial_config, settle, v6_only};
 
-				let unroutable: Vec<SocketAddr> = (1..=destinations)
-					.map(|port| SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port))
-					.collect();
+/// Handshakes in flight against unroutable destinations dialed per call.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct Case {
+	handshakes: usize,
+	destinations: u16,
+}
 
-				group.throughput(Throughput::Elements(destinations.into()));
-				group.bench_function(
-					BenchmarkId::new(format!("handshakes-{handshakes}"), destinations),
-					|b| {
-						b.iter(|| {
-							let dials = unroutable
-								.iter()
-								.map(|&addr| Box::pin(endpoint.connect(&config, addr, "localhost")) as Dial<'_>)
-								.collect();
-							let failed = worker.block_on(settle(dials)).expect("worker");
-							assert_eq!(failed, unroutable.len(), "every unroutable dial fails");
-						});
-					},
-				);
-				drop(background);
-			}
-		}
-		group.finish();
+#[cfg(target_os = "linux")]
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "handshakes-{}/{}", self.handshakes, self.destinations)
 	}
 }
 
 #[cfg(target_os = "linux")]
-fn benchmark(c: &mut criterion::Criterion) {
-	linux::benchmark(c);
+fn cases() -> Vec<Case> {
+	[1, 256, 4096]
+		.into_iter()
+		.flat_map(|handshakes| {
+			[1, 8, 64].map(|destinations| Case {
+				handshakes,
+				destinations,
+			})
+		})
+		.collect()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn benchmark(_: &mut criterion::Criterion) {}
+/// An endpoint carrying `handshakes` dials into a hole, and the destinations a call fails.
+///
+/// Fields drop in order: the background dials before their endpoint, the worker last.
+#[cfg(target_os = "linux")]
+struct Dials {
+	_background: Vec<Dial<'static>>,
+	unroutable: Vec<SocketAddr>,
+	config: Rc<quic::client::Config>,
+	endpoint: quic::Endpoint,
+	_hole: UdpSocket,
+	worker: Worker,
+}
 
-criterion_group!(benches, benchmark);
-criterion_main!(benches);
+#[cfg(target_os = "linux")]
+fn dials(case: Case) -> Dials {
+	let mut worker = Worker::new(Config::default()).expect("io_uring worker");
+	let handle = worker.handle();
+	let endpoint = quic::Endpoint::new(
+		quic::endpoint::Config::default(),
+		handle.udp(v6_only(), udp::Config::default()).expect("socket"),
+	)
+	.expect("endpoint");
+
+	// Handshakes into a socket nobody reads stay in flight for the run, until the 30s
+	// handshake timeout ends them.
+	let hole = UdpSocket::bind("[::1]:0").expect("bind");
+	let into_hole = hole.local_addr().expect("addr");
+	let config = Rc::new(dial_config());
+	let mut background: Vec<Dial<'static>> = (0..case.handshakes)
+		.map(|_| {
+			let (endpoint, config) = (endpoint.clone(), config.clone());
+			Box::pin(async move { endpoint.connect(&config, into_hole, "localhost").await }) as Dial<'static>
+		})
+		.collect();
+	worker
+		.block_on(std::future::poll_fn(|cx| {
+			for dial in &mut background {
+				assert!(dial.as_mut().poll(cx).is_pending(), "a dial into a hole resolved");
+			}
+			Poll::Ready(())
+		}))
+		.expect("worker");
+
+	let unroutable = (1..=case.destinations)
+		.map(|port| SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port))
+		.collect();
+	Dials {
+		_background: background,
+		unroutable,
+		config,
+		endpoint,
+		_hole: hole,
+		worker,
+	}
+}
+
+#[cfg(target_os = "linux")]
+#[bench(args = cases(), setup = dials, items = |case: Case| case.destinations)]
+fn unreachable_dials(dials: &mut Dials) {
+	let pending = dials
+		.unroutable
+		.iter()
+		.map(|&addr| Box::pin(dials.endpoint.connect(&dials.config, addr, "localhost")) as Dial<'_>)
+		.collect();
+	let failed = dials.worker.block_on(settle(pending)).expect("worker");
+	assert_eq!(failed, dials.unroutable.len(), "every unroutable dial fails");
+}
+
+fn main() {
+	swole::main();
+}

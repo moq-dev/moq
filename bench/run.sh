@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs every Criterion target plus the local relay workloads: video over QUIC, and
-# chat and fanout over each of BENCH_TRANSPORTS. With a base commit, Criterion
-# compares matching cases directly and the relay summary prints the base/current delta. `--runtime` instead compares one multi-threaded Tokio
+# Runs the local relay workloads: video over QUIC, and chat and fanout over each of
+# BENCH_TRANSPORTS. With a base commit, the relay summary prints the base/current delta.
+# The Cargo bench targets are swole's to time (see bench/README.md).
+# `--runtime` instead compares one multi-threaded Tokio
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
@@ -13,16 +14,6 @@ set -euo pipefail
 # `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
 # for each BENCH_BASE revision and the current tree, independent of host load.
 
-# Reuse the paired relay suite without repeating unrelated Criterion measurements.
-RELAY_ONLY=false
-if [[ ${1:-} == --relay ]]; then
-    RELAY_ONLY=true
-    shift
-    if (($# > 1)) || [[ ${1:-} == --* ]]; then
-        printf 'usage: run.sh --relay [BASE]\n' >&2
-        exit 2
-    fi
-fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
@@ -65,34 +56,6 @@ usable_cpus() {
     env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
 }
 case $MODE in
-    --criterion)
-        # BENCH_BASE pairs each selected target with the same target built at that revision.
-        BASE=
-        if [[ -n ${BENCH_BASE:-} ]]; then
-            BASE=$(git rev-parse --verify "$BENCH_BASE^{commit}")
-        fi
-        CRITERION_CARGO_ARGS=()
-        CRITERION_FILTER_ARGS=()
-        parsing_filters=false
-        previous=
-        for argument in "${@:2}"; do
-            if [[ $argument == -- && $parsing_filters == false ]]; then
-                parsing_filters=true
-            elif [[ $parsing_filters == true ]]; then
-                CRITERION_FILTER_ARGS+=("$argument")
-            else
-                # The base build matches each package against the base's names, so it takes
-                # only a name or a glob, as a separate argument.
-                if [[ -n $BASE ]] && { [[ $argument == --package=* || $argument == -p?* ]] ||
-                    [[ ($previous == -p || $previous == --package) && $argument == *[@:#]* ]]; }; then
-                    echo "--criterion takes a package as -p NAME or a glob, not $argument" >&2
-                    exit 2
-                fi
-                CRITERION_CARGO_ARGS+=("$argument")
-            fi
-            previous=$argument
-        done
-        ;;
     --audio)
         BASE=
         ;;
@@ -210,7 +173,7 @@ case $MODE in
         ;;
     *)
         if (($# > 1)); then
-            printf 'usage: run.sh [BASE], or run.sh --relay [BASE]\n' >&2
+            printf 'usage: run.sh [BASE]\n' >&2
             exit 2
         fi
         BASE=$MODE
@@ -228,11 +191,7 @@ esac
 ROOT=$(git rev-parse --show-toplevel)
 # shellcheck source=bench/lock.sh
 source "$ROOT/bench/lock.sh"
-if [[ $RELAY_ONLY == true ]]; then
-    bench_lock "$0" --relay "$@"
-else
-    bench_lock "$0" "$@"
-fi
+bench_lock "$0" "$@"
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
@@ -314,464 +273,17 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-METADATA_MODE=$MODE
-if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
 # Record external load before this session's builds and measurements add their own.
 if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-start.txt"; fi
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
-
-export CRITERION_HOME=$RUN/criterion
 
 checkout_base() {
     # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
     # inherit this checkout's settings instead of measuring the base in isolation.
     WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
     git worktree add --detach "$WORKTREE" "$1" >/dev/null
-}
-
-# Shorter than Criterion's defaults, but still enough samples for confidence
-# intervals and outlier detection. Comparisons run both revisions on one host.
-CRITERION_ARGS=(
-    --warm-up-time 1
-    --measurement-time 2
-    --sample-size 30
-    --noplot
-)
-
-criterion_targets() {
-    local checkout=$1
-    (
-        cd "$checkout" || exit 1
-        cargo metadata --locked --format-version 1 --no-deps |
-            jq -r --arg root "$checkout/" '
-                .packages[] as $package
-                | $package.targets[]
-                | select(any(.kind[]; . == "bench"))
-                | [($package.manifest_path | ltrimstr($root)), .name, (.["required-features"] // [] | join(","))]
-                | @tsv
-            ' |
-            sort
-    )
-}
-
-# The features a bench target requires, comma-separated; cargo refuses to build it without them.
-target_features() {
-    local checkout=$1
-    local manifest=$2
-    local target=$3
-    criterion_targets "$checkout" |
-        awk -F '\t' -v manifest="$manifest" -v target="$target" '$1 == manifest && $2 == target { print $3; exit }'
-}
-
-target_dir() {
-    local checkout=$1
-    if [[ $checkout == "$ROOT" ]]; then
-        printf '%s\n' "$CURRENT_TARGET"
-    else
-        printf '%s\n' "$BASE_TARGET"
-    fi
-}
-
-run_criterion() {
-    local checkout=$1
-    local manifest target
-    local target_list=$RUN/criterion-targets
-    shift
-    if ! criterion_targets "$checkout" >"$target_list"; then
-        return 1
-    fi
-    if [[ ! -s $target_list ]]; then
-        printf 'no Criterion benchmark targets found\n' >&2
-        return 1
-    fi
-    while IFS=$'\t' read -r manifest target _; do
-        run_criterion_target "$checkout" "$manifest" "$target" "$@"
-    done <"$target_list"
-}
-
-run_criterion_target() {
-    local checkout=$1
-    local manifest=$2
-    local target=$3
-    local features
-    shift 3
-    features=$(target_features "$checkout" "$manifest" "$target") || return 1
-    (
-        cd "$checkout" || exit 1
-        CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- \
-            "${CRITERION_ARGS[@]}" "$@"
-    )
-}
-
-# The nightly trend's settings, which also screen every case of a paired run.
-CRITERION_QUICK=(--quick --warm-up-time 0.05 --measurement-time 0.2 --noplot)
-
-# Build the selected bench targets in a checkout, listing each in OUT as
-# "package-directory/target<TAB>package path<TAB>executable". OUT is written here rather
-# than by redirecting the call: an errexit inside a redirected function would leave the
-# shell's saved stdout open, and cleanup would wait forever on the log copier.
-criterion_build() {
-    local out=$1 checkout=$2
-    shift 2
-    (
-        cd "$checkout" || exit 1
-        CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --no-run --message-format=json-render-diagnostics "$@"
-    ) | jq -r 'select(.reason == "compiler-artifact" and .executable != null and any(.target.kind[]; . == "bench"))
-        | (.manifest_path | rtrimstr("/Cargo.toml")) as $package
-        | [($package | split("/") | last) + "/" + .target.name, $package, .executable] | @tsv' | sort >"$out"
-}
-
-# Build the base with the current cargo arguments, minus the packages and bench targets it
-# does not have yet: naming one would fail the whole build. Lists nothing in OUT when every
-# selected target is new.
-criterion_build_base() {
-    local out=$1 metadata package pattern names name index selected=0 asked=0 count=${#CRITERION_CARGO_ARGS[@]}
-    local args=() present=() packages=()
-    : >"$out"
-    metadata=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps) || return 1
-    mapfile -t present < <(jq -r '.packages[].name' <<<"$metadata") || return 1
-    for ((index = 0; index < count; index++)); do
-        name=${CRITERION_CARGO_ARGS[index]}
-        if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
-            index=$((index + 1))
-            pattern=${CRITERION_CARGO_ARGS[index]}
-            asked=$((asked + 1))
-            # A selector, literal or a pattern, that names no package of the base selects only
-            # new ones, whose targets are new too; cargo rejects a build that names it.
-            name=
-            for package in "${present[@]}"; do
-                # shellcheck disable=SC2053 # Matched as the pattern cargo reads it as.
-                if [[ $package == $pattern ]]; then
-                    packages+=("$package")
-                    name=$package
-                fi
-            done
-            if [[ -n $name ]]; then
-                args+=(--package "$pattern")
-            fi
-        fi
-    done
-    # Without a package left, cargo would build the whole workspace instead.
-    if ((asked)) && ((${#packages[@]} == 0)); then
-        return 0
-    fi
-    # Another package's target of the same name must not count, or cargo rejects the base build.
-    names=$(jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
-        | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"} <<<"$metadata") || return 1
-    for ((index = 0; index < count; index++)); do
-        name=${CRITERION_CARGO_ARGS[index]}
-        if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
-            index=$((index + 1))
-        elif [[ $name == --bench ]] && ((index + 1 < count)); then
-            index=$((index + 1))
-            name=${CRITERION_CARGO_ARGS[index]}
-            selected=$((selected + 1))
-            # A glob selects whatever the base has.
-            if [[ $name == *[*?[]* ]] || grep -qxF -- "$name" <<<"$names"; then
-                args+=(--bench "$name")
-            fi
-        else
-            args+=("$name")
-        fi
-    done
-    if ((selected)) && [[ " ${args[*]} " != *" --bench "* ]]; then
-        return 0
-    fi
-    criterion_build "$out" "$WORKTREE" ${args[@]+"${args[@]}"}
-}
-
-# Seconds a target may print nothing before it counts as hung. Criterion prints at the start
-# and end of every case, so the longest quiet stretch is one case's setup and measurement.
-# Without the bound, a revision that hangs in one case holds the whole Nightly leg to its
-# timeout, which cancels it and loses every other result.
-CRITERION_IDLE_SECONDS=${BENCH_CRITERION_IDLE_SECONDS:-600}
-
-# Run one built target as cargo bench would, from its package directory, with results under HOME/KEY.
-# Kills it and fails when it prints nothing for CRITERION_IDLE_SECONDS.
-criterion_exec() {
-    local list=$1 home=$2 key=$3 package executable pid fd line last=
-    shift 3
-    IFS=$'\t' read -r _ package executable < <(target_line "$list" "$key") || return 1
-    printf '\nCriterion %s: %s\n' "${home#"$RUN"/}" "$key"
-    exec {fd}< <(cd "$package" && CRITERION_HOME=$home/$key exec "$executable" --bench "$@" </dev/null)
-    pid=$!
-    while true; do
-        if IFS= read -r -t "$CRITERION_IDLE_SECONDS" -u "$fd" line; then
-            printf '%s\n' "$line"
-            [[ -z $line ]] || last=$line
-        elif (($? > 128)); then
-            kill -KILL "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            exec {fd}<&-
-            printf 'Criterion %s hung: no output for %ds after: %s\n' "$key" "$CRITERION_IDLE_SECONDS" "$last" >&2
-            return 1
-        else
-            [[ -z $line ]] || printf '%s' "$line"
-            break
-        fi
-    done
-    exec {fd}<&-
-    wait "$pid"
-}
-
-target_line() {
-    MOQ_CASE_TARGET=$2 awk -F '\t' '$1 == ENVIRON["MOQ_CASE_TARGET"] { print; exit }' "$1"
-}
-
-# A comparison that cannot run fails the paired gate rather than the measurement.
-unavailable() {
-    printf '%s\t%s\n' "$1" "$2" >>"$RUN/paired-unavailable.tsv"
-    printf 'Paired comparison unavailable for %s: %s\n' "$1" "$2" >&2
-}
-
-# Copy the executables a list names to BENCH_KEEP_BUILDS, with the commit they were built
-# from, so a later run can measure them as its base without relinking them.
-keep_builds() {
-    local list=$1 dir=$BENCH_KEEP_BUILDS index=0 key package executable
-    rm -rf "$dir"
-    mkdir -p "$dir/bin"
-    (cd "$ROOT" && git rev-parse HEAD) >"$dir/commit"
-    : >"$dir/targets.tsv"
-    while IFS=$'\t' read -r key package executable; do
-        cp "$executable" "$dir/bin/$index"
-        printf '%s\t%s\t%s\n' "$key" "${package#"$ROOT"/}" "bin/$index" >>"$dir/targets.tsv"
-        index=$((index + 1))
-    done <"$list"
-}
-
-# List the base's kept executables in OUT, as criterion_build would, from the base checkout's
-# packages. Fails when BENCH_BASE_BUILDS holds no builds of BASE covering every current target
-# that can load on this host.
-kept_base() {
-    local out=$1 current=$2 dir=${BENCH_BASE_BUILDS:-} key package file loaded
-    [[ -n $dir && -s $dir/targets.tsv && -f $dir/commit && $(<"$dir/commit") == "$BASE" ]] || return 1
-    dir=$(cd "$dir" && pwd -P)
-    while IFS=$'\t' read -r key _; do
-        [[ -n $(target_line "$dir/targets.tsv" "$key") ]] || return 1
-    done <"$current"
-    : >"$out"
-    while IFS=$'\t' read -r key package file; do
-        # An artifact download drops the executable bit.
-        chmod +x "$dir/$file"
-        # The executables link against the store paths of the shell that built them, which a
-        # fresh runner lacks after a toolchain or library bump. The loader alone, never main,
-        # resolves the interpreter and every library: anything missing builds the base instead.
-        if ! loaded=$(LD_TRACE_LOADED_OBJECTS=1 "$dir/$file" 2>&1); then
-            printf 'Kept base executable %s has no loader here\n' "$key" >&2
-            return 1
-        elif [[ $loaded == *"not found"* ]]; then
-            printf 'Kept base executable %s lacks a library here:\n%s\n' "$key" "$loaded" >&2
-            return 1
-        fi
-        printf '%s\t%s\t%s\n' "$key" "$WORKTREE/$package" "$dir/$file" >>"$out"
-    done <"$dir/targets.tsv"
-}
-
-# Measure the selected targets in quick mode. With a base, run each target's base build
-# beside it, alternating which goes first, then confirm the screen's worst slowdowns.
-# A failed current target fails the run; the base only marks its targets unavailable.
-# A base build byte-identical to the current one is not run: the runner's own drift
-# measured identical builds up to 12% apart, so comparing them can only raise false alarms.
-measure_criterion() {
-    local current=$RUN/criterion-current.targets base=$RUN/criterion-base.targets
-    local key side targets index=0 status=0
-    local filters=(${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"})
-    criterion_build "$current" "$ROOT" ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"}
-    if [[ -n ${BENCH_KEEP_BUILDS:-} ]]; then keep_builds "$current"; fi
-    mapfile -t targets < <(cut -f1 "$current")
-    if ((${#targets[@]} == 0)); then
-        printf 'no Criterion bench targets selected\n' >&2
-        return 1
-    fi
-    : >"$base"
-    if [[ -n $BASE ]]; then
-        checkout_base "$BASE"
-        mkdir -p "$RUN/base-context"
-        (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
-        printf 'Criterion paired with base %s\n' "$BASE"
-        if kept_base "$base" "$current"; then
-            printf 'Base executables kept by an earlier run: %s\n' "$BENCH_BASE_BUILDS"
-        else
-            if [[ -n ${BENCH_BASE_BUILDS:-} ]]; then
-                printf 'No kept base executable of every target in %s; building the base\n' "$BENCH_BASE_BUILDS"
-            fi
-            printf 'Base build log: %s/base-build.log\n' "$RUN"
-            local build_status=(0 0)
-            criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
-            if ((build_status[1] != 0)); then
-                printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
-            fi
-            if ((build_status[0] != 0)); then
-                : >"$base"
-                for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
-            fi
-        fi
-    fi
-    : >"$RUN/paired-identical.txt"
-    for key in "${targets[@]}"; do
-        local order=(current) base_line
-        base_line=$(target_line "$base" "$key")
-        if [[ -n $base_line ]] && cmp -s "$(target_line "$current" "$key" | cut -f3)" "$(cut -f3 <<<"$base_line")"; then
-            printf '%s\n' "$key" >>"$RUN/paired-identical.txt"
-        elif [[ -n $base_line ]]; then
-            if ((index++ % 2)); then order=(current base); else order=(base current); fi
-        fi
-        for side in "${order[@]}"; do
-            if [[ $side == current ]]; then
-                criterion_exec "$current" "$RUN/criterion" "$key" "${CRITERION_QUICK[@]}" \
-                    ${filters[@]+"${filters[@]}"} || status=1
-            else
-                criterion_exec "$base" "$RUN/criterion-base" "$key" "${CRITERION_QUICK[@]}" \
-                    ${filters[@]+"${filters[@]}"} || unavailable "$key" "base run failed"
-            fi
-        done
-    done
-    if [[ -n $BASE ]] && ((status == 0)); then
-        confirm_criterion || return 1
-    fi
-    return "$status"
-}
-
-# One quick run per side can land on noise, so each slowdown the screen flags is
-# re-measured in alternating rounds with the comparison settings before it can fail.
-# Round sides stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
-# cases cannot push the Nightly leg past its timeout. A case cut off mid-rounds is left out
-# of confirm.tsv, so it and every later case stay unconfirmed.
-CONFIRM_SECONDS=300
-confirm_criterion() {
-    local key benchmark round side index=0 deadline=$((SECONDS + CONFIRM_SECONDS))
-    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/screen.tsv" || return 1
-    : >"$RUN/confirm.tsv"
-    while IFS=$'\t' read -r key benchmark; do
-        index=$((index + 1))
-        # compare.py ignores every case of an unavailable target, so its rounds would only spend the budget.
-        if [[ -f $RUN/paired-unavailable.tsv ]] &&
-            awk -F'\t' -v target="$key" '$1 == target { found = 1 } END { exit !found }' "$RUN/paired-unavailable.tsv"; then
-            printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
-            continue
-        fi
-        for ((round = 1; round <= ROUNDS; round++)); do
-            local order=(base current)
-            if ((round % 2 == 0)); then order=(current base); fi
-            for side in "${order[@]}"; do
-                if ((SECONDS >= deadline)); then
-                    printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
-                    break 3
-                fi
-                if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
-                    "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
-                    unavailable "$key" "confirmation failed"
-                    printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
-                    continue 3
-                fi
-            done
-        done
-        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
-    done <"$RUN/screen.tsv"
-    python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
-}
-
-criterion_cases() {
-    local checkout=$1
-    local manifest target benchmark discovery
-    local target_list=$RUN/criterion-targets
-    local label=base
-    if [[ $checkout == "$ROOT" ]]; then
-        label=current
-    fi
-
-    if ! criterion_targets "$checkout" >"$target_list"; then
-        return 1
-    fi
-    if [[ ! -s $target_list ]]; then
-        printf 'no Criterion benchmark targets found\n' >&2
-        return 1
-    fi
-    while IFS=$'\t' read -r manifest target _; do
-        discovery=$RUN/criterion-discovery/$label/$manifest/$target
-        # --list prints truncated display titles. A separate short measurement
-        # writes full IDs without polluting the actual comparison samples.
-        (
-            CRITERION_ARGS=(--warm-up-time 0.001 --measurement-time 0.001 --sample-size 10 --nresamples 1 --noplot)
-            CRITERION_HOME=$discovery run_criterion_target "$checkout" "$manifest" "$target" --save-baseline discovery
-        ) >&2 || return 1
-        # A harness = false target without Criterion, such as moq-cli's play_buffer, writes no samples.
-        if [[ -z $(find "$discovery" -name benchmark.json -print -quit 2>/dev/null) ]]; then
-            printf 'Not a Criterion target, skipped: %s %s\n' "$manifest" "$target" >&2
-            continue
-        fi
-        python3 "$ROOT/bench/compare.py" --criterion-cases "$discovery" >"$RUN/criterion-listing" || return 1
-        while IFS= read -r benchmark; do
-            printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
-        done <"$RUN/criterion-listing"
-    done <"$target_list"
-}
-
-compare_criterion() {
-    local base_checkout=$1
-    local current_checkout=$2
-    local base_cases=$RUN/criterion-base.cases
-    local current_cases=$RUN/criterion-current.cases
-    local keys=$RUN/criterion-case.keys
-    local manifest target benchmark base_match current_match home
-    local index=0
-
-    criterion_cases "$base_checkout" >"$base_cases"
-    criterion_cases "$current_checkout" >"$current_cases"
-    sort -u "$base_cases" "$current_cases" >"$keys"
-
-    while IFS=$'\t' read -r manifest target benchmark; do
-        index=$((index + 1))
-        home=$RUN/criterion/$index
-        base_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
-            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$base_cases")
-        current_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
-            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$current_cases")
-
-        if [[ -n $base_match ]]; then
-            printf '\nCriterion baseline: %s\n' "$benchmark"
-            CRITERION_HOME=$home run_criterion_target "$base_checkout" "$manifest" "$target" \
-                --save-baseline base "$benchmark" --exact
-        fi
-        if [[ -n $current_match ]]; then
-            printf '\nCriterion current: %s\n' "$benchmark"
-            if [[ -n $base_match ]]; then
-                # Truncated directory names can receive different uniqueness suffixes
-                # when cases are added or reordered between revisions.
-                python3 "$ROOT/bench/compare.py" --criterion-baseline \
-                    "$RUN/criterion-discovery/current/$manifest/$target" "$benchmark" "$home"
-                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --baseline base "$benchmark" --exact
-            else
-                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --save-baseline current "$benchmark" --exact
-            fi
-        fi
-    done <"$keys"
-}
-
-report_set_changes() {
-    local base_ids=$RUN/criterion-base.ids
-    local current_ids=$RUN/criterion-current.ids
-    # Baseline measurements also write new/, so saved sample directories cannot
-    # distinguish a removed case from a case measured on the current revision.
-    cut -f3- "$RUN/criterion-base.cases" | sort -u >"$base_ids"
-    cut -f3- "$RUN/criterion-current.cases" | sort -u >"$current_ids"
-
-    local new removed
-    new=$(comm -13 "$base_ids" "$current_ids")
-    removed=$(comm -23 "$base_ids" "$current_ids")
-
-    if [[ -n $new ]]; then
-        printf '\nNEW benchmarks (no base sample):\n%s\n' "$new"
-    fi
-    if [[ -n $removed ]]; then
-        printf '\nREMOVED benchmarks (no current sample):\n%s\n' "$removed"
-    fi
 }
 
 # shellcheck source=bench/relay.sh
@@ -1246,7 +758,7 @@ run_fanout() {
         return 1
     fi
     local cpu=${BENCH_FANOUT_CPU:-${ALLOWED_CPUS##*,}}
-    local label sha index scenario dir key binary status
+    local label sha index scenario dir binary status
     local -a labels=() revisions=() checkouts=() keys=() build_dirs=() extra=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
         label=base
@@ -1406,16 +918,7 @@ run_profile() {
 
 cd "$ROOT"
 
-if [[ $MODE == --criterion ]]; then
-    # Each invocation owns fresh results; previous runs cannot become new points.
-    python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
-        "$RUN/criterion-command.json" "${@:2}"
-    if [[ -n ${BENCH_RUNS:-} ]]; then
-        printf '%s\n' "$RUN" >>"$BENCH_RUNS"
-    fi
-    measure_criterion
-    exit
-elif [[ $MODE == --audio ]]; then
+if [[ $MODE == --audio ]]; then
     run_audio_comparison
     exit 0
 elif [[ $MODE == --runtime ]]; then
@@ -1439,12 +942,6 @@ elif [[ -n $BASE ]]; then
         python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
-    if [[ $RELAY_ONLY == false ]]; then
-        printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
-        compare_criterion "$WORKTREE" "$ROOT"
-        report_set_changes
-    fi
-
     printf '\nBuilding relay binaries...\n'
     (
         cd "$WORKTREE"
@@ -1453,10 +950,6 @@ elif [[ -n $BASE ]]; then
     cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
-    if [[ $RELAY_ONLY == false ]]; then
-        printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
-        run_criterion "$ROOT" --discard-baseline
-    fi
     printf '\nBuilding relay binaries...\n'
 fi
 generate_certificate

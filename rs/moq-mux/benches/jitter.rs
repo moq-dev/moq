@@ -1,9 +1,13 @@
 //! The jitter buffer's clock steering swept over track count and how many floors the rate
 //! window holds.
+//!
+//! Run with `cargo bench -p moq-mux --bench jitter`.
+use std::fmt;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::Timestamp;
+use swole::bench;
 
 #[path = "../src/jitter.rs"]
 #[allow(
@@ -11,6 +15,36 @@ use moq_net::Timestamp;
 	reason = "the bench compiles the private module from source and uses only part of it"
 )]
 mod jitter;
+
+/// The paused clock the buffer runs on.
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+	tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.start_paused(true)
+		.build()
+		.unwrap()
+});
+
+/// A track count and a second dimension, named `<tracks>/<n>`.
+#[derive(Clone, Copy)]
+struct Case {
+	tracks: u16,
+	n: u64,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.tracks, self.n)
+	}
+}
+
+/// Every track count against each of `ns`.
+fn cases(ns: [u64; 3]) -> Vec<Case> {
+	[1u16, 4, 16, 64]
+		.into_iter()
+		.flat_map(|tracks| ns.map(|n| Case { tracks, n }))
+		.collect()
+}
 
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
 /// fill the rate window with `floors`, each step measuring every track heard.
@@ -40,190 +74,126 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 	buffer.dropped()
 }
 
-fn steering(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_time()
-		.start_paused(true)
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("jitter_steering");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for tracks in [1u16, 4, 16, 64] {
-		for floors in [10u64, 100, 300] {
-			group.bench_function(BenchmarkId::new(tracks.to_string(), floors), |b| {
-				b.iter(|| assert_eq!(runtime.block_on(steer(tracks, floors)), 0));
-			});
-		}
-	}
-	group.finish();
+#[bench(args = cases([10, 100, 300]))]
+fn jitter_steering(case: Case) {
+	assert_eq!(RUNTIME.block_on(steer(case.tracks, case.n)), 0);
 }
 
 /// One fill drains every track's available backlog before polling output.
-fn acquisition(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_time()
-		.start_paused(true)
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("jitter_acquisition");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for tracks in [1u16, 4, 16, 64] {
-		for frames in [16u64, 64, 256] {
-			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
-				b.iter(|| {
-					runtime.block_on(async {
-						let start = kio::clock::now();
-						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
-						buffer.expect(1..=tracks);
-						for track in 1..=tracks {
-							for frame in 0..frames {
-								buffer
-									.push(
-										track,
-										jitter::Arrival {
-											arrived: start,
-											read: start,
-											decode: Timestamp::from_millis(frame * 20).unwrap().try_into().unwrap(),
-											restart: 0,
-											sync: frame % 15 == 0,
-											leading: false,
-											bytes: 0,
-											item: (),
-										},
-									)
-									.unwrap();
-							}
-						}
-						let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
-					})
-				});
-			});
-		}
-	}
-	group.finish();
-}
-
-/// An independent identity acquires while the old tracks still hold their tail.
-fn handoff(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_time()
-		.start_paused(true)
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("jitter_handoff");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for tracks in [1u16, 4, 16, 64] {
-		for frames in [16u64, 64, 256] {
-			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
-				b.iter(|| {
-					runtime.block_on(async {
-						let start = kio::clock::now();
-						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
-						buffer.expect(1..=tracks);
-						for identity in 0..2 {
-							if identity == 1 {
-								let keys = tracks + 1..=2 * tracks;
-								buffer.expect(keys.clone());
-								buffer.start(keys.clone(), keys);
-							}
-							for track in 1..=tracks {
-								for frame in 0..frames {
-									buffer
-										.push(
-											identity * tracks + track,
-											jitter::Arrival {
-												arrived: start,
-												read: start,
-												decode: Timestamp::from_millis(
-													u64::from(identity) * 10_000 + frame * 20,
-												)
-												.unwrap()
-												.try_into()
-												.unwrap(),
-												restart: 0,
-												sync: frame % 15 == 0,
-												leading: false,
-												bytes: 0,
-												item: (),
-											},
-										)
-										.unwrap();
-								}
-							}
-							let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
-						}
-						tokio::time::advance(Duration::from_secs(1)).await;
-						if let std::task::Poll::Ready(ready) = buffer.poll_pending(&kio::Waiter::noop()) {
-							buffer.commit(ready).unwrap();
-						}
-						assert!(buffer.is_committed());
-					})
-				});
-			});
-		}
-	}
-	group.finish();
-}
-
-/// Admission reads one time window, independent of the backlog still held by each source.
-fn admission(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_time()
-		.start_paused(true)
-		.build()
-		.unwrap();
-	let mut group = c.benchmark_group("jitter_admission");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for tracks in [1u16, 4, 16, 64] {
-		for backlog in [64u64, 256, 1_024] {
-			group.bench_function(BenchmarkId::new(tracks.to_string(), backlog), |b| {
-				b.iter(|| {
-					runtime.block_on(async {
-						let start = kio::clock::now();
-						let delay = Duration::from_millis(500);
-						let mut buffer = jitter::Buffer::new(delay);
-						buffer.expect(1..=tracks);
-						let frame = |decode| jitter::Arrival {
+#[bench(args = cases([16, 64, 256]))]
+fn jitter_acquisition(case: Case) {
+	let Case { tracks, n: frames } = case;
+	RUNTIME.block_on(async {
+		let start = kio::clock::now();
+		let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
+		buffer.expect(1..=tracks);
+		for track in 1..=tracks {
+			for frame in 0..frames {
+				buffer
+					.push(
+						track,
+						jitter::Arrival {
 							arrived: start,
-							read: kio::clock::now(),
-							decode: Timestamp::from_millis(decode).unwrap().try_into().unwrap(),
+							read: start,
+							decode: Timestamp::from_millis(frame * 20).unwrap().try_into().unwrap(),
 							restart: 0,
-							sync: true,
+							sync: frame % 15 == 0,
 							leading: false,
 							bytes: 0,
 							item: (),
-						};
-						for track in 1..=tracks {
-							buffer.push(track, frame(0)).unwrap();
-						}
-						tokio::time::advance(delay).await;
-						while buffer.poll_next(&kio::Waiter::noop()).is_ready() {}
-						let mut read = 0;
-						for track in 1..=tracks {
-							for next in 1..=backlog {
-								if buffer.full(&track, &kio::Waiter::noop()) {
-									break;
-								}
-								buffer.push(track, frame(next * 20)).unwrap();
-								read += 1;
-							}
-						}
-						std::hint::black_box(read)
-					})
-				});
-			});
+						},
+					)
+					.unwrap();
+			}
 		}
-	}
-	group.finish();
+		let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+	})
 }
 
-criterion_group!(benches, steering, acquisition, handoff, admission);
-criterion_main!(benches);
+/// An independent identity acquires while the old tracks still hold their tail.
+#[bench(args = cases([16, 64, 256]))]
+fn jitter_handoff(case: Case) {
+	let Case { tracks, n: frames } = case;
+	RUNTIME.block_on(async {
+		let start = kio::clock::now();
+		let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
+		buffer.expect(1..=tracks);
+		for identity in 0..2 {
+			if identity == 1 {
+				let keys = tracks + 1..=2 * tracks;
+				buffer.expect(keys.clone());
+				buffer.start(keys.clone(), keys);
+			}
+			for track in 1..=tracks {
+				for frame in 0..frames {
+					buffer
+						.push(
+							identity * tracks + track,
+							jitter::Arrival {
+								arrived: start,
+								read: start,
+								decode: Timestamp::from_millis(u64::from(identity) * 10_000 + frame * 20)
+									.unwrap()
+									.try_into()
+									.unwrap(),
+								restart: 0,
+								sync: frame % 15 == 0,
+								leading: false,
+								bytes: 0,
+								item: (),
+							},
+						)
+						.unwrap();
+				}
+			}
+			let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+		}
+		tokio::time::advance(Duration::from_secs(1)).await;
+		if let std::task::Poll::Ready(ready) = buffer.poll_pending(&kio::Waiter::noop()) {
+			buffer.commit(ready).unwrap();
+		}
+		assert!(buffer.is_committed());
+	})
+}
+
+/// Admission reads one time window, independent of the backlog still held by each source.
+#[bench(args = cases([64, 256, 1_024]))]
+fn jitter_admission(case: Case) -> usize {
+	let Case { tracks, n: backlog } = case;
+	RUNTIME.block_on(async {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = jitter::Buffer::new(delay);
+		buffer.expect(1..=tracks);
+		let frame = |decode| jitter::Arrival {
+			arrived: start,
+			read: kio::clock::now(),
+			decode: Timestamp::from_millis(decode).unwrap().try_into().unwrap(),
+			restart: 0,
+			sync: true,
+			leading: false,
+			bytes: 0,
+			item: (),
+		};
+		for track in 1..=tracks {
+			buffer.push(track, frame(0)).unwrap();
+		}
+		tokio::time::advance(delay).await;
+		while buffer.poll_next(&kio::Waiter::noop()).is_ready() {}
+		let mut read = 0;
+		for track in 1..=tracks {
+			for next in 1..=backlog {
+				if buffer.full(&track, &kio::Waiter::noop()) {
+					break;
+				}
+				buffer.push(track, frame(next * 20)).unwrap();
+				read += 1;
+			}
+		}
+		read
+	})
+}
+
+fn main() {
+	swole::main();
+}

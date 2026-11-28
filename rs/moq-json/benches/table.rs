@@ -4,17 +4,17 @@
 //! the changed rows.
 //!
 //! Deltas, explicitly forced snapshots with deltas enabled, and delta-free snapshots are separate
-//! cases. Before each timed delta, restate the baseline outside the timer to reset the group caps
-//! while retaining the warm memo. Every iteration measures one tick and one update of its kind.
+//! cases. Before each delta, restate the baseline outside the measurement to reset the group caps
+//! while retaining the warm memo. Every call measures one tick and one update of its kind.
 //!
 //! Run with `cargo bench -p moq-json --bench table`.
-use std::cell::RefCell;
-use std::hint::black_box;
+use std::fmt;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use bytes::Bytes;
 use moq_json::snapshot::{Config, Encoder};
 use moq_net::stats::Traffic;
 use serde::Serialize;
+use swole::bench;
 
 /// One tick of the table: rows sorted by path, serialized as a JSON object like moq-stats' `Frame`.
 struct Table {
@@ -66,61 +66,95 @@ impl Table {
 	}
 }
 
-/// A stats track's encoder modes and whether to force a snapshot before each timed update.
-fn configs() -> [(&'static str, Config, bool); 3] {
-	[
-		("deltas", Config::default(), false),
-		("forced-snapshots", Config::default(), true),
-		("snapshots", Config::default().with_deltas(false), false),
-	]
+/// A stats track's encoder mode, and whether to force a snapshot before each timed update.
+#[derive(Clone, Copy)]
+enum Mode {
+	Deltas,
+	ForcedSnapshots,
+	Snapshots,
 }
 
-fn table(c: &mut Criterion) {
-	for (name, config, force_snapshot) in configs() {
-		let mut group = c.benchmark_group(format!("table/{name}"));
-		group.sample_size(10);
-		group.warm_up_time(std::time::Duration::from_secs(1));
-		group.measurement_time(std::time::Duration::from_secs(2));
-		for rows in [100, 1_000, 10_000, 20_000] {
-			for changed in [1, 10, 100] {
-				let table = Table::new(rows, changed);
-				let mut encoder = Encoder::<Table>::new(config.clone());
-				encoder.update(&table).unwrap().expect("an initial snapshot").commit();
-				if config.deltas && !force_snapshot {
-					// Populate the memo so every timed delta has the steady-state fast path.
-					assert!(encoder.update(&table).unwrap().is_none());
-				}
-				let state = RefCell::new((table, encoder));
-				group.throughput(Throughput::Elements(rows as u64));
-				group.bench_function(BenchmarkId::new(format!("{changed}%"), rows), |b| {
-					b.iter_batched(
-						|| {
-							let mut state = state.borrow_mut();
-							let (_, encoder) = &mut *state;
-							if force_snapshot {
-								encoder.reset();
-							} else if config.deltas {
-								// Restating resets both caps without discarding the parsed baseline or memo.
-								encoder.snapshot().unwrap().expect("a seeded baseline").commit();
-							}
-						},
-						|()| {
-							let mut state = state.borrow_mut();
-							let (table, encoder) = &mut *state;
-							table.tick();
-							let frame = encoder.update(table).unwrap().expect("a changed tick");
-							assert_eq!(frame.keyframe, force_snapshot || !config.deltas);
-							black_box(&frame.payload);
-							frame.commit();
-						},
-						BatchSize::PerIteration,
-					);
-				});
-			}
+impl Mode {
+	fn config(self) -> Config {
+		match self {
+			Self::Deltas | Self::ForcedSnapshots => Config::default(),
+			Self::Snapshots => Config::default().with_deltas(false),
 		}
-		group.finish();
 	}
 }
 
-criterion_group!(benches, table);
-criterion_main!(benches);
+/// One table in one mode, named `<mode>/<changed>%/<rows>`.
+#[derive(Clone, Copy)]
+struct Case {
+	mode: Mode,
+	rows: usize,
+	changed: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let mode = match self.mode {
+			Mode::Deltas => "deltas",
+			Mode::ForcedSnapshots => "forced-snapshots",
+			Mode::Snapshots => "snapshots",
+		};
+		write!(f, "{mode}/{}%/{}", self.changed, self.rows)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	let mut cases = Vec::new();
+	for mode in [Mode::Deltas, Mode::ForcedSnapshots, Mode::Snapshots] {
+		for rows in [100, 1_000, 10_000, 20_000] {
+			for changed in [1, 10, 100] {
+				cases.push(Case { mode, rows, changed });
+			}
+		}
+	}
+	cases
+}
+
+/// A table and an encoder seeded with it.
+struct State {
+	mode: Mode,
+	table: Table,
+	encoder: Encoder<Table>,
+}
+
+fn state(case: Case) -> State {
+	let table = Table::new(case.rows, case.changed);
+	let mut encoder = Encoder::<Table>::new(case.mode.config());
+	encoder.update(&table).unwrap().expect("an initial snapshot").commit();
+	if let Mode::Deltas = case.mode {
+		// Populate the memo so every timed delta has the steady-state fast path.
+		assert!(encoder.update(&table).unwrap().is_none());
+	}
+	State {
+		mode: case.mode,
+		table,
+		encoder,
+	}
+}
+
+fn prepare(state: &mut State) {
+	match state.mode {
+		Mode::ForcedSnapshots => state.encoder.reset(),
+		// Restating resets both caps without discarding the parsed baseline or memo.
+		Mode::Deltas => state.encoder.snapshot().unwrap().expect("a seeded baseline").commit(),
+		Mode::Snapshots => {}
+	}
+}
+
+#[bench(args = cases(), setup = state, before = prepare, items = |case: Case| case.rows)]
+fn update(state: &mut State) -> Bytes {
+	state.table.tick();
+	let frame = state.encoder.update(&state.table).unwrap().expect("a changed tick");
+	assert_eq!(frame.keyframe, !matches!(state.mode, Mode::Deltas));
+	let payload = frame.payload.clone();
+	frame.commit();
+	payload
+}
+
+fn main() {
+	swole::main();
+}

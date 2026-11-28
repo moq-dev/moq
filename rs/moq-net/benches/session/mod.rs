@@ -10,12 +10,7 @@
 //! as a slope. Unwatched broadcasts stay announced and silent: their cost is the
 //! route table they occupy, not a publisher writing into its own cache.
 //!
-//! `SESSION_ALLOCS=1` prints the group consumer size, allocations, allocated bytes and,
-//! where Linux perf counters are readable, user instructions per viewer-group or delivered
-//! datagram instead of timing.
-//! `SESSION_CPU=1` measures thread CPU time on Unix instead of elapsed time, excluding
-//! preemption while retaining all protocol work on this current-thread runtime. CPU-timed
-//! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
+//! Each round's cache tick runs before it, outside the measurement.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
 //! A one-relay FETCH fixture asserts one upstream FETCH per group during setup.
@@ -50,7 +45,7 @@
 //! `session_dash_*` models the moq.pro dash aggregator: one session following
 //! every node's per-project stats broadcast, each announced by a peer relay, at
 //! one small frame per track per tick. Throughput counts tracks, so a flat
-//! elements/s across a sweep means the cost per track stays constant.
+//! items/s across a sweep means the cost per track stays constant.
 //!
 //! `session_idle` times one second of idle viewer sessions, swept over sessions.
 //! Sweep held consumers per session too: only held consumers request PROBE or transport estimates.
@@ -61,15 +56,16 @@
 //! here is per-request bookkeeping growing with the sessions or the requests.
 //!
 //! `session_fanout_threads` serves one broadcast's one-frame groups through one relay to 64
-//! viewers on multi-threaded runtimes, timed in process CPU. Each group wakes every
-//! subscription's serve task at once, so a read path that makes them take one shared lock
-//! many times pays for it in lock waits and wakes across workers: the `workers=16` rows
-//! climb above the `workers=1` ones.
+//! viewers on multi-threaded runtimes; compare their process CPU, which `swole bench`
+//! reports. Each group wakes every subscription's serve task at once, so a read path that
+//! makes them take one shared lock many times pays for it in lock waits and wakes across
+//! workers: the `workers=16` rows climb above the `workers=1` ones.
 //!
 //! Everything else runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
 //!
-//! Run with `cargo bench -p moq-net --features fuzz --bench session`.
+//! Run with `cargo bench -p moq-net --features fuzz --bench session`, which runs each case
+//! once, or time them with swole.
 
 #![allow(
 	dead_code,
@@ -91,12 +87,10 @@ pub(crate) mod mock;
 #[path = "../../tests/integration/support/schedule.rs"]
 mod schedule;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput};
 pub(crate) use harness::MockConnectOptions;
 use harness::{MockPair, connect_mock};
 use mock::{MockSession, MockStats};
@@ -248,8 +242,7 @@ impl Shape {
 	}
 
 	fn id(&self, version: &str) -> String {
-		// The credit sweep names only what it varies: the full form passes Criterion's
-		// 100-character title limit, which truncates and renumbers it.
+		// The credit sweep names only what it varies, keeping its names short.
 		if let Some(credit) = self.credit {
 			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
 		}
@@ -316,132 +309,6 @@ impl Shape {
 	}
 }
 
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Cumulative requested allocation and reallocation sizes, not live or copied bytes.
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-
-fn count_allocation(bytes: usize) {
-	if COUNTING.load(Ordering::Relaxed) {
-		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		ALLOCATED.fetch_add(bytes, Ordering::Relaxed);
-	}
-}
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-// Counting only. Every call forwards to the system allocator unchanged.
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		count_allocation(layout.size());
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		count_allocation(layout.size());
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		count_allocation(new_size);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
-
-/// User-mode instructions this thread retires, from a Linux perf counter, for the
-/// `SESSION_ALLOCS` report. Every task runs on the bench's current-thread runtime, so the
-/// thread's count is all of the protocol work. Pin the process (`taskset -c`) to repeat it.
-struct Instructions {
-	#[cfg(all(target_os = "linux", target_endian = "little"))]
-	fd: std::os::fd::OwnedFd,
-}
-
-impl Instructions {
-	/// `None` without perf access, as under `perf_event_paranoid` 3 or in most containers.
-	#[cfg(all(target_os = "linux", target_endian = "little"))]
-	fn open() -> Option<Self> {
-		use std::os::fd::FromRawFd;
-
-		/// `perf_event_attr` as of its first published size, which every kernel accepts.
-		#[repr(C)]
-		struct Attr {
-			kind: u32,
-			size: u32,
-			config: u64,
-			sample_period: u64,
-			sample_type: u64,
-			read_format: u64,
-			/// The flag bitfield, least significant bit first on a little-endian target.
-			flags: u64,
-			wakeup_events: u32,
-			bp_type: u32,
-			config1: u64,
-		}
-		const PERF_TYPE_HARDWARE: u32 = 0;
-		const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
-		const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1;
-		const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
-		const EXCLUDE_KERNEL: u64 = 1 << 5;
-		const EXCLUDE_HV: u64 = 1 << 6;
-		let attr = Attr {
-			kind: PERF_TYPE_HARDWARE,
-			size: size_of::<Attr>() as u32,
-			config: PERF_COUNT_HW_INSTRUCTIONS,
-			sample_period: 0,
-			sample_type: 0,
-			read_format: PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING,
-			flags: EXCLUDE_KERNEL | EXCLUDE_HV,
-			wakeup_events: 0,
-			bp_type: 0,
-			config1: 0,
-		};
-		// SAFETY: `attr` is a valid `perf_event_attr` of the size it declares; this thread, any CPU.
-		let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, 0) };
-		// SAFETY: a nonnegative result is a new descriptor this process owns.
-		(fd >= 0).then(|| Self {
-			fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) },
-		})
-	}
-
-	#[cfg(not(all(target_os = "linux", target_endian = "little")))]
-	fn open() -> Option<Self> {
-		None
-	}
-
-	#[cfg(all(target_os = "linux", target_endian = "little"))]
-	fn read(&self) -> u64 {
-		use std::os::fd::AsRawFd;
-
-		// PERF_FORMAT_GROUP is unset: value, time_enabled, time_running.
-		let mut values = [0u64; 3];
-		// SAFETY: `values` holds the complete read format and outlives the call.
-		let read = unsafe { libc::read(self.fd.as_raw_fd(), values.as_mut_ptr().cast(), size_of_val(&values)) };
-		assert_eq!(
-			read,
-			size_of_val(&values) as isize,
-			"perf read: {}",
-			std::io::Error::last_os_error()
-		);
-		assert_eq!(
-			values[1], values[2],
-			"perf instructions were multiplexed and undercounted"
-		);
-		values[0]
-	}
-
-	#[cfg(not(all(target_os = "linux", target_endian = "little")))]
-	fn read(&self) -> u64 {
-		unreachable!("never opened")
-	}
-}
-
 /// A current-thread runtime for one benchmark cell: the sessions a cell leaves behind stop
 /// with its runtime instead of running inside the next cell's setup and samples.
 fn runtime() -> tokio::runtime::Runtime {
@@ -455,14 +322,10 @@ fn runtime() -> tokio::runtime::Runtime {
 /// session serves them: its debounce, 32 hops of 25 ms (`route::relay::debounce`).
 const ROUTE_LINGER: Duration = Duration::from_millis(32 * 25);
 
-/// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
-/// sessions and origins spawned ends with it: a task that outlives its handles leaks for
-/// as long as a relay runs. The origins may first wait out [`ROUTE_LINGER`], on a paused
-/// clock so the wait costs nothing.
-fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
-	let Some(built) = built else {
-		return;
-	};
+/// Drop what a cell built on `rt` and assert every task its sessions and origins spawned
+/// ends with it: a task that outlives its handles leaks for as long as a relay runs. The
+/// origins may first wait out [`ROUTE_LINGER`], on a paused clock so the wait costs nothing.
+fn retire<T>(rt: &tokio::runtime::Runtime, built: T) {
 	drop(built);
 	rt.block_on(async {
 		tokio::time::pause();
@@ -483,69 +346,13 @@ fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
 	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
 }
 
-/// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
+/// A multi-threaded runtime with `workers` threads, for the scenarios compared in process CPU.
 fn threaded(workers: usize) -> tokio::runtime::Runtime {
 	tokio::runtime::Builder::new_multi_thread()
 		.worker_threads(workers)
 		.enable_time()
 		.build()
 		.unwrap()
-}
-
-/// What a round is timed in.
-#[derive(Clone, Copy)]
-enum Clock {
-	Wall,
-	/// This thread's CPU time, excluding scheduling delays from other processes.
-	Thread,
-	/// Every thread's CPU time, for a multi-threaded runtime: lock waits and wakes across
-	/// its workers count too.
-	Process,
-}
-
-/// One round's clock.
-enum MeasurementClock {
-	Wall(Instant),
-	#[cfg(unix)]
-	Cpu(libc::clockid_t, Duration),
-}
-
-impl MeasurementClock {
-	fn start(clock: Clock) -> Self {
-		#[cfg(unix)]
-		let id = match clock {
-			Clock::Wall => return Self::Wall(Instant::now()),
-			Clock::Thread => libc::CLOCK_THREAD_CPUTIME_ID,
-			Clock::Process => libc::CLOCK_PROCESS_CPUTIME_ID,
-		};
-		#[cfg(unix)]
-		return Self::Cpu(id, Self::cpu(id));
-		#[cfg(not(unix))]
-		match clock {
-			Clock::Wall => Self::Wall(Instant::now()),
-			_ => panic!("CPU-timed rounds require Unix CPU clocks"),
-		}
-	}
-
-	fn elapsed(self) -> Duration {
-		match self {
-			Self::Wall(start) => start.elapsed(),
-			#[cfg(unix)]
-			Self::Cpu(id, start) => Self::cpu(id).checked_sub(start).expect("CPU clock moved backwards"),
-		}
-	}
-
-	#[cfg(unix)]
-	fn cpu(id: libc::clockid_t) -> Duration {
-		let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-		// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
-		let result = unsafe { libc::clock_gettime(id, &mut time) };
-		assert_eq!(result, 0, "CPU clock: {}", std::io::Error::last_os_error());
-		Duration::new(
-			u64::try_from(time.tv_sec).unwrap(),
-			u32::try_from(time.tv_nsec).unwrap(),
-		)
-	}
 }
 
 /// Append the next group on a [`timed`] track, one millisecond past its largest start or at
@@ -608,7 +415,6 @@ fn path(broadcast: usize) -> String {
 /// The relay implementation a shared scenario drives.
 pub(crate) trait Backend {
 	type Relay: Clone;
-	const PREFIX: &'static str;
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool);
 	fn origin(relay: &Self::Relay) -> &origin::Producer;
@@ -620,7 +426,6 @@ pub(crate) struct Model;
 
 impl Backend for Model {
 	type Relay = origin::Producer;
-	const PREFIX: &'static str = "";
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
@@ -914,7 +719,7 @@ impl Viewer {
 }
 
 /// A cluster with its viewers attached.
-struct Room<B: Backend> {
+pub(crate) struct Room<B: Backend> {
 	cluster: Cluster<B>,
 	viewers: Vec<Viewer>,
 	/// Broadcasts at least one viewer watches; only these write each round.
@@ -934,10 +739,8 @@ struct Room<B: Backend> {
 	/// The sequence each broadcast's next datagram takes.
 	next: Vec<u64>,
 	cache_now: moq_net::time::Instant,
-	clock: Clock,
-	/// Counts the timed rounds' instructions into `retired` for the allocation report.
-	instructions: Option<Instructions>,
-	retired: u64,
+	/// Under `SESSION_EXPIRY_ONLY`, when rounds began and when the next cache sample is due.
+	report: Option<(Instant, Duration)>,
 }
 
 impl<B: Backend> Room<B> {
@@ -1009,12 +812,7 @@ impl<B: Backend> Room<B> {
 				.collect(),
 			next: vec![0; shape.total()],
 			cache_now: moq_net::time::Instant::now(),
-			clock: match std::env::var_os("SESSION_CPU") {
-				Some(_) => Clock::Thread,
-				None => Clock::Wall,
-			},
-			instructions: None,
-			retired: 0,
+			report: None,
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -1032,8 +830,7 @@ impl<B: Backend> Room<B> {
 			room.tick();
 			room.round().await;
 		}
-		// Exercise turnover as well as the empty cache, including Criterion's one-pass
-		// nightly smoke mode.
+		// Exercise turnover as well as the empty cache, even in a run that makes one call.
 		for _ in 0..4 {
 			room.tick();
 			room.round().await;
@@ -1049,7 +846,11 @@ impl<B: Backend> Room<B> {
 				"the constrained fixture must exercise flow control"
 			);
 		}
-		if shape.fetch && shape.relays == 1 {
+		if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			room.report = Some((Instant::now(), Duration::from_secs(10)));
+		}
+		// Lite-07 has no FETCH stream: its fetches travel as bounded SUBSCRIBE ranges.
+		if shape.fetch && shape.relays == 1 && room.cluster.version.as_str() != "moq-lite-07-wip" {
 			// Both FETCH types encode in one byte and every request names one group.
 			let kind = if room.cluster.version.is_lite() { 3 } else { 0x16 };
 			let upstream_fetches = room
@@ -1087,6 +888,17 @@ impl<B: Backend> Room<B> {
 			});
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
+		}
+		if let Some((began, next)) = self.report
+			&& began.elapsed() >= next
+		{
+			eprintln!(
+				"cache sample: elapsed={:.1}s groups={} charged={}",
+				began.elapsed().as_secs_f64(),
+				self.groups,
+				self.pools().map(cache::Pool::used).sum::<u64>()
+			);
+			self.report = Some((began, next + Duration::from_secs(10)));
 		}
 	}
 
@@ -1281,80 +1093,125 @@ impl<B: Backend> Room<B> {
 		}
 		assert_eq!(bytes, self.shape.expected());
 	}
+}
 
-	/// Time `iters` rounds, excluding each round's cache tick: its cost grows with the
-	/// number of pools, not with the delivery being measured.
-	async fn measure(&mut self, iters: u64) -> Duration {
-		let mut elapsed = Duration::ZERO;
-		let counting = std::env::var_os("SESSION_ALLOCS").is_some();
-		let report = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
-		let began = Instant::now();
-		let mut next_report = Duration::from_secs(10);
-		for _ in 0..iters {
-			self.tick();
-			let start = MeasurementClock::start(self.clock);
-			let before = self.instructions.as_ref().map(Instructions::read);
-			if counting {
-				COUNTING.store(true, Ordering::Relaxed);
-			}
-			self.round().await;
-			if counting {
-				COUNTING.store(false, Ordering::Relaxed);
-			}
-			if let (Some(counter), Some(before)) = (&self.instructions, before) {
-				self.retired += counter.read() - before;
-			}
-			elapsed += start.elapsed();
-			if report && began.elapsed() >= next_report {
-				eprintln!(
-					"cache sample: elapsed={:.1}s groups={} charged={}",
-					began.elapsed().as_secs_f64(),
-					self.groups,
-					self.pools().map(cache::Pool::used).sum::<u64>()
-				);
-				next_report += Duration::from_secs(10);
-			}
+/// A fixture beside the runtime it runs on. Dropping it [`retire`]s the fixture when built
+/// with [`Running::retired`], and otherwise drops it before the runtime.
+pub(crate) struct Running<T> {
+	fixture: Option<T>,
+	runtime: tokio::runtime::Runtime,
+	retire: bool,
+}
+
+impl<T> Running<T> {
+	/// Build a fixture on `runtime` whose tasks must all end with it.
+	fn retired(runtime: tokio::runtime::Runtime, build: impl Future<Output = T>) -> Self {
+		Self {
+			fixture: Some(runtime.block_on(build)),
+			runtime,
+			retire: true,
 		}
-		elapsed
+	}
+
+	/// Build a fixture on `runtime`, dropped without waiting for its tasks.
+	fn dropped(runtime: tokio::runtime::Runtime, build: impl Future<Output = T>) -> Self {
+		Self {
+			fixture: Some(runtime.block_on(build)),
+			runtime,
+			retire: false,
+		}
+	}
+
+	fn parts(&mut self) -> (&tokio::runtime::Runtime, &mut T) {
+		(
+			&self.runtime,
+			self.fixture.as_mut().expect("dropped only with its runtime"),
+		)
 	}
 }
 
-fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let shapes: Vec<_> = shapes.into_iter().collect();
-	let cpu = if std::env::var_os("SESSION_CPU").is_some() {
-		"_cpu"
-	} else {
-		""
-	};
-	let mut group = c.benchmark_group(format!("{}session_delivery_{name}{cpu}", B::PREFIX));
-	for version in VERSIONS {
-		for shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
-			let rt = runtime();
-			// Built on first call: Criterion only calls a routine its filter
-			// selects, and calls it again for every sample.
-			let mut room = None;
-			group.throughput(if shape.datagrams {
-				Throughput::Elements(shape.objects() as u64)
-			} else {
-				Throughput::Bytes(shape.expected() as u64)
-			});
-			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
-				let room = room.get_or_insert_with(|| rt.block_on(Room::<B>::new(version, *shape)));
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
-			retire(&rt, room);
+impl<T> Drop for Running<T> {
+	fn drop(&mut self) {
+		let fixture = self.fixture.take();
+		match self.retire {
+			true => retire(&self.runtime, fixture),
+			false => {
+				let _context = self.runtime.enter();
+				drop(fixture);
+			}
 		}
 	}
-	group.finish();
+}
+
+/// One delivery case: a version and a [`Shape`] it runs on, named by [`Shape::id`].
+#[derive(Clone, Copy)]
+pub(crate) struct Case {
+	version: &'static str,
+	shape: Shape,
+}
+
+impl Case {
+	/// Payload bytes every viewer reads in one round.
+	pub(crate) fn bytes(self) -> usize {
+		self.shape.expected()
+	}
+
+	/// Datagrams every viewer reads in one datagram round.
+	pub(crate) fn objects(self) -> usize {
+		self.shape.objects()
+	}
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(&self.shape.id(self.version))
+	}
+}
+
+/// Every [`VERSIONS`] entry crossed with `shapes`, keeping only the versions a shape runs on
+/// when `filter` is set.
+fn cases(shapes: impl IntoIterator<Item = Shape>, filter: bool) -> Vec<Case> {
+	let shapes: Vec<_> = shapes.into_iter().collect();
+	VERSIONS
+		.into_iter()
+		.flat_map(|version| {
+			shapes
+				.iter()
+				.filter(move |shape| !filter || shape.runs_on(version))
+				.map(move |&shape| Case { version, shape })
+		})
+		.collect()
+}
+
+/// A delivery room on its own current-thread runtime.
+pub(crate) type Delivering<B> = Running<Room<B>>;
+
+pub(crate) fn delivering<B: Backend>(case: Case) -> Delivering<B> {
+	Running::retired(runtime(), Room::<B>::new(case.version, case.shape))
+}
+
+/// Advance the cache clock before a round, outside the measurement: its cost grows with the
+/// number of pools, not with the delivery being measured.
+pub(crate) fn tick<B: Backend>(room: &mut Delivering<B>) {
+	let (runtime, room) = room.parts();
+	let _context = runtime.enter();
+	room.tick();
+}
+
+pub(crate) fn round<B: Backend>(room: &mut Delivering<B>) {
+	let (runtime, room) = room.parts();
+	runtime.block_on(room.round());
+}
+
+/// Delivery cases over `shapes`, each on the versions it runs on.
+fn delivery(shapes: impl IntoIterator<Item = Shape>) -> Vec<Case> {
+	cases(shapes, true)
 }
 
 /// Metadata subscriptions against the same rooms read with the payload, swept over relay depth,
 /// viewers, and tracks each viewer watches, at a frame large enough that payload dominates: the
 /// headers' cost must not grow with the payload they stand for.
-pub(crate) fn meta<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
+pub(crate) fn delivery_meta() -> Vec<Case> {
 	let mut shapes = Vec::new();
 	for relays in [1, 3] {
 		for viewers in [1, 64] {
@@ -1372,15 +1229,12 @@ pub(crate) fn meta<B: Backend>(c: &mut Criterion) {
 			}
 		}
 	}
-	delivery::<B>(c, "meta", shapes);
+	delivery(shapes)
 }
 
 /// Small-group cost over independent publisher/viewer axes, with both egress request paths.
-pub(crate) fn group_cost<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
-	let shapes = [1, 16].into_iter().flat_map(|publishers| {
+pub(crate) fn delivery_group_cost() -> Vec<Case> {
+	delivery([1, 16].into_iter().flat_map(|publishers| {
 		[1, 16, 64].into_iter().flat_map(move |viewers| {
 			[64, 1024 * 1024].into_iter().flat_map(move |window| {
 				[false, true].map(move |fetch| Shape {
@@ -1392,14 +1246,14 @@ pub(crate) fn group_cost<B: Backend>(c: &mut Criterion) {
 				})
 			})
 		})
-	});
-	delivery::<B>(c, "group_cost", shapes);
+	}))
 }
 
-/// Datagram delivery over independent publisher and viewer axes at a small payload and one
-/// datagram per track per round, then payload size and cadence at 16 publishers and 16
-/// viewers. 64 per round fills what a datagram track holds for an unread consumer exactly.
-fn datagram_shapes() -> impl Iterator<Item = Shape> {
+/// Complete datagram delivery: per-object cost over independent publisher and viewer axes at
+/// a small payload and one datagram per track per round, then payload size and cadence at 16
+/// publishers and 16 viewers. 64 per round fills what a datagram track holds for an unread
+/// consumer exactly.
+pub(crate) fn delivery_datagram() -> Vec<Case> {
 	let base = Shape {
 		datagrams: true,
 		..Shape::BASE
@@ -1413,23 +1267,12 @@ fn datagram_shapes() -> impl Iterator<Item = Shape> {
 	});
 	let payload = [1024].map(|frame| Shape { frame, ..base });
 	let cadence = [16, 64].map(|burst| Shape { burst, ..base });
-	cost.chain(payload).chain(cadence)
-}
-
-/// Complete datagram delivery: per-object cost across publishers, viewers, payload and cadence.
-pub(crate) fn datagram<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
-	delivery::<B>(c, "datagram", datagram_shapes());
+	delivery(cost.chain(payload).chain(cadence))
 }
 
 /// Cached FETCH write cost across independent publishers, viewers, and group lengths.
-pub(crate) fn fetch_frames<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
-	let shapes = [1, 4].into_iter().flat_map(|publishers| {
+pub(crate) fn delivery_fetch_frames() -> Vec<Case> {
+	delivery([1, 4].into_iter().flat_map(|publishers| {
 		[1, 16].into_iter().flat_map(move |viewers| {
 			[4, 256].map(move |group_frames| Shape {
 				publishers,
@@ -1439,16 +1282,12 @@ pub(crate) fn fetch_frames<B: Backend>(c: &mut Criterion) {
 				..Shape::BASE
 			})
 		})
-	});
-	delivery::<B>(c, "fetch_frames", shapes);
+	}))
 }
 
 /// Independent one-group FETCHes across publishers, viewers, and burst lengths.
-pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
-	let shapes = [1, 16].into_iter().flat_map(|publishers| {
+pub(crate) fn delivery_fetch_range() -> Vec<Case> {
+	delivery([1, 16].into_iter().flat_map(|publishers| {
 		[1, 16].into_iter().flat_map(move |viewers| {
 			[2, 16].map(move |burst| Shape {
 				publishers,
@@ -1458,219 +1297,429 @@ pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
 				..Shape::BASE
 			})
 		})
+	}))
+}
+
+pub(crate) fn delivery_compression() -> Vec<Case> {
+	delivery([1, 16].into_iter().flat_map(|publishers| {
+		[1, 16].map(move |viewers| Shape {
+			publishers,
+			viewers,
+			compress: true,
+			frame: 1024,
+			..Shape::BASE
+		})
+	}))
+}
+
+pub(crate) fn delivery_publishers() -> Vec<Case> {
+	delivery([1, 16, 256].map(|publishers| Shape {
+		publishers,
+		..Shape::BASE
+	}))
+}
+
+pub(crate) fn delivery_viewers() -> Vec<Case> {
+	delivery([1, 16, 256].map(|viewers| Shape { viewers, ..Shape::BASE }))
+}
+
+/// Live media: every hop serves each group frame by frame.
+pub(crate) fn delivery_paced() -> Vec<Case> {
+	delivery([1, 16, 256].map(|viewers| Shape {
+		viewers,
+		paced: true,
+		..Shape::BASE
+	}))
+}
+
+pub(crate) fn delivery_scale() -> Vec<Case> {
+	delivery([16, 64, 256].map(|n| Shape {
+		publishers: n,
+		viewers: n,
+		..Shape::BASE
+	}))
+}
+
+/// One publisher session announcing many broadcasts, most of them unwatched.
+pub(crate) fn delivery_broadcasts() -> Vec<Case> {
+	delivery([16, 256, 4096].map(|broadcasts| Shape {
+		publishers: 1,
+		broadcasts,
+		..Shape::BASE
+	}))
+}
+
+/// Each viewer watches many broadcasts over one session, like a conference.
+pub(crate) fn delivery_watch() -> Vec<Case> {
+	delivery([1, 16, 256].map(|watch| Shape {
+		publishers: 1,
+		broadcasts: 256,
+		watch,
+		..Shape::BASE
+	}))
+}
+
+/// One viewer session holding many silent broadcasts open beside the one it watches: each is
+/// an announce request on the session, against a fixed route table. A wake for the watched
+/// group should not cost a poll per held request.
+pub(crate) fn delivery_prefixes() -> Vec<Case> {
+	delivery([1, 64, 1024].map(|follow| Shape {
+		publishers: 1,
+		broadcasts: 1025,
+		viewers: 1,
+		follow,
+		..Shape::BASE
+	}))
+}
+
+pub(crate) fn delivery_frame() -> Vec<Case> {
+	delivery([64, 1024, 16 * 1024].map(|frame| Shape { frame, ..Shape::BASE }))
+}
+
+/// One session serving a backlog on each of its subscriptions: the serve loop that a
+/// `kio::coop::Budget` bounds per poll.
+pub(crate) fn delivery_burst() -> Vec<Case> {
+	delivery(
+		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8), (16, 16), (16, 64)].map(|(watch, burst)| Shape {
+			publishers: 1,
+			broadcasts: 16,
+			viewers: 1,
+			watch,
+			burst,
+			..Shape::BASE
+		}),
+	)
+}
+
+/// The same backlog behind one uni stream grant at a time.
+pub(crate) fn delivery_credit() -> Vec<Case> {
+	delivery([1, 16, 64].into_iter().flat_map(|watch| {
+		[1, 16, 64].map(move |burst| Shape {
+			publishers: 1,
+			broadcasts: 64,
+			viewers: 1,
+			watch,
+			burst,
+			credit: Some(1),
+			..Shape::BASE
+		})
+	}))
+}
+
+pub(crate) fn delivery_relays() -> Vec<Case> {
+	delivery([1, 2, 4, 8].map(|relays| Shape {
+		relays,
+		viewers: 64,
+		..Shape::BASE
+	}))
+}
+
+/// Largest-group fills, swept over cached backlog (`groups_<span>`) and concurrent requests.
+#[derive(Clone, Copy)]
+pub(crate) struct Span {
+	span: u64,
+	pub(crate) requests: usize,
+}
+
+impl fmt::Display for Span {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "groups_{}/{}", self.span, self.requests)
+	}
+}
+
+pub(crate) fn spans() -> Vec<Span> {
+	[2u64, 16]
+		.into_iter()
+		.flat_map(|span| [1usize, 16].map(|requests| Span { span, requests }))
+		.collect()
+}
+
+/// Draft-22 viewers each holding a subscription a cached burst ahead of the publisher.
+pub(crate) struct RangeUpdates<B: Backend> {
+	cluster: Cluster<B>,
+	viewers: Vec<Viewer>,
+	payload: Bytes,
+	span: u64,
+	/// The first group of the burst [`narrow`] writes next.
+	next: u64,
+	/// One past the burst [`narrow`] wrote, which [`range_update`] widens over.
+	future: u64,
+}
+
+pub(crate) fn range_updates<B: Backend>(case: Span) -> Running<RangeUpdates<B>> {
+	Running::dropped(runtime(), async move {
+		let mut cluster = Cluster::<B>::new(
+			"moq-transport-22",
+			Shape {
+				publishers: 1,
+				..Shape::BASE
+			},
+			false,
+		)
+		.await;
+		let mut viewers = Vec::new();
+		for _ in 0..case.requests {
+			let mut viewer = cluster.join(0, false).await;
+			viewer
+				.watch(
+					&path(0),
+					&[TRACK],
+					Some(track::Subscription::default().with_ranges([from(case.span)])),
+				)
+				.await;
+			viewers.push(viewer);
+		}
+		RangeUpdates {
+			cluster,
+			viewers,
+			payload: Bytes::from_static(&[0; 64]),
+			span: case.span,
+			next: 0,
+			future: 0,
+		}
+	})
+}
+
+/// Narrow every subscription past a fresh burst and write the burst, outside the measurement.
+pub(crate) fn narrow<B: Backend>(fixture: &mut Running<RangeUpdates<B>>) {
+	let (runtime, fixture) = fixture.parts();
+	runtime.block_on(async {
+		let future = fixture.next + fixture.span;
+		for viewer in &mut fixture.viewers {
+			viewer.subscribers[0]
+				.update(track::Subscription::default().with_ranges([from(future)]))
+				.unwrap();
+		}
+		let track = &mut fixture.cluster.tracks[0];
+		let viewers = &mut fixture.viewers;
+		kio::wait(|waiter| {
+			for viewer in viewers.iter_mut() {
+				assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
+			}
+			loop {
+				if track
+					.subscription()
+					.is_some_and(|subscription| subscription.ranges == [from(future)])
+				{
+					return std::task::Poll::Ready(());
+				}
+				if track.poll_subscription_changed(waiter).is_pending() {
+					return std::task::Poll::Pending;
+				}
+			}
+		})
+		.await;
+		for key in fixture.next..future {
+			assert_eq!(write_group(track, &fixture.payload, 1), key);
+		}
+		fixture.future = future;
 	});
-	delivery::<B>(c, "fetch_range", shapes);
 }
 
-/// Largest-group fills, over cached backlog and concurrent requests.
-pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		return;
-	}
-	let mut group = c.benchmark_group(format!("{}session_range_updates", B::PREFIX));
-	group.sample_size(10);
-	for span in [2u64, 16] {
-		for requests in [1usize, 16] {
-			let rt = runtime();
-			group.throughput(Throughput::Elements(requests as u64));
-			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
-				let (mut cluster, mut viewers) = rt.block_on(async {
-					let mut cluster = Cluster::<B>::new(
-						"moq-transport-22",
-						Shape {
-							publishers: 1,
-							..Shape::BASE
-						},
-						false,
-					)
-					.await;
-					let mut viewers = Vec::new();
-					for _ in 0..requests {
-						let mut viewer = cluster.join(0, false).await;
-						viewer
-							.watch(
-								&path(0),
-								&[TRACK],
-								Some(track::Subscription::default().with_ranges([from(span)])),
-							)
-							.await;
-						viewers.push(viewer);
-					}
-					(cluster, viewers)
-				});
-				let payload = Bytes::from_static(&[0; 64]);
-				let mut next = 0;
-				b.iter_custom(|iterations| {
-					rt.block_on(async {
-						let mut elapsed = Duration::ZERO;
-						for _ in 0..iterations {
-							let future = next + span;
-							for viewer in &mut viewers {
-								viewer.subscribers[0]
-									.update(track::Subscription::default().with_ranges([from(future)]))
-									.unwrap();
-							}
-							kio::wait(|waiter| {
-								for viewer in &mut viewers {
-									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
-								}
-								loop {
-									if cluster.tracks[0]
-										.subscription()
-										.is_some_and(|subscription| subscription.ranges == [from(future)])
-									{
-										return std::task::Poll::Ready(());
-									}
-									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {
-										return std::task::Poll::Pending;
-									}
-								}
-							})
-							.await;
-							for key in next..future {
-								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), key);
-							}
-							let started = Instant::now();
-							for viewer in &mut viewers {
-								viewer.subscribers[0]
-									.update(track::Subscription::default().with_ranges([from(future - 1)]))
-									.unwrap();
-							}
-							for _ in 0..1 {
-								for viewer in &mut viewers {
-									assert_eq!(read_group(&mut viewer.subscribers[0]).await, payload.len());
-								}
-							}
-							elapsed += started.elapsed();
-							next = future;
-						}
-						elapsed
-					})
-				});
-			});
+/// Widen every subscription over the burst's largest group and read it.
+pub(crate) fn range_update<B: Backend>(fixture: &mut Running<RangeUpdates<B>>) {
+	let (runtime, fixture) = fixture.parts();
+	runtime.block_on(async {
+		let future = fixture.future;
+		for viewer in &mut fixture.viewers {
+			viewer.subscribers[0]
+				.update(track::Subscription::default().with_ranges([from(future - 1)]))
+				.unwrap();
 		}
-	}
-	group.finish();
-}
-
-fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let shapes: Vec<_> = shapes.into_iter().collect();
-	let mut group = c.benchmark_group(format!("{}session_join_{name}", B::PREFIX));
-	for version in VERSIONS {
-		for shape in &shapes {
-			let rt = runtime();
-			let mut cluster = None;
-			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
-				let cluster = cluster.get_or_insert_with(|| {
-					rt.block_on(async {
-						let cluster = Cluster::<B>::new(version, *shape, false).await;
-						let payload = Bytes::from(vec![0; shape.frame]);
-						for track in &cluster.tracks {
-							for key in 0..shape.history as u64 {
-								let start = Timestamp::from_millis(key).unwrap();
-								let mut group = track.append_group(start).unwrap();
-								for _ in 0..shape.group_frames {
-									group.write_frame(start, payload.clone()).unwrap();
-								}
-								group.finish().unwrap();
-							}
-						}
-						cluster
-					})
-				});
-				// Broadcasts published to relay 0, joined from the last relay: every
-				// sample is local on one relay and crosses one peer hop on a mesh.
-				let hosted: Vec<_> = (0..shape.total())
-					.filter(|broadcast| (broadcast / shape.broadcasts) % shape.relays == 0)
-					.collect();
-				let relay = shape.relays - 1;
-				b.iter_custom(|iters| {
-					rt.block_on(async {
-						let mut elapsed = Duration::ZERO;
-						for iter in 0..iters as usize {
-							let broadcast = hosted[iter % hosted.len()];
-							let start = Instant::now();
-							let mut viewer = cluster.join(relay, false).await;
-							viewer.watch(&path(broadcast), &[TRACK], None).await;
-							let bytes = read_group(&mut viewer.subscribers[0]).await;
-							elapsed += start.elapsed();
-							assert_eq!(bytes, shape.group_frames * shape.frame);
-							// Teardown is a leaving viewer's cost, not a joining one's.
-							drop(viewer);
-							tokio::task::yield_now().await;
-						}
-						elapsed
-					})
-				})
-			});
-			retire(&rt, cluster);
+		for viewer in &mut fixture.viewers {
+			assert_eq!(read_group(&mut viewer.subscribers[0]).await, fixture.payload.len());
 		}
-	}
-	group.finish();
+		fixture.next = future;
+	});
 }
 
-/// `(broadcasts, viewers)` shapes for [`announce`].
-const ANNOUNCE: [(usize, usize); 4] = [(16, 1), (4096, 1), (16, 64), (4096, 64)];
+/// A cluster with history cached on every track, which new viewers join.
+pub(crate) struct Joining<B: Backend> {
+	cluster: Cluster<B>,
+	shape: Shape,
+	/// Broadcasts published to relay 0, joined from the last relay: every join is local on
+	/// one relay and crosses one peer hop on a mesh.
+	hosted: Vec<usize>,
+	joins: usize,
+	/// The viewer the last join connected, left after the measurement.
+	joined: Option<Viewer>,
+}
+
+pub(crate) fn joining<B: Backend>(case: Case) -> Running<Joining<B>> {
+	let Case { version, shape } = case;
+	Running::retired(runtime(), async move {
+		let cluster = Cluster::<B>::new(version, shape, false).await;
+		let payload = Bytes::from(vec![0; shape.frame]);
+		for track in &cluster.tracks {
+			for key in 0..shape.history as u64 {
+				let start = Timestamp::from_millis(key).unwrap();
+				let mut group = track.append_group(start).unwrap();
+				for _ in 0..shape.group_frames {
+					group.write_frame(start, payload.clone()).unwrap();
+				}
+				group.finish().unwrap();
+			}
+		}
+		Joining {
+			cluster,
+			shape,
+			hosted: (0..shape.total())
+				.filter(|broadcast| (broadcast / shape.broadcasts) % shape.relays == 0)
+				.collect(),
+			joins: 0,
+			joined: None,
+		}
+	})
+}
+
+/// Connect a viewer, resolve a hosted broadcast, and read its latest group.
+pub(crate) fn join<B: Backend>(fixture: &mut Running<Joining<B>>) {
+	let (runtime, fixture) = fixture.parts();
+	let broadcast = fixture.hosted[fixture.joins % fixture.hosted.len()];
+	fixture.joins += 1;
+	let shape = fixture.shape;
+	let viewer = runtime.block_on(async {
+		let mut viewer = fixture.cluster.join(shape.relays - 1, false).await;
+		viewer.watch(&path(broadcast), &[TRACK], None).await;
+		let bytes = read_group(&mut viewer.subscribers[0]).await;
+		assert_eq!(bytes, shape.group_frames * shape.frame);
+		viewer
+	});
+	fixture.joined = Some(viewer);
+}
+
+/// Teardown is a leaving viewer's cost, not a joining one's.
+pub(crate) fn leave<B: Backend>(fixture: &mut Running<Joining<B>>) {
+	let (runtime, fixture) = fixture.parts();
+	let joined = fixture.joined.take();
+	runtime.block_on(async {
+		drop(joined);
+		tokio::task::yield_now().await;
+	});
+}
+
+pub(crate) fn join_broadcasts() -> Vec<Case> {
+	cases(
+		[1, 2, 8].into_iter().flat_map(|relays| {
+			[1, 64, 1024].map(move |broadcasts| Shape {
+				publishers: 1,
+				broadcasts,
+				relays,
+				..Shape::BASE
+			})
+		}),
+		false,
+	)
+}
+
+/// A live join skips a cached prefix. Sweep publishers against that prefix so resolving one
+/// start cannot hide a scan of unrelated publishers or group IDs.
+pub(crate) fn join_stale() -> Vec<Case> {
+	cases(
+		[1, 8, 32].into_iter().flat_map(|publishers| {
+			[1, 64, 1024].map(move |history| Shape {
+				publishers,
+				history,
+				..Shape::BASE
+			})
+		}),
+		false,
+	)
+}
+
+pub(crate) fn join_relays() -> Vec<Case> {
+	cases([1, 2, 8].map(|relays| Shape { relays, ..Shape::BASE }), false)
+}
 
 /// One more broadcast announced and withdrawn beside `broadcasts` a publisher already
-/// announces through one relay, timed until each of `viewers` sessions saw both.
-fn announce<B: Backend>(c: &mut Criterion) {
-	let mut group = c.benchmark_group(format!("{}session_announce", B::PREFIX));
-	for version in VERSIONS {
-		for (broadcasts, viewers) in ANNOUNCE {
-			let rt = runtime();
-			let mut room = None;
-			let id = format!("{version}/broadcasts={broadcasts}/viewers={viewers}");
-			group.bench_function(BenchmarkId::from_parameter(id), |b| {
-				let (cluster, routes, next) = room.get_or_insert_with(|| {
-					rt.block_on(async {
-						let shape = Shape {
-							publishers: 1,
-							broadcasts,
-							viewers,
-							..Shape::BASE
-						};
-						let mut cluster = Cluster::<B>::new(version, shape, false).await;
-						let mut routes = Vec::new();
-						for _ in 0..viewers {
-							let viewer = cluster.join(0, false).await;
-							let mut announced = viewer.origin.consume().routes();
-							for _ in 0..broadcasts {
-								let event = announced.next().await.expect("announced");
-								assert_eq!(event.kind, origin::RouteKind::Start);
-							}
-							routes.push((viewer, announced));
-						}
-						(cluster, routes, broadcasts)
-					})
-				});
-				b.iter_custom(|iters| {
-					rt.block_on(async {
-						let start = Instant::now();
-						for _ in 0..iters {
-							// A fresh path each time: a broadcast's identity never comes back.
-							let route = cluster.origins[0]
-								.route(path(*next), origin::RouteOptions::default())
-								.unwrap();
-							*next += 1;
-							for (_, announced) in routes.iter_mut() {
-								let event = announced.next().await.expect("announced");
-								assert_eq!(event.kind, origin::RouteKind::Start);
-							}
-							drop(route);
-							for (_, announced) in routes.iter_mut() {
-								let event = announced.next().await.expect("withdrawn");
-								assert_eq!(event.kind, origin::RouteKind::End);
-							}
-						}
-						start.elapsed()
-					})
-				})
-			});
-			retire(&rt, room);
-		}
+/// announces through one relay, until each of `viewers` sessions saw both.
+#[derive(Clone, Copy)]
+pub(crate) struct Announce {
+	version: &'static str,
+	broadcasts: usize,
+	viewers: usize,
+}
+
+impl fmt::Display for Announce {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(
+			f,
+			"{}/broadcasts={}/viewers={}",
+			self.version, self.broadcasts, self.viewers
+		)
 	}
-	group.finish();
+}
+
+pub(crate) fn announces() -> Vec<Announce> {
+	VERSIONS
+		.into_iter()
+		.flat_map(|version| {
+			[(16, 1), (4096, 1), (16, 64), (4096, 64)].map(|(broadcasts, viewers)| Announce {
+				version,
+				broadcasts,
+				viewers,
+			})
+		})
+		.collect()
+}
+
+/// A publisher's broadcasts and every viewer session's announcements of them.
+pub(crate) struct Announcing<B: Backend> {
+	cluster: Cluster<B>,
+	routes: Vec<(Viewer, origin::Routes)>,
+	/// The next fresh path: a broadcast's identity never comes back.
+	next: usize,
+}
+
+pub(crate) fn announcing<B: Backend>(case: Announce) -> Running<Announcing<B>> {
+	let Announce {
+		version,
+		broadcasts,
+		viewers,
+	} = case;
+	Running::retired(runtime(), async move {
+		let shape = Shape {
+			publishers: 1,
+			broadcasts,
+			viewers,
+			..Shape::BASE
+		};
+		let mut cluster = Cluster::<B>::new(version, shape, false).await;
+		let mut routes = Vec::new();
+		for _ in 0..viewers {
+			let viewer = cluster.join(0, false).await;
+			let mut announced = viewer.origin.consume().routes();
+			for _ in 0..broadcasts {
+				let event = announced.next().await.expect("announced");
+				assert_eq!(event.kind, origin::RouteKind::Start);
+			}
+			routes.push((viewer, announced));
+		}
+		Announcing {
+			cluster,
+			routes,
+			next: broadcasts,
+		}
+	})
+}
+
+pub(crate) fn announce<B: Backend>(fixture: &mut Running<Announcing<B>>) {
+	let (runtime, fixture) = fixture.parts();
+	runtime.block_on(async {
+		let route = fixture.cluster.origins[0]
+			.route(path(fixture.next), origin::RouteOptions::default())
+			.unwrap();
+		fixture.next += 1;
+		for (_, announced) in fixture.routes.iter_mut() {
+			let event = announced.next().await.expect("announced");
+			assert_eq!(event.kind, origin::RouteKind::Start);
+		}
+		drop(route);
+		for (_, announced) in fixture.routes.iter_mut() {
+			let event = announced.next().await.expect("withdrawn");
+			assert_eq!(event.kind, origin::RouteKind::End);
+		}
+	});
 }
 
 /// The moq.pro dash aggregator's load: one session on relay 0 following every
@@ -1704,7 +1753,7 @@ impl Dash {
 }
 
 /// A mesh of stats-publishing nodes with the dash session attached.
-struct DashRoom<B: Backend> {
+pub(crate) struct DashRoom<B: Backend> {
 	_cluster: Cluster<B>,
 	tracks: Vec<track::Producer>,
 	_broadcasts: Vec<origin::Route>,
@@ -1773,82 +1822,82 @@ impl<B: Backend> DashRoom<B> {
 		}
 		assert_eq!(bytes, self.tracks.len() * DASH_FRAME);
 	}
+}
 
-	async fn measure(&mut self, iters: u64) -> Duration {
-		let start = Instant::now();
-		for _ in 0..iters {
-			self.round().await;
-		}
-		start.elapsed()
+/// One dash case: a version and a [`Dash`].
+#[derive(Clone, Copy)]
+pub(crate) struct Dashing {
+	version: &'static str,
+	shape: Dash,
+}
+
+impl Dashing {
+	/// Tracks the dash reads each tick.
+	pub(crate) fn total(self) -> usize {
+		self.shape.total()
 	}
 }
 
-fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Dash>) {
+impl fmt::Display for Dashing {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(&self.shape.id(self.version))
+	}
+}
+
+fn dashes(shapes: impl IntoIterator<Item = Dash>) -> Vec<Dashing> {
 	let shapes: Vec<_> = shapes.into_iter().collect();
-	let mut group = c.benchmark_group(format!("{}session_dash_{name}", B::PREFIX));
-	group.sample_size(10);
-	for version in DASH_VERSIONS {
-		for shape in &shapes {
-			let rt = runtime();
-			let mut room = None;
-			group.throughput(Throughput::Elements(shape.total() as u64));
-			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
-				let room = room.get_or_insert_with(|| rt.block_on(DashRoom::<B>::new(version, *shape)));
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
-			retire(&rt, room);
-		}
-	}
-	group.finish();
+	DASH_VERSIONS
+		.into_iter()
+		.flat_map(|version| shapes.iter().map(move |&shape| Dashing { version, shape }))
+		.collect()
 }
 
-/// Print Consumer size, allocations, allocated bytes and, given perf access, user
-/// instructions per viewer-group or delivered datagram, to compare across revisions.
-fn allocations<B: Backend>() {
-	const ROUNDS: usize = 256;
+/// Production (2026-09): ~34 nodes x >=5 projects x ~24 tracks.
+const PROD: Dash = Dash {
+	relays: 35,
+	projects: 5,
+	tracks: 24,
+};
 
-	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
+/// More broadcasts at a fixed track count per broadcast.
+pub(crate) fn dash_projects() -> Vec<Dashing> {
+	dashes([1, 4, 16].map(|projects| Dash {
+		relays: 5,
+		projects,
+		..PROD
+	}))
+}
 
-	let fanout = Shape {
-		publishers: 1,
-		viewers: 256,
-		..Shape::BASE
-	};
-	let groups = [Shape::BASE, fanout]
-		.into_iter()
-		.flat_map(|shape| [false, true].map(|paced| Shape { paced, ..shape }));
-	let shapes: Vec<_> = groups.chain(datagram_shapes()).collect();
-	for version in VERSIONS {
-		for &shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
-			let rt = runtime();
-			let mut room = rt.block_on(Room::<B>::new(version, shape));
-			room.instructions = Instructions::open();
-			ALLOCATIONS.store(0, Ordering::Relaxed);
-			ALLOCATED.store(0, Ordering::Relaxed);
-			rt.block_on(room.measure(ROUNDS as u64));
+/// More tracks per broadcast at a fixed broadcast count.
+pub(crate) fn dash_tracks() -> Vec<Dashing> {
+	dashes([6, 24, 96].map(|tracks| Dash {
+		relays: 5,
+		projects: 4,
+		tracks,
+	}))
+}
 
-			let (units, unit) = if shape.datagrams {
-				(ROUNDS * shape.objects(), "delivered datagram")
-			} else {
-				(
-					ROUNDS * shape.viewers * shape.watch * shape.frames() / shape.group_frames,
-					"viewer-group",
-				)
-			};
-			let per = |count: usize| count as f64 / units as f64;
-			let allocations = per(ALLOCATIONS.load(Ordering::Relaxed));
-			let bytes = per(ALLOCATED.load(Ordering::Relaxed));
-			let instructions = room
-				.instructions
-				.as_ref()
-				.map(|_| format!(", {:.0} instructions", room.retired as f64 / units as f64))
-				.unwrap_or_default();
-			println!(
-				"{}: {allocations:.2} allocations, {bytes:.0} allocated bytes{instructions} per {unit}",
-				shape.id(version)
-			);
-		}
-	}
+/// More peer sessions carrying the same 32 broadcasts, then the production shape.
+pub(crate) fn dash_relays() -> Vec<Dashing> {
+	dashes(
+		[2, 3, 5, 9, 17, 33]
+			.map(|relays| Dash {
+				relays,
+				projects: 32 / (relays - 1),
+				..PROD
+			})
+			.into_iter()
+			.chain([PROD]),
+	)
+}
+
+pub(crate) fn dashing<B: Backend>(case: Dashing) -> Running<DashRoom<B>> {
+	Running::retired(runtime(), DashRoom::new(case.version, case.shape))
+}
+
+pub(crate) fn dash<B: Backend>(room: &mut Running<DashRoom<B>>) {
+	let (runtime, room) = room.parts();
+	runtime.block_on(room.round());
 }
 
 /// Versions for the churn sweep: the newest moq-transport draft and lite.
@@ -1867,8 +1916,50 @@ impl Churn {
 	}
 }
 
+/// One churn case: a version and a [`Churn`].
+#[derive(Clone, Copy)]
+pub(crate) struct Churning {
+	version: &'static str,
+	shape: Churn,
+}
+
+impl fmt::Display for Churning {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(&self.shape.id(self.version))
+	}
+}
+
+fn churns(shapes: impl IntoIterator<Item = Churn>) -> Vec<Churning> {
+	let shapes: Vec<_> = shapes.into_iter().collect();
+	CHURN_VERSIONS
+		.into_iter()
+		.flat_map(|version| shapes.iter().map(move |&shape| Churning { version, shape }))
+		.collect()
+}
+
+pub(crate) fn churn_sessions() -> Vec<Churning> {
+	churns([1, 16, 128].map(|sessions| Churn { sessions, held: 16 }))
+}
+
+pub(crate) fn churn_held() -> Vec<Churning> {
+	churns(
+		[1, 4, 16]
+			.into_iter()
+			.flat_map(|sessions| [1, 64, 1024].map(move |held| Churn { sessions, held })),
+	)
+}
+
+pub(crate) fn churning<B: Backend>(case: Churning) -> Running<ChurnRoom<B>> {
+	Running::retired(runtime(), ChurnRoom::new(case.version, case.shape))
+}
+
+pub(crate) fn churn<B: Backend>(room: &mut Running<ChurnRoom<B>>) {
+	let (runtime, room) = room.parts();
+	runtime.block_on(room.churn());
+}
+
 /// One relay publishing a broadcast with `held` shared tracks plus one churn track per session.
-struct ChurnRoom<B: Backend> {
+pub(crate) struct ChurnRoom<B: Backend> {
 	_cluster: Cluster<B>,
 	_held: Vec<track::Producer>,
 	_viewers: Vec<Viewer>,
@@ -1876,6 +1967,8 @@ struct ChurnRoom<B: Backend> {
 	broadcasts: Vec<broadcast::Consumer>,
 	/// The relay's side of each session's churn track, to wait out its close.
 	churn: Vec<track::Producer>,
+	/// The session the next churn goes to.
+	next: usize,
 }
 
 impl<B: Backend> ChurnRoom<B> {
@@ -1933,56 +2026,35 @@ impl<B: Backend> ChurnRoom<B> {
 			_viewers: viewers,
 			broadcasts,
 			churn,
+			next: 0,
 		}
 	}
 
-	/// Open and close one subscription per iteration, round-robin over the sessions.
-	async fn measure(&mut self, iters: u64) -> Duration {
-		let start = Instant::now();
-		for iter in 0..iters as usize {
-			let session = iter % self.broadcasts.len();
-			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
-			let mut subscriber = track.subscribe(None).await.unwrap();
-			// Keep the reader polled while its per-route subscription resolves. No
-			// groups are produced here, so this starts demand without consuming data.
-			kio::wait(|waiter| {
-				assert!(subscriber.poll_recv_group(waiter).is_pending());
-				while std::task::ready!(self.churn[session].poll_subscription_changed(waiter))
-					.unwrap()
-					.is_none()
-				{}
-				std::task::Poll::Ready(())
-			})
-			.await;
-			drop(subscriber);
-			drop(track);
-			let mut demand = self.churn[session].demand();
-			while demand.wanted_changed().await.unwrap() {}
-		}
-		start.elapsed()
+	/// Open and close one subscription, round-robin over the sessions.
+	async fn churn(&mut self) {
+		let session = self.next;
+		self.next = (self.next + 1) % self.broadcasts.len();
+		let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		// Keep the reader polled while its per-route subscription resolves. No
+		// groups are produced here, so this starts demand without consuming data.
+		kio::wait(|waiter| {
+			assert!(subscriber.poll_recv_group(waiter).is_pending());
+			while std::task::ready!(self.churn[session].poll_subscription_changed(waiter))
+				.unwrap()
+				.is_none()
+			{}
+			std::task::Poll::Ready(())
+		})
+		.await;
+		drop(subscriber);
+		drop(track);
+		let mut demand = self.churn[session].demand();
+		while demand.wanted_changed().await.unwrap() {}
 	}
 }
 
-fn churn<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>) {
-	let shapes: Vec<_> = shapes.into_iter().collect();
-	let mut group = c.benchmark_group(format!("{}session_churn_{name}", B::PREFIX));
-	group.throughput(Throughput::Elements(1));
-	for version in CHURN_VERSIONS {
-		for shape in &shapes {
-			let rt = runtime();
-			let mut room = None;
-			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
-				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::<B>::new(version, *shape)));
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
-			retire(&rt, room);
-		}
-	}
-	group.finish();
-}
-
-/// Idle sessions to one relay, holding PROBE or their local transport estimate.
-struct IdleRoom {
+pub(crate) struct IdleRoom {
 	_viewers: Vec<(MockPair, Vec<moq_net::bandwidth::Consumer>)>,
 }
 
@@ -2014,340 +2086,273 @@ impl IdleRoom {
 		}
 		Self { _viewers: viewers }
 	}
+}
 
-	/// Let a second of protocol time pass per iteration.
-	async fn measure(&self, iters: u64) -> Duration {
-		let start = Instant::now();
-		for _ in 0..iters {
-			kio::clock::sleep(Duration::from_secs(1)).await;
-		}
-		start.elapsed()
+/// Idle viewer sessions, each holding `consumers` PROBE or transport-estimate consumers.
+#[derive(Clone, Copy)]
+pub(crate) struct Idle {
+	version: &'static str,
+	pub(crate) sessions: usize,
+	consumers: usize,
+}
+
+impl fmt::Display for Idle {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(
+			f,
+			"{}/sessions={}/consumers={}",
+			self.version, self.sessions, self.consumers
+		)
 	}
 }
 
-/// One relay serving one broadcast's one-frame groups to 64 viewers, as the relay load
-/// harness's `fanout` workload does, on multi-threaded runtimes timed in process CPU; see
-/// the module docs.
-pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
-	// Process CPU is read through a Unix clock.
-	if !cfg!(unix) || std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some()
-	{
-		return;
-	}
-	let shape = Shape {
+pub(crate) fn idles() -> Vec<Idle> {
+	["moq-lite-06", "moq-transport-22"]
+		.into_iter()
+		.flat_map(|version| {
+			[1, 64, 1024].into_iter().flat_map(move |sessions| {
+				[0, 1, 8].map(move |consumers| Idle {
+					version,
+					sessions,
+					consumers,
+				})
+			})
+		})
+		.collect()
+}
+
+/// Its own runtime, so its paused clock and sessions end with the case.
+pub(crate) fn idling(case: Idle) -> Running<IdleRoom> {
+	Running::dropped(runtime(), async move {
+		tokio::time::pause();
+		IdleRoom::new(case.version, case.sessions, case.consumers).await
+	})
+}
+
+/// Let a second of protocol time pass. Paused time skips the wait itself.
+pub(crate) fn idle(room: &mut Running<IdleRoom>) {
+	// The timer arms when built, which needs the runtime, so build it inside.
+	room.runtime
+		.block_on(async { kio::clock::sleep(Duration::from_secs(1)).await });
+}
+
+/// One relay serving one broadcast's one-frame groups to viewers on a multi-threaded runtime
+/// of `workers` threads, as the relay load harness's `fanout` workload does; see the module
+/// docs.
+#[derive(Clone, Copy)]
+pub(crate) struct Fanout {
+	version: &'static str,
+	workers: usize,
+}
+
+impl Fanout {
+	const SHAPE: Shape = Shape {
 		publishers: 1,
 		viewers: 64,
 		frame: 400,
 		group_frames: 1,
 		..Shape::BASE
 	};
-	let mut group = c.benchmark_group(format!("{}session_fanout_threads", B::PREFIX));
-	// Groups delivered per round: one to each viewer.
-	group.throughput(Throughput::Elements(shape.viewers as u64));
-	for workers in [1, 16] {
-		for version in ["moq-lite-06", "moq-lite-07-wip"] {
-			let rt = threaded(workers);
-			let mut room = None;
-			group.bench_function(format!("{version}/workers={workers}"), |b| {
-				let room = room.get_or_insert_with(|| {
-					let mut room = rt.block_on(Room::<B>::new(version, shape));
-					room.clock = Clock::Process;
-					room
-				});
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
-		}
+
+	/// Groups delivered per round: one to each viewer.
+	pub(crate) fn groups(self) -> usize {
+		Self::SHAPE.viewers
 	}
-	group.finish();
 }
 
-pub(crate) fn idle(c: &mut Criterion) {
-	let mut group = c.benchmark_group("session_idle");
-	for version in ["moq-lite-06", "moq-transport-22"] {
-		for sessions in [1, 64, 1024] {
-			for consumers in [0, 1, 8] {
-				group.throughput(Throughput::Elements(sessions as u64));
-				// Its own runtime, so its paused clock and sessions end with the shape.
-				let rt = runtime();
-				let mut room = None;
-				group.bench_function(format!("{version}/sessions={sessions}/consumers={consumers}"), |b| {
-					let room = room.get_or_insert_with(|| {
-						rt.block_on(async {
-							tokio::time::pause();
-							IdleRoom::new(version, sessions, consumers).await
-						})
-					});
-					b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-				});
-			}
-		}
+impl fmt::Display for Fanout {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/workers={}", self.version, self.workers)
 	}
-	group.finish();
 }
 
-/// Withdraw a batch across a full mesh, sweeping both peers and prefixes.
-/// Paused protocol time lets the quiet-point timeout drain pending work without
-/// including a real wait in the measured duration.
-pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
-	let mut group = c.benchmark_group(format!("{}session_withdrawal", B::PREFIX));
-	group.sample_size(10);
-	for relays in [4, 8, 16] {
-		for broadcasts in [1, 32] {
-			group.bench_function(format!("{relays}r_{broadcasts}b"), |b| {
-				b.iter_custom(|iters| {
-					let mut elapsed = Duration::ZERO;
-					for _ in 0..iters {
-						let rt = runtime();
-						elapsed += rt.block_on(async {
-							tokio::time::pause();
-							let shape = Shape {
-								relays,
-								publishers: 0,
-								..Shape::BASE
-							};
-							let cluster = Cluster::<B>::new("moq-lite-06", shape, false).await;
-							let mut announced = B::origin(cluster.relays.last().unwrap()).consume().routes();
-							let live: Vec<_> = (0..broadcasts)
-								.map(|i| {
-									B::origin(&cluster.relays[i % (relays - 1)])
-										.route(path(i), origin::RouteOptions::default())
-										.unwrap()
-								})
-								.collect();
-							while kio::clock::timeout(Duration::from_secs(1), announced.next())
-								.await
-								.is_ok()
-							{}
-							let start = Instant::now();
-							drop(live);
-							let mut retracted = 0;
-							while let Ok(Some(event)) =
-								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
-							{
-								assert!(
-									matches!(
-										event,
-										moq_net::origin::RouteEvent {
-											kind: moq_net::origin::RouteKind::End,
-											..
-										}
-									),
-									"{event:?}"
-								);
-								retracted += 1;
-							}
-							let elapsed = start.elapsed();
-							assert_eq!(retracted, broadcasts);
-							elapsed
-						});
-					}
-					elapsed
-				});
-			});
-		}
-	}
-	group.finish();
+pub(crate) fn fanouts() -> Vec<Fanout> {
+	[1, 16]
+		.into_iter()
+		.flat_map(|workers| ["moq-lite-06", "moq-lite-07-wip"].map(|version| Fanout { version, workers }))
+		.collect()
 }
 
-pub(crate) fn session<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() {
-		allocations::<B>();
-		return;
+pub(crate) fn fanning<B: Backend>(case: Fanout) -> Delivering<B> {
+	Running::dropped(threaded(case.workers), Room::<B>::new(case.version, Fanout::SHAPE))
+}
+
+/// Withdraw a batch across a full mesh of `relays`, `broadcasts` at once.
+#[derive(Clone, Copy)]
+pub(crate) struct Withdrawal {
+	relays: usize,
+	broadcasts: usize,
+}
+
+impl fmt::Display for Withdrawal {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}r_{}b", self.relays, self.broadcasts)
 	}
-	let base = Shape::BASE;
+}
 
-	delivery::<B>(
-		c,
-		"compression",
-		[1, 16].into_iter().flat_map(|publishers| {
-			[1, 16].map(move |viewers| Shape {
-				publishers,
-				viewers,
-				compress: true,
-				frame: 1024,
-				..base
-			})
-		}),
-	);
+/// Sweeping both peers and prefixes.
+pub(crate) fn withdrawals() -> Vec<Withdrawal> {
+	[4, 8, 16]
+		.into_iter()
+		.flat_map(|relays| [1, 32].map(|broadcasts| Withdrawal { relays, broadcasts }))
+		.collect()
+}
 
-	delivery::<B>(
-		c,
-		"publishers",
-		[1, 16, 256].map(|publishers| Shape { publishers, ..base }),
-	);
-	delivery::<B>(c, "viewers", [1, 16, 256].map(|viewers| Shape { viewers, ..base }));
-	// Live media: every hop serves each group frame by frame.
-	delivery::<B>(
-		c,
-		"paced",
-		[1, 16, 256].map(|viewers| Shape {
-			viewers,
-			paced: true,
-			..base
-		}),
-	);
-	delivery::<B>(
-		c,
-		"scale",
-		[16, 64, 256].map(|n| Shape {
-			publishers: n,
-			viewers: n,
-			..base
-		}),
-	);
-	// One publisher session announcing many broadcasts, most of them unwatched.
-	delivery::<B>(
-		c,
-		"broadcasts",
-		[16, 256, 4096].map(|broadcasts| Shape {
-			publishers: 1,
-			broadcasts,
-			..base
-		}),
-	);
-	// Each viewer watches many broadcasts over one session, like a conference.
-	delivery::<B>(
-		c,
-		"watch",
-		[1, 16, 256].map(|watch| Shape {
-			publishers: 1,
-			broadcasts: 256,
-			watch,
-			..base
-		}),
-	);
-	// One viewer session holding many silent broadcasts open beside the one it watches:
-	// each is an announce request on the session, against a fixed route table. A wake
-	// for the watched group should not cost a poll per held request.
-	delivery::<B>(
-		c,
-		"prefixes",
-		[1, 64, 1024].map(|follow| Shape {
-			publishers: 1,
-			broadcasts: 1025,
-			viewers: 1,
-			follow,
-			..base
-		}),
-	);
-	delivery::<B>(c, "frame", [64, 1024, 16 * 1024].map(|frame| Shape { frame, ..base }));
-	// One session serving a backlog on each of its subscriptions: the serve loop that a
-	// `kio::coop::Budget` bounds per poll.
-	delivery::<B>(
-		c,
-		"burst",
-		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8), (16, 16), (16, 64)].map(|(watch, burst)| Shape {
-			publishers: 1,
-			broadcasts: 16,
-			viewers: 1,
-			watch,
-			burst,
-			..base
-		}),
-	);
-	// The same backlog behind one uni stream grant at a time.
-	delivery::<B>(
-		c,
-		"credit",
-		[1, 16, 64].into_iter().flat_map(|watch| {
-			[1, 16, 64].map(move |burst| Shape {
-				publishers: 1,
-				broadcasts: 64,
-				viewers: 1,
-				watch,
-				burst,
-				credit: Some(1),
-				..base
-			})
-		}),
-	);
-	delivery::<B>(
-		c,
-		"relays",
-		[1, 2, 4, 8].map(|relays| Shape {
+/// A mesh with every broadcast announced to the last relay, ready to withdraw them.
+pub(crate) struct Withdrawing<B: Backend> {
+	announced: origin::Routes,
+	live: Vec<origin::Route>,
+	broadcasts: usize,
+	_cluster: Cluster<B>,
+}
+
+/// Paused protocol time lets the quiet-point timeout drain pending work without including a
+/// real wait in the measurement.
+pub(crate) fn withdrawing<B: Backend>(case: Withdrawal) -> Running<Withdrawing<B>> {
+	let Withdrawal { relays, broadcasts } = case;
+	Running::dropped(runtime(), async move {
+		tokio::time::pause();
+		let shape = Shape {
 			relays,
-			viewers: 64,
-			..base
-		}),
-	);
-
-	join::<B>(
-		c,
-		"broadcasts",
-		[1, 2, 8].into_iter().flat_map(|relays| {
-			[1, 64, 1024].map(move |broadcasts| Shape {
-				publishers: 1,
-				broadcasts,
-				relays,
-				..base
+			publishers: 0,
+			..Shape::BASE
+		};
+		let cluster = Cluster::<B>::new("moq-lite-06", shape, false).await;
+		let mut announced = B::origin(cluster.relays.last().unwrap()).consume().routes();
+		let live: Vec<_> = (0..broadcasts)
+			.map(|i| {
+				B::origin(&cluster.relays[i % (relays - 1)])
+					.route(path(i), origin::RouteOptions::default())
+					.unwrap()
 			})
-		}),
-	);
-	// A live join skips a cached prefix. Sweep publishers against that prefix so
-	// resolving one start cannot hide a scan of unrelated publishers or group IDs.
-	join::<B>(
-		c,
-		"stale",
-		[1, 8, 32].into_iter().flat_map(|publishers| {
-			[1, 64, 1024].map(move |history| Shape {
-				publishers,
-				history,
-				..base
-			})
-		}),
-	);
-
-	join::<B>(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
-
-	announce::<B>(c);
-
-	churn::<B>(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
-	churn::<B>(
-		c,
-		"held",
-		[1, 4, 16]
-			.into_iter()
-			.flat_map(|sessions| [1, 64, 1024].map(move |held| Churn { sessions, held })),
-	);
-
-	// Production (2026-09): ~34 nodes x >=5 projects x ~24 tracks.
-	let prod = Dash {
-		relays: 35,
-		projects: 5,
-		tracks: 24,
-	};
-	// More broadcasts at a fixed track count per broadcast.
-	dash::<B>(
-		c,
-		"projects",
-		[1, 4, 16].map(|projects| Dash {
-			relays: 5,
-			projects,
-			..prod
-		}),
-	);
-	// More tracks per broadcast at a fixed broadcast count.
-	dash::<B>(
-		c,
-		"tracks",
-		[6, 24, 96].map(|tracks| Dash {
-			relays: 5,
-			projects: 4,
-			tracks,
-		}),
-	);
-	// More peer sessions carrying the same 32 broadcasts, then the production
-	// shape.
-	dash::<B>(
-		c,
-		"relays",
-		[2, 3, 5, 9, 17, 33]
-			.map(|relays| Dash {
-				relays,
-				projects: 32 / (relays - 1),
-				..prod
-			})
-			.into_iter()
-			.chain([prod]),
-	);
+			.collect();
+		while kio::clock::timeout(Duration::from_secs(1), announced.next())
+			.await
+			.is_ok()
+		{}
+		Withdrawing {
+			announced,
+			live,
+			broadcasts,
+			_cluster: cluster,
+		}
+	})
 }
+
+/// Withdraw every broadcast and wait until the last relay saw each go.
+pub(crate) fn withdraw<B: Backend>(mut fixture: Running<Withdrawing<B>>) -> Running<Withdrawing<B>> {
+	let (runtime, fixture_ref) = fixture.parts();
+	runtime.block_on(async {
+		drop(std::mem::take(&mut fixture_ref.live));
+		let mut retracted = 0;
+		while let Ok(Some(event)) = kio::clock::timeout(Duration::from_secs(1), fixture_ref.announced.next()).await {
+			assert!(
+				matches!(
+					event,
+					moq_net::origin::RouteEvent {
+						kind: moq_net::origin::RouteKind::End,
+						..
+					}
+				),
+				"{event:?}"
+			);
+			retracted += 1;
+		}
+		assert_eq!(retracted, fixture_ref.broadcasts);
+	});
+	fixture
+}
+
+/// Stamp the scenarios both the model and the relay run as benchmarks on `$backend`, a
+/// [`Backend`] in scope where this expands.
+macro_rules! benches {
+	($backend:ident) => {
+		$crate::session::benches!(@delivery $backend, session_delivery_compression, delivery_compression, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_publishers, delivery_publishers, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_viewers, delivery_viewers, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_paced, delivery_paced, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_scale, delivery_scale, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_broadcasts, delivery_broadcasts, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_watch, delivery_watch, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_prefixes, delivery_prefixes, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_frame, delivery_frame, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_burst, delivery_burst, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_credit, delivery_credit, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_relays, delivery_relays, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_group_cost, delivery_group_cost, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_datagram, delivery_datagram, items = objects);
+		$crate::session::benches!(@delivery $backend, session_delivery_fetch_frames, delivery_fetch_frames, bytes = bytes);
+		$crate::session::benches!(@delivery $backend, session_delivery_fetch_range, delivery_fetch_range, bytes = bytes);
+
+		$crate::session::benches!(@join $backend, session_join_broadcasts, join_broadcasts);
+		$crate::session::benches!(@join $backend, session_join_stale, join_stale);
+		$crate::session::benches!(@join $backend, session_join_relays, join_relays);
+
+		#[swole::bench(
+			args = $crate::session::announces(),
+			setup = $crate::session::announcing::<$backend>
+		)]
+		fn session_announce(fixture: &mut $crate::session::Running<$crate::session::Announcing<$backend>>) {
+			$crate::session::announce(fixture);
+		}
+
+		$crate::session::benches!(@churn $backend, session_churn_sessions, churn_sessions);
+		$crate::session::benches!(@churn $backend, session_churn_held, churn_held);
+
+		$crate::session::benches!(@dash $backend, session_dash_projects, dash_projects);
+		$crate::session::benches!(@dash $backend, session_dash_tracks, dash_tracks);
+		$crate::session::benches!(@dash $backend, session_dash_relays, dash_relays);
+
+		#[swole::bench(
+			args = $crate::session::withdrawals(),
+			setup = $crate::session::withdrawing::<$backend>
+		)]
+		fn session_withdrawal(
+			fixture: $crate::session::Running<$crate::session::Withdrawing<$backend>>,
+		) -> $crate::session::Running<$crate::session::Withdrawing<$backend>> {
+			$crate::session::withdraw(fixture)
+		}
+	};
+	(@delivery $backend:ident, $name:ident, $cases:ident, $unit:ident = $count:ident) => {
+		#[swole::bench(
+			args = $crate::session::$cases(),
+			setup = $crate::session::delivering::<$backend>,
+			before = $crate::session::tick::<$backend>,
+			$unit = $crate::session::Case::$count
+		)]
+		fn $name(room: &mut $crate::session::Delivering<$backend>) {
+			$crate::session::round(room);
+		}
+	};
+	(@join $backend:ident, $name:ident, $cases:ident) => {
+		#[swole::bench(
+			args = $crate::session::$cases(),
+			setup = $crate::session::joining::<$backend>,
+			after = $crate::session::leave::<$backend>
+		)]
+		fn $name(fixture: &mut $crate::session::Running<$crate::session::Joining<$backend>>) {
+			$crate::session::join(fixture);
+		}
+	};
+	(@churn $backend:ident, $name:ident, $cases:ident) => {
+		#[swole::bench(
+			args = $crate::session::$cases(),
+			setup = $crate::session::churning::<$backend>,
+			items = |_| 1
+		)]
+		fn $name(room: &mut $crate::session::Running<$crate::session::ChurnRoom<$backend>>) {
+			$crate::session::churn(room);
+		}
+	};
+	(@dash $backend:ident, $name:ident, $cases:ident) => {
+		#[swole::bench(
+			args = $crate::session::$cases(),
+			setup = $crate::session::dashing::<$backend>,
+			items = $crate::session::Dashing::total
+		)]
+		fn $name(room: &mut $crate::session::Running<$crate::session::DashRoom<$backend>>) {
+			$crate::session::dash(room);
+		}
+	};
+}
+pub(crate) use benches;

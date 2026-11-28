@@ -284,7 +284,6 @@ cfg_aliases = "0.2.2"
 [dev-dependencies]
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
 # `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
@@ -294,6 +293,7 @@ kio = { path = "../kio", features = ["manual"] }
 libc = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = { workspace = true }
+swole = { workspace = true }
 # Runs the portal handshake test in a child with the Flatpak's environment.
 test-env = { path = "../test-env" }
 # `start_paused`, so the capture driver tests run on mocked time.

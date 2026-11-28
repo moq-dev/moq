@@ -1,63 +1,26 @@
-//! Retained receive heap and delivery cost at the relay's 4 MiB / 1 MiB windows.
+//! Delivery cost at the relay's 4 MiB / 1 MiB windows.
 //!
 //! Each session holds one or eight unread messages, each half a stream window,
-//! under native leases. Eight together fill the connection window. Memory includes
-//! both endpoints, the bounded byte pipes, tasks, stream tables, and payload backings;
-//! it excludes the runtime and the shared source payload. It counts live requested
-//! allocator bytes, not RSS or a sum of allocations. Every timed round reads, verifies,
-//! releases, and refills every message. Transport, session count, stream count, and
-//! QMux version are independent axes. TCP and WebSocket framing run over bounded
+//! under native leases. Eight together fill the connection window. Every call reads,
+//! verifies, releases, and refills every message. Transport, session count, stream count,
+//! and QMux version are independent axes. TCP and WebSocket framing run over bounded
 //! in-memory pipes to isolate receive ownership from socket scheduling and TLS.
+//!
+//! Run with `cargo bench --manifest-path rs/qmux/Cargo.toml --bench receive`.
 
-use kio::clock::Instant;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicIsize, Ordering};
-use std::time::Duration;
+use std::fmt;
 
 use bytes::{Buf, Bytes};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::transport::poll::{Lease as _, RecvStream as _, SendStream as _, Session as _};
 use qmux::{Config, RecvStream, SendStream, Session, Version, transport::Stream};
+use swole::bench;
 use tokio::task::JoinSet;
 
 const CONNECTION: usize = 4 << 20;
 const STREAM: usize = 1 << 20;
 const MESSAGE: usize = STREAM / 2;
 
-struct Counter;
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-// Counts requested live bytes once per backing, including reallocations in place.
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		let ptr = unsafe { System.alloc(layout) };
-		if !ptr.is_null() {
-			LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-		}
-		ptr
-	}
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		let ptr = unsafe { System.alloc_zeroed(layout) };
-		if !ptr.is_null() {
-			LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-		}
-		ptr
-	}
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-		let ptr = unsafe { System.realloc(ptr, layout, size) };
-		if !ptr.is_null() {
-			LIVE.fetch_add(size as isize - layout.size() as isize, Ordering::Relaxed);
-		}
-		ptr
-	}
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
-
+/// One case, named `<pipe|ws>/<alpn>/<sessions>s/<streams>streams`.
 #[derive(Clone, Copy)]
 struct Shape {
 	websocket: bool,
@@ -152,73 +115,70 @@ impl Receivers {
 		}
 		assert!(self.drivers.try_join_next().is_none(), "a session driver ended");
 	}
+}
 
-	async fn close(mut self) {
-		self.streams.clear();
-		self.sessions.clear();
-		self.drivers.shutdown().await;
+impl Shape {
+	fn bytes(self) -> usize {
+		self.sessions * self.streams * MESSAGE
 	}
 }
 
-fn receive(c: &mut Criterion) {
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let transport = if self.websocket { "ws" } else { "pipe" };
+		write!(
+			f,
+			"{transport}/{}/{}s/{}streams",
+			self.version.alpn(),
+			self.sessions,
+			self.streams
+		)
+	}
+}
+
+fn shapes() -> Vec<Shape> {
+	let mut shapes = Vec::new();
+	for websocket in [false, true] {
+		for &version in Version::ALL {
+			for sessions in [1, 8, 64] {
+				for streams in [1, 8] {
+					shapes.push(Shape {
+						websocket,
+						version,
+						sessions,
+						streams,
+					});
+				}
+			}
+		}
+	}
+	shapes
+}
+
+/// Receivers warmed by two rounds, and the runtime driving them.
+struct Rig {
+	receivers: Receivers,
+	// Declared last so it drops after the drivers it runs.
+	runtime: tokio::runtime::Runtime,
+}
+
+fn rig(shape: Shape) -> Rig {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.unwrap();
 	let payload = Bytes::from((0..MESSAGE).map(|i| (i % 251) as u8).collect::<Vec<_>>());
-	let mut group = c.benchmark_group("qmux_receive");
-	for (transport, websocket) in [("pipe", false), ("ws", true)] {
-		for &version in Version::ALL {
-			for sessions in [1, 8, 64] {
-				for streams in [1, 8] {
-					let id = format!("{transport}/{}/{sessions}s/{streams}streams", version.alpn());
-					group.throughput(Throughput::Bytes((sessions * streams * MESSAGE) as u64));
-					let mut rig = None;
-					group.bench_function(BenchmarkId::from_parameter(&id), |b| {
-						let rig = rig.get_or_insert_with(|| {
-							let before = LIVE.load(Ordering::Relaxed);
-							let mut rig = runtime.block_on(Receivers::new(
-								Shape {
-									websocket,
-									version,
-									sessions,
-									streams,
-								},
-								payload.clone(),
-							));
-							runtime.block_on(rig.round());
-							runtime.block_on(rig.round());
-							let held = LIVE.load(Ordering::Relaxed) - before;
-							eprintln!(
-								"{id}: retained={held} B, per-session={} B, unread-per-session={} B, connection-window={CONNECTION} B",
-								held / sessions as isize,
-								streams * MESSAGE
-							);
-							rig
-						});
-						b.iter_custom(|iters| {
-							runtime.block_on(async {
-								let start = Instant::now();
-								for _ in 0..iters {
-									rig.round().await;
-								}
-								start.elapsed()
-							})
-						});
-					});
-					if let Some(rig) = rig {
-						runtime.block_on(rig.close());
-					}
-				}
-			}
-		}
-	}
-	group.finish();
+	let mut receivers = runtime.block_on(Receivers::new(shape, payload));
+	runtime.block_on(receivers.round());
+	runtime.block_on(receivers.round());
+	Rig { receivers, runtime }
 }
 
-criterion_group! {
-	name = benches;
-	config = Criterion::default().warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(2)).sample_size(10);
-	targets = receive
+#[bench(args = shapes(), setup = rig, bytes = Shape::bytes)]
+fn qmux_receive(rig: &mut Rig) {
+	rig.runtime.block_on(rig.receivers.round());
 }
-criterion_main!(benches);
+
+fn main() {
+	swole::main();
+}

@@ -7,9 +7,8 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench tail`.
 
-use std::{hint::black_box, task::Poll, time::Duration};
+use std::{fmt, task::Poll, time::Duration};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{broadcast, group, track};
 
 /// Tracks each holding a reader at the tail.
@@ -17,6 +16,26 @@ const TRACKS: [usize; 3] = [1, 32, 1024];
 
 /// Groups each track caches above the hole.
 const GROUPS: [usize; 3] = [1, 32, 1024];
+
+/// Tracks held and groups each caches, named `<tracks>x<groups>`.
+#[derive(Clone, Copy)]
+struct Case {
+	tracks: usize,
+	groups: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}x{}", self.tracks, self.groups)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	TRACKS
+		.into_iter()
+		.flat_map(|tracks| GROUPS.map(|groups| Case { tracks, groups }))
+		.collect()
+}
 
 /// Readers held at a hole below a pending end, one per track.
 struct Held {
@@ -26,7 +45,7 @@ struct Held {
 }
 
 impl Held {
-	fn new(tracks: usize, groups: usize) -> Self {
+	fn new(Case { tracks, groups }: Case) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let waiter = kio::Waiter::noop();
 		let mut readers = Vec::with_capacity(tracks);
@@ -70,21 +89,17 @@ impl Held {
 	}
 }
 
-fn bench_pending_tail(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_pending_tail");
-	group.throughput(Throughput::Elements(1));
-	for tracks in TRACKS {
-		for groups in GROUPS {
-			let id = format!("{tracks}x{groups}");
-			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
-				let mut held = Held::new(tracks, groups);
-				let waiter = kio::Waiter::noop();
-				b.iter(|| assert!(black_box(held.readers[0].poll_recv_group(&waiter)).is_pending()));
-			});
-		}
+mod track_pending_tail {
+	use swole::bench;
+
+	use super::{Case, Held, cases};
+
+	#[bench(args = cases(), setup = Held::new, items = |_: Case| 1)]
+	fn repoll(held: &mut Held) {
+		assert!(held.readers[0].poll_recv_group(&kio::Waiter::noop()).is_pending());
 	}
-	group.finish();
 }
 
-criterion_group!(benches, bench_pending_tail);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

@@ -260,124 +260,146 @@ class ReportTest(unittest.TestCase):
             ],
         )
 
-    def test_criterion_requires_fresh_measured_estimates(self):
-        run = self.root / "runs" / "one"
-        run.mkdir(parents=True)
-        (self.root / "criterion-runs.txt").write_text(f"{run}\n")
-        (run / "metadata.json").write_text(
-            json.dumps(
-                {
-                    "mode": "--criterion",
-                    "revision": "abc",
-                    "environment": {"BENCH_LABEL": "net-cpu", "SESSION_CPU": "1"},
-                }
-            )
-        )
+    def swole(self, label, benchmarks, base=None):
+        """Write a label's swole `--report` with {name: (base_ns, head_ns, (value, lower, upper))}."""
+        report = {"schema_version": 1, "mode": "bench", "fingerprint": "x86_64-1a2b3c4d5e6f", "host": []}
+        if base is not None:
+            report["base"] = base
+        report["benchmarks"] = {}
+        for name, (base_ns, head_ns, change) in benchmarks.items():
+            entry = {"threaded": False}
+            for side, time in (("base", base_ns), ("head", head_ns)):
+                if time is not None:
+                    entry[side] = {"time": {"value": time, "unit": "ns"}, "user time": {"value": time, "unit": "ns"}}
+            if change is not None:
+                entry["change"] = dict(zip(("value", "lower", "upper"), change), unit="head/base")
+            report["benchmarks"][name] = entry
+        path = self.root / "swole" / f"{label}.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(report))
+
+    def test_rust_records_each_head_time_by_label(self):
         with self.assertRaises(ValueError):
             report.rust(self.root)
-        case = run / "criterion" / "delivery" / "new"
-        case.mkdir(parents=True)
-        (case / "benchmark.json").write_text(json.dumps({"full_id": "delivery/4/8"}))
-        (case / "estimates.json").write_text(
-            json.dumps({"mean": {"point_estimate": 20, "confidence_interval": {"lower_bound": 18, "upper_bound": 22}}})
-        )
-        entry = report.rust(self.root)[0]
-        self.assertEqual(entry["name"], "rust/net-cpu/delivery/4/8")
-        self.assertEqual(entry["value"], 20)
-        self.assertIn("abc", entry["extra"])
-
-    def paired_runs(self, comparisons):
-        """Write measured Criterion runs, each with {label: (base, paired.json)}."""
-        runs = []
-        for label, (base, comparison) in comparisons.items():
-            run = self.root / "runs" / label
-            run.mkdir(parents=True)
-            (run / "metadata.json").write_text(
-                json.dumps(
-                    {"mode": "--criterion", "revision": "c2", "base": base, "environment": {"BENCH_LABEL": label}}
-                )
-            )
-            if comparison is not None:
-                (run / "paired.json").write_text(json.dumps(comparison))
-            runs.append(str(run))
-        (self.root / "criterion-runs.txt").write_text("\n".join(runs) + "\n")
-
-    def comparison(self, cases, unavailable=()):
-        return {
-            "commit": "c2",
-            "base": "c1",
-            "threshold_pct": 10,
-            "rounds": 3,
-            "unavailable": [{"target": target, "reason": "base build failed"} for target in unavailable],
-            "cases": [
-                {
-                    "target": "kio/lock",
-                    "id": name,
-                    "base_ns": 100,
-                    "current_ns": 150,
-                    "delta_pct": 50,
-                    "verdict": verdict,
-                    **(
-                        {"rounds": {"delta_pct": 40, "paired_deltas_pct": [30, 40, 50], "status": "consistent sign"}}
-                        if verdict == "regression"
-                        else {}
-                    ),
-                }
-                for name, verdict in cases.items()
-            ],
-        }
-
-    def test_paired_runs_combine_under_trend_names_and_gate_regressions(self):
-        self.paired_runs(
+        self.swole(
+            "kio",
             {
-                "kio": ("c1", self.comparison({"lock/4": "regression", "lock/1": "unchanged"})),
-                "gst": ("c1", self.comparison({"catalog": "faster"}, ["moq-gst/catalog"])),
-            }
+                "rs/kio/benches/lock.rs::lock[4]": (None, 20, None),
+                "rs/kio/benches/lock.rs::gone": (5, None, None),
+            },
         )
-        combined = report.paired(self.root)
         self.assertEqual(
-            [case["name"] for case in combined["cases"]], ["rust/kio/lock/4", "rust/kio/lock/1", "rust/gst/catalog"]
+            report.rust(self.root),
+            [
+                {
+                    "name": "rust/kio/rs/kio/benches/lock.rs::lock[4]",
+                    "unit": "ns",
+                    "value": 20,
+                    "extra": "Median nanoseconds per call; x86_64-1a2b3c4d5e6f",
+                }
+            ],
         )
-        self.assertEqual(combined["unavailable"], [{"name": "rust/gst/moq-gst/catalog", "reason": "base build failed"}])
+        self.assertIsNone(report.paired(self.root, "c2"))
+        # A label whose every benchmark is missing at this commit fails, as do other reports.
+        self.swole("uring-udp_uring", {"rs/moq-uring/benches/udp_uring.rs::send": (5, None, None)})
+        with self.assertRaises(ValueError):
+            report.rust(self.root)
+        for data in ({"schema_version": 2, "mode": "bench"}, {"schema_version": 1, "mode": "sim"}):
+            (self.root / "swole" / "uring-udp_uring.json").write_text(json.dumps(data))
+            with self.assertRaises(ValueError):
+                report.rust(self.root)
+
+    def paired_reports(self):
+        self.swole(
+            "kio",
+            {
+                "lock[4]": (100, 150, (1.5, 1.4, 1.6)),
+                # Slower beyond the threshold, but its interval reaches back under it.
+                "lock[1]": (100, 112, (1.12, 1.05, 1.19)),
+                "added": (None, 7, None),
+            },
+            base="c1",
+        )
+        self.swole("gst", {"catalog": (100, 80, (0.8, 0.75, 0.85)), "removed": (9, None, None)}, base="c1")
+
+    def test_paired_reports_classify_by_interval_and_gate_regressions(self):
+        self.paired_reports()
+        combined = report.paired(self.root, "c2")
+        self.assertEqual((combined["commit"], combined["base"], combined["threshold_pct"]), ("c2", "c1", 10))
+        self.assertEqual(
+            {case["name"]: case["verdict"] for case in combined["cases"]},
+            {
+                "rust/gst/catalog": "faster",
+                "rust/gst/removed": "removed",
+                "rust/kio/lock[4]": "regression",
+                "rust/kio/lock[1]": "unchanged",
+                "rust/kio/added": "new",
+            },
+        )
+        self.assertEqual(
+            combined["cases"][2],
+            {
+                "name": "rust/kio/lock[4]",
+                "base_ns": 100,
+                "current_ns": 150,
+                "change": {"value": 1.5, "lower": 1.4, "upper": 1.6},
+                "verdict": "regression",
+            },
+        )
         (self.root / "paired.json").write_text(json.dumps(combined))
         self.assertEqual(report.gate(self.root), 1)
-        combined["cases"][0]["verdict"], combined["unavailable"] = "noise", []
+        combined["cases"][2]["verdict"] = "unchanged"
         (self.root / "paired.json").write_text(json.dumps(combined))
         self.assertEqual(report.gate(self.root), 0)
         (self.root / "paired.json").unlink()
         with self.assertRaises(ValueError):
             report.gate(self.root)
 
-    def test_unpaired_runs_have_no_comparison_and_bases_must_agree(self):
-        self.paired_runs({"kio": ("", None)})
-        self.assertIsNone(report.paired(self.root))
-        self.temp.cleanup()
-        self.root.mkdir()
-        self.paired_runs({"kio": ("c1", self.comparison({})), "gst": ("", None)})
+    def test_paired_reports_must_share_one_base(self):
+        self.swole("kio", {"lock": (None, 1, None)}, base="c1")
+        self.swole("gst", {"catalog": (None, 1, None)})
         with self.assertRaises(ValueError):
-            report.paired(self.root)
+            report.paired(self.root, "c2")
+
+    def test_a_failed_pair_lists_its_head_and_fails_the_gate(self):
+        # nightly.sh timed gst's head alone after its pair failed.
+        self.swole("kio", {"lock": (100, 100, (1.0, 0.95, 1.05))}, base="c1")
+        self.swole("gst", {"catalog": (None, 80, None)})
+        (self.root / "unpaired").write_text("c1 gst\n")
+        combined = report.paired(self.root, "c2")
+        self.assertEqual(combined["base"], "c1")
+        self.assertEqual(
+            {case["name"]: case["verdict"] for case in combined["cases"]},
+            {"rust/kio/lock": "unchanged", "rust/gst/catalog": "unpaired"},
+        )
+        (self.root / "paired.json").write_text(json.dumps(combined))
+        self.assertEqual(report.gate(self.root), 1)
+        # With every pair failed, the comparison still names the base.
+        (self.root / "unpaired").write_text("c1 gst\nc1 kio\n")
+        self.swole("kio", {"lock": (None, 100, None)})
+        combined = report.paired(self.root, "c2")
+        self.assertEqual((combined["base"], {case["verdict"] for case in combined["cases"]}), ("c1", {"unpaired"}))
 
     def test_paired_comparison_publishes_beside_the_trend(self):
-        self.paired_runs(
-            {"kio": ("c1", self.comparison({"lock/4": "regression", "lock/1": "unchanged"}, ["kio/other"]))}
-        )
+        self.paired_reports()
         source = self.root / "inputs" / "bench-rust"
         source.mkdir(parents=True)
-        (source / "report.json").write_text(json.dumps([{"name": "rust/kio/lock/4", "unit": "ns", "value": 150}]))
+        (source / "report.json").write_text(json.dumps([{"name": "rust/kio/lock[4]", "unit": "ns", "value": 150}]))
         (source / "outcome.json").write_text('{"status":"success"}')
-        (source / "paired.json").write_text(json.dumps(report.paired(self.root)))
+        (source / "paired.json").write_text(json.dumps(report.paired(self.root, "c2")))
         reports = self.root / "reports"
         report.prepare(self.root / "inputs", reports)
-        self.history("costs", [("c2", 1, {"bench-rust/rust/kio/lock/4": 150})])
+        self.history("costs", [("c2", 1, {"bench-rust/rust/kio/lock[4]": 150})])
         report.index(self.root, "c2", reports / "paired.json")
         page = (self.root / "bench" / "index.html").read_text()
-        self.assertIn("Confirmed regressions (1)", page)
+        self.assertIn("Regressions (1)", page)
+        self.assertIn("Faster (1)", page)
         self.assertIn("Unchanged (1)", page)
-        self.assertIn("bench-rust/rust/kio/lock/4", page)
-        self.assertIn("+30.0% +40.0% +50.0%", page)
-        self.assertIn("bench-rust/rust/kio/kio/other: base build failed", page)
+        self.assertIn("Measured on one side only (2)", page)
+        self.assertIn("bench-rust/rust/kio/lock[4]", page)
+        self.assertIn("+40.0% to +60.0%", page)
         # The trend table still reads only its own rows.
-        self.assertEqual(self.rows("c2")[1], {"bench-rust/rust/kio/lock/4": "muted"})
+        self.assertEqual(self.rows("c2")[1], {"bench-rust/rust/kio/lock[4]": "muted"})
         # A night without a finished comparison replaces the published one.
         (source / "outcome.json").write_text('{"status":"failure"}')
         report.prepare(self.root / "inputs", reports)
@@ -426,12 +448,12 @@ class ReportTest(unittest.TestCase):
         base = "b" * 40
         self.source(
             "bench-rust",
-            [{"name": "rust/kio/lock/4", "unit": "ns", "value": 150.123456789}],
+            [{"name": "rust/kio/rs/kio/benches/lock.rs::wait_ns", "unit": "ns", "value": 150.123456789}],
             comparison={
                 "base": base,
                 "cases": [
-                    {"name": "rust/kio/lock/4", "base_ns": 100, "verdict": "unchanged"},
-                    {"name": "rust/kio/same", "base_ns": None, "verdict": "identical"},
+                    {"name": "rust/kio/rs/kio/benches/lock.rs::wait_ns", "base_ns": 100, "verdict": "unchanged"},
+                    {"name": "rust/kio/added", "base_ns": None, "verdict": "new"},
                 ],
             },
         )
@@ -452,7 +474,7 @@ class ReportTest(unittest.TestCase):
                 "samples": [
                     {
                         "metrics": {
-                            "rust/kio/lock/4": {"time": {"value": 150.123}},
+                            "rust/kio/rs/kio/benches/lock.rs::wait_ns": {"time": {"value": 150.123}},
                             "rust-test/moq-net/fanout/viewers=4": {
                                 "elapsed_ns": {"value": 2000000000},
                                 "lost_packets": {"value": 0},
@@ -460,7 +482,7 @@ class ReportTest(unittest.TestCase):
                             "size/moq-relay": {"size": {"value": 4}},
                         }
                     },
-                    {"commit": base, "metrics": {"rust/kio/lock/4": {"time": {"value": 100}}}},
+                    {"commit": base, "metrics": {"rust/kio/rs/kio/benches/lock.rs::wait_ns": {"time": {"value": 100}}}},
                 ],
             },
         )

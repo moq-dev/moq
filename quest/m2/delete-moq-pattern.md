@@ -48,7 +48,7 @@ Scope:
   widening an exact `path=demo` revalidation into a subtree match, and document
   the breaking change in `MIGRATE.md` and PR Impact.
 - Delete `rs/moq-pattern` and `js/pattern` along with workspace members,
-  criterion benches (`sh/rs/instructions.sh`, `sh/gh/nightly.sh`), feature-flag
+  benches (`sh/rs/instructions.sh`, `sh/gh/nightly.sh`), feature-flag
   lists, trusted-publisher lists, and docs references; update affected quests
   ([feature-flags](/quest/m3/release/feature-flags.md),
   [crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md),

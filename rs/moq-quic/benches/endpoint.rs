@@ -1,13 +1,13 @@
 //! Endpoint routing: dispatching short header datagrams to the connection that owns their CID.
 //!
 //! Only `Endpoint::handle` is timed; the routed event is dropped before the connection sees it,
-//! so the same datagrams replay every iteration.
+//! so the same datagrams replay every call.
 
-use std::hint::black_box;
+use std::{fmt, hint::black_box};
 
 use bytes::{BufMut, BytesMut};
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::endpoint::{DatagramEvent, Received};
+use swole::bench;
 
 #[allow(
 	dead_code,
@@ -15,56 +15,69 @@ use moq_quic::endpoint::{DatagramEvent, Received};
 )]
 mod common;
 
-use common::{Pair, Setup, ThreadCpu};
+use common::{Pair, Setup};
 
-/// Datagrams dispatched per iteration, drawn across every CID the server issued.
+/// Datagrams dispatched per call, drawn across every CID the server issued.
 const BATCH: usize = 1024;
 
 /// Connections against CIDs per connection. A client with zero-length CIDs advertises an
 /// `active_connection_id_limit` of 2, otherwise 5, and the server issues that many.
-fn bench_route(c: &mut Criterion<ThreadCpu>) {
-	let mut group = c.benchmark_group("endpoint_route");
-	group.throughput(Throughput::Elements(BATCH as u64));
-	for connections in [16, 256, 4096] {
-		for cids in [2, 5] {
-			let mut setup = None;
-			group.bench_function(
-				BenchmarkId::new(format!("connections_{connections}"), format!("cids_{cids}")),
-				|b| {
-					let (pair, datagrams) = setup.get_or_insert_with(|| route(connections, cids));
-					let remote = pair.clients[0].addr;
-					let now = pair.now;
-					let mut buf = Vec::new();
-					b.iter_batched(
-						|| datagrams.clone(),
-						|datagrams| {
-							for datagram in datagrams {
-								let event = pair.server.endpoint.handle(
-									now,
-									Received {
-										remote,
-										local_ip: None,
-										ecn: None,
-										data: datagram,
-										arrival: None,
-									},
-									&mut buf,
-								);
-								assert!(matches!(event, Some(DatagramEvent::ConnectionEvent(..))));
-								black_box(event);
-							}
-						},
-						BatchSize::SmallInput,
-					);
-				},
-			);
-		}
+#[derive(Clone, Copy)]
+struct Case {
+	connections: usize,
+	cids: usize,
+}
+
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "connections_{}/cids_{}", self.connections, self.cids)
 	}
-	group.finish();
+}
+
+fn cases() -> Vec<Case> {
+	[16, 256, 4096]
+		.into_iter()
+		.flat_map(|connections| [2, 5].map(|cids| Case { connections, cids }))
+		.collect()
+}
+
+/// A connected server, the datagrams it routes, and the copy the next call consumes.
+struct Route {
+	pair: Pair,
+	datagrams: Vec<BytesMut>,
+	pending: Vec<BytesMut>,
+	buf: Vec<u8>,
+}
+
+/// Refills the datagrams a call consumes, outside the measurement.
+fn refill(route: &mut Route) {
+	route.pending.clone_from(&route.datagrams);
+}
+
+#[bench(args = cases(), setup = route, before = refill, items = |_: Case| BATCH)]
+fn endpoint_route(route: &mut Route) {
+	let remote = route.pair.clients[0].addr;
+	let now = route.pair.now;
+	for datagram in route.pending.drain(..) {
+		let event = route.pair.server.endpoint.handle(
+			now,
+			Received {
+				remote,
+				local_ip: None,
+				ecn: None,
+				data: datagram,
+				arrival: None,
+			},
+			&mut route.buf,
+		);
+		assert!(matches!(event, Some(DatagramEvent::ConnectionEvent(..))));
+		black_box(event);
+	}
 }
 
 /// Connects the clients and forges one 1-RTT datagram per issued CID, in a scattered order.
-fn route(connections: usize, cids: usize) -> (Pair, Vec<BytesMut>) {
+fn route(case: Case) -> Route {
+	let Case { connections, cids } = case;
 	let pair = Pair::new(Setup {
 		clients: connections,
 		client_cid_len: if cids == 2 { 0 } else { 8 },
@@ -92,12 +105,14 @@ fn route(connections: usize, cids: usize) -> (Pair, Vec<BytesMut>) {
 			datagram
 		})
 		.collect();
-	(pair, datagrams)
+	Route {
+		pair,
+		datagrams,
+		pending: Vec::new(),
+		buf: Vec::new(),
+	}
 }
 
-criterion_group! {
-	name = benches;
-	config = common::config();
-	targets = bench_route
+fn main() {
+	swole::main();
 }
-criterion_main!(benches);

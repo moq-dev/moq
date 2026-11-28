@@ -13,11 +13,41 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench synced`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fmt;
+
 use moq_net::{Prefixes, fuzz, origin};
 
-/// `(streams, consumers)` shapes.
-const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000, 1_000)];
+/// Snapshots in flight and consumers watching elsewhere, named `<streams>st_<consumers>c`.
+#[derive(Clone, Copy)]
+struct Shape {
+	streams: usize,
+	consumers: usize,
+}
+
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}st_{}c", self.streams, self.consumers)
+	}
+}
+
+const SHAPES: [Shape; 4] = [
+	Shape {
+		streams: 10,
+		consumers: 10,
+	},
+	Shape {
+		streams: 1_000,
+		consumers: 10,
+	},
+	Shape {
+		streams: 10,
+		consumers: 1_000,
+	},
+	Shape {
+		streams: 1_000,
+		consumers: 1_000,
+	},
+];
 
 /// An origin with `streams` snapshots in flight under `room/` and `consumers` cursors
 /// on prefixes of their own under `other/`. The handles are held for the whole run.
@@ -28,7 +58,7 @@ struct Table {
 	_consumers: Vec<origin::Routes>,
 }
 
-fn table(streams: usize, consumers: usize) -> Table {
+fn table(Shape { streams, consumers }: Shape) -> Table {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	let streams = (0..streams)
 		.map(|i| fuzz::snapshot(&producer, &format!("room/{i}")))
@@ -48,40 +78,57 @@ fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
 	producer.consume().scope(prefix, &Prefixes::all()).unwrap()
 }
 
-fn bench_land(c: &mut Criterion) {
-	let mut group = c.benchmark_group("synced/land");
-	for (streams, consumers) in SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{streams}st_{consumers}c"));
-		group.bench_function(id, |b| {
-			let table = table(streams, consumers);
-			let watcher = scoped(&table.producer, "room/incoming").routes();
-			b.iter(|| {
-				let snapshot = fuzz::snapshot(&table.producer, "room/incoming");
-				assert!(!watcher.poll_synced(&kio::Waiter::noop()).is_ready());
-				drop(snapshot);
-				assert!(watcher.poll_synced(&kio::Waiter::noop()).is_ready());
-			});
-		});
+mod synced {
+	use moq_net::{fuzz, origin};
+	use swole::bench;
+
+	use super::{SHAPES, Table, scoped, table};
+
+	/// A table and a consumer of the prefix a snapshot lands under.
+	struct Landing {
+		table: Table,
+		watcher: origin::Routes,
 	}
-	group.finish();
+
+	fn landing(shape: super::Shape) -> Landing {
+		let table = table(shape);
+		let watcher = scoped(&table.producer, "room/incoming").routes();
+		Landing { table, watcher }
+	}
+
+	#[bench(args = SHAPES, setup = landing)]
+	fn land(input: &Landing) {
+		let snapshot = fuzz::snapshot(&input.table.producer, "room/incoming");
+		assert!(!input.watcher.poll_synced(&kio::Waiter::noop()).is_ready());
+		drop(snapshot);
+		assert!(input.watcher.poll_synced(&kio::Waiter::noop()).is_ready());
+	}
+
+	/// A table with a snapshot held under the prefix a consumer registers on.
+	struct Registering {
+		_table: Table,
+		incoming: origin::Consumer,
+		_held: fuzz::Snapshot,
+	}
+
+	fn registering(shape: super::Shape) -> Registering {
+		let table = table(shape);
+		let incoming = scoped(&table.producer, "room/incoming");
+		let _held = fuzz::snapshot(&table.producer, "room/incoming");
+		Registering {
+			_table: table,
+			incoming,
+			_held,
+		}
+	}
+
+	#[bench(args = SHAPES, setup = registering)]
+	fn register(input: &Registering) {
+		let watcher = input.incoming.routes();
+		assert!(!watcher.poll_synced(&kio::Waiter::noop()).is_ready());
+	}
 }
 
-fn bench_register(c: &mut Criterion) {
-	let mut group = c.benchmark_group("synced/register");
-	for (streams, consumers) in SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{streams}st_{consumers}c"));
-		group.bench_function(id, |b| {
-			let table = table(streams, consumers);
-			let incoming = scoped(&table.producer, "room/incoming");
-			let _held = fuzz::snapshot(&table.producer, "room/incoming");
-			b.iter(|| {
-				let watcher = incoming.routes();
-				assert!(!watcher.poll_synced(&kio::Waiter::noop()).is_ready());
-			});
-		});
-	}
-	group.finish();
+fn main() {
+	swole::main();
 }
-
-criterion_group!(benches, bench_land, bench_register);
-criterion_main!(benches);

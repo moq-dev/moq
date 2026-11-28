@@ -36,12 +36,12 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # Compile the generated wrappers used by the tests and benches.
 moq-json = { path = "../moq-json", features = ["async"] }
 moq-net = { path = "../moq-net", features = ["async", "fuzz"] }
 moq-stats = { path = ".", features = ["async"] }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 workspace-hack = { path = "../workspace-hack" }
 

@@ -21,7 +21,7 @@ Found by the 2026-11-23 pre-0.22 performance audit (`890ea4e531`):
 Once `m2` finishes, follow the Release baseline method in [Performance audit](/quest/m3/audit-perf.md):
 
 ```bash
-BENCH_ARTIFACTS=<scratch> just bench origin/release
+BENCH_ARTIFACTS=<scratch> just bench-relay origin/release
 bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
 ```
 

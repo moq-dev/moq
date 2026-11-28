@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Count the deterministic Criterion benches' instructions under stock Valgrind with swole,
+# Count the deterministic benches' instructions under stock Valgrind with swole,
 # as the nightly Instructions workflow does (x86-64 Linux).
 #
 # Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [swole options]
@@ -34,9 +34,12 @@ case "$command" in
         ;;
 esac
 
-# Only single-threaded targets without I/O, and not targets made only of `iter_custom`, which
-# CodSpeed's Criterion skips; some still read the wall clock, so their counts move with the host's
-# load (quest/m0/repeatable-instruction-counts.md). Nightly still times them all.
+# Only single-threaded targets without I/O, since a count holds what other threads ran beside a
+# call, which swole counts five times over, and none of a syscall's kernel work. Some still read
+# the wall clock, so their counts move with the host's load
+# (quest/m0/repeatable-instruction-counts.md). Nightly still times them all. A self-timed
+# benchmark's count covers its whole call, such as moq-quic's client side beside the server
+# work its timing keeps.
 targets=(
     "kio tasks" "kio waiter"
     "moq-audio bus"
@@ -49,7 +52,8 @@ targets=(
     "moq-net interests" "moq-net priority" "moq-net retirement" "moq-net schedule" "moq-net stats"
     "moq-net synced" "moq-net tail" "moq-net tracks" "moq-net varint" "moq-net viewers"
     "moq-pattern matching"
-    "moq-quic endpoint" "moq-quic receive" "moq-quic sent_packets" "moq-quic streams"
+    "moq-quic endpoint" "moq-quic receive" "moq-quic receive_bursts" "moq-quic sent_packets"
+    "moq-quic streams" "moq-quic wire"
     "moq-rtmp chunk_interleaving"
 )
 # The features a package's targets need.

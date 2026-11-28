@@ -2,13 +2,16 @@
 //! holds waiting on the decider. A slope means admitting one request costs more as others
 //! wait, rather than what the request itself touches.
 //! The real web listener runs over loopback TCP; timings include one request round trip.
+//!
+//! Run with `cargo bench -p moq-relay --bench http_auth`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fmt;
+use std::task::Poll;
+
 use futures::{StreamExt, stream::FuturesUnordered};
 use moq_auth::{Grant, lease};
 use moq_relay::{auth, cluster, web};
-use std::task::Poll;
-use std::time::Duration;
+use swole::bench;
 
 type Send = h2::client::SendRequest<bytes::Bytes>;
 
@@ -168,44 +171,69 @@ fn get(prefix: &str) -> axum::http::Request<()> {
 		.unwrap()
 }
 
-fn admission(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	for server in [false, true] {
-		let name = if server {
-			"relay_http_auth_server"
-		} else {
-			"relay_http_admission"
-		};
-		let mut group = c.benchmark_group(name);
-		group.sample_size(10);
-		group.warm_up_time(Duration::from_millis(100));
-		group.measurement_time(Duration::from_millis(300));
-		// A held HTTP/1.1 auth POST takes two sockets, unlike a multiplexed web
-		// stream. Keep its full sweep below a process's standard 1024-fd budget.
-		let (connections, streams) = if server {
-			([1, 4, 16], [0, 4, 16])
-		} else {
-			([1, 16, 64], [0, 16, 64])
-		};
-		// Each connection may hold up to the verification budget (128 by default) at once.
-		for connections in connections {
-			for streams in streams {
-				let mut fixture = runtime.block_on(Fixture::new(connections, streams, server));
-				group.bench_with_input(
-					BenchmarkId::new(format!("connections={connections}"), streams),
-					&(connections, streams),
-					|b, _| {
-						b.iter(|| runtime.block_on(fixture.round()));
-					},
-				);
-			}
-		}
-		group.finish();
+/// Connections each holding `streams` requests waiting on the decider, named
+/// `connections=<connections>/<streams>`.
+#[derive(Clone, Copy)]
+struct Held {
+	connections: usize,
+	streams: usize,
+}
+
+impl fmt::Display for Held {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "connections={}/{}", self.connections, self.streams)
 	}
 }
 
-criterion_group!(benches, admission);
-criterion_main!(benches);
+/// Each connection may hold up to the verification budget (128 by default) at once.
+fn held(connections: [usize; 3], streams: [usize; 3]) -> Vec<Held> {
+	connections
+		.into_iter()
+		.flat_map(|connections| streams.map(|streams| Held { connections, streams }))
+		.collect()
+}
+
+/// A fixture beside the runtime it runs on, declared first so it drops before the runtime.
+struct Running {
+	fixture: Fixture,
+	runtime: tokio::runtime::Runtime,
+}
+
+impl Running {
+	fn new(held: Held, server: bool) -> Self {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		let fixture = runtime.block_on(Fixture::new(held.connections, held.streams, server));
+		Self { fixture, runtime }
+	}
+
+	fn embedded(held: Held) -> Self {
+		Self::new(held, false)
+	}
+
+	fn server(held: Held) -> Self {
+		Self::new(held, true)
+	}
+
+	fn round(&mut self) {
+		self.runtime.block_on(self.fixture.round());
+	}
+}
+
+#[bench(args = held([1, 16, 64], [0, 16, 64]), setup = Running::embedded)]
+fn relay_http_admission(running: &mut Running) {
+	running.round();
+}
+
+// A held HTTP/1.1 auth POST takes two sockets, unlike a multiplexed web stream. Keep its
+// full sweep below a process's standard 1024-fd budget.
+#[bench(args = held([1, 4, 16], [0, 4, 16]), setup = Running::server)]
+fn relay_http_auth_server(running: &mut Running) {
+	running.round();
+}
+
+fn main() {
+	swole::main();
+}

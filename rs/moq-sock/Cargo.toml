@@ -32,8 +32,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 cfg_aliases = "0.2"
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 rand = "0.10"
+swole = { workspace = true }
 tracing-test = "0.2"
 workspace-hack = { path = "../workspace-hack" }
 

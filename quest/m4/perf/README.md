@@ -8,7 +8,7 @@ hot-path costs: redundant copies, locks, atomics, clock reads, allocations,
 and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
 
-Every implementation quest lands with a measured before/after (`just bench BASE` on Linux,
+Every implementation quest lands with a measured before/after (`just bench-relay BASE` on Linux,
 or `just bench-runtime` for an io_uring change, plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
@@ -74,7 +74,7 @@ as the [Stream transports](/quest/m4/stream-transports/README.md) epic, ranked
 second, and the io_uring TCP line moves in from m3. io_uring pays far more
 for TCP than for UDP, so it no longer waits on fleet demand.
 
-Decided 2026-10-22 from the io_uring audit: `just bench BASE` runs only
+Decided 2026-10-22 from the io_uring audit: `just bench-relay BASE` runs only
 tokio, so an io_uring quest measures with `just bench-runtime` at both
 revisions on the same host and worker count, and profiles with
 `just bench-profile MODES WORKLOAD WORKERS io-uring-workers [BASE]`.

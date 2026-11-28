@@ -52,15 +52,10 @@ metadata = {
             "GLIBC_TUNABLES",
             "RUSTC_WRAPPER",
             "RUSTC_WORKSPACE_WRAPPER",
-            "SESSION_CPU",
         )
     },
     "profile": "profiling" if mode == "--profile" else "release",
-    "features": {
-        "--runtime": "default",
-        "--profile": "default; heap adds moq-relay/jemalloc",
-        "--criterion": "see criterion-command.json",
-    }.get(mode, "default"),
+    "features": "default; heap adds moq-relay/jemalloc" if mode == "--profile" else "default",
     "mode": mode,
     "runtime_workers": sys.argv[4] if len(sys.argv) > 4 else None,
     "rounds": int(sys.argv[5]) if len(sys.argv) > 5 else None,
@@ -69,9 +64,7 @@ metadata = {
     "profilers": {tool: command(tool, "--version").splitlines()[0] for tool in ("perf", "jeprof") if shutil.which(tool)}
     if mode == "--profile"
     else None,
-    "workload": None
-    if mode == "--criterion"
-    else {"startup": "2s", "duration": "10s", "report": "500ms", "instructions_duration": "19s"},
+    "workload": {"startup": "2s", "duration": "10s", "report": "500ms", "instructions_duration": "19s"},
 }
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 subprocess.run(

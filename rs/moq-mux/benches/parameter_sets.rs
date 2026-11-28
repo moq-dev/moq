@@ -6,10 +6,6 @@
 //!
 //! Run with `cargo bench -p moq-mux --bench parameter_sets`.
 
-use std::hint::black_box;
-use std::time::Duration;
-
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_mux::codec::h264::Split;
 
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -48,29 +44,41 @@ fn keyframe(count: u32, distinct: bool) -> Vec<u8> {
 		.collect()
 }
 
-fn parameter_sets(c: &mut Criterion) {
-	let mut group = c.benchmark_group("h264-split-pps");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
+const COUNTS: [u32; 4] = [1, 16, 256, 4096];
+
+/// Splitting the keyframe into frames, flushed.
+fn split(data: &[u8]) -> Vec<moq_mux::container::Frame> {
 	let pts = moq_net::Timestamp::from_micros(0).unwrap();
-	for count in [1, 16, 256, 4096] {
-		group.throughput(Throughput::Elements(count.into()));
-		for distinct in [true, false] {
-			let data = keyframe(count, distinct);
-			let ids = if distinct { "distinct" } else { "repeated" };
-			group.bench_function(BenchmarkId::new(ids, count), |b| {
-				b.iter(|| {
-					let mut split = Split::new();
-					let mut frames = split.decode(&data, pts).unwrap();
-					frames.extend(split.flush(pts).unwrap());
-					black_box(frames)
-				})
-			});
-		}
-	}
-	group.finish();
+	let mut split = Split::new();
+	let mut frames = split.decode(data, pts).unwrap();
+	frames.extend(split.flush(pts).unwrap());
+	frames
 }
 
-criterion_group!(benches, parameter_sets);
-criterion_main!(benches);
+mod h264_split_pps {
+	use swole::bench;
+
+	use super::{COUNTS, keyframe};
+
+	fn distinct_keyframe(count: u32) -> Vec<u8> {
+		keyframe(count, true)
+	}
+
+	#[bench(args = COUNTS, setup = distinct_keyframe, items = |count| count)]
+	fn distinct(data: &[u8]) -> Vec<moq_mux::container::Frame> {
+		super::split(data)
+	}
+
+	fn repeated_keyframe(count: u32) -> Vec<u8> {
+		keyframe(count, false)
+	}
+
+	#[bench(args = COUNTS, setup = repeated_keyframe, items = |count| count)]
+	fn repeated(data: &[u8]) -> Vec<moq_mux::container::Frame> {
+		super::split(data)
+	}
+}
+
+fn main() {
+	swole::main();
+}

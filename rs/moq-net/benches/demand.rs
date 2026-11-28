@@ -15,6 +15,7 @@
 //! Run with `cargo bench -p moq-net --bench demand`.
 
 use std::{
+	fmt,
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
@@ -22,17 +23,39 @@ use std::{
 	task::{Poll, Wake},
 };
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::broadcast;
 
-/// `(tracks, handles)` shapes: the broadcast's tracks and the demand handles watching it.
-const SHAPES: [(usize, usize); 5] = [(1, 1), (100, 1), (10_000, 1), (1, 100), (10_000, 100)];
+/// The broadcast's tracks and the demand handles watching it, named `<tracks>t_<handles>h`.
+#[derive(Clone, Copy)]
+struct Shape {
+	tracks: usize,
+	handles: usize,
+}
 
-/// `(tracks, handles)` shapes for churn: each `tracks` is one under the inbox capacity it grows to.
-const CHURN_SHAPES: [(usize, usize); 5] = [(3, 1), (127, 1), (16_383, 1), (3, 100), (16_383, 100)];
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}t_{}h", self.tracks, self.handles)
+	}
+}
 
-/// `(tracks, readers)` shapes for lookup: the broadcast's tracks and the readers on the one looked up.
-const LOOKUP_SHAPES: [(usize, usize); 5] = [(1, 1), (100, 1), (10_000, 1), (1, 100), (10_000, 100)];
+fn shapes(shapes: [(usize, usize); 5]) -> [Shape; 5] {
+	shapes.map(|(tracks, handles)| Shape { tracks, handles })
+}
+
+/// The broadcast's tracks and the readers on the one looked up, named `<tracks>t_<readers>r`.
+#[derive(Clone, Copy)]
+struct Lookup {
+	tracks: usize,
+	readers: usize,
+}
+
+impl fmt::Display for Lookup {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}t_{}r", self.tracks, self.readers)
+	}
+}
+
+const LOOKUPS: [(usize, usize); 5] = [(1, 1), (100, 1), (10_000, 1), (1, 100), (10_000, 100)];
 
 /// Counts the wakes of a parked poll.
 #[derive(Default)]
@@ -51,80 +74,104 @@ fn changed(demand: &mut broadcast::Demand, waiter: &kio::Waiter) -> Option<bool>
 	}
 }
 
-fn bench_edge(c: &mut Criterion) {
-	let mut group = c.benchmark_group("demand/edge");
-	for (tracks, handles) in SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{tracks}t_{handles}h"));
-		group.bench_function(id, |b| {
-			let producer = broadcast::Info::new().produce();
-			let _tracks: Vec<_> = (0..tracks)
-				.map(|i| {
-					producer
-						.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
-						.unwrap()
-				})
-				.collect();
-			let consumer = producer.consume();
-			let waiter = kio::Waiter::noop();
-			let mut demands: Vec<_> = (0..handles).map(|_| producer.demand()).collect();
-			for demand in &mut demands {
-				assert_eq!(changed(demand, &waiter), Some(false));
-			}
-			b.iter(|| {
-				let reader = consumer.track("t0").unwrap().subscribe(None);
-				for demand in &mut demands {
-					assert_eq!(changed(demand, &waiter), Some(true));
-				}
-				drop(reader);
-				for demand in &mut demands {
-					assert_eq!(changed(demand, &waiter), Some(false));
-				}
-			});
-		});
-	}
-	group.finish();
+fn tracks(producer: &broadcast::Producer, tracks: usize) -> Vec<moq_net::track::Producer> {
+	(0..tracks)
+		.map(|i| {
+			producer
+				.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+				.unwrap()
+		})
+		.collect()
 }
 
-fn bench_churn(c: &mut Criterion) {
-	let mut group = c.benchmark_group("demand/churn");
-	for (tracks, handles) in CHURN_SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{tracks}t_{handles}h"));
-		group.bench_function(id, |b| {
-			let producer = broadcast::Info::new().produce();
-			let _demands: Vec<_> = (0..handles).map(|_| producer.demand()).collect();
-			let _tracks: Vec<_> = (0..tracks)
-				.map(|i| {
-					producer
-						.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
-						.unwrap()
-				})
-				.collect();
-			b.iter(|| {
-				drop(
-					producer
-						.create_track("churn", moq_net::track::Info::default().with_max_age(None))
-						.unwrap(),
-				)
-			});
-		});
-	}
-	group.finish();
-}
+mod demand {
+	use std::sync::{Arc, atomic::Ordering};
 
-fn bench_lookup(c: &mut Criterion) {
-	let mut group = c.benchmark_group("demand/lookup");
-	for (tracks, readers) in LOOKUP_SHAPES {
-		let id = BenchmarkId::from_parameter(format!("{tracks}t_{readers}r"));
+	use moq_net::{broadcast, track};
+	use swole::bench;
+
+	use super::{LOOKUPS, Lookup, Shape, Wakes, changed, shapes, tracks};
+
+	struct Edge {
+		_producer: broadcast::Producer,
+		_tracks: Vec<track::Producer>,
+		consumer: broadcast::Consumer,
+		demands: Vec<broadcast::Demand>,
+	}
+
+	fn edge_setup(shape: Shape) -> Edge {
 		let producer = broadcast::Info::new().produce();
-		let _tracks: Vec<_> = (0..tracks)
-			.map(|i| {
-				producer
-					.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
-					.unwrap()
-			})
-			.collect();
+		let _tracks = tracks(&producer, shape.tracks);
 		let consumer = producer.consume();
-		let _readers: Vec<_> = (0..readers)
+		let waiter = kio::Waiter::noop();
+		let mut demands: Vec<_> = (0..shape.handles).map(|_| producer.demand()).collect();
+		for demand in &mut demands {
+			assert_eq!(changed(demand, &waiter), Some(false));
+		}
+		Edge {
+			_producer: producer,
+			_tracks,
+			consumer,
+			demands,
+		}
+	}
+
+	#[bench(args = shapes([(1, 1), (100, 1), (10_000, 1), (1, 100), (10_000, 100)]), setup = edge_setup)]
+	fn edge(input: &mut Edge) {
+		let waiter = kio::Waiter::noop();
+		let reader = input.consumer.track("t0").unwrap().subscribe(None);
+		for demand in &mut input.demands {
+			assert_eq!(changed(demand, &waiter), Some(true));
+		}
+		drop(reader);
+		for demand in &mut input.demands {
+			assert_eq!(changed(demand, &waiter), Some(false));
+		}
+	}
+
+	struct Churn {
+		producer: broadcast::Producer,
+		_demands: Vec<broadcast::Demand>,
+		_tracks: Vec<track::Producer>,
+	}
+
+	fn churn_setup(shape: Shape) -> Churn {
+		let producer = broadcast::Info::new().produce();
+		let _demands = (0..shape.handles).map(|_| producer.demand()).collect();
+		let _tracks = tracks(&producer, shape.tracks);
+		Churn {
+			producer,
+			_demands,
+			_tracks,
+		}
+	}
+
+	/// Each `tracks` is one under the inbox capacity it grows to.
+	#[bench(args = shapes([(3, 1), (127, 1), (16_383, 1), (3, 100), (16_383, 100)]), setup = churn_setup)]
+	fn churn(input: &Churn) {
+		drop(
+			input
+				.producer
+				.create_track("churn", track::Info::default().with_max_age(None))
+				.unwrap(),
+		)
+	}
+
+	struct Looking {
+		_producer: broadcast::Producer,
+		_tracks: Vec<track::Producer>,
+		consumer: broadcast::Consumer,
+		_readers: Vec<kio::Pending<track::Subscribing>>,
+		wakes: Arc<Wakes>,
+		waiter: kio::Waiter,
+		demand: broadcast::Demand,
+	}
+
+	fn lookup_setup(lookup: Lookup) -> Looking {
+		let producer = broadcast::Info::new().produce();
+		let _tracks = tracks(&producer, lookup.tracks);
+		let consumer = producer.consume();
+		let _readers = (0..lookup.readers)
 			.map(|_| consumer.track("t0").unwrap().subscribe(None))
 			.collect();
 		let wakes = Arc::new(Wakes::default());
@@ -132,24 +179,35 @@ fn bench_lookup(c: &mut Criterion) {
 		let mut demand = producer.demand();
 		assert_eq!(changed(&mut demand, &waiter), Some(true));
 		assert_eq!(changed(&mut demand, &waiter), None);
-		let mut lookups = 0;
-		group.bench_function(id, |b| {
-			b.iter(|| {
-				lookups += 1;
-				let subscriber = consumer.track("t0").unwrap().subscribe(None);
-				// Re-arm like a driver would, so every wake a lookup causes counts.
-				assert_eq!(changed(&mut demand, &waiter), None);
-				subscriber
-			})
-		});
-		let wakes = wakes.0.load(Ordering::Relaxed);
+		Looking {
+			_producer: producer,
+			_tracks,
+			consumer,
+			_readers,
+			wakes,
+			waiter,
+			demand,
+		}
+	}
+
+	/// A live lookup only reads the table, so any wake fails the bench.
+	fn unwoken(input: &mut Looking) {
 		assert_eq!(
-			wakes, 0,
-			"{tracks}t_{readers}r: {lookups} live lookups woke a demand watcher {wakes} times"
+			input.wakes.0.load(Ordering::Relaxed),
+			0,
+			"a live lookup woke a demand watcher"
 		);
 	}
-	group.finish();
+
+	#[bench(args = LOOKUPS.map(|(tracks, readers)| Lookup { tracks, readers }), setup = lookup_setup, after = unwoken)]
+	fn lookup(input: &mut Looking) -> kio::Pending<track::Subscribing> {
+		let subscriber = input.consumer.track("t0").unwrap().subscribe(None);
+		// Re-arm like a driver would, so every wake a lookup causes counts.
+		assert_eq!(changed(&mut input.demand, &input.waiter), None);
+		subscriber
+	}
 }
 
-criterion_group!(benches, bench_edge, bench_churn, bench_lookup);
-criterion_main!(benches);
+fn main() {
+	swole::main();
+}

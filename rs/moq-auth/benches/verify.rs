@@ -2,81 +2,30 @@
 //!
 //! `decide` is [`Policy::decide`] end to end, as the server answers a `connect`: it
 //! rereads the configured key source, imports the key, and verifies the token. The
-//! `stage` cases time each part alone: reading the file, parsing a key or set, decoding
-//! the header, looking up a `kid`, and verifying with a freshly imported (`cold`) or an
-//! already used (`warm`) key. `set` sweeps a key set's size against where the `kid`
-//! sits, and `refuse` times the refusals a client can provoke.
+//! `stage` benchmarks time each part alone: reading the file, parsing a key or set,
+//! decoding the header, looking up a `kid`, and verifying with a freshly imported
+//! (`verify_cold`) or an already used (`verify_warm`) key. `set` sweeps a key set's size
+//! against where the `kid` sits, and `refuse` times the refusals a client can provoke.
 //!
 //! `clients` runs concurrent requests on a multi-threaded runtime, including a burst of
-//! refusals and a key replaced and removed while they run, and prints each case's
-//! per-request latency percentiles after the run. `sessions` times a `connect` and its
-//! `end` against a server whose session limits count other live sessions. `http` is one
-//! `connect` as a relay sends it, a `POST /` over loopback TCP, for scale.
+//! refusals and a key replaced and removed while they run. `sessions` times a `connect`
+//! and its `end` against a server whose session limits count other live sessions. `http`
+//! is one `connect` as a relay sends it, a `POST /` over loopback TCP, for scale.
 //!
 //! Validity checks read a [`Manual`](kio::clock::Manual) clock, so every run decides the
-//! same way. Keys and tokens are generated once into `VERIFY_FIXTURE` (a fresh temporary
-//! directory by default); point repeated runs at one directory so they verify identical
-//! signatures. With `VERIFY_ITERATIONS=n`, the bench skips Criterion and runs the case
-//! named by `VERIFY_CASE` exactly `n` times, printing its allocations, so an external
-//! instruction counter divides by a known count:
+//! same way. Keys and tokens are generated once per process into a temporary directory, or
+//! into `VERIFY_FIXTURE` when set; point repeated runs at one directory so they verify
+//! identical signatures.
 //!
-//! ```bash
-//! cargo bench --manifest-path rs/moq-auth/Cargo.toml --bench verify --no-run
-//! VERIFY_FIXTURE=fixture VERIFY_CASE=verify/decide/ES256/file VERIFY_ITERATIONS=1000 \
-//!     perf stat -e instructions:u target/release/deps/verify-*
-//! ```
+//! Run with `cargo bench --manifest-path rs/moq-auth/Cargo.toml --bench verify`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::VecDeque;
-use std::hint::black_box;
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
-use criterion::Criterion;
 use moq_auth::serve::{Denial, Keys, Policy, Server};
-use moq_auth::{Algorithm, Bytes, Claims, Event, Grant, Key, KeyId, KeySet, Request, Transport, lease};
-
-/// Counts every allocation on every thread, including tokio's blocking pool that reads files,
-/// while [`COUNTING`] is set. Only the fixed-iteration mode sets it, so timed runs share no
-/// counter between threads.
-struct Counter;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-static ALLOCATED: AtomicU64 = AtomicU64::new(0);
-
-fn count(size: usize) {
-	if COUNTING.load(Ordering::Relaxed) {
-		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
-	}
-}
-
-#[global_allocator]
-static ALLOCATOR: Counter = Counter;
-
-unsafe impl GlobalAlloc for Counter {
-	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		count(layout.size());
-		unsafe { System.alloc(layout) }
-	}
-
-	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		count(layout.size());
-		unsafe { System.alloc_zeroed(layout) }
-	}
-
-	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		count(new_size);
-		unsafe { System.realloc(ptr, layout, new_size) }
-	}
-
-	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		unsafe { System.dealloc(ptr, layout) }
-	}
-}
+use moq_auth::{Algorithm, Claims, Event, Grant, Key, KeyId, KeySet, Request, Transport, lease};
 
 const ALGORITHMS: [Algorithm; 12] = [
 	Algorithm::HS256,
@@ -99,14 +48,11 @@ const SET_SIZES: [usize; 3] = [1, 16, 256];
 /// Keys in the directory and set that concurrent clients spread their tokens over.
 const SPREAD: usize = 16;
 
-/// Concurrent requests per iteration of a `clients` case.
+/// Concurrent requests per call of a `clients` case.
 const CLIENTS: [usize; 3] = [1, 16, 64];
 
 /// Live sessions in the server's table, for the `sessions` cases.
 const SESSIONS: [usize; 3] = [0, 1024, 16384];
-
-/// Per-request latencies kept for each concurrent case's percentiles: the most recent ones.
-const SAMPLES: usize = 1 << 16;
 
 /// Every token expires a year after the manual clock's start, or expired a second before it.
 fn claims(expires: kio::clock::Wall) -> Claims {
@@ -215,353 +161,469 @@ fn generate(root: &Path) {
 	write(&root.join("ready"), "");
 }
 
-/// A benchmark case: a name and the work one iteration does.
-type Case = (String, Box<dyn FnMut()>);
+/// A runtime whose clock is the manual one, so validity checks decide alike every run.
+struct Runtime {
+	runtime: tokio::runtime::Runtime,
+	_clock: kio::clock::Installed,
+}
 
-/// The most recent per-request latencies of one concurrent case.
-#[derive(Clone, Default)]
-struct Latencies(Arc<Mutex<VecDeque<Duration>>>);
+impl Runtime {
+	fn new(builder: &mut tokio::runtime::Builder) -> Self {
+		let runtime = builder.enable_all().build().unwrap();
+		let _clock = kio::clock::Manual::new().install(runtime.handle());
+		Self { runtime, _clock }
+	}
+}
 
-impl Latencies {
-	fn record(&self, elapsed: Duration) {
-		let mut samples = self.0.lock().unwrap();
-		if samples.len() == SAMPLES {
-			samples.pop_front();
+/// The runtime every case but `clients` runs on, entered by `main` so validity checks
+/// outside `block_on` read the manual clock too.
+static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new(&mut tokio::runtime::Builder::new_current_thread()));
+
+/// A multi-threaded runtime for the concurrent cases, started only by them.
+static POOL: LazyLock<Runtime> =
+	LazyLock::new(|| Runtime::new(tokio::runtime::Builder::new_multi_thread().worker_threads(4)));
+
+fn block_on<F: Future>(future: F) -> F::Output {
+	RUNTIME.runtime.block_on(future)
+}
+
+/// Where `main` puts the fixture unless `VERIFY_FIXTURE` names a directory.
+static TEMPORARY: OnceLock<PathBuf> = OnceLock::new();
+
+/// The generated keys and tokens, built on first use.
+fn fixture() -> &'static Path {
+	static ROOT: LazyLock<PathBuf> = LazyLock::new(|| match std::env::var_os("VERIFY_FIXTURE") {
+		Some(root) => {
+			let root = PathBuf::from(root);
+			if !root.join("ready").exists() {
+				// Concurrent benchmark processes each generate their own and the first rename
+				// wins, so none reads a half-written fixture.
+				std::fs::create_dir_all(root.parent().unwrap_or(Path::new("."))).unwrap();
+				let staged = tempfile::tempdir_in(root.parent().unwrap_or(Path::new("."))).unwrap();
+				generate(staged.path());
+				let _ = std::fs::rename(staged.path(), &root);
+			}
+			assert!(
+				root.join("ready").exists(),
+				"{} holds no complete fixture",
+				root.display()
+			);
+			root.canonicalize().unwrap()
 		}
-		samples.push_back(elapsed);
+		None => {
+			let root = TEMPORARY.get().expect("main sets the temporary directory");
+			generate(root);
+			root.canonicalize().unwrap()
+		}
+	});
+	&ROOT
+}
+
+fn read(path: impl AsRef<Path>) -> String {
+	std::fs::read_to_string(fixture().join(path)).unwrap()
+}
+
+/// A request presenting `token`.
+fn request(token: &str) -> Request {
+	let mut request = Request::new("bench", Transport::Quic, "/demo");
+	request.query = Some(format!("jwt={token}"));
+	request
+}
+
+/// A policy verifying with `keys`, and a request it answers.
+struct Decide {
+	policy: Policy,
+	request: Request,
+}
+
+/// Asserts `token` is admitted or refused as expected before any call.
+fn decider(keys: Keys, token: String, admit: bool) -> Decide {
+	let mut policy = Policy::default();
+	policy.keys = Some(keys);
+	let request = request(&token);
+	let decided = block_on(policy.decide(&request));
+	assert_eq!(decided.is_ok(), admit, "{decided:?}");
+	Decide { policy, request }
+}
+
+/// One algorithm's key, in one of the three places a server reads keys from.
+#[derive(Clone, Copy)]
+struct Source {
+	algorithm: Algorithm,
+	keys: &'static str,
+}
+
+impl fmt::Display for Source {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{:?}/{}", self.algorithm, self.keys)
+	}
+}
+
+fn sources() -> Vec<Source> {
+	ALGORITHMS
+		.into_iter()
+		.flat_map(|algorithm| ["file", "dir", "set"].map(|keys| Source { algorithm, keys }))
+		.collect()
+}
+
+fn source(source: Source) -> Decide {
+	let dir = fixture().join(format!("{:?}", source.algorithm));
+	let keys = match source.keys {
+		"file" => Keys::File(dir.join("key.jwk")),
+		"dir" => Keys::Dir(dir.join("dir")),
+		_ => Keys::Set(dir.join("set.jwks")),
+	};
+	decider(keys, read(dir.join("token")), true)
+}
+
+#[swole::bench(args = sources(), setup = source)]
+fn decide(input: &Decide) -> Result<Grant, Denial> {
+	block_on(input.policy.decide(&input.request))
+}
+
+mod stage {
+	use moq_auth::{Algorithm, Jwk, Key, KeySet};
+	use swole::bench;
+
+	use super::{ALGORITHMS, SET_SIZES, block_on, fixture, read};
+
+	fn key_text(algorithm: Algorithm) -> String {
+		read(format!("{algorithm:?}/key.jwk"))
 	}
 
-	fn summary(&self) -> Option<String> {
-		let mut samples: Vec<Duration> = self.0.lock().unwrap().iter().copied().collect();
-		if samples.is_empty() {
-			return None;
-		}
-		samples.sort_unstable();
-		let at = |quantile: f64| samples[((samples.len() - 1) as f64 * quantile).round() as usize];
-		Some(format!(
-			"{} requests: p50 {:?}, p95 {:?}, p99 {:?}, max {:?}",
-			samples.len(),
-			at(0.5),
-			at(0.95),
-			at(0.99),
-			at(1.0),
-		))
+	#[bench(args = ALGORITHMS, setup = key_text)]
+	fn parse_key(text: &str) -> Key {
+		text.parse().unwrap()
+	}
+
+	/// A used key, so it holds its crypto material, and a token it verifies.
+	fn used(algorithm: Algorithm) -> (Key, String) {
+		let key = Key::from_file(fixture().join(format!("{algorithm:?}/key.jwk"))).unwrap();
+		let token = read(format!("{algorithm:?}/token"));
+		key.verify(&token).unwrap();
+		(key, token)
+	}
+
+	fn exported(algorithm: Algorithm) -> (Jwk, String) {
+		let (key, token) = used(algorithm);
+		(key.export(), token)
+	}
+
+	/// A fresh import derives the crypto material on first use.
+	#[bench(args = ALGORITHMS, setup = exported)]
+	fn verify_cold((jwk, token): &(Jwk, String)) -> moq_auth::Claims {
+		let key = jwk.clone().import().unwrap();
+		key.verify(token).unwrap()
+	}
+
+	#[bench(args = ALGORITHMS, setup = exported)]
+	fn import((jwk, _): &(Jwk, String)) -> Key {
+		jwk.clone().import().unwrap()
+	}
+
+	#[bench(args = ALGORITHMS, setup = used)]
+	fn verify_warm((key, token): &(Key, String)) -> moq_auth::Claims {
+		key.verify(token).unwrap()
+	}
+
+	fn es256_key() -> std::path::PathBuf {
+		fixture().join("ES256").join("key.jwk")
+	}
+
+	#[bench(setup = es256_key)]
+	fn read_tokio(path: &std::path::Path) -> String {
+		block_on(tokio::fs::read_to_string(path)).unwrap()
+	}
+
+	#[bench(setup = es256_key)]
+	fn read_std(path: &std::path::Path) -> String {
+		std::fs::read_to_string(path).unwrap()
+	}
+
+	fn es256_token() -> String {
+		read("ES256/token")
+	}
+
+	#[bench(setup = es256_token)]
+	fn header(token: &str) -> jsonwebtoken::Header {
+		jsonwebtoken::decode_header(token).unwrap()
+	}
+
+	fn set_text(size: usize) -> String {
+		read(format!("set/{size}.jwks"))
+	}
+
+	#[bench(args = SET_SIZES, setup = set_text)]
+	fn parse_set(text: &str) -> KeySet {
+		text.parse().unwrap()
+	}
+
+	/// A set and the `kid` of its last key.
+	fn set(size: usize) -> (KeySet, String) {
+		(set_text(size).parse().unwrap(), format!("k{}", size - 1))
+	}
+
+	#[bench(args = SET_SIZES, setup = set)]
+	fn lookup((set, kid): &(KeySet, String)) -> std::sync::Arc<Key> {
+		set.find(kid).unwrap()
+	}
+}
+
+/// A set's size and which `kid` the token carries.
+#[derive(Clone, Copy)]
+struct Lookup {
+	size: usize,
+	kid: &'static str,
+}
+
+impl fmt::Display for Lookup {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.size, self.kid)
+	}
+}
+
+fn lookups() -> Vec<Lookup> {
+	SET_SIZES
+		.into_iter()
+		.flat_map(|size| ["first", "last", "missing"].map(|kid| Lookup { size, kid }))
+		.collect()
+}
+
+fn lookup(lookup: Lookup) -> Decide {
+	let token = match lookup.kid {
+		"last" => read(format!("set/{}-last", lookup.size)),
+		kid => read(format!("set/{kid}")),
+	};
+	let keys = Keys::Set(fixture().join("set").join(format!("{}.jwks", lookup.size)));
+	decider(keys, token, lookup.kid != "missing")
+}
+
+#[swole::bench(args = lookups(), setup = lookup)]
+fn set(input: &Decide) -> Result<Grant, Denial> {
+	block_on(input.policy.decide(&input.request))
+}
+
+const REFUSALS: [&str; 5] = ["expired", "forged", "unknown_kid", "missing_kid", "malformed"];
+
+fn refusal(refusal: &str) -> Decide {
+	let keys = Keys::Dir(fixture().join("ES256").join("dir"));
+	decider(keys, read(format!("refuse/{refusal}")), false)
+}
+
+#[swole::bench(args = REFUSALS, setup = refusal)]
+fn refuse(input: &Decide) -> Result<Grant, Denial> {
+	block_on(input.policy.decide(&input.request))
+}
+
+/// How many concurrent requests, against which keys.
+#[derive(Clone, Copy)]
+struct Crowd {
+	clients: usize,
+	keys: &'static str,
+}
+
+impl fmt::Display for Crowd {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}/{}", self.clients, self.keys)
 	}
 }
 
 /// Which outcomes a concurrent case accepts from each request.
 type Expect = fn(&Result<Grant, Denial>) -> bool;
 
-struct Bench {
-	root: PathBuf,
-	runtime: Arc<tokio::runtime::Runtime>,
-	/// A multi-threaded runtime for the concurrent cases.
-	pool: Arc<tokio::runtime::Runtime>,
-	cases: Vec<Case>,
-	latencies: Vec<(String, Latencies)>,
+/// A shared policy and the requests one call sends it at once. With `rotate`, each call also
+/// replaces or removes that directory's only key while the requests run.
+struct Clients {
+	policy: Arc<Policy>,
+	requests: Vec<Arc<Request>>,
+	rotate: Option<PathBuf>,
+	expect: Expect,
+	version: usize,
 }
 
-impl Bench {
-	fn read(&self, path: impl AsRef<Path>) -> String {
-		std::fs::read_to_string(self.root.join(path)).unwrap()
-	}
+fn crowds() -> Vec<Crowd> {
+	let mut crowds: Vec<Crowd> = CLIENTS
+		.into_iter()
+		.flat_map(|clients| ["file", "dir16", "set16"].map(|keys| Crowd { clients, keys }))
+		.collect();
+	crowds.push(Crowd {
+		clients: 16,
+		keys: "rotate",
+	});
+	crowds.push(Crowd {
+		clients: 64,
+		keys: "refuse",
+	});
+	crowds
+}
 
-	fn add(&mut self, name: String, run: impl FnMut() + 'static) {
-		self.cases.push((name, Box::new(run)));
-	}
-
-	/// Time `Policy::decide` for `token`, asserting it is admitted or refused as expected.
-	fn decide(&mut self, name: String, keys: Keys, token: String, admit: bool) {
-		let mut policy = Policy::default();
-		policy.keys = Some(keys);
-		let mut request = Request::new("bench", Transport::Quic, "/demo");
-		request.query = Some(format!("jwt={token}"));
-		let runtime = self.runtime.clone();
-		let decided = runtime.block_on(policy.decide(&request));
-		assert_eq!(decided.is_ok(), admit, "{name}: {decided:?}");
-		self.add(name, move || {
-			black_box(runtime.block_on(policy.decide(black_box(&request))).is_ok());
-		});
-	}
-
-	/// Time `clients` concurrent `Policy::decide` calls, presenting `tokens` in turn. With
-	/// `rotate`, each iteration also replaces or removes that directory's only key while
-	/// the requests run.
-	fn clients(&mut self, name: String, keys: Keys, tokens: &[String], rotate: Option<PathBuf>, expect: Expect) {
-		let clients: usize = name.split('/').nth(2).unwrap().parse().unwrap();
-		let mut policy = Policy::default();
-		policy.keys = Some(keys);
-		let policy = Arc::new(policy);
-		let requests: Vec<Arc<Request>> = (0..clients)
-			.map(|client| {
-				let mut request = Request::new("bench", Transport::Quic, "/demo");
-				request.query = Some(format!("jwt={}", tokens[client % tokens.len()]));
-				Arc::new(request)
-			})
-			.collect();
-		let latencies = Latencies::default();
-		self.latencies.push((name.clone(), latencies.clone()));
-		let pool = self.pool.clone();
-		let mut version = 0;
-		self.add(name, move || {
-			version += 1;
-			pool.block_on(async {
-				let rotation = rotate
-					.clone()
-					.map(|dir| tokio::task::spawn_blocking(move || rotate_key(&dir, version)));
-				let tasks: Vec<_> = requests
-					.iter()
-					.map(|request| {
-						let (policy, request) = (policy.clone(), request.clone());
-						tokio::spawn(async move { timed(policy.decide(&request)).await })
-					})
-					.collect();
-				if let Some(rotation) = rotation {
-					rotation.await.unwrap();
-				}
-				for task in tasks {
-					let (decided, elapsed) = task.await.unwrap();
-					assert!(expect(&decided), "{decided:?}");
-					latencies.record(elapsed);
-				}
-			});
-		});
-	}
-
-	/// Time one `connect` as a relay asks it: a `POST /` to the server over loopback TCP,
-	/// on a kept-alive connection, reading and decoding the grant it answers with.
-	fn http(&mut self, name: String, keys: Keys, token: String) {
-		let mut policy = Policy::default();
-		policy.keys = Some(keys);
-		let server = Server::new(policy).unwrap();
-		let runtime = self.runtime.clone();
-		let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-		let url = format!("http://{}/", listener.local_addr().unwrap());
-		runtime.spawn(async move { server.serve(listener).await });
-		let mut request = Request::new("bench", Transport::Quic, "/demo");
-		request.query = Some(format!("jwt={token}"));
-		// reqwest reads rustls's process default, which a binary's main installs.
-		moq_crypto::provider::install_default().unwrap();
-		let client = reqwest::Client::new();
-		let post = move || {
-			let response = client.post(&url).json(&request).send();
-			async move {
-				let response = response.await.unwrap().error_for_status().unwrap();
-				response.json::<Grant>().await.unwrap()
-			}
-		};
-		let grant = runtime.block_on(post());
-		assert_eq!(
-			grant.publish.path,
-			[moq_auth::Prefix::all()].into_iter().collect(),
-			"{name}"
-		);
-		self.add(name, move || {
-			black_box(runtime.block_on(post()));
-		});
-	}
-
-	/// Time one `connect` and its `end` against a server whose session limits count `live`
-	/// other sessions, each from its own address with its own token.
-	fn sessions(&mut self, live: usize) {
-		let path = self.root.join("HS256").join("key.jwk");
-		let key = Key::from_file(&path).unwrap();
-		let mut policy = Policy::default();
-		policy.keys = Some(Keys::File(path));
-		policy.limits.token = Some(usize::MAX);
-		policy.limits.remote = Some(usize::MAX);
-		policy.revalidate = Some(Duration::from_secs(60));
-		policy.expires = Some(Duration::from_secs(3600));
-		let server = Server::new(policy).unwrap();
-		let request = |index: usize| {
-			let [_, a, b, c] = (index as u32).to_be_bytes();
-			let mut request = Request::new("bench", Transport::Quic, "/demo");
-			request.remote = Some(([10, a, b, c], 4433).into());
-			let claims = valid().with_publish([format!("s{index}").parse().unwrap()]);
-			request.query = Some(format!("jwt={}", key.sign(&claims).unwrap()));
-			request
-		};
-		for index in 0..live {
-			self.runtime.block_on(server.answer(&request(index))).unwrap();
-		}
-		let connect = request(live);
-		let mut end = connect.clone();
-		end.event = Event::End {
-			reason: lease::Reason::Shutdown,
-			duration: Duration::ZERO,
-			bytes: Bytes::default(),
-		};
-		let runtime = self.runtime.clone();
-		self.add(format!("verify/sessions/{live}"), move || {
-			runtime.block_on(async {
-				black_box(server.answer(black_box(&connect)).await.unwrap());
-				black_box(server.answer(black_box(&end)).await.unwrap());
-			});
-		});
-	}
-
-	fn cases(&mut self) {
-		for algorithm in ALGORITHMS {
-			let name = format!("{algorithm:?}");
-			let dir = self.root.join(&name);
-			let token = self.read(dir.join("token"));
-			self.decide(
-				format!("verify/decide/{name}/file"),
-				Keys::File(dir.join("key.jwk")),
-				token.clone(),
-				true,
-			);
-			self.decide(
-				format!("verify/decide/{name}/dir"),
-				Keys::Dir(dir.join("dir")),
-				token.clone(),
-				true,
-			);
-			self.decide(
-				format!("verify/decide/{name}/set"),
-				Keys::Set(dir.join("set.jwks")),
-				token.clone(),
-				true,
-			);
-
-			let text = self.read(dir.join("key.jwk"));
-			self.add(format!("verify/stage/{name}/parse_key"), move || {
-				black_box(black_box(text.as_str()).parse::<Key>().unwrap());
-			});
-
-			// A fresh import derives the crypto material on first use; a used key has it cached.
-			let key = Key::from_file(dir.join("key.jwk")).unwrap();
-			key.verify(&token).unwrap();
-			let jwk = key.export();
-			let cold = token.clone();
-			self.add(format!("verify/stage/{name}/verify_cold"), move || {
-				let key = black_box(jwk.clone()).import().unwrap();
-				black_box(key.verify(black_box(&cold)).unwrap());
-			});
-			let jwk = key.export();
-			self.add(format!("verify/stage/{name}/import"), move || {
-				black_box(black_box(jwk.clone()).import().unwrap());
-			});
-			self.add(format!("verify/stage/{name}/verify_warm"), move || {
-				black_box(key.verify(black_box(&token)).unwrap());
-			});
-		}
-
-		let path = self.root.join("ES256").join("key.jwk");
-		let runtime = self.runtime.clone();
-		let tokio_path = path.clone();
-		self.add("verify/stage/read_tokio".into(), move || {
-			black_box(runtime.block_on(tokio::fs::read_to_string(&tokio_path)).unwrap());
-		});
-		self.add("verify/stage/read_std".into(), move || {
-			black_box(std::fs::read_to_string(&path).unwrap());
-		});
-		let token = self.read("ES256/token");
-		self.add("verify/stage/header".into(), move || {
-			black_box(jsonwebtoken::decode_header(black_box(&token)).unwrap());
-		});
-
-		let first = self.read("set/first");
-		let missing = self.read("set/missing");
-		for size in SET_SIZES {
-			let path = self.root.join("set").join(format!("{size}.jwks"));
-			let last = self.read(format!("set/{size}-last"));
-			for (kid, token, admit) in [
-				("first", &first, true),
-				("last", &last, true),
-				("missing", &missing, false),
-			] {
-				self.decide(
-					format!("verify/set/{size}/{kid}"),
-					Keys::Set(path.clone()),
-					token.clone(),
-					admit,
-				);
-			}
-
-			let text = self.read(&path);
-			let set: KeySet = text.parse().unwrap();
-			self.add(format!("verify/stage/parse_set/{size}"), move || {
-				black_box(black_box(text.as_str()).parse::<KeySet>().unwrap());
-			});
-			let kid = format!("k{}", size - 1);
-			self.add(format!("verify/stage/lookup/{size}"), move || {
-				black_box(set.find(black_box(&kid)).unwrap());
-			});
-		}
-
-		let dir = self.root.join("ES256").join("dir");
-		let refusals = ["expired", "forged", "unknown_kid", "missing_kid", "malformed"];
-		for refusal in refusals {
-			let token = self.read(format!("refuse/{refusal}"));
-			self.decide(format!("verify/refuse/{refusal}"), Keys::Dir(dir.clone()), token, false);
-		}
-
-		let es256 = [self.read("ES256/token")];
-		let spread: Vec<String> = (0..SPREAD).map(|index| self.read(format!("tokens/k{index}"))).collect();
-		for clients in CLIENTS {
-			let file = Keys::File(self.root.join("ES256").join("key.jwk"));
-			self.clients(
-				format!("verify/clients/{clients}/file"),
-				file,
-				&es256,
-				None,
-				Result::is_ok,
-			);
-			let spread_dir = Keys::Dir(self.root.join("spread"));
-			let name = format!("verify/clients/{clients}/dir{SPREAD}");
-			self.clients(name, spread_dir, &spread, None, Result::is_ok);
-			let set = Keys::Set(self.root.join("set").join(format!("{SPREAD}.jwks")));
-			let name = format!("verify/clients/{clients}/set{SPREAD}");
-			self.clients(name, set, &spread, None, Result::is_ok);
-		}
-
+fn crowd(crowd: Crowd) -> Clients {
+	let root = fixture();
+	let spread = || (0..SPREAD).map(|index| read(format!("tokens/k{index}"))).collect();
+	let (keys, tokens, rotate, expect): (Keys, Vec<String>, Option<PathBuf>, Expect) = match crowd.keys {
+		"file" => (
+			Keys::File(root.join("ES256").join("key.jwk")),
+			vec![read("ES256/token")],
+			None,
+			Result::is_ok,
+		),
+		"dir16" => (Keys::Dir(root.join("spread")), spread(), None, Result::is_ok),
+		"set16" => (
+			Keys::Set(root.join("set").join(format!("{SPREAD}.jwks"))),
+			spread(),
+			None,
+			Result::is_ok,
+		),
 		// Tokens from both versions while the key is replaced and removed underneath them.
-		let live = self.root.join("rotate").join("live");
-		rotate_key(&live, 0);
-		let versions = [self.read("rotate/a.jwt"), self.read("rotate/b.jwt")];
-		self.clients(
-			"verify/clients/16/rotate".into(),
-			Keys::Dir(live.clone()),
-			&versions,
-			Some(live),
-			|decided| matches!(decided, Ok(_) | Err(Denial::InvalidToken(_) | Denial::UnknownKey)),
-		);
-		let refusals: Vec<String> = refusals
-			.iter()
-			.map(|refusal| self.read(format!("refuse/{refusal}")))
-			.collect();
-		self.clients(
-			"verify/clients/64/refuse".into(),
-			Keys::Dir(dir),
-			&refusals,
+		"rotate" => {
+			let live = root.join("rotate").join("live");
+			rotate_key(&live, 0);
+			(
+				Keys::Dir(live.clone()),
+				vec![read("rotate/a.jwt"), read("rotate/b.jwt")],
+				Some(live),
+				|decided| matches!(decided, Ok(_) | Err(Denial::InvalidToken(_) | Denial::UnknownKey)),
+			)
+		}
+		_ => (
+			Keys::Dir(root.join("ES256").join("dir")),
+			REFUSALS
+				.iter()
+				.map(|refusal| read(format!("refuse/{refusal}")))
+				.collect(),
 			None,
 			Result::is_err,
-		);
-
-		for live in SESSIONS {
-			self.sessions(live);
-		}
-
-		for algorithm in [Algorithm::HS256, Algorithm::ES256] {
-			let name = format!("{algorithm:?}");
-			let keys = Keys::File(self.root.join(&name).join("key.jwk"));
-			let token = self.read(format!("{name}/token"));
-			self.http(format!("verify/http/{name}"), keys, token);
-		}
+		),
+	};
+	let mut policy = Policy::default();
+	policy.keys = Some(keys);
+	let requests = (0..crowd.clients)
+		.map(|client| Arc::new(request(&tokens[client % tokens.len()])))
+		.collect();
+	Clients {
+		policy: Arc::new(policy),
+		requests,
+		rotate,
+		expect,
+		version: 0,
 	}
 }
 
-/// Run `future`, returning its output and the host time it took.
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "request latency is host time; the manual clock only decides validity"
-)]
-async fn timed<T>(future: impl Future<Output = T>) -> (T, Duration) {
-	let start = std::time::Instant::now();
-	let output = future.await;
-	(output, start.elapsed())
+#[swole::bench(args = crowds(), setup = crowd)]
+fn clients(input: &mut Clients) {
+	input.version += 1;
+	let version = input.version;
+	POOL.runtime.block_on(async {
+		let rotation = input
+			.rotate
+			.clone()
+			.map(|dir| tokio::task::spawn_blocking(move || rotate_key(&dir, version)));
+		let tasks: Vec<_> = input
+			.requests
+			.iter()
+			.map(|request| {
+				let (policy, request) = (input.policy.clone(), request.clone());
+				tokio::spawn(async move { policy.decide(&request).await })
+			})
+			.collect();
+		if let Some(rotation) = rotation {
+			rotation.await.unwrap();
+		}
+		for task in tasks {
+			let decided = task.await.unwrap();
+			assert!((input.expect)(&decided), "{decided:?}");
+		}
+	});
+}
+
+/// A server whose session limits count other live sessions, and one more session's `connect`
+/// and `end`.
+struct Sessions {
+	server: Server,
+	connect: Request,
+	end: Request,
+}
+
+/// A server already holding `live` sessions, each from its own address with its own token.
+fn live(live: usize) -> Sessions {
+	let path = fixture().join("HS256").join("key.jwk");
+	let key = Key::from_file(&path).unwrap();
+	let mut policy = Policy::default();
+	policy.keys = Some(Keys::File(path));
+	policy.limits.token = Some(usize::MAX);
+	policy.limits.remote = Some(usize::MAX);
+	policy.revalidate = Some(Duration::from_secs(60));
+	policy.expires = Some(Duration::from_secs(3600));
+	let server = Server::new(policy).unwrap();
+	let request = |index: usize| {
+		let [_, a, b, c] = (index as u32).to_be_bytes();
+		let mut request = Request::new("bench", Transport::Quic, "/demo");
+		request.remote = Some(([10, a, b, c], 4433).into());
+		let claims = valid().with_publish([format!("s{index}").parse().unwrap()]);
+		request.query = Some(format!("jwt={}", key.sign(&claims).unwrap()));
+		request
+	};
+	for index in 0..live {
+		block_on(server.answer(&request(index))).unwrap();
+	}
+	let connect = request(live);
+	let mut end = connect.clone();
+	end.event = Event::End {
+		reason: lease::Reason::Shutdown,
+		duration: Duration::ZERO,
+		bytes: moq_auth::Bytes::default(),
+	};
+	Sessions { server, connect, end }
+}
+
+/// One `connect` and its `end`.
+#[swole::bench(args = SESSIONS, setup = live)]
+fn sessions(input: &Sessions) -> (Option<Grant>, Option<Grant>) {
+	block_on(async {
+		let connect = input.server.answer(&input.connect).await.unwrap();
+		let end = input.server.answer(&input.end).await.unwrap();
+		(connect, end)
+	})
+}
+
+/// A kept-alive client of a server on loopback TCP, and the `connect` it posts.
+struct Http {
+	client: reqwest::Client,
+	url: String,
+	request: Request,
+}
+
+impl Http {
+	async fn post(&self) -> Grant {
+		let response = self.client.post(&self.url).json(&self.request).send().await.unwrap();
+		response.error_for_status().unwrap().json::<Grant>().await.unwrap()
+	}
+}
+
+fn server(algorithm: Algorithm) -> Http {
+	let name = format!("{algorithm:?}");
+	let mut policy = Policy::default();
+	policy.keys = Some(Keys::File(fixture().join(&name).join("key.jwk")));
+	let server = Server::new(policy).unwrap();
+	let listener = block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+	let url = format!("http://{}/", listener.local_addr().unwrap());
+	RUNTIME.runtime.spawn(async move { server.serve(listener).await });
+	// reqwest reads rustls's process default, which a binary's main installs.
+	moq_crypto::provider::install_default().unwrap();
+	let http = Http {
+		client: reqwest::Client::new(),
+		url,
+		request: request(&read(format!("{name}/token"))),
+	};
+	let grant = block_on(http.post());
+	assert_eq!(grant.publish.path, [moq_auth::Prefix::all()].into_iter().collect());
+	http
+}
+
+/// One `connect` as a relay asks it: a `POST /`, reading and decoding the grant it answers.
+#[swole::bench(args = [Algorithm::HS256, Algorithm::ES256], setup = server)]
+fn http(input: &Http) -> Grant {
+	block_on(input.post())
 }
 
 /// Install version `a` or `b` of the rotating key in `dir` by an atomic rename, or remove it,
@@ -577,72 +639,14 @@ fn rotate_key(dir: &Path, version: usize) {
 			return;
 		}
 	};
-	let staged = dir.join(format!("{version}.tmp"));
+	let staged = dir.join(format!("{}-{version}.tmp", std::process::id()));
 	std::fs::copy(dir.parent().unwrap().join(source), &staged).unwrap();
 	std::fs::rename(&staged, &live).unwrap();
 }
 
 fn main() {
-	let fixture = std::env::var_os("VERIFY_FIXTURE");
 	let temporary = tempfile::tempdir().unwrap();
-	let root = fixture.map(PathBuf::from).unwrap_or_else(|| temporary.path().into());
-	generate(&root);
-	let root = root.canonicalize().unwrap();
-
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let _clock = kio::clock::Manual::new().install(runtime.handle());
-	let pool = tokio::runtime::Builder::new_multi_thread()
-		.worker_threads(4)
-		.enable_all()
-		.build()
-		.unwrap();
-	let _pool_clock = kio::clock::Manual::new().install(pool.handle());
-	// Hold the runtime context so validity checks outside `block_on` read the manual clock too.
-	let _enter = runtime.enter();
-	let mut bench = Bench {
-		root,
-		runtime: Arc::new(runtime),
-		pool: Arc::new(pool),
-		cases: Vec::new(),
-		latencies: Vec::new(),
-	};
-	bench.cases();
-
-	if let Some(iterations) = std::env::var_os("VERIFY_ITERATIONS") {
-		let iterations: u64 = iterations.to_str().unwrap().parse().unwrap();
-		let name = std::env::var("VERIFY_CASE").expect("VERIFY_CASE names the case to run");
-		let (_, run) = bench
-			.cases
-			.iter_mut()
-			.find(|(case, _)| *case == name)
-			.unwrap_or_else(|| panic!("no case {name}"));
-		// One untimed run first, so lazily initialized statics are not counted.
-		run();
-		COUNTING.store(true, Ordering::Relaxed);
-		for _ in 0..iterations {
-			run();
-		}
-		COUNTING.store(false, Ordering::Relaxed);
-		let per = |total: &AtomicU64| total.load(Ordering::Relaxed) as f64 / iterations.max(1) as f64;
-		println!(
-			"{name}: {:.1} allocations, {:.0} bytes allocated per iteration",
-			per(&ALLOCATIONS),
-			per(&ALLOCATED),
-		);
-	} else {
-		let mut criterion = Criterion::default().configure_from_args();
-		for (name, run) in &mut bench.cases {
-			criterion.bench_function(name, |b| b.iter(&mut *run));
-		}
-		criterion.final_summary();
-	}
-
-	for (name, latencies) in &bench.latencies {
-		if let Some(summary) = latencies.summary() {
-			println!("{name}: {summary}");
-		}
-	}
+	TEMPORARY.set(temporary.path().into()).unwrap();
+	let _enter = RUNTIME.runtime.enter();
+	swole::main();
 }

@@ -128,7 +128,8 @@
 //! iteration adds to the backlog too, so such a walk also lifts every point far above one
 //! reader's constant.
 //!
-//! Run with `cargo bench -p moq-net --bench track`.
+//! Run with `cargo bench -p moq-net --features fuzz --bench track`; `--features async` alone
+//! leaves out `track_subscriber_churn_drops`.
 
 #![expect(
 	clippy::disallowed_methods,
@@ -136,6 +137,7 @@
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
+use std::fmt;
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::task::Poll;
@@ -144,8 +146,25 @@ use std::time::{Duration, Instant as WallInstant};
 use moq_net::time::Instant;
 
 use bytes::Bytes;
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Error, Timestamp, broadcast, cache, group, track};
+use swole::{Iterations, bench};
+
+/// One case's parameters, named as the case is.
+#[derive(Clone)]
+struct Case<T> {
+	name: String,
+	params: T,
+}
+
+impl<T> fmt::Display for Case<T> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(&self.name)
+	}
+}
+
+fn case<T>(name: String, params: T) -> Case<T> {
+	Case { name, params }
+}
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
@@ -186,7 +205,7 @@ const ABORTED: [usize; 4] = [1, 8, 64, 512];
 /// Small shared payload so the benchmark measures model overhead, not allocation.
 const PAYLOAD: usize = 64;
 
-/// Small enough to reach steady-state eviction during Criterion warm-up.
+/// Small enough to reach steady-state eviction while warming up.
 const CACHE_CAPACITY: u64 = 64 * 1024;
 
 /// Steady viewers that stay subscribed while others churn.
@@ -424,20 +443,23 @@ const HIGH: u64 = 1 << 40;
 /// Groups written below the far-ahead key before `track_high_key` measures.
 const BACKLOG: [usize; 3] = [0, 1024, 16_384];
 
-fn bench_high_key(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_high_key");
-	for subscribers in FANOUT {
-		for backlog in BACKLOG {
-			group.throughput(Throughput::Elements(subscribers as u64));
-			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
-			let mut fixture = None;
-			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), backlog), |b| {
-				let high = fixture.get_or_insert_with(|| HighKey::new(subscribers, backlog));
-				b.iter(|| high.step());
-			});
-		}
-	}
-	group.finish();
+fn high_key_cases() -> Vec<Case<(usize, usize)>> {
+	FANOUT
+		.into_iter()
+		.flat_map(|subscribers| {
+			BACKLOG.map(|backlog| case(format!("{subscribers}r/{backlog}"), (subscribers, backlog)))
+		})
+		.collect()
+}
+
+fn high_key(case: Case<(usize, usize)>) -> HighKey {
+	let (subscribers, backlog) = case.params;
+	HighKey::new(subscribers, backlog)
+}
+
+#[bench(args = high_key_cases(), setup = high_key, items = |case: Case<(usize, usize)>| case.params.0)]
+fn track_high_key(high: &mut HighKey) {
+	high.step();
 }
 
 /// A cached aborted prefix followed by one live group.
@@ -494,6 +516,7 @@ struct Swept {
 	_tracks: Vec<track::Producer>,
 	pool: cache::Pool,
 	now: Instant,
+	waiter: kio::Waiter,
 }
 
 impl Swept {
@@ -520,6 +543,7 @@ impl Swept {
 			_tracks: tracks,
 			pool,
 			now,
+			waiter: kio::Waiter::noop(),
 		}
 	}
 }
@@ -572,6 +596,8 @@ struct Aged {
 	reads: Vec<(moq_net::group::Consumer, kio::Waiter)>,
 	pool: cache::Pool,
 	now: Instant,
+	/// A collection's own waiter.
+	waiter: kio::Waiter,
 }
 
 impl Aged {
@@ -621,154 +647,150 @@ impl Aged {
 			reads,
 			pool,
 			now,
+			waiter: kio::Waiter::noop(),
 		}
 	}
 }
 
-fn bench_wall(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_wall");
-	for tracks in AGED_TRACKS {
-		for groups in AGED_GROUPS {
-			// Skip the largest table: setup alone would dominate the run.
-			if tracks * groups > 1_000_000 {
-				continue;
-			}
-			let id = format!("{tracks}x{groups}");
-			// A collection with every deadline armed and none due: every origin poll.
-			group.throughput(Throughput::Elements(1));
-			group.bench_function(BenchmarkId::new("idle", &id), |b| {
-				let aged = Aged::new(tracks, groups);
-				let waiter = kio::Waiter::noop();
-				b.iter(|| black_box(aged.pool.poll(aged.now, &waiter)));
-			});
-			// Re-polling one parked read re-arms its deadline.
-			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
-				let mut aged = Aged::new(tracks, groups);
-				b.iter(|| {
-					let (read, waiter) = &mut aged.reads[0];
-					assert!(black_box(read.poll_read_frame(waiter)).is_pending());
-				});
-			});
-			// The collection that releases every parked read at once. Its cost is per track
-			// released, so the cached groups behind each read are not swept.
-			if groups != 1 {
-				continue;
-			}
-			group.throughput(Throughput::Elements(tracks as u64));
-			group.bench_function(BenchmarkId::new("due", &id), |b| {
-				b.iter_batched(
-					|| Aged::new(tracks, groups),
-					|aged| {
-						// Past every deadline, which setup armed after `now`.
-						black_box(
-							aged.pool
-								.poll(aged.now.saturating_add(2 * AGED_BUDGET), &kio::Waiter::noop()),
-						);
-						aged
-					},
-					BatchSize::PerIteration,
-				);
-			});
-		}
-	}
-	group.finish();
+fn wall_cases() -> Vec<Case<(usize, usize)>> {
+	AGED_TRACKS
+		.into_iter()
+		.flat_map(|tracks| AGED_GROUPS.map(|groups| (tracks, groups)))
+		// Skip the largest table: setup alone would dominate the run.
+		.filter(|(tracks, groups)| tracks * groups <= 1_000_000)
+		.map(|(tracks, groups)| case(format!("{tracks}x{groups}"), (tracks, groups)))
+		.collect()
 }
 
-fn bench_gc(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_gc");
-	for tracks in SWEPT {
-		// Between passes, which is every origin poll: should stay flat as tracks grow.
-		group.throughput(Throughput::Elements(1));
-		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
-			let swept = Swept::new(tracks);
-			let waiter = kio::Waiter::noop();
-			b.iter(|| black_box(swept.pool.poll(swept.now, &waiter)));
-		});
-		// Also advance supplied time, so reusing an identical instant cannot hide clock work.
-		group.bench_with_input(BenchmarkId::new("advancing", tracks), &tracks, |b, &tracks| {
-			let swept = Swept::new(tracks);
-			let mut now = swept.now;
-			let waiter = kio::Waiter::noop();
-			b.iter(|| {
-				now = now.saturating_add(Duration::from_nanos(1));
-				black_box(swept.pool.poll(now, &waiter))
-			});
-		});
-		// A due pass, stepping one sweep interval per call.
-		group.throughput(Throughput::Elements(tracks as u64));
-		group.bench_with_input(BenchmarkId::new("sweep", tracks), &tracks, |b, &tracks| {
-			let swept = Swept::new(tracks);
-			let interval = cache::DEFAULT_EXPIRY / 2;
-			let mut now = swept.now;
-			let waiter = kio::Waiter::noop();
-			b.iter(|| {
-				now = now.saturating_add(interval);
-				black_box(swept.pool.poll(now, &waiter))
-			});
-		});
-	}
-	group.finish();
+fn aged(case: Case<(usize, usize)>) -> Aged {
+	let (tracks, groups) = case.params;
+	Aged::new(tracks, groups)
 }
 
-fn bench_fanout(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fanout_group");
-	for subscribers in FANOUT {
-		group.throughput(Throughput::Elements(subscribers as u64));
-		group.bench_with_input(
-			BenchmarkId::from_parameter(subscribers),
-			&subscribers,
-			|b, &subscribers| {
-				let mut fanout = Fanout::new(subscribers);
-				b.iter(|| fanout.cycle());
-			},
-		);
+mod track_wall {
+	use std::hint::black_box;
+
+	use moq_net::time::Instant;
+	use swole::bench;
+
+	use super::{AGED_BUDGET, Aged, Case, aged, wall_cases};
+
+	/// A collection with every deadline armed and none due: every origin poll.
+	#[bench(args = wall_cases(), setup = aged, items = |_| 1)]
+	fn idle(aged: &Aged) -> Option<Instant> {
+		aged.pool.poll(aged.now, &aged.waiter)
 	}
-	group.finish();
+
+	/// Re-polling one parked read re-arms its deadline.
+	#[bench(args = wall_cases(), setup = aged, items = |_| 1)]
+	fn repoll(aged: &mut Aged) {
+		let (read, waiter) = &mut aged.reads[0];
+		assert!(black_box(read.poll_read_frame(waiter)).is_pending());
+	}
+
+	/// The collection that releases every parked read at once. Its cost is per track released,
+	/// so the cached groups behind each read are not swept.
+	fn due_cases() -> Vec<Case<(usize, usize)>> {
+		wall_cases().into_iter().filter(|case| case.params.1 == 1).collect()
+	}
+
+	#[bench(args = due_cases(), setup = aged, items = |case: Case<(usize, usize)>| case.params.0)]
+	fn due(aged: Aged) -> Aged {
+		// Past every deadline, which setup armed after `now`.
+		black_box(aged.pool.poll(aged.now.saturating_add(2 * AGED_BUDGET), &aged.waiter));
+		aged
+	}
+}
+
+mod track_gc {
+	use std::time::Duration;
+
+	use moq_net::{cache, time::Instant};
+	use swole::bench;
+
+	use super::{SWEPT, Swept};
+
+	/// Between passes, which is every origin poll: should stay flat as tracks grow.
+	#[bench(args = SWEPT, setup = Swept::new, items = |_| 1)]
+	fn idle(swept: &Swept) -> Option<Instant> {
+		swept.pool.poll(swept.now, &swept.waiter)
+	}
+
+	/// Also advance supplied time, so reusing an identical instant cannot hide clock work.
+	#[bench(args = SWEPT, setup = Swept::new, items = |_| 1)]
+	fn advancing(swept: &mut Swept) -> Option<Instant> {
+		swept.now = swept.now.saturating_add(Duration::from_nanos(1));
+		swept.pool.poll(swept.now, &swept.waiter)
+	}
+
+	/// A due pass, stepping one sweep interval per call.
+	#[bench(args = SWEPT, setup = Swept::new, items = |tracks| tracks)]
+	fn sweep(swept: &mut Swept) -> Option<Instant> {
+		swept.now = swept.now.saturating_add(cache::DEFAULT_EXPIRY / 2);
+		swept.pool.poll(swept.now, &swept.waiter)
+	}
+}
+
+#[bench(args = FANOUT, setup = Fanout::new, items = |subscribers| subscribers)]
+fn track_fanout_group(fanout: &mut Fanout) {
+	fanout.cycle();
 }
 
 /// Groups written between reads in `track_evict_fanout`, each evicting one.
 const EVICTED: [usize; 3] = [1, 8, 64];
 
-fn bench_evict_fanout(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_evict_fanout");
-	for subscribers in FANOUT {
-		for evicted in EVICTED {
-			group.throughput(Throughput::Elements(evicted as u64));
-			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
-			let mut fixture = None;
-			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), evicted), |b| {
-				let fanout = fixture.get_or_insert_with(|| {
-					let mut fanout = Fanout::new(subscribers);
-					// Twice what the pool holds, so every write evicts.
-					for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
-						fanout.cycle();
-					}
-					fanout
-				});
-				// Only the writes and the evictions they cause are timed, not the reads that
-				// judge each written group cached again.
-				b.iter_custom(|iterations| {
-					let mut elapsed = Duration::ZERO;
-					for _ in 0..iterations {
-						let start = Instant::now();
-						for _ in 0..evicted {
-							let mut group = fanout.append();
-							group.write_frame(at(group.start), fanout.payload.clone()).unwrap();
-							group.finish().unwrap();
-						}
-						elapsed += start.elapsed();
-						for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&fanout.waiters) {
-							while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(waiter) {
-								black_box(group);
-							}
-						}
-					}
-					elapsed
-				});
-			});
+/// A full pool's fanout, and the groups each call writes into it.
+struct EvictFanout {
+	fanout: Fanout,
+	evicted: usize,
+}
+
+impl EvictFanout {
+	fn new(case: Case<(usize, usize)>) -> Self {
+		let (subscribers, evicted) = case.params;
+		let mut fanout = Fanout::new(subscribers);
+		// Twice what the pool holds, so every write evicts.
+		for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
+			fanout.cycle();
+		}
+		Self { fanout, evicted }
+	}
+
+	/// The reads that judge each written group cached again, outside the measurement.
+	fn read(&mut self) {
+		let fanout = &mut self.fanout;
+		for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&fanout.waiters) {
+			while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(waiter) {
+				black_box(group);
+			}
 		}
 	}
-	group.finish();
+}
+
+fn evict_fanout_cases() -> Vec<Case<(usize, usize)>> {
+	FANOUT
+		.into_iter()
+		.flat_map(|subscribers| {
+			EVICTED.map(|evicted| case(format!("{subscribers}r/{evicted}"), (subscribers, evicted)))
+		})
+		.collect()
+}
+
+/// Only the writes and the evictions they cause are measured.
+#[bench(
+	args = evict_fanout_cases(),
+	setup = EvictFanout::new,
+	after = EvictFanout::read,
+	items = |case: Case<(usize, usize)>| case.params.1,
+)]
+fn track_evict_fanout(evict: &mut EvictFanout) {
+	for _ in 0..evict.evicted {
+		let mut group = evict.fanout.append();
+		group
+			.write_frame(at(group.start), evict.fanout.payload.clone())
+			.unwrap();
+		group.finish().unwrap();
+	}
 }
 
 /// Frames written per group in `track_fanout_frame`, after which the group rolls and every
@@ -787,60 +809,71 @@ impl futures::task::ArcWake for Fired {
 	}
 }
 
-fn bench_fanout_frame(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fanout_frame");
-	for subscribers in FANOUT {
-		group.bench_with_input(
-			BenchmarkId::from_parameter(subscribers),
-			&subscribers,
-			|b, &subscribers| {
-				let mut fanout = Fanout::new(subscribers);
-				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-				let waiters: Vec<_> = (0..subscribers)
-					.map(|index| {
-						let fired = Arc::new(Fired {
-							index,
-							queue: queue.clone(),
-						});
-						kio::Waiter::new(futures::task::waker(fired))
-					})
-					.collect();
-				let mut open: Option<moq_net::group::Producer> = None;
-				let mut written = FRAMES_PER_GROUP;
-				// Only the frame write and the re-polls it causes are timed, not the group roll.
-				b.iter_custom(|iterations| {
-					let mut elapsed = Duration::ZERO;
-					for _ in 0..iterations {
-						if written == FRAMES_PER_GROUP {
-							if let Some(open) = open.take() {
-								open.finish().unwrap();
-							}
-							open = Some(fanout.append());
-							written = 0;
-							for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&waiters) {
-								assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Ready(Ok(Some(_)))));
-								assert!(subscriber.poll_recv_group(waiter).is_pending());
-							}
-							queue.lock().unwrap().clear();
-						}
-						let group = open.as_mut().unwrap();
-						let timestamp = at(group.start);
-						let start = Instant::now();
-						group.write_frame(timestamp, fanout.payload.clone()).unwrap();
-						// A woken reader re-polls, as its task would.
-						let woken = std::mem::take(&mut *queue.lock().unwrap());
-						for index in woken {
-							black_box(fanout.subscribers[index].poll_recv_group(&waiters[index]).is_pending());
-						}
-						elapsed += start.elapsed();
-						written += 1;
-					}
-					elapsed
+/// Subscribers parked on an open group, re-polled only when a frame wakes them.
+struct FanoutFrame {
+	fanout: Fanout,
+	queue: Arc<std::sync::Mutex<Vec<usize>>>,
+	waiters: Vec<kio::Waiter>,
+	open: Option<moq_net::group::Producer>,
+	written: usize,
+}
+
+impl FanoutFrame {
+	fn new(subscribers: usize) -> Self {
+		let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+		let waiters = (0..subscribers)
+			.map(|index| {
+				let fired = Arc::new(Fired {
+					index,
+					queue: queue.clone(),
 				});
-			},
+				kio::Waiter::new(futures::task::waker(fired))
+			})
+			.collect();
+		Self {
+			fanout: Fanout::new(subscribers),
+			queue,
+			waiters,
+			open: None,
+			written: FRAMES_PER_GROUP,
+		}
+	}
+
+	/// Roll to a new group once the open one is full, outside the measurement.
+	fn roll(&mut self) {
+		if self.written < FRAMES_PER_GROUP {
+			return;
+		}
+		if let Some(open) = self.open.take() {
+			open.finish().unwrap();
+		}
+		self.open = Some(self.fanout.append());
+		self.written = 0;
+		for (subscriber, waiter) in self.fanout.subscribers.iter_mut().zip(&self.waiters) {
+			assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(subscriber.poll_recv_group(waiter).is_pending());
+		}
+		self.queue.lock().unwrap().clear();
+	}
+}
+
+/// Only the frame write and the re-polls it causes are measured, not the group roll.
+#[bench(args = FANOUT, setup = FanoutFrame::new, before = FanoutFrame::roll)]
+fn track_fanout_frame(frame: &mut FanoutFrame) {
+	let group = frame.open.as_mut().unwrap();
+	group
+		.write_frame(at(group.start), frame.fanout.payload.clone())
+		.unwrap();
+	// A woken reader re-polls, as its task would.
+	let woken = std::mem::take(&mut *frame.queue.lock().unwrap());
+	for index in woken {
+		black_box(
+			frame.fanout.subscribers[index]
+				.poll_recv_group(&frame.waiters[index])
+				.is_pending(),
 		);
 	}
-	group.finish();
+	frame.written += 1;
 }
 
 /// A track with groups presenting at 0..4 s and the last still open, `readers` fetches of
@@ -892,64 +925,56 @@ impl FetchBudgets {
 	}
 }
 
+fn fetch_park(readers: usize) -> FetchBudgets {
+	FetchBudgets::new(readers, 0)
+}
+
 /// One more fetch beside `readers` live ones: parking it must not scan the deadlines the live
 /// readers hold, so a sweep per park shows up as a slope.
-fn bench_fetch_park(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fetch_park");
-	for readers in [1, 64, 1_024] {
-		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
-			let fetched = FetchBudgets::new(readers, 0);
-			b.iter(|| fetched.fetch());
-		});
-	}
-	group.finish();
+#[bench(args = [1, 64, 1_024], setup = fetch_park)]
+fn track_fetch_park(fetched: &FetchBudgets) -> kio::Waiter {
+	fetched.fetch()
+}
+
+fn fetch_budgets_cases() -> Vec<Case<(usize, usize)>> {
+	[0, 1_024, 16_384]
+		.into_iter()
+		.flat_map(|history| [1, 64].map(|readers| case(format!("history_{history}/{readers}"), (readers, history))))
+		.collect()
+}
+
+fn fetch_budgets(case: Case<(usize, usize)>) -> FetchBudgets {
+	let (readers, history) = case.params;
+	FetchBudgets::new(readers, history)
 }
 
 /// The write that crosses every fetch's deadline, beside live readers and the
 /// finished fetches before them: the write must cost what the live readers do, so deadlines
 /// left indexed by fetches that already finished show up as a slope over the history.
-fn bench_fetch_budgets(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fetch_budgets");
-	for history in [0, 1_024, 16_384] {
-		for readers in [1, 64] {
-			group.bench_with_input(
-				BenchmarkId::new(format!("history_{history}"), readers),
-				&(readers, history),
-				|b, &(readers, history)| {
-					b.iter_batched(
-						|| FetchBudgets::new(readers, history),
-						|mut fetched| {
-							fetched
-								.open
-								.write_frame(Timestamp::from_secs(10).unwrap(), Bytes::from_static(b"f"))
-								.unwrap();
-							fetched
-						},
-						BatchSize::PerIteration,
-					);
-				},
-			);
-		}
-	}
-	group.finish();
+#[bench(args = fetch_budgets_cases(), setup = fetch_budgets)]
+fn track_fetch_budgets(mut fetched: FetchBudgets) -> FetchBudgets {
+	fetched
+		.open
+		.write_frame(Timestamp::from_secs(10).unwrap(), Bytes::from_static(b"f"))
+		.unwrap();
+	fetched
 }
 
-fn bench_fetch_expiry(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fetch_expiry");
-	for history in FETCH_HISTORY {
-		for readers in FANOUT {
-			group.throughput(Throughput::Elements(readers as u64));
-			group.bench_with_input(
-				BenchmarkId::new(format!("history_{history}"), readers),
-				&(readers, history),
-				|b, &(readers, history)| {
-					let mut fetched = FetchReaders::new(readers, history);
-					b.iter(|| fetched.poll());
-				},
-			);
-		}
-	}
-	group.finish();
+fn fetch_expiry_cases() -> Vec<Case<(usize, usize)>> {
+	FETCH_HISTORY
+		.into_iter()
+		.flat_map(|history| FANOUT.map(|readers| case(format!("history_{history}/{readers}"), (readers, history))))
+		.collect()
+}
+
+fn fetch_readers(case: Case<(usize, usize)>) -> FetchReaders {
+	let (readers, history) = case.params;
+	FetchReaders::new(readers, history)
+}
+
+#[bench(args = fetch_expiry_cases(), setup = fetch_readers, items = |case: Case<(usize, usize)>| case.params.0)]
+fn track_fetch_expiry(fetched: &mut FetchReaders) {
+	fetched.poll();
 }
 
 /// Write `iterations` single-frame groups across independent tracks sharing one pool.
@@ -991,63 +1016,54 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 	})
 }
 
-fn bench_parallel_write(c: &mut Criterion) {
+fn shared_pool(writers: usize) -> (cache::Pool, usize) {
 	let config = cache::Config::default()
 		.with_capacity(CACHE_CAPACITY)
 		.with_expiry(cache::DEFAULT_EXPIRY);
-	let pool = cache::Pool::new(config);
-	let mut group = c.benchmark_group("track_parallel_write");
-	// No throughput: one iteration is one frame write, wherever it landed, so the
-	// per-iteration time is already the number to compare across writer counts.
-	for writers in WRITERS {
-		group.bench_with_input(BenchmarkId::from_parameter(writers), &writers, |b, &writers| {
-			b.iter_custom(|iterations| parallel_write(&pool, writers, iterations));
-		});
-	}
-	group.finish();
+	(cache::Pool::new(config), writers)
 }
 
-fn bench_aborted_scan(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_aborted_scan");
-	for aborted in ABORTED {
-		group.throughput(Throughput::Elements(aborted as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(aborted), &aborted, |b, &aborted| {
-			let scan = AbortedScan::new(aborted);
-			b.iter(|| scan.scan());
-		});
-	}
-	group.finish();
+/// Each iteration is one frame write, wherever it landed, so the per-iteration time is already
+/// the number to compare across writer counts. Timed by the writers' span, without their setup.
+#[bench(args = WRITERS, setup = shared_pool)]
+fn track_parallel_write(input: &(cache::Pool, usize), iterations: Iterations) -> Duration {
+	let (pool, writers) = input;
+	parallel_write(pool, *writers, iterations.get())
 }
 
-fn bench_subscriber_churn(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_subscriber_churn");
-	for steady in STEADY {
-		for churn in CHURN {
-			group.throughput(Throughput::Elements(churn as u64));
-			group.bench_with_input(
-				BenchmarkId::new(format!("steady_{steady}"), churn),
-				&churn,
-				|b, &churn| {
-					let mut setup = Churn::new(steady, 0);
-					b.iter(|| setup.run(churn));
-				},
-			);
-		}
-	}
-	group.finish();
+#[bench(args = ABORTED, setup = AbortedScan::new, items = |aborted| aborted)]
+fn track_aborted_scan(scan: &AbortedScan) {
+	scan.scan();
 }
 
-fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
-	const CHURN: usize = 512;
-	let mut group = c.benchmark_group("track_subscriber_churn_after_peak");
-	group.throughput(Throughput::Elements(CHURN as u64));
-	for peak in PEAK {
-		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
-			let mut setup = Churn::new(1, peak);
-			b.iter(|| setup.run(CHURN));
-		});
-	}
-	group.finish();
+fn churn_cases() -> Vec<Case<(usize, usize)>> {
+	STEADY
+		.into_iter()
+		.flat_map(|steady| CHURN.map(|churn| case(format!("steady_{steady}/{churn}"), (steady, churn))))
+		.collect()
+}
+
+fn churn(case: Case<(usize, usize)>) -> (Churn, usize) {
+	let (steady, churn) = case.params;
+	(Churn::new(steady, 0), churn)
+}
+
+#[bench(args = churn_cases(), setup = churn, items = |case: Case<(usize, usize)>| case.params.1)]
+fn track_subscriber_churn(input: &mut (Churn, usize)) {
+	let (setup, churn) = input;
+	setup.run(*churn);
+}
+
+/// Viewers that join and leave in one `track_subscriber_churn_after_peak` call.
+const AFTER_PEAK_CHURN: usize = 512;
+
+fn after_peak(peak: usize) -> Churn {
+	Churn::new(1, peak)
+}
+
+#[bench(args = PEAK, setup = after_peak, items = |_| AFTER_PEAK_CHURN)]
+fn track_subscriber_churn_after_peak(setup: &mut Churn) {
+	setup.run(AFTER_PEAK_CHURN);
 }
 
 /// Readers of a fragmented drop set, its runs, the runs each reader reported, and each run's span.
@@ -1059,226 +1075,325 @@ const DROP_RUNS: [u64; 3] = [16, 1024, 65_536];
 const DROP_SPAN: [u64; 2] = [1, 1 << 32];
 
 #[cfg(feature = "fuzz")]
-fn bench_subscriber_churn_drops(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_subscriber_churn_drops");
-	group.throughput(Throughput::Elements(1));
-	for readers in DROP_READERS {
-		for runs in DROP_RUNS {
-			for reported in [1, runs] {
-				for span in DROP_SPAN {
-					let id = format!("{readers}r/{runs}n/{reported}k/span_{span}");
-					group.bench_function(BenchmarkId::from_parameter(id), |b| {
-						let mut set = moq_net::fuzz::DropSet::new(readers, runs, reported, span);
-						b.iter_custom(|iterations| {
-							let mut elapsed = Duration::ZERO;
-							for _ in 0..iterations {
-								// Untimed: restore the runs and records each drop adds.
-								set.hold();
-								let start = Instant::now();
-								set.drop_one();
-								elapsed += start.elapsed();
-							}
-							elapsed
-						});
-					});
+mod drops {
+	use moq_net::fuzz::DropSet;
+
+	use super::{Case, DROP_READERS, DROP_RUNS, DROP_SPAN, case};
+
+	pub(super) fn cases() -> Vec<Case<(usize, u64, u64, u64)>> {
+		let mut cases = Vec::new();
+		for readers in DROP_READERS {
+			for runs in DROP_RUNS {
+				for reported in [1, runs] {
+					for span in DROP_SPAN {
+						let name = format!("{readers}r/{runs}n/{reported}k/span_{span}");
+						cases.push(case(name, (readers, runs, reported, span)));
+					}
 				}
 			}
 		}
+		cases
 	}
-	group.finish();
+
+	pub(super) fn drop_set(case: Case<(usize, u64, u64, u64)>) -> DropSet {
+		let (readers, runs, reported, span) = case.params;
+		DropSet::new(readers, runs, reported, span)
+	}
 }
 
-#[cfg(not(feature = "fuzz"))]
-fn bench_subscriber_churn_drops(_: &mut Criterion) {}
+/// `hold` restores the runs and records each drop adds, outside the measurement.
+#[cfg(feature = "fuzz")]
+#[bench(args = drops::cases(), setup = drops::drop_set, before = moq_net::fuzz::DropSet::hold, items = |_| 1)]
+fn track_subscriber_churn_drops(set: &mut moq_net::fuzz::DropSet) {
+	set.drop_one();
+}
 
-/// One join and its aggregate poll, excluding the departure between iterations.
-fn bench_subscriber_join(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_subscriber_join");
-	group.throughput(Throughput::Elements(1));
-	for steady in STEADY {
-		group.bench_function(BenchmarkId::from_parameter(steady), |b| {
-			let mut setup = Churn::new(steady, 0);
-			b.iter_custom(|iterations| {
-				let mut elapsed = Duration::ZERO;
-				for _ in 0..iterations {
-					let start = Instant::now();
-					let viewer = setup.track.subscribe(None);
-					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_pending());
-					elapsed += start.elapsed();
-					drop(viewer);
-					assert!(setup.track.poll_subscription_changed(&setup.waiter).is_pending());
-				}
-				elapsed
-			});
-		});
-	}
-	group.finish();
+fn steady(steady: usize) -> Churn {
+	Churn::new(steady, 0)
+}
+
+/// The departure after each join and its aggregate poll, outside the measurement.
+fn rejoin(setup: &mut Churn) {
+	assert!(setup.track.poll_subscription_changed(&setup.waiter).is_pending());
+}
+
+/// One join and its aggregate poll; the viewer it returns leaves before the next.
+#[bench(args = STEADY, setup = steady, after = rejoin, items = |_| 1)]
+fn track_subscriber_join(setup: &mut Churn) -> track::Subscriber {
+	let viewer = setup.track.subscribe(None);
+	assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_pending());
+	viewer
 }
 
 /// Preference changes and an extreme holder leaving, over the already held audience.
 ///
 /// Each held reader asks for distinct values, so the aggregate's tables grow with the audience.
-fn bench_subscriber_preferences(c: &mut Criterion) {
-	let ordinary = track::Subscription::default().with_ranges([span(100, 199).with_order(track::Order::Ascending)]);
-	let held = |i: usize| {
+mod track_subscriber_preferences {
+	use std::hint::black_box;
+	use std::time::Duration;
+
+	use moq_net::track;
+	use swole::bench;
+
+	use super::{CHURN, Case, Churn, STEADY, case, span};
+
+	fn ordinary() -> track::Subscription {
+		track::Subscription::default().with_ranges([span(100, 199).with_order(track::Order::Ascending)])
+	}
+
+	fn held(i: usize) -> track::Subscription {
 		let i = i as u64;
 		track::Subscription::default().with_ranges([span(100 + i, 199 + i)
 			.with_priority(((i % 255) as i16 - 128) as i8)
 			.with_order(track::Order::Ascending)])
-	};
-	let extreme = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-		min: Some(Duration::from_secs(10)),
-		max: Some(Duration::from_secs(10)),
-	})
-	.with_priority(i8::MAX)]);
-	let mut group = c.benchmark_group("track_subscriber_preferences");
-	for steady in STEADY {
-		for touched in CHURN {
-			group.throughput(Throughput::Elements(2 * touched as u64));
-			group.bench_function(BenchmarkId::new(format!("update/{steady}"), touched), |b| {
-				let mut setup = Churn::new(steady, 0);
-				for (i, subscriber) in setup._steady.iter_mut().enumerate() {
-					subscriber.update(held(i)).unwrap();
-				}
-				let mut viewer = setup.track.subscribe(ordinary.clone());
-				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
-				b.iter(|| {
-					for _ in 0..touched {
-						viewer.update(extreme.clone()).unwrap();
-						assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
-						viewer.update(ordinary.clone()).unwrap();
-						assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
-					}
-				});
-			});
-		}
-		group.throughput(Throughput::Elements(1));
-		group.bench_function(BenchmarkId::new("extreme_leave", steady), |b| {
-			let mut setup = Churn::new(steady, 0);
-			for (i, subscriber) in setup._steady.iter_mut().enumerate() {
-				subscriber.update(held(i)).unwrap();
-			}
-			assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
-			b.iter_custom(|iterations| {
-				let mut elapsed = Duration::ZERO;
-				for _ in 0..iterations {
-					let viewer = setup.track.subscribe(extreme.clone());
-					assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
-					let start = Instant::now();
-					drop(viewer);
-					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
-					elapsed += start.elapsed();
-				}
-				elapsed
-			});
-		});
 	}
-	group.finish();
+
+	fn extreme() -> track::Subscription {
+		track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Some(Duration::from_secs(10)),
+			max: Some(Duration::from_secs(10)),
+		})
+		.with_priority(i8::MAX)])
+	}
+
+	/// The steady audience, each holding its own distinct preferences, caught up.
+	fn audience(steady: usize) -> Churn {
+		let mut setup = Churn::new(steady, 0);
+		for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+			subscriber.update(held(i)).unwrap();
+		}
+		setup
+	}
+
+	struct Update {
+		setup: Churn,
+		viewer: track::Subscriber,
+		ordinary: track::Subscription,
+		extreme: track::Subscription,
+		touched: usize,
+	}
+
+	fn update_cases() -> Vec<Case<(usize, usize)>> {
+		STEADY
+			.into_iter()
+			.flat_map(|steady| CHURN.map(|touched| case(format!("{steady}/{touched}"), (steady, touched))))
+			.collect()
+	}
+
+	fn update_setup(case: Case<(usize, usize)>) -> Update {
+		let (steady, touched) = case.params;
+		let mut setup = audience(steady);
+		let viewer = setup.track.subscribe(ordinary());
+		assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+		Update {
+			setup,
+			viewer,
+			ordinary: ordinary(),
+			extreme: extreme(),
+			touched,
+		}
+	}
+
+	#[bench(args = update_cases(), setup = update_setup, items = |case: Case<(usize, usize)>| 2 * case.params.1)]
+	fn update(update: &mut Update) {
+		let setup = &mut update.setup;
+		for _ in 0..update.touched {
+			update.viewer.update(update.extreme.clone()).unwrap();
+			assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+			update.viewer.update(update.ordinary.clone()).unwrap();
+			assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+		}
+	}
+
+	struct Leave {
+		setup: Churn,
+		extreme: track::Subscription,
+		viewer: Option<track::Subscriber>,
+	}
+
+	fn leave_setup(steady: usize) -> Leave {
+		let mut setup = audience(steady);
+		assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+		Leave {
+			setup,
+			extreme: extreme(),
+			viewer: None,
+		}
+	}
+
+	/// The extreme holder joins and the aggregate takes it in, outside the measurement.
+	fn join(leave: &mut Leave) {
+		leave.viewer = Some(leave.setup.track.subscribe(leave.extreme.clone()));
+		assert!(
+			leave
+				.setup
+				.track
+				.poll_subscription_changed(&leave.setup.waiter)
+				.is_ready()
+		);
+	}
+
+	#[bench(args = STEADY, setup = leave_setup, before = join, items = |_| 1)]
+	fn extreme_leave(leave: &mut Leave) {
+		drop(leave.viewer.take());
+		assert!(black_box(leave.setup.track.poll_subscription_changed(&leave.setup.waiter)).is_ready());
+	}
+}
+
+/// One reader moving between ranges nobody else holds, beside the steady readers.
+struct RangeDemand {
+	setup: Churn,
+	viewer: track::Subscriber,
+}
+
+/// Far past every held range, so each move adds one run and removes another.
+fn away(offset: u64) -> track::Subscription {
+	let group = (1 << 40) + offset;
+	track::Subscription::default().with_ranges([span(group, group)])
+}
+
+fn range_demand_cases() -> Vec<Case<(usize, usize)>> {
+	STEADY
+		.into_iter()
+		.flat_map(|steady| {
+			DISTINCT
+				.into_iter()
+				.filter(move |&distinct| distinct <= steady)
+				.map(move |distinct| case(format!("{steady}r/{distinct}"), (steady, distinct)))
+		})
+		.collect()
+}
+
+fn range_demand(case: Case<(usize, usize)>) -> RangeDemand {
+	let (steady, distinct) = case.params;
+	let mut setup = Churn::new(steady, 0);
+	for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+		// Overlapping, so the held ranges union into one run.
+		let start = (i % distinct) as u64 * 10;
+		subscriber
+			.update(track::Subscription::default().with_ranges([span(start, start + 999)]))
+			.unwrap();
+	}
+	let viewer = setup.track.subscribe(away(0));
+	assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+	RangeDemand { setup, viewer }
 }
 
 /// One reader moving between ranges of its own, over readers holding `distinct` ranges.
-fn bench_range_demand(c: &mut Criterion) {
-	// Far past every held range, so each move adds one run and removes another.
-	let away = |offset: u64| {
-		let group = (1 << 40) + offset;
-		track::Subscription::default().with_ranges([span(group, group)])
-	};
-	let mut group = c.benchmark_group("track_range_demand");
-	for steady in STEADY {
-		for distinct in DISTINCT.into_iter().filter(|&distinct| distinct <= steady) {
-			group.throughput(Throughput::Elements(2));
-			group.bench_function(BenchmarkId::new(format!("{steady}r"), distinct), |b| {
-				let mut setup = Churn::new(steady, 0);
-				for (i, subscriber) in setup._steady.iter_mut().enumerate() {
-					// Overlapping, so the held ranges union into one run.
-					let start = (i % distinct) as u64 * 10;
-					subscriber
-						.update(track::Subscription::default().with_ranges([span(start, start + 999)]))
-						.unwrap();
-				}
-				let mut viewer = setup.track.subscribe(away(0));
-				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
-				b.iter(|| {
-					viewer.update(away(2)).unwrap();
-					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
-					viewer.update(away(0)).unwrap();
-					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
-				});
-			});
-		}
-	}
-	group.finish();
+#[bench(args = range_demand_cases(), setup = range_demand, items = |_| 2)]
+fn track_range_demand(demand: &mut RangeDemand) {
+	let setup = &mut demand.setup;
+	demand.viewer.update(away(2)).unwrap();
+	assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+	demand.viewer.update(away(0)).unwrap();
+	assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
 }
 
-fn bench_subscription_ranges(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_subscription_ranges");
-	for width in SPAN {
-		for ranges in RANGES {
-			let broadcast = broadcast::Info::default().produce();
-			let track = broadcast
-				.create_track("bench", moq_net::track::Info::default().with_max_age(None))
-				.unwrap();
-			// A gap between neighbors keeps every range distinct in the union.
-			let viewers: Vec<_> = (0..ranges)
-				.map(|i| {
-					let start = i * (width + 1);
-					track.subscribe(track::Subscription::default().with_ranges([span(start, start + width - 1)]))
-				})
-				.collect();
-			assert_eq!(track.subscription().unwrap().ranges.len(), ranges as usize);
-
-			group.throughput(Throughput::Elements(ranges));
-			group.bench_function(BenchmarkId::new(format!("span_{width}"), ranges), |b| {
-				b.iter(|| black_box(track.subscription()));
-			});
-			drop((viewers, track, broadcast));
-		}
-	}
-	group.finish();
+/// Subscribers each asking for a disjoint range of one track.
+struct Ranges {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	_viewers: Vec<track::Subscriber>,
 }
 
-fn bench_range_serving(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_range_serving");
-	for width in SERVED_SPAN {
-		for ranges in SERVED_RANGES {
-			let broadcast = broadcast::Info::default().produce();
-			let track = broadcast
-				.create_track("bench", moq_net::track::Info::default().with_max_age(None))
-				.unwrap();
-			// A gap between neighbors keeps every range distinct, and its group cached.
-			for key in 0..ranges * (width + 1) {
-				let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
-				group
-					.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
-					.unwrap();
-				group.finish().unwrap();
-			}
-			let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
-				let start = i * (width + 1);
-				span(start, start + width - 1)
-			}));
+fn ranges_cases() -> Vec<Case<(u64, u64)>> {
+	SPAN.into_iter()
+		.flat_map(|width| RANGES.map(|ranges| case(format!("span_{width}/{ranges}"), (width, ranges))))
+		.collect()
+}
 
-			group.throughput(Throughput::Elements(ranges * width));
-			group.bench_function(BenchmarkId::new(format!("span_{width}"), ranges), |b| {
-				b.iter_batched(
-					|| track.subscribe(subscription.clone()),
-					|mut reader| {
-						let waiter = kio::Waiter::noop();
-						let mut served = 0;
-						while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
-							black_box(group);
-							served += 1;
-						}
-						assert_eq!(served, ranges * width);
-						reader
-					},
-					BatchSize::SmallInput,
-				);
-			});
-			drop((track, broadcast));
+fn subscription_ranges(case: Case<(u64, u64)>) -> Ranges {
+	let (width, ranges) = case.params;
+	let broadcast = broadcast::Info::default().produce();
+	let track = broadcast
+		.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+		.unwrap();
+	// A gap between neighbors keeps every range distinct in the union.
+	let viewers: Vec<_> = (0..ranges)
+		.map(|i| {
+			let start = i * (width + 1);
+			track.subscribe(track::Subscription::default().with_ranges([span(start, start + width - 1)]))
+		})
+		.collect();
+	assert_eq!(track.subscription().unwrap().ranges.len(), ranges as usize);
+	Ranges {
+		_broadcast: broadcast,
+		track,
+		_viewers: viewers,
+	}
+}
+
+#[bench(args = ranges_cases(), setup = subscription_ranges, items = |case: Case<(u64, u64)>| case.params.1)]
+fn track_subscription_ranges(ranges: &Ranges) -> Option<track::Subscription> {
+	ranges.track.subscription()
+}
+
+/// A cached track and a reader of disjoint ranges of it, subscribed fresh before each call.
+struct RangeServing {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	subscription: track::Subscription,
+	reader: Option<track::Subscriber>,
+	served: u64,
+}
+
+impl RangeServing {
+	fn new(case: Case<(u64, u64)>) -> Self {
+		let (width, ranges) = case.params;
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
+		// A gap between neighbors keeps every range distinct, and its group cached.
+		for key in 0..ranges * (width + 1) {
+			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
+			let start = i * (width + 1);
+			span(start, start + width - 1)
+		}));
+		Self {
+			_broadcast: broadcast,
+			track,
+			subscription,
+			reader: None,
+			served: ranges * width,
 		}
 	}
-	group.finish();
+
+	fn subscribe(&mut self) {
+		self.reader = Some(self.track.subscribe(self.subscription.clone()));
+	}
+}
+
+fn serving_cases() -> Vec<Case<(u64, u64)>> {
+	SERVED_SPAN
+		.into_iter()
+		.flat_map(|width| SERVED_RANGES.map(|ranges| case(format!("span_{width}/{ranges}"), (width, ranges))))
+		.collect()
+}
+
+/// Drains the fresh reader, which it returns so its drop stays outside the measurement.
+#[bench(
+	args = serving_cases(),
+	setup = RangeServing::new,
+	before = RangeServing::subscribe,
+	items = |case: Case<(u64, u64)>| case.params.0 * case.params.1,
+)]
+fn track_range_serving(serving: &mut RangeServing) -> track::Subscriber {
+	let mut reader = serving.reader.take().unwrap();
+	let waiter = kio::Waiter::noop();
+	let mut served = 0;
+	while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+		black_box(group);
+		served += 1;
+	}
+	assert_eq!(served, serving.served);
+	reader
 }
 
 /// Queues a parked read as woken, so the bench visits only what an append wakes.
@@ -1300,88 +1415,81 @@ impl std::task::Wake for Woken {
 /// One append past a backlog of parked reads, one per group like a publisher's parked
 /// group streams, re-polling whatever it wakes. Swept over the backlog so a per-append
 /// cost that grows with the parked reads shows up as a slope.
-fn bench_parked_read(c: &mut Criterion) {
+/// It times itself because its budget must cover every measured append, sized by the iterations.
+#[bench(args = [8, 64, 512], items = |_| 1)]
+fn track_parked_read(parked: usize, iterations: Iterations) -> Duration {
 	const MICROS_PER_GROUP: u64 = 2500;
 	// A group's start on the millisecond track, from its first frame's microseconds.
 	let millis = |micros: u64| micros / 1000;
-	let mut group = c.benchmark_group("track_parked_read");
-	group.throughput(Throughput::Elements(1));
-	for parked in [8, 64, 512] {
-		group.bench_function(BenchmarkId::from_parameter(parked), |b| {
-			b.iter_custom(|iterations| {
-				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast.create_track("bench", timed()).unwrap();
-				// Cover setup and every measured append so the same backlog stays parked,
-				// even when Criterion requests more iterations during warm-up.
-				let max_delay = Duration::from_micros(
-					iterations
-						.checked_add(parked as u64)
-						.unwrap()
-						.checked_mul(MICROS_PER_GROUP)
-						.unwrap(),
-				);
-				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
-					track::Start::Live {
-						min: Some(max_delay),
-						max: Some(max_delay),
-					},
-				)]));
-				let mut micros = 0;
-				let mut open = Vec::with_capacity(parked);
-				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-				let mut reads: Vec<_> = (0..parked)
-					.map(|read| {
-						let mut group = track
-							.append_group(Timestamp::from_millis(millis(micros)).unwrap())
-							.unwrap();
-						group
-							.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
-							.unwrap();
-						micros += MICROS_PER_GROUP;
-						// Left open, so its read parks instead of ending.
-						open.push(group);
+	let iterations = iterations.get();
+	let broadcast = broadcast::Info::default().produce();
+	let track = broadcast.create_track("bench", timed()).unwrap();
+	// Cover setup and every measured append so the same backlog stays parked.
+	let max_delay = Duration::from_micros(
+		iterations
+			.checked_add(parked as u64)
+			.unwrap()
+			.checked_mul(MICROS_PER_GROUP)
+			.unwrap(),
+	);
+	let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+		track::Start::Live {
+			min: Some(max_delay),
+			max: Some(max_delay),
+		},
+	)]));
+	let mut micros = 0;
+	let mut open = Vec::with_capacity(parked);
+	let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+	let mut reads: Vec<_> = (0..parked)
+		.map(|read| {
+			let mut group = track
+				.append_group(Timestamp::from_millis(millis(micros)).unwrap())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+			micros += MICROS_PER_GROUP;
+			// Left open, so its read parks instead of ending.
+			open.push(group);
 
-						let woken = Woken {
-							read,
-							queue: queue.clone(),
-						};
-						let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(woken)));
-						let Poll::Ready(Ok(Some(mut read))) = sub.poll_recv_group(&waiter) else {
-							panic!("the group is cached");
-						};
-						assert!(matches!(read.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
-						assert!(read.poll_read_frame(&waiter).is_pending());
-						(waiter, read)
-					})
-					.collect();
+			let woken = Woken {
+				read,
+				queue: queue.clone(),
+			};
+			let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(woken)));
+			let Poll::Ready(Ok(Some(mut read))) = sub.poll_recv_group(&waiter) else {
+				panic!("the group is cached");
+			};
+			assert!(matches!(read.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read.poll_read_frame(&waiter).is_pending());
+			(waiter, read)
+		})
+		.collect();
 
-				let mut woken = Vec::new();
-				let mut repoll = |reads: &mut Vec<(kio::Waiter, moq_net::group::Consumer)>| {
-					std::mem::swap(&mut woken, &mut *queue.lock().unwrap());
-					for read in woken.drain(..) {
-						let (waiter, read) = &mut reads[read];
-						assert!(black_box(read.poll_read_frame(waiter)).is_pending());
-					}
-				};
-				// Each append above woke the reads before it: park them again.
-				repoll(&mut reads);
+	let mut woken = Vec::new();
+	let mut repoll = |reads: &mut Vec<(kio::Waiter, moq_net::group::Consumer)>| {
+		std::mem::swap(&mut woken, &mut *queue.lock().unwrap());
+		for read in woken.drain(..) {
+			let (waiter, read) = &mut reads[read];
+			assert!(black_box(read.poll_read_frame(waiter)).is_pending());
+		}
+	};
+	// Each append above woke the reads before it: park them again.
+	repoll(&mut reads);
 
-				let start = WallInstant::now();
-				for _ in 0..iterations {
-					let mut next = track
-						.append_group(Timestamp::from_millis(millis(micros)).unwrap())
-						.unwrap();
-					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
-						.unwrap();
-					next.finish().unwrap();
-					micros += MICROS_PER_GROUP;
-					repoll(&mut reads);
-				}
-				start.elapsed()
-			});
-		});
+	let start = WallInstant::now();
+	for _ in 0..iterations {
+		let mut next = track
+			.append_group(Timestamp::from_millis(millis(micros)).unwrap())
+			.unwrap();
+		next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		next.finish().unwrap();
+		micros += MICROS_PER_GROUP;
+		repoll(&mut reads);
 	}
-	group.finish();
+	start.elapsed()
 }
 
 /// Hand-outs from a sparse feed holding `gaps` remembered gaps, on an untimed track and on
@@ -1396,6 +1504,8 @@ struct Sparse {
 	next: u64,
 	missing: u64,
 	timed: bool,
+	/// The waiter a repeated parked read polls with.
+	waiter: kio::Waiter,
 }
 
 impl Sparse {
@@ -1415,6 +1525,7 @@ impl Sparse {
 			next: gaps * 2,
 			missing: 1,
 			timed: info.timescale.is_some(),
+			waiter: kio::Waiter::noop(),
 		};
 		for gap in 0..gaps {
 			sparse.hand_out(gap * 2);
@@ -1455,50 +1566,49 @@ impl Sparse {
 	}
 }
 
-fn bench_sparse_read(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_sparse_read");
-	group.throughput(Throughput::Elements(2));
-	for (name, info) in [
-		("untimed", track::Info::default().with_max_age(None)),
-		("timed", timed()),
-	] {
-		for gaps in [16u64, 256, 4096] {
-			group.bench_function(BenchmarkId::new(name, gaps), |b| {
-				b.iter_custom(|iterations| {
-					let mut sparse = Sparse::new(info.clone(), gaps);
-					let start = WallInstant::now();
-					for _ in 0..iterations {
-						sparse.read_pair();
-					}
-					start.elapsed()
-				});
-			});
-		}
-	}
-	group.finish();
+fn untimed_sparse(gaps: u64) -> Sparse {
+	Sparse::new(track::Info::default().with_max_age(None), gaps)
 }
 
-fn bench_sparse_poll(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_sparse_poll");
-	for (name, info) in [
-		("untimed", track::Info::default().with_max_age(None)),
-		("timed", timed()),
-	] {
-		for gaps in [16u64, 256, 4096] {
-			group.bench_function(BenchmarkId::new(name, gaps), |b| {
-				b.iter_custom(|iterations| {
-					let mut sparse = Sparse::new(info.clone(), gaps);
-					let waiter = kio::Waiter::noop();
-					let start = WallInstant::now();
-					for _ in 0..iterations {
-						assert!(black_box(sparse.sub.poll_recv_group(&waiter)).is_pending());
-					}
-					start.elapsed()
-				});
-			});
-		}
+fn timed_sparse(gaps: u64) -> Sparse {
+	Sparse::new(timed(), gaps)
+}
+
+/// Gaps a sparse feed holds.
+const GAPS: [u64; 3] = [16, 256, 4096];
+
+mod track_sparse_read {
+	use swole::bench;
+
+	use super::{GAPS, Sparse, timed_sparse, untimed_sparse};
+
+	#[bench(args = GAPS, setup = untimed_sparse, items = |_| 2)]
+	fn untimed(sparse: &mut Sparse) {
+		sparse.read_pair();
 	}
-	group.finish();
+
+	#[bench(args = GAPS, setup = timed_sparse, items = |_| 2)]
+	fn timed(sparse: &mut Sparse) {
+		sparse.read_pair();
+	}
+}
+
+mod track_sparse_poll {
+	use std::hint::black_box;
+
+	use swole::bench;
+
+	use super::{GAPS, Sparse, timed_sparse, untimed_sparse};
+
+	#[bench(args = GAPS, setup = untimed_sparse)]
+	fn untimed(sparse: &mut Sparse) {
+		assert!(black_box(sparse.sub.poll_recv_group(&sparse.waiter)).is_pending());
+	}
+
+	#[bench(args = GAPS, setup = timed_sparse)]
+	fn timed(sparse: &mut Sparse) {
+		assert!(black_box(sparse.sub.poll_recv_group(&sparse.waiter)).is_pending());
+	}
 }
 
 /// Readers parked on one track with nothing new, each having taken the one cached group.
@@ -1559,18 +1669,28 @@ impl Idle {
 	}
 }
 
-fn bench_idle_poll(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_idle_poll");
-	for (name, ordered) in [("recv", false), ("next", true)] {
-		for readers in FANOUT {
-			group.throughput(Throughput::Elements(readers as u64));
-			group.bench_function(BenchmarkId::new(name, readers), |b| {
-				let mut idle = Idle::new(readers, ordered);
-				b.iter(|| idle.poll());
-			});
-		}
+mod track_idle_poll {
+	use swole::bench;
+
+	use super::{FANOUT, Idle};
+
+	fn recv_readers(readers: usize) -> Idle {
+		Idle::new(readers, false)
 	}
-	group.finish();
+
+	fn next_readers(readers: usize) -> Idle {
+		Idle::new(readers, true)
+	}
+
+	#[bench(args = FANOUT, setup = recv_readers, items = |readers| readers)]
+	fn recv(idle: &mut Idle) {
+		idle.poll();
+	}
+
+	#[bench(args = FANOUT, setup = next_readers, items = |readers| readers)]
+	fn next(idle: &mut Idle) {
+		idle.poll();
+	}
 }
 
 /// A sparse feed that opens one gap per millisecond, keeping `gaps` within its budget.
@@ -1626,21 +1746,9 @@ impl Expiring {
 	}
 }
 
-fn bench_sparse_expire(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_sparse_expire");
-	for gaps in [16u64, 256, 4096] {
-		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
-			b.iter_custom(|iterations| {
-				let mut expiring = Expiring::new(gaps);
-				let start = WallInstant::now();
-				for _ in 0..iterations {
-					expiring.arrive();
-				}
-				start.elapsed()
-			});
-		});
-	}
-	group.finish();
+#[bench(args = GAPS, setup = Expiring::new)]
+fn track_sparse_expire(expiring: &mut Expiring) {
+	expiring.arrive();
 }
 
 /// A reader remembering `gaps` gaps, each below a handed-out group since aborted but still
@@ -1703,16 +1811,10 @@ impl GapFlush {
 /// One hand-out forgetting every remembered gap at once, each below a group that was
 /// aborted but is still cached, swept over the gaps. The groups judged share one
 /// successor past the aborted run, so finding it once per gap shows up as a slope.
-fn bench_gap_flush(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_gap_flush");
-	group.sample_size(10);
-	for gaps in [16u64, 64, 256, 512, 4096] {
-		group.throughput(Throughput::Elements(gaps));
-		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
-			b.iter_batched_ref(|| GapFlush::new(gaps), GapFlush::flush, BatchSize::PerIteration);
-		});
-	}
-	group.finish();
+#[bench(args = [16u64, 64, 256, 512, 4096], setup = GapFlush::new, items = |gaps| gaps)]
+fn track_gap_flush(mut flush: GapFlush) -> GapFlush {
+	flush.flush();
+	flush
 }
 
 /// How the groups after an [`EmptyRun`] judge it.
@@ -1792,86 +1894,112 @@ impl EmptyRun {
 	}
 }
 
+fn empty_run_cases() -> Vec<Case<(Run, usize, u64)>> {
+	let mut cases = Vec::new();
+	for (name, mode) in [("stale", Run::Stale), ("fresh", Run::Fresh), ("retired", Run::Retired)] {
+		for readers in [1usize, 8, 64] {
+			for run in [64u64, 512, 4096] {
+				cases.push(case(format!("{name}/{readers}/{run}"), (mode, readers, run)));
+			}
+		}
+	}
+	cases
+}
+
+fn empty_run(case: Case<(Run, usize, u64)>) -> EmptyRun {
+	let (mode, readers, run) = case.params;
+	EmptyRun::new(run, readers, mode)
+}
+
 /// Readers draining a run of groups that finished without a frame, swept over the run and
 /// the readers, with the groups after it past the budget (`stale`), within it (`fresh`), or
 /// the run retired by the wall clock (`retired`).
 /// A reader's cost must stay linear in the run, so a walk over the rest of the run per
 /// group shows up as a slope over it.
-fn bench_empty_run(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_empty_run");
-	group.sample_size(10);
-	for (name, mode) in [("stale", Run::Stale), ("fresh", Run::Fresh), ("retired", Run::Retired)] {
-		for readers in [1usize, 8, 64] {
-			for run in [64u64, 512, 4096] {
-				group.throughput(Throughput::Elements(run * readers as u64));
-				group.bench_function(BenchmarkId::new(format!("{name}/{readers}"), run), |b| {
-					b.iter_batched_ref(
-						|| EmptyRun::new(run, readers, mode),
-						EmptyRun::drain,
-						BatchSize::PerIteration,
-					);
-				});
-			}
+#[bench(
+	args = empty_run_cases(),
+	setup = empty_run,
+	items = |case: Case<(Run, usize, u64)>| case.params.2 * case.params.1 as u64,
+)]
+fn track_empty_run(mut run: EmptyRun) -> EmptyRun {
+	run.drain();
+	run
+}
+
+/// Idle narrow readers of a cached track, the first of which widens and narrows again.
+struct RangeWidening {
+	readers: Vec<track::Subscriber>,
+	_track: track::Producer,
+	_broadcast: broadcast::Producer,
+	narrow: track::Subscription,
+	wide: track::Subscription,
+	waiter: kio::Waiter,
+}
+
+impl RangeWidening {
+	fn new(case: Case<(usize, u64)>) -> Self {
+		let (readers, cached) = case.params;
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
+		for key in 0..cached {
+			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let narrow = track::Subscription::default().with_ranges([span(0, 0)]);
+		let mid = cached / 2;
+		let wide = narrow.clone().with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
+		let waiter = kio::Waiter::noop();
+		let readers = (0..readers)
+			.map(|_| {
+				let mut reader = track.subscribe(narrow.clone());
+				while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+				reader
+			})
+			.collect();
+		Self {
+			readers,
+			_track: track,
+			_broadcast: broadcast,
+			narrow,
+			wide,
+			waiter,
 		}
 	}
-	group.finish();
+}
+
+fn range_widening_cases() -> Vec<Case<(usize, u64)>> {
+	WIDENING_READERS
+		.into_iter()
+		.flat_map(|readers| WIDENING_CACHED.map(|cached| case(format!("{readers}r/{cached}"), (readers, cached))))
+		.collect()
 }
 
 /// One reader widening its ranges by [`WIDENED`] cached groups mid-cache and back, beside
 /// idle narrow readers. Every widening after the first finds groups already handed out,
 /// which the reader skips, so each one costs the same scan of the span.
-fn bench_range_widening(c: &mut Criterion) {
-	let mut bench = c.benchmark_group("track_range_widening");
-	bench.throughput(Throughput::Elements(1));
-	for readers in WIDENING_READERS {
-		for cached in WIDENING_CACHED {
-			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
-			let mut fixture = None;
-			bench.bench_function(BenchmarkId::new(format!("{readers}r"), cached), |b| {
-				let (readers, _track, _broadcast, narrow, wide, waiter) = fixture.get_or_insert_with(|| {
-					let broadcast = broadcast::Info::default().produce();
-					let track = broadcast
-						.create_track("bench", moq_net::track::Info::default().with_max_age(None))
-						.unwrap();
-					for key in 0..cached {
-						let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
-						group
-							.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
-							.unwrap();
-						group.finish().unwrap();
-					}
-					let narrow = track::Subscription::default().with_ranges([span(0, 0)]);
-					let mid = cached / 2;
-					let wide = narrow.clone().with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
-					let waiter = kio::Waiter::noop();
-					let readers: Vec<_> = (0..readers)
-						.map(|_| {
-							let mut reader = track.subscribe(narrow.clone());
-							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-							reader
-						})
-						.collect();
-					(readers, track, broadcast, narrow, wide, waiter)
-				});
-				let reader = &mut readers[0];
-				b.iter(|| {
-					reader.update(wide.clone()).unwrap();
-					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(waiter) {
-						black_box(group);
-					}
-					reader.update(narrow.clone()).unwrap();
-					// The narrow range is already delivered, so it ends until widened again.
-					assert!(matches!(reader.poll_recv_group(waiter), Poll::Ready(Ok(None))));
-				});
-			});
-		}
+#[bench(args = range_widening_cases(), setup = RangeWidening::new, items = |_| 1)]
+fn track_range_widening(widening: &mut RangeWidening) {
+	let reader = &mut widening.readers[0];
+	reader.update(widening.wide.clone()).unwrap();
+	while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&widening.waiter) {
+		black_box(group);
 	}
-	bench.finish();
+	reader.update(widening.narrow.clone()).unwrap();
+	// The narrow range is already delivered, so it ends until widened again.
+	assert!(matches!(
+		reader.poll_recv_group(&widening.waiter),
+		Poll::Ready(Ok(None))
+	));
 }
 
 /// One reader holding `runs` cached groups it skipped as stale, each between two it handed
 /// out, in a cache of `cached` groups, beside `readers` idle readers; see
-/// [`bench_budget_widening`].
+/// [`track_budget_widening`].
 struct BudgetWidening {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
@@ -1938,31 +2066,38 @@ impl BudgetWidening {
 	}
 }
 
-/// One reader widening its budget past the cached groups it skipped as stale, swept over the
-/// readers beside it, the groups cached, and the runs it skipped. Each re-offered group must
-/// cost the same, so a scan of the cache or the audience shows up as a slope.
-fn bench_budget_widening(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_budget_widening");
-	group.sample_size(10);
+fn budget_widening_cases() -> Vec<Case<(usize, u64, u64)>> {
+	let mut cases = Vec::new();
 	for readers in [1usize, 64] {
 		for cached in WIDENING_CACHED {
 			for runs in [1u64, 16, 256].into_iter().filter(|runs| 4 * runs <= cached) {
-				group.throughput(Throughput::Elements(runs));
-				group.bench_function(BenchmarkId::new(format!("{readers}r/{cached}c"), runs), |b| {
-					b.iter_batched_ref(
-						|| BudgetWidening::new(readers, cached, runs),
-						BudgetWidening::widen,
-						BatchSize::PerIteration,
-					);
-				});
+				cases.push(case(format!("{readers}r/{cached}c/{runs}"), (readers, cached, runs)));
 			}
 		}
 	}
-	group.finish();
+	cases
+}
+
+fn budget_widening(case: Case<(usize, u64, u64)>) -> BudgetWidening {
+	let (readers, cached, runs) = case.params;
+	BudgetWidening::new(readers, cached, runs)
+}
+
+/// One reader widening its budget past the cached groups it skipped as stale, swept over the
+/// readers beside it, the groups cached, and the runs it skipped. Each re-offered group must
+/// cost the same, so a scan of the cache or the audience shows up as a slope.
+#[bench(
+	args = budget_widening_cases(),
+	setup = budget_widening,
+	items = |case: Case<(usize, u64, u64)>| case.params.2,
+)]
+fn track_budget_widening(mut widening: BudgetWidening) -> BudgetWidening {
+	widening.widen();
+	widening
 }
 
 /// Readers whose range ends at a time no group reaches yet, as groups land behind a missing
-/// key; see [`bench_time_end`].
+/// key; see [`track_time_end`].
 struct TimeEnd {
 	_broadcast: broadcast::Producer,
 	track: track::Producer,
@@ -2016,25 +2151,33 @@ impl TimeEnd {
 	}
 }
 
+fn time_end_cases() -> Vec<Case<(usize, u64)>> {
+	[1usize, 8, 64]
+		.into_iter()
+		.flat_map(|readers| [64u64, 512, 4096].map(|groups| case(format!("{readers}r/{groups}"), (readers, groups))))
+		.collect()
+}
+
+fn time_end(case: Case<(usize, u64)>) -> TimeEnd {
+	let (readers, groups) = case.params;
+	TimeEnd::new(readers, groups)
+}
+
 /// Groups landing one at a time behind a missing key, each drained by readers whose
 /// time end it cannot settle, swept over the groups and the readers. Each group must cost
 /// each reader the same, so a rescan behind the gap shows up as a slope over the groups.
-fn bench_time_end(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_time_end");
-	group.sample_size(10);
-	for readers in [1usize, 8, 64] {
-		for groups in [64u64, 512, 4096] {
-			group.throughput(Throughput::Elements(groups * readers as u64));
-			group.bench_function(BenchmarkId::new(format!("{readers}r"), groups), |b| {
-				b.iter_batched_ref(|| TimeEnd::new(readers, groups), TimeEnd::run, BatchSize::PerIteration);
-			});
-		}
-	}
-	group.finish();
+#[bench(
+	args = time_end_cases(),
+	setup = time_end,
+	items = |case: Case<(usize, u64)>| case.params.1 * case.params.0 as u64,
+)]
+fn track_time_end(mut end: TimeEnd) -> TimeEnd {
+	end.run();
+	end
 }
 
 /// Readers missing the same runs of one track below where its feed starts, and the handler
-/// they ask; see [`bench_fill`].
+/// they ask; see [`track_fill`].
 struct Fills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
@@ -2120,25 +2263,29 @@ impl Fills {
 	}
 }
 
+fn fill_cases() -> Vec<Case<(usize, u64)>> {
+	[1usize, 8, 64]
+		.into_iter()
+		.flat_map(|readers| [1u64, 64, 1024].map(|runs| case(format!("{readers}r/{runs}"), (readers, runs))))
+		.collect()
+}
+
+fn fills(case: Case<(usize, u64)>) -> Fills {
+	let (readers, runs) = case.params;
+	Fills::new(readers, runs)
+}
+
 /// Readers missing the same runs below the feed's start, each asked as one fill they share,
 /// swept over the readers and the runs. Each reader must pay the same per run, so a cost
 /// that grows with the audience or the runs shows up as a slope.
-fn bench_fill(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fill");
-	group.sample_size(10);
-	for readers in [1usize, 8, 64] {
-		for runs in [1u64, 64, 1024] {
-			group.throughput(Throughput::Elements(runs * readers as u64));
-			group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
-				b.iter_batched_ref(|| Fills::new(readers, runs), Fills::run, BatchSize::PerIteration);
-			});
-		}
-	}
-	group.finish();
+#[bench(args = fill_cases(), setup = fills, items = |case: Case<(usize, u64)>| case.params.1 * case.params.0 as u64)]
+fn track_fill(mut fills: Fills) -> Fills {
+	fills.run();
+	fills
 }
 
 /// Readers whose disjoint ranges all fall below where the feed starts, and the handler that
-/// answers the fills they share; see [`bench_range_filling`].
+/// answers the fills they share; see [`track_range_filling`].
 struct RangeFills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
@@ -2212,39 +2359,38 @@ impl RangeFills {
 	}
 }
 
-/// Readers filling disjoint ranges below the feed's start, swept over how many ranges and how
-/// many groups each spans for one reader, then over the ranges and the readers sharing their
-/// fills. Each group filled must cost each reader the same, so a walk over the ranges, the
-/// groups of each fill, or the readers shows up as a slope over that axis.
-fn bench_range_filling(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_range_filling");
-	group.sample_size(10);
-	let mut sweep = |readers: usize, ranges: u64, span: u64, id: BenchmarkId| {
-		group.throughput(Throughput::Elements(ranges * span * readers as u64));
-		group.bench_function(id, |b| {
-			b.iter_batched_ref(
-				|| RangeFills::new(readers, ranges, span),
-				RangeFills::run,
-				BatchSize::PerIteration,
-			);
-		});
-	};
+fn range_filling_cases() -> Vec<Case<(usize, u64, u64)>> {
+	let mut cases = Vec::new();
 	for span in SERVED_SPAN {
 		for ranges in SERVED_RANGES {
-			sweep(1, ranges, span, BenchmarkId::new(format!("span_{span}"), ranges));
+			cases.push(case(format!("span_{span}/{ranges}"), (1, ranges, span)));
 		}
 	}
 	for readers in [8, 64] {
 		for ranges in SERVED_RANGES {
-			sweep(
-				readers,
-				ranges,
-				8,
-				BenchmarkId::new(format!("span_8/{readers}r"), ranges),
-			);
+			cases.push(case(format!("span_8/{readers}r/{ranges}"), (readers, ranges, 8)));
 		}
 	}
-	group.finish();
+	cases
+}
+
+fn range_fills(case: Case<(usize, u64, u64)>) -> RangeFills {
+	let (readers, ranges, span) = case.params;
+	RangeFills::new(readers, ranges, span)
+}
+
+/// Readers filling disjoint ranges below the feed's start, swept over how many ranges and how
+/// many groups each spans for one reader, then over the ranges and the readers sharing their
+/// fills. Each group filled must cost each reader the same, so a walk over the ranges, the
+/// groups of each fill, or the readers shows up as a slope over that axis.
+#[bench(
+	args = range_filling_cases(),
+	setup = range_fills,
+	items = |case: Case<(usize, u64, u64)>| case.params.1 * case.params.2 * case.params.0 as u64,
+)]
+fn track_range_filling(mut fills: RangeFills) -> RangeFills {
+	fills.run();
+	fills
 }
 
 /// A shared fill refused newest first, with each reader taking each answer as it arrives.
@@ -2308,66 +2454,33 @@ impl RefusedFill {
 	}
 }
 
-fn bench_fill_refusal(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fill_refusal");
-	group.sample_size(10);
-	for readers in [1usize, 8, 64] {
-		for refusals in [16u64, 256, 4096] {
-			group.throughput(Throughput::Elements(refusals * readers as u64));
-			group.bench_function(BenchmarkId::new(format!("{readers}r"), refusals), |b| {
-				b.iter_batched_ref(
-					|| RefusedFill::new(readers),
-					|fill| fill.run(refusals),
-					BatchSize::PerIteration,
-				);
-			});
-		}
-	}
+fn fill_refusal_cases() -> Vec<Case<(usize, u64)>> {
+	let mut cases: Vec<_> = [1usize, 8, 64]
+		.into_iter()
+		.flat_map(|readers| {
+			[16u64, 256, 4096].map(|refusals| case(format!("{readers}r/{refusals}"), (readers, refusals)))
+		})
+		.collect();
 	// Keep the long single-reader history that exposes even a cheap per-refusal copy.
-	group.throughput(Throughput::Elements(100_000));
-	group.bench_function("1r/100000", |b| {
-		b.iter_batched_ref(
-			|| RefusedFill::new(1),
-			|fill| fill.run(100_000),
-			BatchSize::PerIteration,
-		);
-	});
-	group.finish();
+	cases.push(case("1r/100000".to_string(), (1, 100_000)));
+	cases
 }
 
-criterion_group!(
-	benches,
-	bench_range_widening,
-	bench_budget_widening,
-	bench_fanout,
-	bench_fanout_frame,
-	bench_evict_fanout,
-	bench_high_key,
-	bench_fetch_expiry,
-	bench_fetch_budgets,
-	bench_fetch_park,
-	bench_parallel_write,
-	bench_aborted_scan,
-	bench_gc,
-	bench_subscriber_churn,
-	bench_subscriber_churn_after_peak,
-	bench_subscriber_churn_drops,
-	bench_subscriber_join,
-	bench_range_demand,
-	bench_subscription_ranges,
-	bench_range_serving,
-	bench_subscriber_preferences,
-	bench_parked_read,
-	bench_sparse_read,
-	bench_sparse_poll,
-	bench_idle_poll,
-	bench_sparse_expire,
-	bench_gap_flush,
-	bench_wall,
-	bench_empty_run,
-	bench_time_end,
-	bench_fill,
-	bench_range_filling,
-	bench_fill_refusal
-);
-criterion_main!(benches);
+fn refused_fill(case: Case<(usize, u64)>) -> (RefusedFill, u64) {
+	let (readers, refusals) = case.params;
+	(RefusedFill::new(readers), refusals)
+}
+
+#[bench(
+	args = fill_refusal_cases(),
+	setup = refused_fill,
+	items = |case: Case<(usize, u64)>| case.params.1 * case.params.0 as u64,
+)]
+fn track_fill_refusal(mut input: (RefusedFill, u64)) -> (RefusedFill, u64) {
+	input.0.run(input.1);
+	input
+}
+
+fn main() {
+	swole::main();
+}

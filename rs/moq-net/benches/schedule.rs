@@ -1,27 +1,29 @@
 //! Send scheduling on a congested link: the transport's send groups against the publishers'
 //! session-wide priority queue and two scalar orderings.
 //!
-//! Each workload runs every scheduler once and prints its byte shares, live-edge lag, and
-//! queue work, then criterion times the run. The four schedulers:
+//! Each workload runs every scheduler from a fresh simulation. The four schedulers:
 //!
 //! - `groups`: one send group per subscription at its priority, streams ordered by group
 //!   key inside it (what native QUIC uses).
 //! - `queue`: the publishers' `PriorityQueue`, ranking every in-flight group on the session
 //!   into one `u8` send order, re-applied to each stream whose rank moves.
-//! - `scalar-seq`: a 32-bit `[priority][group key]` key, which leaves 24 bits for the
+//! - `scalar_seq`: a 32-bit `[priority][group key]` key, which leaves 24 bits for the
 //!   key and compares keys across subscriptions.
 //! - `scalar`: the priority alone, so equal subscriptions share by stream count.
 //!
-//! `fanout` sweeps subscriptions against groups in flight per subscription, timing one frame,
+//! `fanout_*` sweeps subscriptions against groups in flight per subscription, timing one frame,
 //! so a scheduling cost that grows with the table rather than the touched path is a slope.
-//! `datagram` sweeps send groups and queued datagrams per group against one
+//! `datagram_*` sweeps send groups and queued datagrams per group against one
 //! datagram sent and one evicted, for the same reason.
+//!
+//! Run with `cargo bench -p moq-net --features fuzz --bench schedule`.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use swole::bench;
 
 // Both schedulers compile straight from source, so neither widens its crate's API for this.
 #[path = "../src/priority.rs"]
@@ -77,12 +79,19 @@ impl Track {
 	}
 }
 
+#[derive(Clone)]
 struct Workload {
 	name: &'static str,
 	tracks: Vec<Track>,
 	/// Bytes the link takes per tick.
 	capacity: usize,
 	ticks: u64,
+}
+
+impl fmt::Display for Workload {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.write_str(self.name)
+	}
 }
 
 fn workloads() -> Vec<Workload> {
@@ -132,25 +141,12 @@ fn workloads() -> Vec<Workload> {
 	]
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum Kind {
 	Groups,
 	Queue,
 	ScalarSeq,
 	Scalar,
-}
-
-const KINDS: [Kind; 4] = [Kind::Groups, Kind::Queue, Kind::ScalarSeq, Kind::Scalar];
-
-impl Kind {
-	fn name(self) -> &'static str {
-		match self {
-			Self::Groups => "groups",
-			Self::Queue => "queue",
-			Self::ScalarSeq => "scalar-seq",
-			Self::Scalar => "scalar",
-		}
-	}
 }
 
 struct Stream {
@@ -350,79 +346,47 @@ impl Sim {
 			self.step();
 		}
 	}
+}
 
-	fn report(&self, workload: &str) {
-		let priorities: Vec<i8> = {
-			let mut p: Vec<_> = self.tracks.iter().map(|t| t.priority).collect();
-			p.sort();
-			p.dedup();
-			p
-		};
-		let mut line = format!("{workload:>10} {:>10}  work {:>8}", self.kind.name(), self.work);
-		for priority in priorities.into_iter().rev() {
-			let bytes: Vec<f64> = self
-				.tracks
-				.iter()
-				.zip(&self.shares)
-				.filter(|(t, _)| t.priority == priority)
-				.map(|(_, s)| s.bytes as f64)
-				.collect();
-			let sum: f64 = bytes.iter().sum();
-			let squares: f64 = bytes.iter().map(|b| b * b).sum();
-			let jain = if squares > 0.0 {
-				sum * sum / (bytes.len() as f64 * squares)
-			} else {
-				0.0
-			};
-			line += &format!(
-				"  p{priority}: {:.0} KB/tick jain {jain:.3}",
-				sum / self.tick as f64 / 1e3
-			);
+/// A fresh simulation of one workload on one scheduler, and the ticks to run it for.
+struct Run {
+	sim: Sim,
+	ticks: u64,
+}
+
+impl Run {
+	fn new(kind: Kind, workload: &Workload) -> Self {
+		Self {
+			sim: Sim::new(kind, workload),
+			ticks: workload.ticks,
 		}
-		let lag: Vec<String> = self
-			.tracks
-			.iter()
-			.zip(&self.shares)
-			.map(|(track, share)| {
-				let lag = match (share.opened, share.delivered) {
-					(Some(opened), Some(delivered)) => (opened.saturating_sub(delivered) / track.step).to_string(),
-					_ => "-".to_string(),
-				};
-				let delay = match share.groups {
-					0 => "-".to_string(),
-					n => format!("{:.0}", share.delay as f64 / n as f64),
-				};
-				format!("{lag}/{delay}")
-			})
-			.collect();
-		line += &format!("  lag/delay {}", lag.join(" "));
-		eprintln!("{line}");
+	}
+
+	/// Run every tick, returning the simulation so its drop stays out of the measurement.
+	fn run(mut self) -> Sim {
+		self.sim.run(self.ticks);
+		self.sim
 	}
 }
 
-fn bench_workloads(c: &mut Criterion) {
-	eprintln!("byte share and Jain fairness per priority; lag in groups behind the live edge, delay in ticks");
-	for workload in workloads() {
-		let mut group = c.benchmark_group(format!("schedule_{}", workload.name));
-		for kind in KINDS {
-			let mut sim = Sim::new(kind, &workload);
-			sim.run(workload.ticks);
-			sim.report(workload.name);
-
-			group.bench_function(kind.name(), |b| {
-				b.iter_batched(
-					|| Sim::new(kind, &workload),
-					|mut sim| {
-						sim.run(workload.ticks);
-						sim
-					},
-					BatchSize::LargeInput,
-				);
-			});
+/// One benchmark per scheduler, each over every workload.
+macro_rules! workload {
+	($name:ident, $setup:ident, $kind:expr) => {
+		fn $setup(workload: Workload) -> Run {
+			Run::new($kind, &workload)
 		}
-		group.finish();
-	}
+
+		#[bench(args = workloads(), setup = $setup)]
+		fn $name(run: Run) -> Sim {
+			run.run()
+		}
+	};
 }
+
+workload!(groups, groups_run, Kind::Groups);
+workload!(queue, queue_run, Kind::Queue);
+workload!(scalar_seq, scalar_seq_run, Kind::ScalarSeq);
+workload!(scalar, scalar_run, Kind::Scalar);
 
 /// A saturated schedule: `subscriptions` groups at one priority, each with `streams` queued.
 fn saturated(subscriptions: usize, streams: usize) -> (Schedule<u64, ()>, Vec<Slot>) {
@@ -441,55 +405,69 @@ fn saturated(subscriptions: usize, streams: usize) -> (Schedule<u64, ()>, Vec<Sl
 	(schedule, slots)
 }
 
-fn bench_fanout(c: &mut Criterion) {
-	let mut group = c.benchmark_group("schedule_fanout_frame");
-	for subscriptions in [1, 16, 256, 4_096] {
-		for streams in [1, 16, 256] {
-			if subscriptions * streams > 100_000 {
-				continue;
-			}
-			let (mut schedule, mut slots) = saturated(subscriptions, streams);
-			group.bench_with_input(
-				BenchmarkId::new(format!("subs_{subscriptions}"), streams),
-				&(),
-				|b, ()| {
-					b.iter(|| {
-						let Some(Next::Stream(id)) = schedule.pop() else {
-							unreachable!("only streams are queued");
-						};
-						let slot = &mut slots[id as usize];
-						schedule.sent(id, slot, PACKET, Some((id % streams as u64) as i64), true);
-					});
-				},
-			);
-		}
-	}
-	group.finish();
+/// One point of a fanout sweep: send groups at one priority, against what each holds queued.
+#[derive(Clone, Copy)]
+struct Fanout {
+	/// `subs` for subscriptions, `groups` for datagram send groups.
+	axis: &'static str,
+	groups: usize,
+	queued: usize,
+}
 
-	// A group opening and closing a stream, as each new MoQ group does.
-	let mut group = c.benchmark_group("schedule_fanout_churn");
-	for subscriptions in [1, 16, 256, 4_096] {
-		for streams in [1, 16, 256] {
-			if subscriptions * streams > 100_000 {
-				continue;
-			}
-			// Opening then closing leaves the schedule as it was, so one serves every run.
-			let (mut schedule, _slots) = saturated(subscriptions, streams);
-			group.bench_with_input(
-				BenchmarkId::new(format!("subs_{subscriptions}"), streams),
-				&(),
-				|b, ()| {
-					b.iter(|| {
-						let mut slot = Slot::default();
-						schedule.join(u64::MAX, &mut slot, Some(0), i64::MAX);
-						schedule.push(u64::MAX, &mut slot, i64::MAX);
-						schedule.leave(&mut slot);
-					});
-				},
-			);
-		}
+impl fmt::Display for Fanout {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}_{}/{}", self.axis, self.groups, self.queued)
 	}
-	group.finish();
+}
+
+/// Every point under 100,000 queued in all.
+fn fanout(axis: &'static str) -> Vec<Fanout> {
+	[1, 16, 256, 4_096]
+		.into_iter()
+		.flat_map(|groups| [1, 16, 256].map(|queued| Fanout { axis, groups, queued }))
+		.filter(|case| case.groups * case.queued <= 100_000)
+		.collect()
+}
+
+struct Frames {
+	schedule: Schedule<u64, ()>,
+	slots: Vec<Slot>,
+	streams: u64,
+}
+
+fn frames(case: Fanout) -> Frames {
+	let (schedule, slots) = saturated(case.groups, case.queued);
+	Frames {
+		schedule,
+		slots,
+		streams: case.queued as u64,
+	}
+}
+
+/// One frame sent from a saturated schedule, its stream requeued behind its group's others.
+#[bench(args = fanout("subs"), setup = frames)]
+fn fanout_frame(frames: &mut Frames) {
+	let Some(Next::Stream(id)) = frames.schedule.pop() else {
+		unreachable!("only streams are queued");
+	};
+	let slot = &mut frames.slots[id as usize];
+	frames
+		.schedule
+		.sent(id, slot, PACKET, Some((id % frames.streams) as i64), true);
+}
+
+fn churn(case: Fanout) -> (Schedule<u64, ()>, Vec<Slot>) {
+	saturated(case.groups, case.queued)
+}
+
+/// A group opening and closing a stream, as each new MoQ group does. Opening then closing
+/// leaves the schedule as it was, so one serves every call.
+#[bench(args = fanout("subs"), setup = churn)]
+fn fanout_churn((schedule, _slots): &mut (Schedule<u64, ()>, Vec<Slot>)) {
+	let mut slot = Slot::default();
+	schedule.join(u64::MAX, &mut slot, Some(0), i64::MAX);
+	schedule.push(u64::MAX, &mut slot, i64::MAX);
+	schedule.leave(&mut slot);
 }
 
 /// A full datagram budget: `groups` send groups at one priority, with `datagrams` queued in
@@ -506,53 +484,51 @@ fn datagrams(groups: usize, datagrams: usize) -> (Schedule<u64, ()>, Vec<usize>)
 	(schedule, ids)
 }
 
-fn bench_datagram(c: &mut Criterion) {
-	// A datagram into a full budget, which evicts the oldest of the lowest-priority group.
-	let mut group = c.benchmark_group("schedule_datagram_evict_groups");
-	for groups in [1, 16, 256, 4_096] {
-		for queued in [1, 16, 256] {
-			if groups * queued > 100_000 {
-				continue;
-			}
-			let (mut schedule, ids) = datagrams(groups, queued);
-			let budget = schedule.datagram_bytes();
-			let mut seq = queued as i64;
-			let mut next = 0;
-			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
-				b.iter(|| {
-					// Round robin, so every group keeps its share of the budget.
-					schedule.push_datagram(Some(ids[next]), seq, (), PACKET, budget);
-					next = (next + 1) % ids.len();
-					seq += 1;
-				});
-			});
-		}
-	}
-	group.finish();
-
-	// A datagram sent and another queued in its place, through every round robin.
-	let mut group = c.benchmark_group("schedule_datagram_send");
-	for groups in [1, 16, 256, 4_096] {
-		for queued in [1, 16, 256] {
-			if groups * queued > 100_000 {
-				continue;
-			}
-			let (mut schedule, _) = datagrams(groups, queued);
-			let mut seq = queued as i64;
-			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
-				b.iter(|| {
-					let Some(Next::Datagram(at)) = schedule.pop() else {
-						unreachable!("only datagrams are queued");
-					};
-					schedule.sent_datagram(at);
-					schedule.push_datagram(at, seq, (), PACKET, usize::MAX);
-					seq += 1;
-				});
-			});
-		}
-	}
-	group.finish();
+struct Evict {
+	schedule: Schedule<u64, ()>,
+	ids: Vec<usize>,
+	budget: usize,
+	seq: i64,
+	next: usize,
 }
 
-criterion_group!(benches, bench_workloads, bench_fanout, bench_datagram);
-criterion_main!(benches);
+fn evict(case: Fanout) -> Evict {
+	let (schedule, ids) = datagrams(case.groups, case.queued);
+	Evict {
+		budget: schedule.datagram_bytes(),
+		schedule,
+		ids,
+		seq: case.queued as i64,
+		next: 0,
+	}
+}
+
+/// A datagram into a full budget, which evicts the oldest of the lowest-priority group.
+#[bench(args = fanout("groups"), setup = evict)]
+fn datagram_evict_groups(evict: &mut Evict) {
+	// Round robin, so every group keeps its share of the budget.
+	evict
+		.schedule
+		.push_datagram(Some(evict.ids[evict.next]), evict.seq, (), PACKET, evict.budget);
+	evict.next = (evict.next + 1) % evict.ids.len();
+	evict.seq += 1;
+}
+
+fn send(case: Fanout) -> (Schedule<u64, ()>, i64) {
+	(datagrams(case.groups, case.queued).0, case.queued as i64)
+}
+
+/// A datagram sent and another queued in its place, through every round robin.
+#[bench(args = fanout("groups"), setup = send)]
+fn datagram_send((schedule, seq): &mut (Schedule<u64, ()>, i64)) {
+	let Some(Next::Datagram(at)) = schedule.pop() else {
+		unreachable!("only datagrams are queued");
+	};
+	schedule.sent_datagram(at);
+	schedule.push_datagram(at, *seq, (), PACKET, usize::MAX);
+	*seq += 1;
+}
+
+fn main() {
+	swole::main();
+}
