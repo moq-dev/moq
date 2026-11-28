@@ -1,6 +1,6 @@
 import { Duration } from "@moq/clock";
+import type * as Moq from "@moq/net";
 import type { Timed } from "@moq/net";
-import * as Moq from "@moq/net";
 
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
