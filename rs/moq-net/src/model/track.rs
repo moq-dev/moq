@@ -37392,6 +37392,47 @@ mod test {
 		);
 	}
 
+	/// A retryable upstream drop (such as CANCEL) arriving over keys a reader already judged
+	/// locally stale must not strip the stale verdict: once the drop is evicted from the track's
+	/// drop cache, widening the budget still reopens the miss and asks a fill.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_locally_stale_miss_stays_reopenable_after_a_retryable_drop() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		let mut latest = producer.create_group(group::Info { start: 3 }).unwrap();
+		latest
+			.write_frame(Timestamp::from_millis(300).unwrap(), &b"x"[..])
+			.unwrap();
+		latest.finish().unwrap();
+		let mut subscriber = producer.subscribe(within(Duration::from_millis(100), None));
+		let waiter = kio::Waiter::noop();
+		// 0..2 has reach 2 ms against live edge 300 ms (age 298 ms > 100 ms), so the reader
+		// judges it locally stale under 100 ms.
+		assert_eq!(drain_groups(&mut subscriber), [3, 2]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+
+		// Upstream sends a retryable CANCEL for 0..2; probe so drops.since processes it, then
+		// evict CANCEL from state.drops.
+		producer.drop_groups(0..2, StreamError::Cancel);
+		let mut next = producer.create_group(group::Info { start: 4 }).unwrap();
+		next.write_frame(Timestamp::from_millis(301).unwrap(), &b"x"[..])
+			.unwrap();
+		next.finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [4]);
+		producer.forget_drops(0..2);
+
+		// Widening to 1 s must still reopen the locally stale 0..2 verdict and ask a fill.
+		subscriber.update(within(Duration::from_secs(1), None)).unwrap();
+		assert!(subscriber.poll_next_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("widening must still reopen a locally stale miss after a retryable CANCEL");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+	}
+
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds
 	/// it as a stale verdict under that age rather than a loss for good: the readers waiting now
 	/// are refused, a later reader no wider is settled without asking, and once the verdict is

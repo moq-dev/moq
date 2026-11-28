@@ -1161,14 +1161,15 @@ impl Misses {
 				self.refused.remove(key..key + 1);
 			}
 		}
+		let mut refreshed_stale = false;
 		for changed in drops.since(self.drops_revision) {
 			for run in self.deferred.overlapping(changed.clone()) {
 				candidates.insert(run);
 			}
-			// Refresh already-given-up verdicts when a newer non-stale drop or skip replaces
+			// Refresh already-given-up verdicts when a newer final drop or skip replaces
 			// them (for example, an upstream SKIP replacing an adopted UNROUTABLE error), so
 			// post-eviction fallback keeps the newer verdict without overwriting locally judged
-			// stale runs with an adopted stale verdict.
+			// stale runs with an adopted stale verdict or a retryable error.
 			let mut refresh = Vec::new();
 			for run in self.given_up.overlapping(&changed) {
 				let span = run.start.max(changed.start)..run.end.min(changed.end);
@@ -1177,31 +1178,34 @@ impl Misses {
 				}
 				for (drop_run, hole) in state.drops.overlapping(&span) {
 					let part = drop_run.start.max(span.start)..drop_run.end.min(span.end);
-					if !part.is_empty() && (*hole == Hole::Skip || hole.stale_budget().is_none()) {
+					if !part.is_empty()
+						&& (*hole == Hole::Skip
+							|| (hole.stale_budget().is_none() && !crate::Error::Stream(hole.error()).retryable()))
+					{
 						refresh.push((part, hole.clone()));
 					}
 				}
 			}
-			if !refresh.is_empty() {
-				for (part, hole) in refresh {
-					if hole == Hole::Skip {
-						self.skipped.insert(part.clone());
+			for (part, hole) in refresh {
+				if hole == Hole::Skip {
+					self.skipped.insert(part.clone());
+					if self.stale.overlapping(&part).next().is_some() {
 						self.stale.remove(part.clone());
-						self.adopted_errors.remove(part);
-					} else {
-						for seg in self.skipped.gaps(&part) {
+						refreshed_stale = true;
+					}
+					self.adopted_errors.remove(part);
+				} else {
+					for seg in self.skipped.gaps(&part) {
+						if self.stale.overlapping(&seg).next().is_some() {
 							self.stale.remove(seg.clone());
-							if hole.error() == crate::StreamError::NotFound {
-								self.adopted_errors.remove(seg);
-							} else {
-								self.adopted_errors.insert(seg, hole.error());
-							}
+							refreshed_stale = true;
+						}
+						if hole.error() == crate::StreamError::NotFound {
+							self.adopted_errors.remove(seg);
+						} else {
+							self.adopted_errors.insert(seg, hole.error());
 						}
 					}
-				}
-				self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
-				if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
-					self.adopted_under = None;
 				}
 			}
 			// A drop or skip landing on the track settles in-flight fills for the keys it
@@ -1224,6 +1228,12 @@ impl Misses {
 					lost.insert(part);
 				}
 				self.release(&lost);
+			}
+		}
+		if refreshed_stale {
+			self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
+			if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
+				self.adopted_under = None;
 			}
 		}
 		// What it judged cached and the track evicted since, before this reader took it, is a
@@ -2579,15 +2589,23 @@ impl super::super::record::Beside for Misses {
 		}
 		let debt = debt.expect("cleared is non-empty");
 		if let Some(budget) = &self.budget {
+			let mut idx = 0;
 			for (seg, current) in budget.runs(debt.clone()) {
+				while idx < cleared.len() && cleared[idx].end <= seg.start {
+					idx += 1;
+				}
 				let mut limit = current;
-				for run in &cleared {
+				let mut scan = idx;
+				while scan < cleared.len() && cleared[scan].start < seg.end {
+					let run = &cleared[scan];
 					let overlap = run.start.max(seg.start)..run.end.min(seg.end);
-					if !overlap.is_empty() {
-						for (_, judged) in self.stale.overlapping(&overlap) {
-							limit = limit.min(judged.budget);
-						}
+					for (_, judged) in self.stale.overlapping(&overlap) {
+						limit = limit.min(judged.budget);
 					}
+					if run.end <= seg.end {
+						idx = scan + 1;
+					}
+					scan += 1;
 				}
 				tighten_forgotten(&mut self.forgotten_budgets, seg, limit);
 			}
