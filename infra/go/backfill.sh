@@ -49,9 +49,9 @@ for v in $versions; do
 done
 
 # A mirror tag proxy.golang.org does not list is a release only the mirror
-# took, after moq.dev's cutover. sum.golang.org has pinned no hash for it, so
-# modzip builds it from the tag's tree, the files proxy.golang.org would have
-# zipped.
+# took, usually after moq.dev's cutover. modzip builds it from the tag's tree,
+# the files proxy.golang.org would have zipped. proxy.golang.org's list can
+# lag a fetch from git, so a hash sum.golang.org already pinned must match.
 tags=$(git ls-remote --tags --refs "$MIRROR" 'v*' | sed 's|.*refs/tags/||' | sort -V)
 built=0
 for v in $tags; do
@@ -62,8 +62,24 @@ for v in $tags; do
     git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$v" "$MIRROR" "$src"
     at=$(git -C "$src" log -1 --format=%cI)
     rm -rf "$src/.git"
-    GOWORK=off go -C "$HERE/../../sh/go/modzip" run . -dir "$src" -version "$v" -time "$at" -out "$WORK/out"
+    sums=$(GOWORK=off go -C "$HERE/../../sh/go/modzip" run . -dir "$src" -version "$v" -time "$at" -out "$WORK/out")
     rm -rf "$src"
+    echo "$sums"
+    status=$(curl -sS -o "$WORK/lookup" -w '%{http_code}' "https://sum.golang.org/lookup/$MODULE@$v")
+    case "$status" in
+        200)
+            if ! grep -qxF "$(head -1 <<<"$sums")" "$WORK/lookup"; then
+                echo "Error: sum.golang.org pinned $MODULE@$v to a different hash than the mirror's tree:" >&2
+                grep -F "$MODULE $v " "$WORK/lookup" >&2
+                exit 1
+            fi
+            ;;
+        404 | 410) ;;
+        *)
+            echo "Error: sum.golang.org answered HTTP $status for $MODULE@$v" >&2
+            exit 1
+            ;;
+    esac
     built=$((built + 1))
 done
 
