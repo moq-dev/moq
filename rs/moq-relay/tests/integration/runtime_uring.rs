@@ -171,12 +171,12 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let publisher = connect(client().with_publisher(&origin), wt_url.clone()).await;
@@ -269,12 +269,12 @@ async fn uring_workers_serve_every_configured_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let raw = format!("moql://127.0.0.1:{port}/versions");
@@ -706,12 +706,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
@@ -784,12 +784,12 @@ async fn traced_session(congestion: Option<moq_tokio::quic::CongestionControl>) 
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 

@@ -201,8 +201,9 @@ async fn ratio_joins_cross_two_relays() {
 			moq_net::track::Refresh::default().with_ratio((name == "moq-lite-07-wip").then_some(1))
 		);
 		crate::support::harness::subscribed(&producer).await;
-		let mut group = producer.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
-		group.write_frame(moq_net::Timestamp::unscaled(0), &b"key"[..]).unwrap();
+		let mut group = producer
+			.append_group(moq_net::Timestamp::unscaled(0), &b"key"[..])
+			.unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), &b"abc"[..]).unwrap();
 		let mut received = baseline.recv_group().await.unwrap().unwrap();
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 3);
@@ -285,8 +286,7 @@ async fn interval_caps_refreshes_across_two_relays() {
 		let mut n = 0u64;
 		while demand.refresh().await.is_ok() {
 			let start = Timestamp::unscaled(n);
-			let mut group = publishing.append_group(start).unwrap();
-			group.write_frame(start, &b"still"[..]).unwrap();
+			let group = publishing.append_group(start, &b"still"[..]).unwrap();
 			group.finish().unwrap();
 			log.borrow_mut().push(kio::clock::now());
 			n += 1;

@@ -212,12 +212,9 @@ impl Mesh {
 	/// Write a group at L and wait for the reader at A to receive it.
 	async fn reads(&mut self) {
 		let sequence = self.track.largest().map_or(0, |largest| largest.group + 1);
-		let mut group = self
+		let group = self
 			.track
-			.append_group(moq_net::Timestamp::from_millis(sequence).unwrap())
-			.unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(sequence).unwrap(), b"l".as_ref())
+			.append_group(moq_net::Timestamp::from_millis(sequence).unwrap(), b"l".as_ref())
 			.unwrap();
 		group.finish().unwrap();
 		loop {

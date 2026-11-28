@@ -1263,14 +1263,12 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track
+		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
+		let group = track
 			.append_group(
 				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				PAYLOAD,
 			)
-			.unwrap();
-		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
-		group
-			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 			.unwrap();
 		group.finish().unwrap();
 		let mut refused = Web::new(
@@ -1507,13 +1505,11 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track
+		let group = track
 			.append_group(
 				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				b"hello".as_ref(),
 			)
-			.unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.unwrap();
 		group.finish().unwrap();
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
@@ -1625,11 +1621,8 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track
-				.append_group(moq_net::Timestamp::from_millis(millis).unwrap())
-				.unwrap();
-			group
-				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
+			let group = track
+				.append_group(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();
 			group.finish().unwrap();
 		}
