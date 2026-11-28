@@ -27,7 +27,7 @@ use std::task::Poll;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Timestamp, broadcast, group, track};
+use moq_net::{Timestamp, broadcast, track};
 
 /// Ranges in the one subscription, up to about what a lite-07 SUBSCRIBE fits.
 const RANGES: [u64; 4] = [1, 64, 1024, 16_384];
@@ -47,7 +47,7 @@ fn millis(millis: u64) -> Timestamp {
 
 /// Write a one-frame group starting at `key` milliseconds.
 fn land(track: &track::Producer, key: u64) {
-	let mut group = track.create_group(millis(key), Bytes::from_static(b"x")).unwrap();
+	let group = track.create_group(millis(key), Bytes::from_static(b"x")).unwrap();
 	group.finish().unwrap();
 }
 

@@ -341,7 +341,7 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for key in (n..n + LIVE_BATCH).map(|key| key as u64) {
-						let mut group = ctx.track.append_group(at(key), payload.clone()).unwrap();
+						let group = ctx.track.append_group(at(key), payload.clone()).unwrap();
 						group.finish().unwrap();
 						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 						black_box(group);
@@ -540,7 +540,7 @@ fn bench_compressed_updates(c: &mut Criterion) {
 										track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 									)
 									.unwrap();
-								let mut group = track.append_group(Timestamp::unscaled(0), payload.clone()).unwrap();
+								let group = track.append_group(Timestamp::unscaled(0), payload.clone()).unwrap();
 								group.finish().unwrap();
 								track
 							})

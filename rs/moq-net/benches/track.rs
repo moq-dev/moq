@@ -387,7 +387,7 @@ impl HighKey {
 	}
 
 	fn write(&self, key: u64) {
-		let mut group = self.track.create_group(Timestamp::unscaled(key), self.payload.clone()).unwrap();
+		let group = self.track.create_group(Timestamp::unscaled(key), self.payload.clone()).unwrap();
 		group.finish().unwrap();
 	}
 
@@ -1403,7 +1403,7 @@ impl Sparse {
 			true => at(key),
 			false => moq_net::Timestamp::unscaled(key),
 		};
-		let mut group = self.track.create_group(timestamp, Bytes::from_static(b"x")).unwrap();
+		let group = self.track.create_group(timestamp, Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("the group is cached");
@@ -1631,7 +1631,7 @@ impl GapFlush {
 			},
 		)]));
 		let mut hand_out = |key: u64| {
-			let mut group = track.create_group(at(key), Bytes::from_static(b"x")).unwrap();
+			let group = track.create_group(at(key), Bytes::from_static(b"x")).unwrap();
 			let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
 				panic!("the group is cached");
 			};
@@ -1656,7 +1656,7 @@ impl GapFlush {
 	#[inline(never)]
 	fn flush(&mut self) {
 		const TWO_HOURS: u64 = 7_200_000;
-		let group = self.track.create_group(at(TWO_HOURS), Bytes::from_static(b"x")).unwrap();
+		let _group = self.track.create_group(at(TWO_HOURS), Bytes::from_static(b"x")).unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("the group is cached");
 		};
@@ -1755,7 +1755,7 @@ impl BudgetWidening {
 		let waiter = kio::Waiter::noop();
 		let mut write = |keys: std::ops::Range<u64>| {
 			for key in keys {
-				let mut group = track.create_group(at(100 * key), Bytes::from_static(b"x")).unwrap();
+				let group = track.create_group(at(100 * key), Bytes::from_static(b"x")).unwrap();
 				group.finish().unwrap();
 			}
 			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
@@ -1832,7 +1832,7 @@ impl TimeEnd {
 	fn new(readers: usize, groups: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut zero = track.create_group(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let zero = track.create_group(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x")).unwrap();
 		zero.finish().unwrap();
 		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
 		let subscription = track::Subscription::default().with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
@@ -1855,7 +1855,7 @@ impl TimeEnd {
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for key in 2..self.groups + 2 {
-			let mut group = self.track.create_group(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x")).unwrap();
+			let group = self.track.create_group(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x")).unwrap();
 			group.finish().unwrap();
 			for reader in &mut self.readers {
 				let mut handed = 0;
@@ -1904,7 +1904,7 @@ impl Fills {
 		// The feed starts past every run, so each is a miss.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs).map(|run| span(run * 2, run * 2)).chain([from(start)]);
@@ -2002,7 +2002,7 @@ impl RangeFills {
 		// it its own fill, and has every range start at a time no group held places.
 		let start = ranges * (width + 1) + 1;
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
 			let first = i * (width + 1) + 1;
@@ -2107,7 +2107,7 @@ impl RefusedFill {
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
 		track.start_at(Self::START).unwrap();
-		let mut group = track.create_group(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		let group = track.create_group(at(Self::START), Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)

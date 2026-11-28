@@ -1169,7 +1169,7 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::hidden())
 							.unwrap();
 						let track = standby.broadcast().create_track("video", timed()).unwrap();
-						let mut second = track.create_group(at(1), b"two".as_ref()).unwrap();
+						let second = track.create_group(at(1), b"two".as_ref()).unwrap();
 						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
 						standby.announce().unwrap();
@@ -1512,7 +1512,7 @@ fn bench_parked(c: &mut Criterion) {
 					.collect();
 				let _writers: Vec<_> = sources
 					.iter()
-					.map(|source| source.append_group(Timestamp::unscaled(0)).unwrap())
+					.map(|source| source.append_group(Timestamp::unscaled(0), b"frame".as_ref()).unwrap())
 					.collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
 					let resolved = producer.consume().request("room/live", None).await.unwrap();
@@ -1522,7 +1522,10 @@ fn bench_parked(c: &mut Criterion) {
 						let track = resolved.track(&format!("{i}")).unwrap();
 						for _ in 0..readers {
 							let mut sub = track.subscribe(None).await.unwrap();
-							groups.push(sub.recv_group().await.unwrap().unwrap());
+							let mut group = sub.recv_group().await.unwrap().unwrap();
+							// Past the frame that opened the group, so the read parks.
+							group.read_frame().await.unwrap().expect("the opening frame");
+							groups.push(group);
 							subscriptions.push(sub);
 						}
 					}
@@ -1775,7 +1778,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
 		for key in order {
-			let mut group = track.create_group(at(key as u64), b"f".as_ref()).unwrap();
+			let group = track.create_group(at(key as u64), b"f".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
