@@ -3742,7 +3742,7 @@ test("published names refuse navigation segments", () => {
 	}
 });
 
-test("a `*` is refused everywhere a path is named", () => {
+test("a `*` is refused everywhere a path is named", async () => {
 	const origin = new Producer();
 	try {
 		for (const name of ["room/*", "room/cam*1", "**"]) {
@@ -3752,6 +3752,10 @@ test("a `*` is refused everywhere a path is named", () => {
 			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow("`*`");
 			expect(() => origin.consume().follow(path)).toThrow("`*`");
 		}
+		// A peer's request for one never reaches a claim covering it.
+		const claim = origin.claim(Path.from("room"));
+		expect(await wireOf(origin.consume()).demand(Path.from("room/cam*1"))).toBeUndefined();
+		claim.close();
 	} finally {
 		origin.close();
 	}

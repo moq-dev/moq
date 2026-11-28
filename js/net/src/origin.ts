@@ -2898,6 +2898,9 @@ export class Consumer implements Reader {
 		signal?: AbortSignal,
 	): Promise<broadcast.Consumer | undefined> {
 		signal?.throwIfAborted();
+		// Nothing can serve a path holding `*` (see `nameable`), so a peer's request for one is
+		// refused here rather than handed to a claim whose answer would throw.
+		if (path.includes("*")) return undefined;
 		const cancelled = new Once<true>();
 		let release: Dispose | undefined;
 		const abort = () => {
