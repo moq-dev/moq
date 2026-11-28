@@ -13217,7 +13217,8 @@ async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
 /// its clock is still acquired, keeps its audio on time at the rate with any delay that carries the
 /// source: the send-ahead the rate needs grows before anything is due, since the anchor then gives
 /// the track sent latest the delay. A delay shorter than the source's PES packing drops frames at any
-/// rate, so it is not swept.
+/// rate, so it is not swept; at 300 ms, `eac3` still drops a frame the given rate keeps
+/// (`quest/m1/ts-export-audio-rate.md`).
 #[tokio::test(start_paused = true)]
 async fn an_ffmpeg_audio_source_measured_while_its_clock_is_acquired_keeps_its_audio_on_time() {
 	for (name, data) in [
