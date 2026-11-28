@@ -17,4 +17,10 @@ test("draft-23: a sealed ID_TIMESCALE is read, and a second copy is malformed", 
 	// Delta-encoded: ID_TIMESCALE (0x40B70) after the block (0x0b).
 	const twice = concat([sealed, varint(0x40b70 - 0x0b), varint(1000)]);
 	await expect(parse(twice)).rejects.toThrow("repeated property");
+	// A second block, even sealing other keys, and a nested block are malformed too.
+	const priority = concat([varint(0x0e), varint(1)]);
+	const other = concat([varint(0), varint(priority.byteLength), priority]);
+	await expect(parse(concat([sealed, other]))).rejects.toThrow("repeated property");
+	const nested = concat([varint(0x0b), varint(sealed.byteLength), sealed]);
+	await expect(parse(nested)).rejects.toThrow("nested Immutable Properties");
 });

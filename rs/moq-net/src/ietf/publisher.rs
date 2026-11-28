@@ -328,7 +328,12 @@ impl PrepareFetch {
 			// A start past Largest Object in a group the cache holds is refused INVALID_RANGE
 			// (draft-22 section 9.11), rather than waiting on the live group. A group past every
 			// one held does not exist yet.
-			if (range.start.group, range.start.object) > (largest.group, largest.object) {
+			// A copy that can't prove its last moq-timestamp ID holds only a lower bound on it, so
+			// a start past that bound may still name a published object.
+			let estimated = track
+				.peek_group(largest.group)
+				.is_some_and(|group| !group_last_id_exact(&group, timed));
+			if (range.start.group, range.start.object) > (largest.group, largest.object) && !estimated {
 				let held = range
 					.start
 					.group
@@ -523,7 +528,9 @@ impl FindFetch {
 					let info = ready!(resolving.poll_ok(waiter))?;
 					let cached = track.peek_group(self.key);
 					let wire = cached.as_ref().and_then(|group| group.wire());
-					if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
+					if wire.as_ref().is_some_and(|wire| !wire.fetchable)
+						|| cached.as_ref().is_some_and(|group| misses_head(group, self.skip))
+					{
 						return Poll::Ready(Err(Error::Unsupported));
 					}
 					// Relayed Object IDs in the same scheme need not match ordinals; when relaying
@@ -7587,7 +7594,7 @@ impl FetchGroupWrite {
 		version: Version,
 		priority: u8,
 	) -> Result<Self, Error> {
-		if group.wire().is_some_and(|wire| !wire.fetchable) {
+		if group.wire().is_some_and(|wire| !wire.fetchable) || misses_head(&group, slice.skip) {
 			return Err(Error::Unsupported);
 		}
 		let same_mode = group_relayed_same_mode(&group, false);
@@ -7745,6 +7752,7 @@ impl FetchGroupWrite {
 				FetchGroupState::Yield => {
 					ready!(self.budget.poll_yield(waiter));
 					if self.group.wire().is_some_and(|wire| !wire.fetchable)
+						|| misses_head(&self.group, self.slice.skip)
 						|| (!self.same_mode
 							&& self
 								.group
@@ -22286,6 +22294,16 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 	live_edge_for(track, true)
 }
 
+/// Whether a FETCH from Object `skip` reaches below a timestamp-ID copy relayed from a stream
+/// that started past the group's first object: timestamp IDs skip ticks with no gap mark, so
+/// that copy can't prove what came before its first object.
+fn misses_head(group: &group::Consumer, skip: u64) -> bool {
+	group.timestamp_ids() == Some(true)
+		&& group
+			.wire()
+			.is_some_and(|wire| !wire.first_object && skip < wire.first_id)
+}
+
 /// Whether a relayed MOQT group's stored wire Object IDs already match the egress peer's mode.
 fn group_relayed_same_mode(group: &group::Consumer, timed: bool) -> bool {
 	group.wire().is_some() && (group.timescale().is_none() || group.timestamp_ids().is_none_or(|ts| ts == timed))
@@ -22301,6 +22319,15 @@ fn group_last_id(group: &group::Consumer, timed: bool) -> Option<u64> {
 	} else {
 		group.last_frame()
 	}
+}
+
+/// Whether [`group_last_id`] is the group's exact last Object ID on this egress rather than
+/// the lower bound a timed copy without frame 0 answers.
+fn group_last_id_exact(group: &group::Consumer, timed: bool) -> bool {
+	if group_relayed_same_mode(group, timed) || !timed || group.timescale().is_none() {
+		return true;
+	}
+	group.last_frame().is_none_or(|last| group.timed_id(last).is_some())
 }
 
 /// The moq-timestamp Object ID a track ending before frame `frame` of `group` ends at: one
@@ -23483,6 +23510,60 @@ mod compression_tests {
 		assert_eq!(len, 5);
 		assert_eq!(r.slice(len).unwrap(), b"hello");
 		assert!(r.is_empty());
+	}
+
+	/// A timed copy without frame 0 knows only a lower bound on its last timestamp Object ID,
+	/// so a FETCH past it isn't refused INVALID_RANGE on that bound; a whole copy knows it exactly.
+	#[test]
+	fn a_headless_timed_copy_estimates_its_last_id() {
+		for headless in [false, true] {
+			let track = track::Producer::new(
+				Arc::new(crate::broadcast::Info::default()),
+				"video",
+				track::Info::timed().with_timescale(Timescale::MILLI),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			if headless {
+				group.start_at(1).unwrap();
+			}
+			for ms in [5, 10, 10] {
+				group
+					.write_frame(Timestamp::from_millis(ms).unwrap(), b"x".as_slice())
+					.unwrap();
+			}
+			let consumer = group.consume();
+			assert_eq!(group_last_id_exact(&consumer, true), !headless, "headless={headless}");
+			assert!(group_last_id_exact(&consumer, false), "headless={headless}");
+		}
+	}
+
+	/// A timestamp-ID copy relayed from a stream that started past the group's first object
+	/// serves only FETCHes from its first object on: the objects before it are unproven.
+	#[test]
+	fn a_timestamp_id_suffix_misses_only_what_precedes_it() {
+		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+		info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: Version::Draft23,
+			values: Vec::new(),
+		}));
+		for first_object in [true, false] {
+			let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+			let group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object,
+					first_id: 33,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			let consumer = group.consume();
+			assert_eq!(misses_head(&consumer, 0), !first_object, "first_object={first_object}");
+			assert!(!misses_head(&consumer, 33), "first_object={first_object}");
+		}
 	}
 
 	/// On Draft23, standalone `END_OF_TRACK` uses the sparse wire Object ID (see [`timed_end`]),

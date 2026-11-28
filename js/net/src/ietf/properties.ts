@@ -150,6 +150,8 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 		// Odd type: length-prefixed bytes
 		const bytes = await r.read(await r.u53());
 		if (abs !== IMMUTABLE) continue;
+		// One block, never nested, as in Rust: a second would leave the sealed keys ambiguous.
+		once(IMMUTABLE);
 		// A sealed property applies as a mutable one does: ID_TIMESCALE there still picks the
 		// Object ID scheme.
 		const block = new Cursor(bytes, r.version);
@@ -157,6 +159,7 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 		while (block.remaining > 0) {
 			const id = prev + block.u62();
 			prev = id;
+			if (id === IMMUTABLE) throw new Error("nested Immutable Properties");
 			if (id % 2n === 0n) apply(id, block.u62());
 			else block.read(block.u53());
 		}

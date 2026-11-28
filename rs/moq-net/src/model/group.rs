@@ -2979,11 +2979,9 @@ impl Handle {
 				return Err(Error::MalformedTrack);
 			}
 			// A first object's gap may also cover IDs below where this copy starts. Timestamp
-			// Object IDs skip the ticks between frames with no Prior Object ID Gap, so on such a
-			// track only a stream starting at the group's first object proves its head is held.
-			if self.track.timestamp_ids() == Some(true) {
-				wire.fetchable &= wire.last.is_some() || wire.first_object;
-			} else {
+			// Object IDs skip the ticks between frames with no Prior Object ID Gap, so a FETCH
+			// judges such a copy's missing head by its first ID instead (`ietf::publisher`).
+			if self.track.timestamp_ids() != Some(true) {
 				wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
 			}
 		}
@@ -6375,40 +6373,6 @@ mod test {
 		assert_eq!(pool.used(), charged);
 		drop(consumer);
 		assert_eq!(pool.used(), 0);
-	}
-
-	/// A timestamp-ID copy whose stream starts past the group's first object can't prove the
-	/// frames before it, so it answers no FETCH; one starting at the first object can.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_timestamp_id_suffix_is_not_fetchable() {
-		for first_object in [true, false] {
-			let mut info = track::Info::timed();
-			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
-				version: crate::ietf::Version::Draft23,
-				values: Vec::new(),
-			}));
-			let cache = cache::Track::new(
-				cache::Pool::unbounded(),
-				Default::default(),
-				Default::default(),
-				kio::Weak::new(),
-			);
-			let group = Producer::new(Info::from(0u64), info, cache);
-			group
-				.set_wire(Wire {
-					sparse: false,
-					first_object,
-					first_id: 33,
-					extensions: true,
-					has_end: true,
-					fetchable: true,
-					last: None,
-				})
-				.unwrap();
-			group.mark_gap(33, None).unwrap();
-			assert_eq!(group.wire().unwrap().fetchable, first_object);
-		}
 	}
 
 	#[test]
