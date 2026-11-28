@@ -479,4 +479,7 @@ test("superseded: a superseded group reads as one across either wire, and an abo
 	}
 	expect(superseded(new StreamError(StreamCode.Old))).toBe(true);
 	expect(superseded(new Error("boom"))).toBe(false);
+	// moq-lite keeps a publisher's own timeout apart from a superseded group.
+	const late = fromTransport(toTransport(toStreamCode(new TimeoutError("late")), "reset"));
+	expect(superseded(late)).toBe(false);
 });

@@ -461,13 +461,13 @@ export function retry(err: unknown): Retry {
  * `Error::superseded`.
  *
  * True whoever gave the group up: this reader's own budget, this side's track, or a publisher
- * upstream, whose reset says `Old` on moq-lite and `DeliveryTimeout` on moq-transport. A
- * publisher aborting the group itself is a failure, not this.
+ * upstream, whose reset says `Old` on moq-lite and `DeliveryTimeout` on moq-transport, which has
+ * no `Old`. A publisher aborting the group itself is a failure, not this.
  *
  * @public
  */
 export function superseded(err: unknown): boolean {
-	return err instanceof Stream && (err.code === StreamCode.Old || err.code === StreamCode.DeliveryTimeout);
+	return err instanceof Stream && err.code === StreamCode.Old;
 }
 
 /**
@@ -537,6 +537,11 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 	if (code === undefined) return error(err);
 	if (options?.version !== undefined && !sharedStreamCode(code) && claimedLocally(code)) {
 		return new Stream(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
+	}
+	// How a group given up for a newer one says so on moq-transport (see toStreamCode), and content
+	// past its deadline is skipped the same way, as in Rust.
+	if (options?.version !== undefined && code === StreamCode.DeliveryTimeout) {
+		return new Stream(StreamCode.Old, { cause: err });
 	}
 	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });
 	if (code === StreamCode.FrameTooLarge) return new FrameTooLarge({ cause: err });

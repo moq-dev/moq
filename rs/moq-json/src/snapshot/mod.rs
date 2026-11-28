@@ -251,13 +251,8 @@ mod test {
 	/// catalog group aged out of the relay cache underneath it.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		// Lost on this side, then reset by the publisher over moq-lite and moq-transport: the
-		// reader sees the same loss each way.
-		for lost in [
-			moq_net::Error::Old,
-			moq_net::Error::Stream(moq_net::StreamError::Old),
-			moq_net::Error::Stream(moq_net::StreamError::DeliveryTimeout),
-		] {
+		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
+		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("test", timed())

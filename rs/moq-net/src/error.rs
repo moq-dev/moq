@@ -627,12 +627,10 @@ impl Error {
 	///
 	/// True whoever gave the group up: this reader's own budget, this side's track, or a
 	/// publisher upstream, whose reset says `OLD` on moq-lite and `DELIVERY_TIMEOUT` on
-	/// moq-transport. A publisher aborting the group itself is a failure, not this.
+	/// moq-transport, which has no `OLD`. A publisher aborting the group itself is a failure,
+	/// not this.
 	pub fn superseded(&self) -> bool {
-		matches!(
-			self,
-			Self::Old | Self::Stream(StreamError::Old | StreamError::DeliveryTimeout)
-		)
+		matches!(self, Self::Old | Self::Stream(StreamError::Old))
 	}
 
 	/// Whether a source lost its route to the content: only another route continues it.
