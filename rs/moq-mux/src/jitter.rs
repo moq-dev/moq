@@ -86,9 +86,13 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			_ => None,
 		}
 	}
-	/// The engine a replacement acquires its clock on, while it is pending.
-	pub fn pending_engine(&self) -> Option<&Engine<K, T>> {
-		self.pending().map(|pending| &pending.engine)
+	/// The engine a replacement's clock runs on: its own while it acquires, the active one once
+	/// committed. `None` before a replacement starts.
+	pub fn replacement_engine(&self) -> Option<&Engine<K, T>> {
+		match self.handoff.as_deref()? {
+			Handoff::Pending(pending) => Some(&pending.engine),
+			Handoff::Committed(_) => Some(&self.active),
+		}
 	}
 
 	fn committed(&self) -> Option<&Committed<K, T>> {

@@ -2767,7 +2767,7 @@ where
 		// A replacement acquires its own clock beside the one playing, so it reads its own engine.
 		let engine = match self.program.id == self.active_program {
 			true => Some(&*self.jitter),
-			false => self.jitter.pending_engine(),
+			false => self.jitter.replacement_engine(),
 		};
 		let engine = engine.filter(|_| self.program.psi.is_some());
 		let spare = match engine.and_then(|engine| engine.spare_seen()) {
@@ -2776,8 +2776,8 @@ where
 				Duration::try_from_secs_f64(seen).map_or(Duration::ZERO, |seen| seen.saturating_sub(PCR_INTERVAL))
 			}
 		};
-		// A whole second whose frames all had less than a slot to spare: the delay is shorter than
-		// the source sends its audio ahead, not a moment's late arrival.
+		// The least spare over a whole second below a slot: the delay is shorter than the source
+		// sends its audio ahead, not a moment's late arrival.
 		let short = engine
 			.and_then(|engine| engine.margin())
 			.filter(|&margin| margin < PCR_INTERVAL.as_secs_f64());
