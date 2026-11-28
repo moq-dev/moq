@@ -249,11 +249,10 @@ mod tests {
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
 		let mut group = Lazy::appending(&track);
-		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
-
 		format
 			.write(&mut group.writer(), &[frame(1_000_000, b"keyframe", true)])
 			.unwrap();
+		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 		let first = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
 		assert_eq!(first.duration, None);
@@ -274,11 +273,10 @@ mod tests {
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
 		let mut group = Lazy::appending(&track);
-		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
-
 		format
 			.write(&mut group.writer(), &[frame(1_000_000, b"keyframe", true)])
 			.unwrap();
+		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 		// A truncated timestamp varint.
 		group
 			.write_frame(

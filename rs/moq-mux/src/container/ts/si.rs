@@ -1016,7 +1016,9 @@ mod tests {
 		assert_eq!(catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track, name);
 		input.to(&mut capture, Duration::from_millis(19_001));
 		capture.flush(Timestamp::ZERO, false).unwrap();
+		// An empty snapshot is one frame with no sections.
 		let mut empty = reader.recv_group().await.unwrap().unwrap();
+		assert!(empty.read_frame().await.unwrap().unwrap().payload.is_empty());
 		assert!(empty.read_frame().await.unwrap().is_none());
 		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
 		assert!(capture.entries[&(0x10, 0x40)].active.is_empty());

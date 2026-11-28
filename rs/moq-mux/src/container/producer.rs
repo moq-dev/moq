@@ -2610,16 +2610,17 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
 			.with_buffer(std::time::Duration::from_secs(1));
 		producer.write(frame(20_000, true)).unwrap();
-		let mut group = consumer.recv_group().await.unwrap().unwrap();
 		assert!(producer.cut(Some(Timestamp::from_micros(10_000).unwrap())).is_err());
 		assert!(!producer.needs_keyframe());
+		// Still buffered, so the group its first frame creates doesn't exist yet.
 		assert!(
-			kio::clock::timeout(std::time::Duration::from_millis(1), group.read_frame())
+			kio::clock::timeout(std::time::Duration::from_millis(1), consumer.recv_group())
 				.await
 				.is_err()
 		);
 		producer.write(frame(30_000, false)).unwrap();
 		producer.cut(Some(Timestamp::from_micros(35_000).unwrap())).unwrap();
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
 		let mut timestamps = Vec::new();
 		while let Some(frame) = group.read_frame().await.unwrap() {
 			timestamps.push(
@@ -3002,7 +3003,9 @@ mod tests {
 			for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
 				copy(&groups, order).unwrap_or_else(|err| panic!("cut({end:?}) in {order:?}: {err}"));
 			}
-			let inside = [groups[0].clone(), (at - 1, Vec::new(), None)];
+			let mut marker = groups[1].1[0].clone();
+			marker.timestamp = Timestamp::from_micros(at - 1).unwrap();
+			let inside = [groups[0].clone(), (at - 1, vec![marker], None)];
 			assert!(
 				copy(&inside, [0, 1]).is_err(),
 				"a marker inside the span arriving second"

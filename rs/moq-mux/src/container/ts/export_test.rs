@@ -1046,12 +1046,16 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 			}),
 		);
 	let format = HangContainer::Legacy(Kind::Video);
-	for (sequence, stamps) in [
-		(10, vec![100, 80, 90, 110]),
-		(11, vec![200, 180, 190, 210]),
-		(13, vec![400, 380, 390, 410]),
+	// Appended groups follow on with nothing between; the last is created past a hole.
+	for (appended, stamps) in [
+		(true, vec![100, 80, 90, 110]),
+		(true, vec![200, 180, 190, 210]),
+		(false, vec![400, 380, 390, 410]),
 	] {
-		let mut group = Lazy::new(&track);
+		let mut group = match appended {
+			true => Lazy::appending(&track),
+			false => Lazy::new(&track),
+		};
 		let frames: Vec<_> = stamps
 			.into_iter()
 			.enumerate()
@@ -1367,8 +1371,9 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 		.renditions
 		.insert("video".into(), config);
 	let format = HangContainer::Legacy(Kind::Video);
-	for (sequence, stamps) in groups.iter().enumerate() {
-		let mut group = Lazy::new(&track);
+	// Appended, so each group follows on from the one before with nothing between.
+	for stamps in groups {
+		let mut group = Lazy::appending(&track);
 		let frames: Vec<_> = stamps
 			.iter()
 			.enumerate()
@@ -5038,7 +5043,10 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 	let sequences: Vec<u64> = groups.iter().map(|(sequence, _)| *sequence).collect();
 	assert_eq!(sequences, [0, 1, 2], "one snapshot per revision");
 	assert_sdt_lists_only(&groups[0].1[0], 0, 1, b"One");
-	assert!(groups[1].1.is_empty(), "the retiring snapshot carries no SDT");
+	assert!(
+		groups[1].1.iter().all(|payload| payload.is_empty()),
+		"the retiring snapshot carries no SDT"
+	);
 	assert_sdt_lists_only(&groups[2].1[0], 2, 1, b"One");
 }
 
