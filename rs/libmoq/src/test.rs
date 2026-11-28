@@ -9111,6 +9111,9 @@ fn raw_track_reads_past_a_group_a_drop_left_open() {
 	for version in ["moq-lite-06", "moq-transport-22"] {
 		let source = id(moq_origin_create());
 		let sink = id(moq_origin_create());
+		// Announced before the session syncs discovery, so the request below finds it.
+		let route = publish(source, "live", moq_net::origin::RouteOptions::default());
+		let mut requests = route.broadcast().requests();
 		let server_cb = Callback::new();
 		let (server, addr, fingerprint) = listen(&server_cb);
 		let url = format!("https://{addr}/");
@@ -9143,11 +9146,21 @@ fn raw_track_reads_past_a_group_a_drop_left_open() {
 			assert_eq!(cb.recv().phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
 		}
 
-		let route = publish(source, "live", moq_net::origin::RouteOptions::default());
-		let mut requests = route.broadcast().requests();
 		let consume = request_broadcast(sink, b"live");
 		let frame_cb = Callback::new();
-		let reader = consume_track(consume, b"video", &frame_cb);
+		// No budget of its own, so only the group's end tells the reader to move on.
+		let mut subscription = moq_subscription_defaults();
+		subscription.delay.max_unlimited = true;
+		let reader = id(unsafe {
+			moq_consume_track(
+				consume,
+				b"video".as_ptr() as *const c_char,
+				b"video".len(),
+				&subscription,
+				Some(channel_callback),
+				frame_cb.ptr,
+			)
+		});
 
 		let first = crate::ffi::RUNTIME
 			.block_on(requests.requested_track())
