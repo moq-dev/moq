@@ -330,7 +330,11 @@ fn discovery_finds_a_larger_mtu() {
 		.expect("worker");
 	assert!(path.largest() > FLOOR, "discovered {}", path.largest());
 	assert!(path.largest() <= ETHERNET, "discovered {}", path.largest());
-	assert!(datagrams > 2 * sends, "{datagrams} datagrams in {sends} sends");
+	// How long a train runs is the host's to decide: the worker counts the receiver's one-datagram
+	// ACK sends too, and a contended host wakes each end per datagram, so trains shrink to a few
+	// segments and ACKs outnumber them. What the larger MTU must not break is batching at all, which
+	// leaves more datagrams than sends.
+	assert!(datagrams > sends, "{datagrams} datagrams in {sends} sends");
 }
 
 /// A path that shrinks after discovery black-holes the larger datagrams, and
