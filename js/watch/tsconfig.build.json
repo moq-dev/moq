@@ -1,10 +1,11 @@
 {
 	// Build-only variant of tsconfig.json that keeps tests and their helpers out of dist/, so they
-	// are neither published nor discovered by `bun test` at the package root.
+	// are neither published nor discovered by `bun test` at the package root. The audio replay is
+	// test support that borrows `@moq/net`'s internal hooks.
 	// `tsc --noEmit` still uses tsconfig.json, so tests stay type-checked.
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
 		"rootDir": "./src"
 	},
-	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.test-util.ts"]
+	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.test-util.ts", "src/audio/replay.ts"]
 }

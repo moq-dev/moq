@@ -16,6 +16,7 @@ import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
 import { Terminal } from "./terminal";
+import { hooks } from "../../../net/src/internal.ts";
 
 // Bun cannot load the blob-URL worklet import.
 mock.module("./render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
@@ -1666,7 +1667,7 @@ async function livePlayback(burst: number, priority?: Signal<number>) {
 					held.push(frame * FRAME);
 					if (held.length < burst) continue;
 					for (const timestamp of held) {
-						const group = track.createGroup(sequence++);
+						const group = hooks.createEmpty(track, sequence++);
 						group.writeFrame(legacyFrame(Duration.millis(timestamp)));
 						group.finish();
 					}
