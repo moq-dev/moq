@@ -71,12 +71,7 @@ test("an include parses beside a same-ID rendition and a malformed one is refuse
 	expect(() => checkRenditions(parsed)).not.toThrow();
 	expect(encode(parsed).version).toBeUndefined();
 
-	for (const include of [
-		[],
-		{ alice: null },
-		{ alice: {} },
-		{ alice: { broadcast: 42 } },
-	]) {
+	for (const include of [[], { alice: null }, { alice: {} }, { alice: { broadcast: 42 } }]) {
 		expect(RootSchema.safeParse({ include }).success).toBe(false);
 	}
 	// The issue names an include, not a rendition.

@@ -762,10 +762,7 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let sibling = Relative::new("./source").unwrap();
-		let first = source
-			.resolve(Some(&sibling))
-			.await
-			.expect("the sibling resolves");
+		let first = source.resolve(Some(&sibling)).await.expect("the sibling resolves");
 
 		let new = origin.route("a/source", Default::default()).unwrap();
 		let _late = new.broadcast().create_track("late", None).unwrap();

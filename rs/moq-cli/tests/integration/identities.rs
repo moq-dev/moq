@@ -185,10 +185,7 @@ async fn replacement(version: &str) {
 	let mut catalog = old.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await.unwrap();
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
-	let pinned = old
-		.resolve(reference.broadcast.as_ref())
-		.await
-		.unwrap();
+	let pinned = old.resolve(reference.broadcast.as_ref()).await.unwrap();
 	let cold = pinned.track("audio").unwrap();
 	let mut subscription = cold.subscribe(None).await.unwrap();
 	assert_eq!(read(&mut subscription).await, "A:0");

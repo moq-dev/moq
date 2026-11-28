@@ -31,9 +31,7 @@ function filterRenditions<T extends ReferencedRendition>(
 	renditions: Record<string, T>,
 	usable: Usable,
 ): Record<string, T> {
-	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) => usable(config.broadcast)),
-	);
+	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
 }
 
 // Whether an announced route covers `path`, and whether the origin has heard every attached

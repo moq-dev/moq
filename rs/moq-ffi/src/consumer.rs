@@ -273,7 +273,10 @@ impl MoqBroadcastConsumer {
 	}
 
 	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
-	pub(crate) async fn resolve_inner(&self, reference: Option<&str>) -> Result<moq_net::broadcast::Consumer, MoqError> {
+	pub(crate) async fn resolve_inner(
+		&self,
+		reference: Option<&str>,
+	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.driver
 			.watch(async {
 				// A caller-supplied string, refused unless it is spelled as a catalog's reference must be.
