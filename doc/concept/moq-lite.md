@@ -279,9 +279,10 @@ per-request token, so there an announcement rides the session's scope.
 A subscriber names a broadcast and track. Delivery starts at the oldest group
 it can still use, which at the default budget is the latest one, so every group
 must begin at a point a fresh subscriber can decode from (a keyframe, a full
-JSON snapshot). A moq-lite 05 or moq-transport publisher starts at the latest
-group whatever the budget, so a subscription there reads older groups only from
-a starting group it names. Groups can also be fetched by start, which is how the
+JSON snapshot). A moq-transport publisher starts at the latest group whatever
+the budget, so a subscription there reads older groups only from a starting group
+it names, and one over moq-lite 05 or 06 reads none: a copy received over them
+is live-only. Groups can also be fetched by start, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
@@ -424,17 +425,23 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there it goes
 out as milliseconds, each frame stamped with its group's start; the
 work-in-progress 07 carries it without a timescale, with the same stamps.
 
-A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. A group's timestamps never decrease either: writing a frame
+A group starts at its first frame's timestamp and is created with that frame,
+so no group is empty, and moq-lite 07 sends frame 0 with no timestamp of its own.
+A group's timestamps never decrease either: writing a frame
 below its predecessor fails, so a stream with B-frames stamps decode time and
 carries presentation time in its payload, as hang's `cts` container does.
-moq-lite 07 sends each after a stream's first as an unsigned delta. A receiver passes on the timestamps it
+moq-lite 07 sends each later one as an unsigned delta. moq-lite 05 and 06 number
+groups by sequence, so a copy received over them keys each group by its frame 0's
+timestamp and serves live subscriptions only: it refuses a history or time
+request and a fetch, which need moq-lite 07 end to end. A receiver passes on the
+timestamps within a group it
 gets over moq-lite 05 and 06 without checking them, since an older publisher
 stamps an untimed track there with send times, which look like media time, and an
 older group fetched later would look like a rewind. A relay serves them on to
 moq-lite 05 and 06, while a moq-lite 07 or moq-transport draft-23 subscriber gets
 an error for a group whose timestamps decrease. On moq-transport draft-23 and later, a timed frame's
-timestamp is `Group ID + Object ID - TIMESTAMP_TIE` in the track's `ID_TIMESCALE`;
+timestamp is `Group ID + Object ID - TIMESTAMP_TIE` in the track's `ID_TIMESCALE`,
+and a group whose first object misses its Group ID is refused;
 earlier drafts use `TIMESCALE`, with every frame at its Group ID.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
