@@ -441,8 +441,16 @@ export class Connection {
 				else producer.synced();
 				return;
 			}
+			let routes: Routes;
+			try {
+				routes = origin.routes(prefix, options);
+			} catch (err) {
+				// The origin's root can still push the prefix past the wire limits: end the listing with why.
+				producer.close(err instanceof Error ? err : new Error(String(err)));
+				return;
+			}
 			// A URL switch retracts what the old origin announced.
-			pumpAnnounced(effect, origin.routes(prefix, options), producer);
+			pumpAnnounced(effect, routes, producer);
 		});
 
 		closeUnwanted(producer);

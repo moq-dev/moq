@@ -3805,6 +3805,14 @@ test("a `*` is refused everywhere a path is named", async () => {
 		expect(() => origin.consume().announced(long)).toThrow("bytes");
 		const rooted = origin.scope(Path.from("a".repeat(Path.MAX_BYTES - 1)), new Path.Prefixes([Path.Prefix.all()]));
 		expect(() => rooted.consume().announced(Path.from("b"))).toThrow("bytes");
+		// A grant the root pushes past them is left out of the listing's watch rather than asked about.
+		const interests: string[] = [];
+		const unlisten = wireOf(origin).interests((prefix) => interests.push(prefix));
+		const granted = origin.scope(Path.from("a".repeat(Path.MAX_BYTES - 1)), Path.Prefixes.parse(["b"]));
+		granted.consume().announced().close();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(interests.filter((prefix) => Path.check(prefix as Path.Valid) !== undefined)).toEqual([]);
+		unlisten();
 		// A peer's request for one never reaches a claim covering it.
 		const claim = origin.claim(Path.from("room"));
 		expect(await wireOf(origin.consume()).demand(Path.from("room/cam*1"))).toBeUndefined();

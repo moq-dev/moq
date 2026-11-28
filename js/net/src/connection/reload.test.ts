@@ -1177,6 +1177,30 @@ test("announced refuses a starred prefix up front, before any session exists", (
 	}
 });
 
+test("a listing the origin's root pushes past the wire limits ends with why", async () => {
+	const original = globalThis.WebTransport;
+	// Never dialed through: the origin is in place before any session.
+	globalThis.WebTransport = function StubWebTransport() {
+		return createMockTransportPair(Lite.ALPN_06).client;
+	} as unknown as typeof WebTransport;
+	const origin = new OriginProducer();
+	const deepest = origin.scope(Path.from(Array(32).fill("a").join("/")), Path.Prefixes.all());
+	const connection = new Connection({
+		enabled: true,
+		url: new URL("https://example.com/"),
+		websocket: { enabled: false },
+		consume: deepest,
+	});
+	try {
+		const announced = connection.announced(Path.from("child"));
+		await expect(announced.next()).rejects.toThrow("parts");
+	} finally {
+		connection.close();
+		origin.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 /**
  * A watcher on the consume origin syncs only once the session has delivered the
  * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and

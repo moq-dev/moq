@@ -107,7 +107,10 @@ class Scope {
 	 */
 	listed(prefix: Path.Valid): Path.Prefixes {
 		const rooted = new Path.Prefixes([Path.Prefix.parse(Path.encode(Path.join(this.root, prefix)))]);
-		return this.allowed?.intersect(rooted) ?? rooted;
+		if (!this.allowed) return rooted;
+		// A grant beneath the root can still pass the wire limits; no session could ask about it.
+		const listed = this.allowed.intersect(rooted).toArray();
+		return new Path.Prefixes(listed.filter((member) => Path.check(member.text as Path.Valid) === undefined));
 	}
 
 	/** The root-relative prefixes this scope asks its peer about: its own, already disjoint. */
