@@ -1147,6 +1147,8 @@ let timeAnchors: (producer: Producer) => {
 	 * lite-07 copy, whose ranges carry each join, until its end is declared. See `hooks.answersJoins`.
 	 */
 	answersJoins: boolean;
+	/** Whether the copy's wire answers each live join at all (lite-07), its end declared or not. */
+	answers: boolean;
 	/** Whether the copy is final or its declared end settled, so its live edge is final. Walks the cache. */
 	ended: () => boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
@@ -1694,12 +1696,11 @@ export class Producer {
 	// run reaching it extends it down instead: that opens no gap. Mirrors the Rust
 	// `TrackState::forget_drops`.
 	#forgot(forgotten: readonly Run[]): void {
-		const feed = this.#feedStart();
-		const declared = feed === "pending" ? this.#wire?.served?.requested : feed;
+		const unknown = this.#feedStart() === undefined;
 		for (const run of forgotten) {
 			const first = this.#arrivals.first();
-			const floor = declared ?? first ?? 0n;
-			const reaches = declared === undefined && first !== undefined && run.start < first && first <= run.end;
+			const floor = this.#tailFloor();
+			const reaches = unknown && first !== undefined && run.start < first && first <= run.end;
 			let start = reaches ? run.start : max(run.start, floor);
 			if (start >= run.end) continue;
 			// The highest run starting at or below the run's end touches it when it ends at or past
@@ -1839,6 +1840,7 @@ export class Producer {
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
 				producer.#state.outcome.peek() === undefined,
+			answers: producer.#answersJoins,
 			// Judged now rather than by the outcome latch, which a group's close callback sets later.
 			// Mirrors the Rust `is_final() || is_settled()`.
 			ended: () => producer.#state.outcome.peek() !== undefined || producer.#settled(),
@@ -3286,10 +3288,18 @@ export class Producer {
 		return named === undefined || named >= start ? start : undefined;
 	}
 
+	// Where a received copy's tail is owed from: while where its feed starts is pending with no floor
+	// asked, from 0, since the start may name any group below the end; otherwise from the start
+	// declared, or the first arrival standing in for one. Mirrors the Rust `TrackState::tail_floor`.
+	#tailFloor(): bigint {
+		const feed = this.#feedStart();
+		if (feed === "pending") return this.#wire?.served?.requested ?? 0n;
+		return feed ?? this.#arrivals.first() ?? 0n;
+	}
+
 	#owes(final: bigint): boolean {
 		if (!this.#wire || this.#state.end.peek()?.tail !== "pending") return false;
-		const feed = this.#feedStart();
-		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
+		const floor = this.#tailFloor();
 		// A key the publisher gave up is owed no more. A stale verdict is not receipt: a new
 		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
 		const drops = this.#state.drops;
@@ -3299,6 +3309,9 @@ export class Producer {
 				return runGaps(given, gap.start, gap.end).length > 0;
 			});
 		const from = min(floor, final);
+		// Where the feed starts is still unknown, so every gap below the end is owed, whatever the
+		// ranges ask. Mirrors the Rust `TrackState::tail_deadline`.
+		if (this.#feedStart() === "pending" && this.#wire.served?.requested === undefined) return missing(0n, final);
 		// On a proven copy (lite-07) with active demand ranges, only gaps inside the asked ranges
 		// are owed by the wire: a gap between two disjoint ranges is never named on the wire.
 		const requested = this.#proven ? this.#requested.peek() : undefined;
@@ -6440,7 +6453,22 @@ export class Subscriber {
 		return (
 			end !== undefined &&
 			reaches(this.#state.received.peek(), this.#state.drops, end, this.#state.refused.peek()) &&
-			!this.#state.owed.peek()
+			!this.#state.owed.peek() &&
+			!this.#awaitsAnswer()
+		);
+	}
+
+	// Whether this read still waits on where one of its live joins starts: a lite-07 publisher may
+	// answer a range after the end it declared, up to finishing the track, and the copy's tail settles
+	// only once every range it asked is answered. An answer changes the start, which wakes the read.
+	// Mirrors the Rust `TrackState::awaits_answer`.
+	#awaitsAnswer(): boolean {
+		const producer = this.#state.producer;
+		return (
+			producer !== undefined &&
+			this.#window.reaching &&
+			timeAnchors(producer).answers &&
+			this.#state.end.peek()?.tail === "pending"
 		);
 	}
 
@@ -7148,7 +7176,7 @@ export class Subscriber {
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&
-			(this.#complete() || (end !== undefined && start >= finalKey(end)))
+			(this.#complete() || (end !== undefined && start >= finalKey(end) && !this.#awaitsAnswer()))
 		) {
 			return this.#done();
 		}

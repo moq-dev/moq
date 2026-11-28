@@ -6371,6 +6371,100 @@ test("track: a placed join waits on an unanswered one to start", () => {
 	}
 });
 
+// A lite-07 copy holding a whole burst for a live join still waiting on its upstream, whose publisher
+// declares the end before answering the join, as the draft lets it: each range's SUBSCRIBE_START may
+// come as late as the track's finish. The end leaves the read waiting, and the answer wakes it.
+function endedBeforeAnswered(order: Order) {
+	const producer = receivedTrack();
+	hooks.answersJoins(producer);
+	hooks.proveTrack(producer);
+	// The SUBSCRIBE asked from the live edge, so where its feed starts waits on the answer.
+	hooks.startTrack(producer, { requested: undefined });
+	const subscriber = producer.subscribe({
+		order,
+		ranges: [{ start: { live: { min: Duration.secs(1), max: null } } }],
+	});
+	for (const key of [10n, 11n, 12n]) putGroup(producer, key);
+	hooks.skipTrackGroups(producer, 0n, 10n);
+	hooks.endTrack(producer, { group: 13n, frame: 0 });
+	const answer = () => {
+		hooks.answerJoin(producer, 1000, undefined, 10n, NO_MAX_DELAY);
+		hooks.startTrack(producer, { start: 10n, requested: undefined });
+	};
+	return { producer, subscriber, answer };
+}
+
+// A copy whose SUBSCRIBE asked from the live edge owes its tail from the first group while where its
+// feed starts is pending: the answer may start it at any group below the end, not only at or past
+// the first that arrived. Mirrors the Rust `TrackState::tail_floor`.
+test("track: a pending feed start owes the tail below the first arrival", () => {
+	const producer = receivedTrack();
+	hooks.proveTrack(producer);
+	hooks.startTrack(producer, { requested: undefined });
+	const subscriber = producer.subscribe({ order: "ascending", ranges: [{}] });
+	try {
+		putGroup(producer, 2n);
+		hooks.endTrack(producer, { group: 3n, frame: 0 });
+		expect(subscriber.tryRecvGroup()?.start).toBe(2n);
+		expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "idle" });
+		putGroup(producer, 0n);
+		putGroup(producer, 1n);
+		expect(subscriber.tryRecvGroup()?.start).toBe(0n);
+	} finally {
+		subscriber.close();
+		producer.close();
+	}
+});
+
+// An arrival read whose live join is answered after the end its publisher declared first reads the
+// join's groups before it ends. Mirrors the Rust `an_arrival_read_takes_a_join_answered_after_the_end`.
+test("track: an arrival read takes a join answered after the end", async () => {
+	const { producer, subscriber, answer } = endedBeforeAnswered("descending");
+	try {
+		expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "idle" });
+		let woken = false;
+		const next = subscriber.recvGroup().then((group) => {
+			woken = true;
+			return group;
+		});
+		await settle();
+		expect(woken).toBe(false);
+		answer();
+		expect((await next)?.start).toBe(12n);
+		hooks.settleTail(producer);
+		const got: bigint[] = [];
+		for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) got.push(group.start);
+		expect(got).toEqual([11n, 10n]);
+		expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "done" });
+	} finally {
+		subscriber.close();
+		producer.close();
+	}
+});
+
+// The ordered read of the same order reads the join's groups in key order before it ends. Mirrors
+// the Rust `an_ordered_read_takes_a_join_answered_after_the_end`.
+test("track: an ordered read takes a join answered after the end", async () => {
+	const { producer, subscriber, answer } = endedBeforeAnswered("ascending");
+	const reader = subscriber.ordered();
+	try {
+		let woken = false;
+		const next = reader.nextGroup().then((group) => {
+			woken = true;
+			return group;
+		});
+		await settle();
+		expect(woken).toBe(false);
+		answer();
+		expect((await next)?.start).toBe(10n);
+		hooks.settleTail(producer);
+		expect(drainOrdered(reader)).toEqual([11n, 12n]);
+	} finally {
+		reader.close();
+		producer.close();
+	}
+});
+
 // A received lite-07 copy places a live join only from its upstream's answer to that join recorded
 // after the reader began waiting: one answered for an earlier reader is stale, since the live edge
 // moved on, so the reader asks again and waits, however many groups the copy holds.
