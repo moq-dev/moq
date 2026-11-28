@@ -9,6 +9,11 @@ input".
 
 ## Plan
 
+Decided 2026-11-28 (maintainer): after a flush that drained the encoder's tail with an end of
+stream, recreate the codec (a new configured and started instance instead of `AMediaCodec_flush`).
+Rejected: recreate only software encoders (naming the codec needs API 28, above this crate's API
+26); refuse input after such a flush (breaks the documented flush-and-continue contract).
+
 Found by [moq-dev/moq#9814](https://github.com/moq-dev/moq/pull/9814). On the API 34 emulator's
 `c2.android.avc.encoder`, every frame after a flush that went through `drain_tail` (end of input,
 then `AMediaCodec_flush`) vanishes: 6 frames in, only an end-of-stream buffer out, every run
@@ -27,10 +32,3 @@ keyframe carrying its parameter sets. It fails on the emulator today.
 The first frame on a codec that just started or flushed no longer drops ([moq-dev/moq#9814](https://github.com/moq-dev/moq/pull/9814) waits for an
 input buffer when nothing is in flight), so a fresh instance needs nothing more for its first
 frame.
-
-## Waiting
-
-- Maintainer: After a flush that drained the encoder's tail with an end of stream, how should the MediaCodec encoder take input again, given the AOSP software encoder ignores everything after one until it is recreated?
-  - Recreate the codec (Recommended) - replace it with a new configured and started instance instead of `AMediaCodec_flush`; correct on every encoder, costs a codec creation per tail-drained flush, which in-tree happens only at track end
-  - Recreate only software encoders - keep `AMediaCodec_flush` for hardware ones, but naming the codec needs `AMediaCodec_getName` (API 28), above the API 26 this crate builds against
-  - Refuse input after such a flush - fail loud instead of silently dropping, but breaks the documented flush-and-continue contract
