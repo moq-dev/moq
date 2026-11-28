@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Duration, type Installed, Instant } from "@moq/clock";
+import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
@@ -176,20 +177,164 @@ describe("Tail", () => {
 		expect(t.covers(1n, 10n)).toBe(true);
 	});
 
-	test("the grace waits for a stream being read", async () => {
+	// When a stream last delivered data, which the test advances.
+	const meter = () => {
+		let last = now();
+		return {
+			read: () => last,
+			deliver: () => {
+				last = now();
+			},
+		};
+	};
+
+	const SILENCE = TAIL_GRACE_MS;
+
+	test("a drain gives up on a stream that delivered nothing for the grace", async () => {
 		const { clock, tail: t } = tail(Duration.millis(10));
-		const read = t.open(0n);
+		const quiet = meter();
+		const read = t.open(0n, quiet.read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
 		let settled = false;
-		const settling = t
-			.settle(() => false, new Once<unknown>())
+		const draining = t
+			.drain(() => false, new Once<unknown>())
 			.then(() => {
 				settled = true;
 			});
 
-		await clock.advance(Duration.millis(50));
+		// Its own grace is no measure: only silence for GRACE is.
+		await clock.advance(SILENCE.div(2));
+		expect(stalled).toBe(false);
+		await clock.advance(SILENCE.div(2));
+		await read.stalled;
+		// Still counted until its reader lets go, which the drain waits for.
+		expect(t.reading).toBe(true);
 		expect(settled).toBe(false);
 		read.done();
+		await draining;
+	});
+
+	test("a drain with no age limit still gives up on a silent stream", async () => {
+		const { clock, tail: t } = tail(Duration.millis(NO_MAX_DELAY));
+		const read = t.open(0n, meter().read);
+		const draining = t.drain(() => true, new Once<unknown>());
+
+		await clock.advance(SILENCE);
+		await read.stalled;
+		read.done();
+		await draining;
+	});
+
+	test("a stream still delivering within each grace is waited for", async () => {
+		const { clock, tail: t } = tail();
+		const slow = meter();
+		const read = t.open(0n, slow.read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const draining = t.drain(() => false, new Once<unknown>());
+
+		for (let i = 0; i < 10; i++) {
+			await clock.advance(SILENCE.mul(3).div(4));
+			slow.deliver();
+		}
+		expect(stalled).toBe(false);
+
+		await clock.advance(SILENCE);
+		await read.stalled;
+		read.done();
+		await draining;
+	});
+
+	test("a drain gives a stream the whole grace after it starts, however long it was quiet before", async () => {
+		const { clock, tail: t } = tail();
+		const read = t.open(0n, meter().read);
+		await clock.advance(SILENCE.mul(5));
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const draining = t.drain(() => false, new Once<unknown>());
+
+		await clock.advance(SILENCE.mul(9).div(10));
+		expect(stalled).toBe(false);
+		await clock.advance(SILENCE.div(10));
+		await read.stalled;
+		read.done();
+		await draining;
+	});
+
+	test("a drain's limit still caps the wait for groups that never arrive", async () => {
+		const { clock, tail: t } = tail(Duration.millis(NO_MAX_DELAY));
+		const draining = t.drain(() => false, new Once<unknown>(), Duration.millis(10));
+
+		await clock.advance(Duration.millis(10));
+		await draining;
+	});
+
+	test("a settle before the end never gives up on a quiet stream", async () => {
+		const { clock, tail: t } = tail(Duration.millis(10));
+		const read = t.open(0n, meter().read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const settling = t.settle(() => false, new Once<unknown>());
+
+		await clock.advance(SILENCE.mul(10));
+		expect(stalled).toBe(false);
+		read.done();
 		await settling;
+	});
+
+	test("a parked stream is not given up on, and restarts its quiet time when it resumes", async () => {
+		const { clock, tail: t } = tail();
+		const read = t.open(0n, meter().read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		// Something else keeps the drain waiting while it is parked.
+		const release = t.hold();
+		const draining = t.drain(() => false, new Once<unknown>());
+
+		read.park();
+		await clock.advance(SILENCE.mul(5));
+		expect(stalled).toBe(false);
+
+		read.resume();
+		await clock.advance(SILENCE.div(2));
+		expect(stalled).toBe(false);
+		await clock.advance(SILENCE.div(2));
+		await read.stalled;
+		read.done();
+		release();
+		await draining;
+	});
+
+	test("a stream opened without a meter is waited for until it ends", async () => {
+		const { clock, tail: t } = tail();
+		const read = t.open(0n);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		let settled = false;
+		const draining = t
+			.drain(() => false, new Once<unknown>())
+			.then(() => {
+				settled = true;
+			});
+
+		await clock.advance(SILENCE.mul(10));
+		expect(stalled).toBe(false);
+		expect(settled).toBe(false);
+		read.done();
+		await draining;
 	});
 
 	test("with no grace, a gap is owed until it is accounted for", async () => {
@@ -216,7 +361,11 @@ describe("Tail", () => {
 	// Lite-07 times nothing: a limit caps only a grace, so a stream is waited for until its read ends.
 	test("with no grace, a stream being read holds the end past any limit", async () => {
 		const { clock, tail: t } = tail(null);
-		const stream = t.open(0n);
+		const stream = t.open(0n, meter().read);
+		let stalled = false;
+		void stream.stalled.then(() => {
+			stalled = true;
+		});
 		let settled = false;
 		const settling = t
 			.settle(() => true, new Once<unknown>(), Duration.millis(10))
@@ -226,13 +375,29 @@ describe("Tail", () => {
 
 		await clock.advance(GRACE.mul(100));
 		expect(settled).toBe(false);
+		expect(stalled).toBe(false);
 		stream.done();
 		await settling;
 	});
 
+	test("with no grace, a drain never gives up on a silent stream", async () => {
+		const { clock, tail: t } = tail(null);
+		const read = t.open(0n, meter().read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const draining = t.drain(() => true, new Once<unknown>());
+
+		await clock.advance(SILENCE.mul(100));
+		expect(stalled).toBe(false);
+		read.done();
+		await draining;
+	});
+
 	test("a parked stream holds nothing until it resumes", () => {
 		const { tail: t } = tail(Duration.millis(10));
-		const stream = t.open(0n);
+		const stream = t.open(0n, meter().read);
 		stream.park();
 		stream.park();
 		expect(t.reading).toBe(false);

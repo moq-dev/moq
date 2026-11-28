@@ -2795,11 +2795,11 @@ export class Subscriber {
 					// The publisher FINs once done (unprompted before lite-07, or in reply to our
 					// one-shot FIN on lite-07), before every uni Group Stream it opened may have
 					// landed: wait for those before refusing what is left, at most the grace before
-					// lite-07, whose tail has none.
+					// lite-07, whose tail has none, and a stream silent that long is given up on.
 					if (!covered() || entry.tail.reading) {
 						const drained = new Once<null>();
 						try {
-							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
+							await race([entry.tail.drain(covered, drained, GRACE), leaving]);
 						} finally {
 							drained.set(null);
 						}
@@ -3201,10 +3201,11 @@ export class Subscriber {
 	//
 	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
 	// key, such as a lost datagram, still waits out the grace. Streams whose
-	// headers arrived keep reading until their own FIN or reset.
+	// headers arrived keep reading until their own FIN or reset, or, with a grace, until they go
+	// quiet for it: a browser can lose a stream's reset.
 	async #settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
-		await tail.settle(() => this.#covered(entry), hooks.trackReleased(track));
+		await tail.drain(() => this.#covered(entry), hooks.trackReleased(track));
 	}
 
 	// Whether the groups received and dropped account for every group the demand is owed once
@@ -3638,7 +3639,7 @@ export class Subscriber {
 		const overtaken = hasSkip(this.version) && tail.dropped(group.key);
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		const counted = tail.open(group.key);
+		const counted = tail.open(group.key, () => stream.last);
 
 		try {
 			// The publisher contradicted its own end, which no later group can repair. lite-05
@@ -3690,7 +3691,13 @@ export class Subscriber {
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
-			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
+			// A stream the subscription's end gave up on, as one whose reset the browser lost, fails like
+			// a reset, so the reader may fetch what it still wants.
+			const quiet = counted.stalled.then((): never => {
+				console.debug(`group stream stalled: group=${group.key} track=${track.name}`);
+				throw new StreamError(StreamCode.DeliveryTimeout, { message: "stalled" });
+			});
+			const end = await race([entry.filling ? untilAbandoned(producer, frames) : frames, quiet]);
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
