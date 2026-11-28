@@ -268,6 +268,14 @@ describe("Tail", () => {
 		await draining;
 	});
 
+	test("a drain's limit still caps the wait for groups that never arrive", async () => {
+		const { clock, tail: t } = tail(Duration.millis(NO_MAX_DELAY));
+		const draining = t.drain(() => false, new Once<unknown>(), Duration.millis(10));
+
+		await clock.advance(Duration.millis(10));
+		await draining;
+	});
+
 	test("a settle before the end never gives up on a quiet stream", async () => {
 		const { clock, tail: t } = tail(Duration.millis(10));
 		const read = t.open(0n, meter().read);

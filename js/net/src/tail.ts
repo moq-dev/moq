@@ -231,12 +231,12 @@ export class Tail {
 	}
 
 	/**
-	 * {@link settle} once the publisher ended the subscription, which also gives up on a stream that
+	 * {@link settle} (with the same `limit`) once the publisher ended the subscription, which also gives up on a stream that
 	 * delivered nothing for {@link GRACE} since (see {@link Counted.stalled}): a browser can lose a
 	 * stream's reset, leaving it open forever. Not with no grace, where the wire names every group.
 	 */
-	drain(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
-		return this.#settle(complete, closed, undefined, true);
+	drain(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
+		return this.#settle(complete, closed, limit, true);
 	}
 
 	async #settle(

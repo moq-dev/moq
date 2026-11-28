@@ -2795,11 +2795,11 @@ export class Subscriber {
 					// The publisher FINs once done (unprompted before lite-07, or in reply to our
 					// one-shot FIN on lite-07), before every uni Group Stream it opened may have
 					// landed: wait for those before refusing what is left, at most the grace before
-					// lite-07, whose tail has none.
+					// lite-07, whose tail has none, and a stream silent that long is given up on.
 					if (!covered() || entry.tail.reading) {
 						const drained = new Once<null>();
 						try {
-							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
+							await race([entry.tail.drain(covered, drained, GRACE), leaving]);
 						} finally {
 							drained.set(null);
 						}
