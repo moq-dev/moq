@@ -209,6 +209,23 @@ pub struct Config {
 	/// 16 has no floor at all. The other backends keep their own quality
 	/// controls, tuned per device.
 	pub qp_floor: Option<u8>,
+	/// Whether the rate control may drop a frame to hold the bitrate cap.
+	///
+	/// `None` (the default) keeps the backend's own behavior. openh264 skips: a
+	/// frame that would overshoot the cap, typically one right after a keyframe
+	/// or a burst of detail, codes to nothing, and the stream carries no picture
+	/// for its timestamp. `Some(false)` codes every frame instead, at a coarser
+	/// quantizer, and lets the rate run over the cap for a moment.
+	///
+	/// Turn it off for a consumer that takes the newest frame on a deadline: a
+	/// skipped frame leaves it holding the previous one, a full frame interval
+	/// staler. Leave it on when the cap is the link's capacity, where an
+	/// overshoot waits in a queue instead. No [`Preset`] changes it, as neither
+	/// choice is the lower-latency one in general. [`Applied`]'s controls say
+	/// `no frame skipping` when it is off.
+	///
+	/// Only openh264 reads it; the other backends keep their own rate control.
+	pub skip_frames: Option<bool>,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -265,6 +282,7 @@ impl Config {
 			kind: Kind::Auto,
 			preset: Preset::default(),
 			qp_floor: None,
+			skip_frames: None,
 			color: None,
 			resize: None,
 			#[cfg(target_os = "linux")]
