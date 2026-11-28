@@ -4,7 +4,7 @@ Raw Go bindings for [Media over QUIC](https://datatracker.ietf.org/doc/draft-lcu
 
 **Most callers want the ergonomic [`moq.dev/moq`](../wrapper) wrapper instead.** This module is the native foundation it builds on: it ships the prebuilt `libmoq_ffi.a` per platform and links statically through cgo. The wrapper is pure Go and depends on this module.
 
-The published module is `moq.dev/moq-ffi`, a vanity path moq.dev resolves to the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror, populated by CI on every `moq-ffi-v*` tag, lockstep with the `moq-ffi` crate version. This in-tree directory is the source skeleton, not a buildable Go module on its own.
+The published module is `moq.dev/moq-ffi`, served by our own module proxy at `go.moq.dev` ([infra/go](../../infra/go)), populated by CI on every `moq-ffi-v*` tag, lockstep with the `moq-ffi` crate version. moq.dev's vanity page points the go command there with a `mod` go-import tag, so `go get` works through proxy.golang.org and with `GOPROXY=direct` alike, and the static libraries never enter git. Until that cutover, moq.dev still resolves it to the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) git mirror. This in-tree directory is the source skeleton, not a buildable Go module on its own.
 
 ## Install
 
@@ -49,8 +49,8 @@ go/ffi/
     lib/<goos>_<goarch>/libmoq_ffi.a  (gitignored, staged at release time)
 ```
 
-Compiled binaries never live in the source tree. `sh/go/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror.
+Compiled binaries never live in the source tree. `sh/go/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the published module zip.
 
 ## Release
 
-The `release-shared-ffi.yml` coordinator fires on every `moq-ffi-v*` tag and builds the default-feature native libraries once for Go, Kotlin, and Swift. It generates bindings from the built Linux library and calls `release-go-ffi.yml`, which calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.
+The `release-shared-ffi.yml` coordinator fires on every `moq-ffi-v*` tag and builds the default-feature native libraries once for Go, Kotlin, and Swift. It generates bindings from the built Linux library and calls `release-go-ffi.yml`, which calls `just go package-ffi` to assemble the module and `just go publish-ffi` to publish it as a bare-semver version (e.g. `v0.4.27`) lockstep with the crate. `publish-ffi` builds the version's `.info`, `.mod`, and `.zip` with `sh/go/modzip` (golang.org/x/mod/zip, the go command's own zip code), uploads them to the `go-moq-dev` bucket without ever replacing an existing object, lists the version last, and then downloads it through moq.dev with `GOPROXY=direct`, which has sum.golang.org pin its hash. Until the cutover, the job publishes to the git mirror instead (`just go publish-ffi-mirror`), choosing by the go-import tag moq.dev serves (`just go ffi-origin`).
