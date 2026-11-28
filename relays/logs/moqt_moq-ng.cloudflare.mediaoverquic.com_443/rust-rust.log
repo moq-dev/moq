@@ -1,13 +1,16 @@
-[2m2026-11-28T16:43:40.003407Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m811392707399334 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-28T16:43:40.007961Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-28T16:43:40.007978Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-28T16:43:40.014451Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
-[2m2026-11-28T16:43:40.014462Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-28T16:43:40.222118Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-28T16:43:40.222136Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
-[2m2026-11-28T16:43:40.318238Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4395-22291.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-28T16:43:40.456719Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
-Error: json: remote error: code=18
+[2m2026-11-28T18:41:03.072930Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m4837782013806921 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-28T18:41:03.077199Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-28T18:41:03.077216Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-28T18:41:03.080001Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-28T18:41:03.080017Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
+[2m2026-11-28T18:41:03.210836Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-28T18:41:03.210854Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
+[2m2026-11-28T18:41:03.323221Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4053-14297.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-28T18:41:03.443310Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4053-14297.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-28T18:41:03.611647Z[0m [33m WARN[0m [2mmoq_mux::container::consumer[0m[2m:[0m track failed; ending the reader [3mtrack[0m[2m=[0m"0.avc3" [3merror[0m[2m=[0mRemote(18)
+[2m2026-11-28T18:41:03.611757Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4053-14297.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-28T18:41:03.611942Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
+Error: moq: remote error: code=18
 
 Caused by:
     remote error: code=18
