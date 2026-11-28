@@ -68,6 +68,16 @@ pub struct Transport {
 	#[serde_as(as = "Option<Number>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub lost_packets: Option<u64>,
+	/// Cumulative bytes the connection sent across every broadcast it carries, as its stack counts
+	/// them: native QUIC includes overhead and retransmissions, WebTransport in a browser does not.
+	#[serde_as(as = "Option<Number>")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub sent_bytes: Option<u64>,
+	/// How long the reporter has run when the snapshot is taken, on its monotonic clock. The
+	/// difference between two reports is the time their counters span, however late either arrived.
+	#[serde_as(as = "Option<Millis>")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub uptime: Option<Duration>,
 	/// Age of the transport sample when the snapshot was taken.
 	#[serde_as(as = "Option<Millis>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +90,8 @@ impl Transport {
 			&& self.rate.is_none()
 			&& self.lost_bytes.is_none()
 			&& self.lost_packets.is_none()
+			&& self.sent_bytes.is_none()
+			&& self.uptime.is_none()
 			&& self.age.is_none()
 	}
 }

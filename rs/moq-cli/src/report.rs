@@ -117,17 +117,23 @@ impl<T: serde::Serialize> ReportTrack<T> {
 /// Which way the reported media crosses the connection, which picks its rate estimate.
 #[derive(Clone, Copy)]
 enum Direction {
-	Send,
+	/// A publisher, which has run since the instant.
+	Send(kio::clock::Instant),
 	Receive,
 }
 
 /// The connection's transport measurements now, or none without a dialed connection or while
-/// it reconnects.
+/// it reconnects. A publisher also reports its uptime and the bytes sent, which its readers need to
+/// grade the counters; a viewer's grade never reads its own uplink, and a reconnect would reset it
+/// for nothing.
 fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats::Transport {
 	let mut transport = hang::stats::Transport::default();
+	if let Direction::Send(started) = direction {
+		transport.uptime = Some(started.elapsed());
+	}
 	if let Some(stats) = connection.and_then(Monitor::stats) {
 		let rate = match direction {
-			Direction::Send => stats.estimated_send_rate,
+			Direction::Send(_) => stats.estimated_send_rate,
 			// A receive estimate costs PROBE traffic, which an export does not request just to report.
 			Direction::Receive => None,
 		};
@@ -135,6 +141,10 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 		transport.rate = rate.map(moq_net::bandwidth::Rate::as_bps);
 		transport.lost_bytes = stats.bytes_lost;
 		transport.lost_packets = stats.packets_lost;
+		transport.age = stats.age;
+		if matches!(direction, Direction::Send(_)) {
+			transport.sent_bytes = stats.bytes_sent;
+		}
 	}
 	transport
 }
@@ -161,6 +171,7 @@ pub struct Stats {
 	renditions: Box<dyn Fn() -> BTreeMap<String, hang::stats::Rendition> + Send>,
 	connection: Option<Monitor>,
 	sections: Sections,
+	started: kio::clock::Instant,
 }
 
 impl Stats {
@@ -183,6 +194,7 @@ impl Stats {
 			renditions: Box::new(move || catalog.stats()),
 			connection,
 			sections: Sections::default(),
+			started: kio::clock::now(),
 		})
 	}
 
@@ -193,7 +205,7 @@ impl Stats {
 
 	fn snapshot(&self) -> hang::stats::Snapshot<ts::stats::Report> {
 		let mut snapshot = hang::stats::Snapshot::default();
-		snapshot.transport = transport(self.connection.as_ref(), Direction::Send);
+		snapshot.transport = transport(self.connection.as_ref(), Direction::Send(self.started));
 		snapshot.renditions = (self.renditions)();
 		snapshot.ext = self.sections.get();
 		snapshot
@@ -423,6 +435,63 @@ async fn snapshot(
 /// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
 pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+	follow_report(origin, path, |_, value| Ok(Some(value.to_string()))).await
+}
+
+/// `export health`: grade the broadcast's publisher reports as `export report` follows them and
+/// write each [`hang::health::Health`] to stdout as a JSON line. A report that is not a publisher
+/// snapshot is logged and skipped.
+pub async fn print_health(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+	let mut previous = None;
+	follow_report(origin, path, |observer, value| {
+		let snapshot = match serde_json::from_value(value) {
+			Ok(snapshot) => snapshot,
+			Err(err) => {
+				tracing::warn!(%err, "skipping a report that is not a publisher snapshot");
+				return Ok(None);
+			}
+		};
+		let health = grade(&mut previous, hang::health::Report::new(observer, snapshot));
+		Ok(Some(serde_json::to_string(&health)?))
+	})
+	.await
+}
+
+/// Grade `current` against `previous`, over the time the reporter says its counters span, then
+/// keep it as the next `previous`. A pair whose reports state no later uptime has nothing to
+/// diff: arrival times say nothing about the time between the samples, since a congested report
+/// arrives late and in a burst.
+fn grade(
+	previous: &mut Option<hang::health::Report<hang::stats::Snapshot>>,
+	current: hang::health::Report<hang::stats::Snapshot>,
+) -> hang::health::Health {
+	// A report is graded as it arrives, so it has no age to be stale by.
+	let mut sample = hang::health::Sample::new(&current, Duration::ZERO);
+	if let Some(previous) = previous.as_ref() {
+		let span = current
+			.snapshot
+			.transport
+			.uptime
+			.zip(previous.snapshot.transport.uptime)
+			.and_then(|(current, previous)| current.checked_sub(previous))
+			.filter(|span| !span.is_zero());
+		if let Some(span) = span {
+			sample = sample.with_previous(previous, span);
+		}
+	}
+	let health = hang::health::publisher(&sample, &hang::health::Thresholds::default());
+	*previous = Some(current);
+	health
+}
+
+/// Call `line` with each report of the broadcast at `path`, and the observer that read it, and write
+/// the line it returns, if any, to stdout, following the track the catalog's `stats` section names until the
+/// catalog and that track have both ended.
+async fn follow_report(
+	origin: moq_net::origin::Consumer,
+	path: String,
+	mut line: impl FnMut(hang::health::Observer, serde_json::Value) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	let broadcast = origin
 		.follow(path.as_str(), None)?
@@ -430,6 +499,7 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{path}`"))?
 		.context("went offline before serving")?;
+	let observer = hang::health::Observer::new(broadcast.info().path.clone(), broadcast.info().identity.clone());
 	let source = moq_mux::Source::new(origin, broadcast.clone());
 	let mut catalog = Some(source.catalog::<()>(CatalogFormat::Hang).await?);
 
@@ -457,8 +527,10 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 			}
 			value = snapshot(&mut track) => match value? {
 				Some(value) => {
-					stdout.write_all(format!("{value}\n").as_bytes()).await?;
-					stdout.flush().await?;
+					if let Some(line) = line(observer.clone(), value)? {
+						stdout.write_all(format!("{line}\n").as_bytes()).await?;
+						stdout.flush().await?;
+					}
 				}
 				None if catalog.is_none() => return Ok(()),
 				None => track = None,
@@ -666,6 +738,36 @@ mod tests {
 		);
 		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
+	}
+
+	/// A grade spans the time the reporter says its counters cover, over the connection's sent
+	/// bytes: a second broadcast on the connection counts against the headroom, and reports that
+	/// state no uptime have nothing to diff.
+	#[test]
+	fn health_grades_the_connection_over_the_reporters_time() {
+		let report = |sent: u64, uptime: Option<u64>| {
+			let mut snapshot = hang::stats::Snapshot::default();
+			snapshot.transport.rate = Some(1_000_000);
+			snapshot.transport.lost_bytes = Some(0);
+			snapshot.transport.sent_bytes = Some(sent);
+			snapshot.transport.uptime = uptime.map(Duration::from_secs);
+			let observer = hang::health::Observer::new(moq_net::Path::from_static("room/live"), None);
+			hang::health::Report::new(observer, snapshot)
+		};
+		let mut previous = None;
+		assert_eq!(grade(&mut previous, report(0, Some(10))).interval, None);
+
+		// 1 MB over 4 s is 2 Mb/s against a 1 Mb/s rate, though no rendition sent a byte.
+		let health = grade(&mut previous, report(1_000_000, Some(14)));
+		assert_eq!(health.interval, Some(Duration::from_secs(4)));
+		let headroom = &health.transport.evidence[2];
+		assert_eq!(headroom.input, hang::health::Input::Headroom);
+		assert_eq!(headroom.value, Some(0.5));
+		assert_eq!(headroom.verdict, hang::health::Verdict::Unhealthy);
+
+		// No uptime, or one that went backwards, leaves nothing to diff against.
+		assert_eq!(grade(&mut previous, report(2_000_000, None)).interval, None);
+		assert_eq!(grade(&mut previous, report(3_000_000, Some(1))).interval, None);
 	}
 
 	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.

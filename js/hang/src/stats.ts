@@ -16,6 +16,10 @@ export const TransportSchema = z.object({
 	lostBytes: measurementSchema,
 	// Cumulative packets reported lost by the transport.
 	lostPackets: measurementSchema,
+	// Cumulative bytes the connection sent across every broadcast it carries.
+	sentBytes: measurementSchema,
+	// Milliseconds the reporter has run on its monotonic clock when the snapshot is taken.
+	uptime: measurementSchema,
 	// Transport sample age in milliseconds at reporting time.
 	age: measurementSchema,
 });

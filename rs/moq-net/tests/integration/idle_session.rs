@@ -130,6 +130,24 @@ async fn ietf_stats_refresh_costs_one_driver_poll() {
 	}
 }
 
+/// A read reports how long ago the transport counters were sampled, so a diff of two reads can
+/// span the samples' times rather than the reads'.
+#[kio::test]
+async fn stats_report_the_age_of_their_sample() {
+	for version in VERSIONS {
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.stats = STATS;
+		let pair = connect_mock(options).await;
+		let first = pair.client.stats().age.expect("a session reports its sample's age");
+		kio::clock::sleep(Duration::from_secs(3)).await;
+		let second = pair.client.stats().age.unwrap();
+		assert!(
+			second >= first + Duration::from_secs(2),
+			"{version}: a sample nobody refreshed ages with the clock: {first:?} then {second:?}"
+		);
+	}
+}
+
 /// The session and stats snapshots are not demand; only held consumers open PROBE.
 #[kio::test]
 async fn probe_follows_consumer_lifetime() {

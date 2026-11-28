@@ -196,6 +196,10 @@ async fn import_reports_count_what_each_rendition_wrote() {
 		reports.iter().any(|report| report.transport.rtt.is_some()),
 		"the import reports its connection"
 	);
+	assert!(
+		reports.iter().any(|report| report.transport.sent_bytes.is_some()),
+		"the import reports the bytes its connection sent"
+	);
 
 	let mpegts = last.ext.mpegts.as_ref().expect("a TS import reports its counters");
 	assert_clean(mpegts);
@@ -240,6 +244,36 @@ async fn a_late_sink_reads_the_final_report() {
 	let report: hang::stats::Snapshot<ts::stats::Report> = next(&mut lines).await.expect("the final report");
 	assert_eq!(report.renditions, expected);
 	assert_eq!(report.ext.mpegts.as_ref().map(units), Some(units(&health)));
+	sink.kill().await.unwrap();
+	import.kill().await.unwrap();
+}
+
+/// `export health` grades the reports an import writes, each against the one before it.
+#[tokio::test]
+async fn export_health_grades_each_report_against_the_last() {
+	let relay = relay().await;
+	let mut import = moq(&relay, "demo", &["import", "--report", "--linger", "2s", "ts"])
+		.stdin(Stdio::piped())
+		.spawn()
+		.expect("spawn the import");
+	let mut stdin = import.stdin.take().expect("stdin");
+	let (mut sink, mut lines) = sink(&relay, "demo", "health");
+	feed(CLIP, async |chunk| stdin.write_all(chunk).await.expect("write stdin")).await;
+
+	let mut health = Vec::new();
+	while health.len() < 2 {
+		health.push(next::<serde_json::Value>(&mut lines).await.expect("two graded reports"));
+	}
+	drop(stdin);
+	assert!(health.iter().all(|health| health["role"] == "publisher"));
+	assert!(
+		health[0].get("interval").is_none(),
+		"the first report has nothing to diff against"
+	);
+	assert!(
+		health[1].get("interval").is_some(),
+		"the next spans the time between reports"
+	);
 	sink.kill().await.unwrap();
 	import.kill().await.unwrap();
 }

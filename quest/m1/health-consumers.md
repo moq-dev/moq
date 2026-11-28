@@ -1,23 +1,36 @@
-# [M] Client health in use
+# [M] Browser reporters feed client health
 
 ## Goal
 
 The client health grade from
-[moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654) is read by
-something and holds for a connection carrying several broadcasts: stats carry
-a per-connection media counter, at least one consumer shows the grade, and the
-grade's limits are re-measured against browser reporters.
+[moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654) grades a browser
+publisher's loss and headroom, and its limits are re-measured against the
+numbers the browser reporters publish.
 
 ## Plan
 
-- Add a media counter to the per-connection `Transport` stats
-  (`rs/hang/src/stats.rs` and the JS mirror). `health.rs` says the grade holds
-  only for a connection's sole broadcast until then.
-- Consumers: `moq-dev/studio` m0 (`quest/m0/pin-moq-tip.md`, pinned at `81e43217c`
-  until it moves to a `main` where `hang::health` is public), `moq-dev/hang.live` m2
-  (`quest/m2/network-xray.md`, reading `Hang.Health`), preflight in
-  [Preflight](/quest/m3/stats/preflight.md), plus the demo dashboard and a `moq`
-  CLI sink. Promoted to m1 on 2026-11-26 so downstream consumers are unblocked.
-- Re-measure the thresholds in `rs/hang/src/health.rs` against the numbers
-  the browser reporters publish (`<moq-publish stats>` and
-  `<moq-watch echo>`).
+Done in the quest's PR: `transport.sentBytes` (the connection's cumulative
+bytes sent) in the `stats` and `echo` snapshots, loss and headroom graded over
+it so they hold for a connection carrying several broadcasts, `moq export
+health` as the first consumer, and `moq import --report` and `moq export
+--echo` reporting it. `moq-dev/studio` m0 (`quest/m0/pin-moq-tip.md`) and
+`moq-dev/hang.live` m2 (`quest/m2/network-xray.md`, reading `Hang.Health`) read
+the grade in their own repositories once they move to a `main` with it, and
+[Preflight](/quest/m3/stats/preflight.md) will too.
+
+- `<moq-publish stats>` and `<moq-watch echo>` report only the PROBE round-trip
+  time (`js/publish/src/broadcast.ts` `#stats`, `js/watch/src/echo.ts`), so a
+  browser publisher grades on RTT alone. Report `sentBytes`, `uptime`, `lostBytes`,
+  `lostPackets`, and `rate` from `connection.stats()` (`js/net`
+  `Connection.Stats`, `bytesSent`, `bytesLost`, `packetsLost`,
+  `estimatedSendRate`). It is an async pull, so the reporters need a polled
+  stats signal on `Connection` beside `probe` instead of the synchronous
+  read they use now; W3C's `bytesSent` excludes retransmissions and QUIC
+  overhead, so the browser's loss reads higher than native for the same link.
+- Re-measure the thresholds in `rs/hang/src/health.rs` against what the browser
+  reporters then publish, with `moq-shaper` impairing the link by bufferbloat
+  (a finite queue), not random loss, in a browser driven by `agent-browser`.
+  The recorded limits divided by media bytes on native QUIC; native `sentBytes`
+  adds overhead and retransmissions, which nudges headroom toward worse and
+  loss toward better.
+- The demo dashboard (`demo/web`) does not show the grade yet.

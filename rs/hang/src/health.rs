@@ -122,7 +122,9 @@ pub struct Limits<T> {
 /// a 10 Mb/s link fell to 1.35. The RTT limits double ITU-T G.114's one-way delays for interactive
 /// use. The rendition shares are not measured against real traffic; a 1% rise in time spent
 /// buffering cost viewers of a 90-minute live event over three minutes of watching (Dobrian et al.,
-/// SIGCOMM 2011).
+/// SIGCOMM 2011). The loss and headroom numbers divided by media bytes; the connection's sent
+/// counter adds overhead and retransmissions on native QUIC, which nudges headroom toward worse
+/// and loss toward better.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Thresholds {
@@ -143,9 +145,9 @@ pub struct Thresholds {
 pub struct TransportThresholds {
 	/// Round-trip time.
 	pub rtt: Limits<Duration>,
-	/// Transport bytes lost per media byte sent (publisher only).
+	/// Transport bytes lost per byte the connection sent (publisher only).
 	pub loss: Limits<f64>,
-	/// Estimated rate over the media bitrate sent (publisher only); lower is worse.
+	/// Estimated rate over the bitrate the connection sent (publisher only); lower is worse.
 	pub headroom: Limits<f64>,
 }
 
@@ -217,9 +219,9 @@ pub enum Reset {
 pub enum Input {
 	/// Round-trip time, in milliseconds.
 	Rtt,
-	/// Transport bytes lost per media byte sent over the interval.
+	/// Transport bytes lost per byte the connection sent over the interval.
 	Loss,
-	/// Estimated rate over the media bitrate sent over the interval; lower is worse.
+	/// Estimated rate over the bitrate the connection sent over the interval; lower is worse.
 	Headroom,
 	/// Frames skipped before sending, as a share of frames sent or skipped over the interval.
 	Skipped,
@@ -312,8 +314,8 @@ pub struct Health {
 
 /// Grade a publisher's self-report.
 ///
-/// Loss and headroom divide the connection's transport counters by this broadcast's media, so
-/// they hold when the broadcast is the only one its connection publishes.
+/// Loss and headroom divide the connection's loss and rate by the bytes the connection sent, so
+/// they hold however many broadcasts it carries. A report without `sent_bytes` grades them unknown.
 pub fn publisher<E>(sample: &Sample<'_, stats::Snapshot<E>>, thresholds: &Thresholds) -> Health {
 	assess(sample, thresholds)
 }
@@ -436,7 +438,6 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 	let interval = previous.map(|_| sample.interval);
 
 	let zero = S::Rendition::default();
-	let mut sent: u64 = 0;
 	let mut renditions = BTreeMap::new();
 	for (id, rendition) in current.renditions() {
 		let delta = previous.map(|previous| Delta {
@@ -445,7 +446,6 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 			interval: sample.interval,
 		});
 		let bytes = delta.as_ref().map(|d| d.count(S::bytes));
-		sent = sent.saturating_add(bytes.unwrap_or(0));
 		let frames = delta.as_ref().map(|d| d.count(S::frames));
 		let evidence = S::evidence(delta, thresholds);
 		renditions.insert(
@@ -464,8 +464,7 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 		current: current.transport(),
 		previous: previous.map(S::transport),
 		age: sample.age,
-		sent,
-		media: interval.map(|interval| bitrate(sent, interval)),
+		interval,
 	};
 	let transport = connection(&link, S::ROLE, thresholds);
 	let mut health = Health {
@@ -494,28 +493,29 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 	health
 }
 
-/// The reporting connection's two samples, the current report's age, and the media sent between them.
+/// The reporting connection's two samples, the current report's age, and the interval between them.
 struct Link<'a> {
 	current: &'a stats::Transport,
 	previous: Option<&'a stats::Transport>,
 	age: Duration,
-	sent: u64,
-	media: Option<u64>,
+	interval: Option<Duration>,
 }
 
 /// Grade the connection: RTT for both roles, and loss and headroom where the publisher's sent
-/// media gives them a denominator. A viewer's loss counters describe its own uplink. Loss diffs
-/// the two transport samples, so a stale previous one would stretch it past the interval.
+/// counter gives them a denominator. A viewer's loss counters describe its own uplink. The
+/// counters diff the two transport samples, so a stale previous one would stretch them past the
+/// interval.
 fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connection {
 	let limits = &thresholds.transport;
 	let previous = link
 		.previous
 		.filter(|previous| previous.age.is_none_or(|age| age <= thresholds.stale));
-	let lost = |counter: fn(&stats::Transport) -> Option<u64>| {
+	let delta = |counter: fn(&stats::Transport) -> Option<u64>| {
 		previous.and_then(|previous| Some(counter(link.current)?.saturating_sub(counter(previous)?)))
 	};
-	let lost_bytes = lost(|t| t.lost_bytes);
-	let lost_packets = lost(|t| t.lost_packets);
+	let lost_bytes = delta(|t| t.lost_bytes);
+	let lost_packets = delta(|t| t.lost_packets);
+	let sent = delta(|t| t.sent_bytes);
 
 	let rtt = link.current.rtt.map(|rtt| rtt.as_nanos() as f64 / 1e6);
 	let mut evidence = vec![above(
@@ -527,11 +527,20 @@ fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connectio
 		},
 	)];
 	if role == Role::Publisher {
-		let loss = lost_bytes.and_then(|lost| ratio(lost, link.sent));
+		let loss = lost_bytes.zip(sent).and_then(|(lost, sent)| ratio(lost, sent));
+		// The counters were sampled `age` before each report, so they span the interval
+		// between the reports, widened by the earlier sample's age and narrowed by the later's.
+		let span = link.interval.zip(previous).and_then(|(interval, previous)| {
+			interval
+				.saturating_add(previous.age.unwrap_or_default())
+				.checked_sub(link.current.age.unwrap_or_default())
+				.filter(|span| !span.is_zero())
+		});
+		let media = sent.zip(span).map(|(sent, span)| bitrate(sent, span));
 		let headroom = link
 			.current
 			.rate
-			.zip(link.media.filter(|media| *media > 0))
+			.zip(media.filter(|media| *media > 0))
 			.map(|(rate, media)| rate as f64 / media as f64);
 		evidence.push(above(Input::Loss, loss, &limits.loss));
 		evidence.push(below(Input::Headroom, headroom, &limits.headroom));
@@ -554,13 +563,14 @@ fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connectio
 }
 
 fn decreased<S: Kind>(previous: &S, current: &S) -> bool {
-	let lost = |counter: fn(&stats::Transport) -> Option<u64>| {
+	let went_down = |counter: fn(&stats::Transport) -> Option<u64>| {
 		counter(previous.transport())
 			.zip(counter(current.transport()))
 			.is_some_and(|(previous, current)| current < previous)
 	};
-	lost(|t| t.lost_bytes)
-		|| lost(|t| t.lost_packets)
+	went_down(|t| t.lost_bytes)
+		|| went_down(|t| t.lost_packets)
+		|| went_down(|t| t.sent_bytes)
 		|| current.renditions().iter().any(|(id, rendition)| {
 			previous
 				.renditions()
@@ -705,7 +715,7 @@ mod tests {
 
 	#[test]
 	fn counters_near_the_limit_saturate() {
-		let snapshot = |frames: u64, bytes| {
+		let snapshot = |frames: u64, bytes: u64| {
 			let rendition = stats::Rendition {
 				frames,
 				bytes,
@@ -716,6 +726,7 @@ mod tests {
 				transport: stats::Transport {
 					rate: Some(1_000_000),
 					lost_bytes: Some(0),
+					sent_bytes: Some(bytes),
 					..Default::default()
 				},
 				renditions: BTreeMap::from([
