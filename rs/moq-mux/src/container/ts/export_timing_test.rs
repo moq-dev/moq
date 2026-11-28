@@ -319,6 +319,7 @@ impl Live {
 		};
 		Frame {
 			timestamp: Timestamp::from_micros(presented.strict_add_signed(self.offset)).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&slice]),
 			keyframe,
@@ -392,6 +393,7 @@ impl Live {
 		self.audio
 			.write(Frame {
 				timestamp: Timestamp::from_micros((index * AUDIO_US).strict_add_signed(self.offset)).unwrap(),
+				decode: None,
 				duration: None,
 				payload: audio_payload(index),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),

@@ -197,8 +197,8 @@ struct Inner<T> {
 	/// Watches for a joiner wanting a group past the largest written.
 	refresh: Refresh,
 
-	/// The newest timestamp written, which a refresh restates the window at. An edit may carry an
-	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	/// The newest timestamp written, which a refresh restates the window at. A group's timestamps
+	/// never decrease, so a later write may not go below it, nor a new group start before it.
 	/// `None` before the first write.
 	at: Option<moq_net::Timestamp>,
 
@@ -487,8 +487,10 @@ mod tests {
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		// Oldest first, as published.
-		let mut groups =
-			track.subscribe(moq_net::track::Subscription::default().with_order(moq_net::track::Order::Ascending));
+		let mut groups = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_ranges([moq_net::track::Range::default().with_order(moq_net::track::Order::Ascending)]),
+		);
 		let mut producer = Producer::<Value>::new(track, Config::default());
 		producer
 			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))

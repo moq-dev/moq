@@ -9,7 +9,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { withMax } from "../subscription.test-util.ts";
+import { everyRange, withMax } from "../subscription.test-util.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
@@ -824,20 +824,48 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 	track.close();
 });
 
-test("a received frame's time is its group's key in the track's TIMESCALE", async () => {
-	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
+test("a received frame's time is Group ID + Object ID - TIMESTAMP_TIE in ID_TIMESCALE", async () => {
+	const { subscriber, track } = await subscribeTrack({
+		version: Version.DRAFT_23,
+		properties: { timescale: Timescale.MICRO },
+	});
 	expect((await track.info()).timescale).toBe(Timescale.MICRO);
 
-	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8:
-	// neither is read. The second object carries no properties at all.
+	// LOC's 0x08 (Timescale) = 1 and 0x10 (Timestamp) = 5 are ignored; object 0 gets 7 + 0 = 7,
+	// and object 1 (no properties) gets 7 + 1 = 8.
 	const objects = new Uint8Array([...encodeStamped([0x08, 1, 0x08, 5]), ...encodeStamped([])]);
-	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, VERSION));
+	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, Version.DRAFT_23));
 	const group = await track.ordered().nextGroup();
 	for (let i = 0; i < 2; i++) {
 		const frame = await group?.readFrame();
 		expect(frame?.payload).toEqual(new Uint8Array([42]));
-		expect(frame?.timestamp).toEqual(new Timestamp(7, Timescale.MICRO));
+		expect(frame?.timestamp).toEqual(new Timestamp(7 + i, Timescale.MICRO));
 	}
+	expect(track.closed.peek()).toBeUndefined();
+	track.close();
+});
+
+test("a compact subgroup stream's later objects carry sparse timestamp ID deltas", async () => {
+	const { subscriber, track } = await subscribeTrack({
+		version: Version.DRAFT_23,
+		properties: { timescale: Timescale.MICRO },
+	});
+	// The first Object ID names subgroup 0; the next delta of 32 is Object ID 33.
+	const objects = new Uint8Array([0, 1, 42, 32, 1, 43]);
+	const header = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 7n,
+		subGroupId: 0n,
+		publisherPriority: 0,
+		flags: { ...groupFlags(true), hasSubgroupObject: true },
+	});
+	await subscriber.handleGroup(header, new Reader(undefined, objects, Version.DRAFT_23));
+	const group = await track.ordered().nextGroup();
+	const first = await group?.readFrame();
+	expect(first?.timestamp).toEqual(new Timestamp(7, Timescale.MICRO));
+	const second = await group?.readFrame();
+	expect(second?.payload).toEqual(new Uint8Array([43]));
+	expect(second?.timestamp).toEqual(new Timestamp(40, Timescale.MICRO));
 	expect(track.closed.peek()).toBeUndefined();
 	track.close();
 });
@@ -1273,11 +1301,7 @@ test.each(
 		const consumer = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({
-				...track.Subscription.default(),
-				ranges: [range],
-				order: "ascending",
-			});
+			.subscribe(everyRange({ ...track.Subscription.default(), ranges: [range] }, { order: "ascending" }));
 		const peer = await nextStream(pair.client, version);
 		const ordered = consumer.ordered();
 		let fetch: Stream | undefined;

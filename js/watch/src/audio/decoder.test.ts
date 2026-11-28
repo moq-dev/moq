@@ -1628,7 +1628,7 @@ async function livePlayback(burst: number, priority?: Signal<number>) {
 		ring,
 		// The priority the publisher sees: the highest of the decoder's subscriptions to the track.
 		get priority() {
-			return track.subscription.peek()?.priority;
+			return track.subscription.peek()?.ranges?.[0]?.priority ?? 0;
 		},
 		get burst() {
 			return burst;

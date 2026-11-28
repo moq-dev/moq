@@ -101,6 +101,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Not real frames of course. The first frame is a keyframe and starts the first group.
 	let frame = moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(1).unwrap(),
+		decode: None,
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
 		duration: None,
@@ -111,6 +112,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 
 	let frame = moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(2).unwrap(),
+		decode: None,
 		payload: Bytes::from_static(b"delta NAL data"),
 		keyframe: false,
 		duration: None,
@@ -122,6 +124,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Marking this frame as a keyframe closes the current group and starts a new one.
 	let frame = moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(3).unwrap(),
+		decode: None,
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
 		duration: None,

@@ -1,28 +1,192 @@
 //! The union of every subscriber's ranges, kept current per change rather than refolded.
 //!
-//! Time ranges become signed boundaries over group starts, +1 where one starts and -1
-//! past where it ends, so a start is covered while the running sum stays above zero. A
-//! start between groups stands for the group containing it, which a range starting at or
-//! before it covers too, so spans merge as they do over starts. A treap keeps each
-//! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
-//! range-minimum question, whatever else the audience holds. Ranges with no time start can't
-//! be placed on that line and are counted by value instead: live joins by lag and end under
-//! the largest `max` among them, since where a join lands doesn't depend on it, and ranges
-//! from the oldest group under the furthest end, which takes in the rest.
+//! Ranges are counted apart by [`Policy`], since folding one into a range at another policy
+//! would lose its priority or order. Within one policy, time ranges become signed boundaries
+//! over group starts, +1 where one starts and -1 past where it ends, so a start is covered
+//! while the running sum stays above zero. A start between groups stands for the group
+//! containing it, which a range starting at or before it covers too, so spans merge as they
+//! do over starts. A treap keeps each subtree's sum and lowest running sum, so a change
+//! touches two boundaries and asks one range-minimum question, whatever else the audience
+//! holds. Ranges with no time start can't be placed on that line and are counted by value
+//! instead: live joins by lag and end under the largest `max` among them, since where a join
+//! lands doesn't depend on it, and ranges from the oldest group under the furthest end, which
+//! takes in the rest.
+//!
+//! Across policies a range is dropped only once ranges at policies
+//! [covering](Policy::covers) its own cover its span. With one policy there is nothing to
+//! fold, so a change costs O(log n) as above. With several, the fold is redone only when one
+//! policy's union moves, at the cost of the union's own length.
 
 use std::cell::OnceCell;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 
 use std::time::Duration;
 
-use super::super::{Range, Start};
+use super::super::{Order, Range, Start};
 use super::{add, remove};
-use crate::model::subscription::max_of;
+use crate::model::subscription::{Policy, max_of};
 
-/// Every subscriber's ranges, counted so that one change costs O(log n).
+/// Every subscriber's ranges, counted so that one change costs O(log n) unless several
+/// policies are asked and it moves the union of its policy's ranges.
 #[derive(Default)]
 pub(super) struct Ranges {
+	/// The ranges of each policy, those covering others first.
+	classes: BTreeMap<(Reverse<i8>, Reverse<Order>), (Policy, Class)>,
+	/// The union, until a change moves it. Kept while several policies are asked, to tell
+	/// whether a change moved it.
+	union: OnceCell<Vec<Range>>,
+}
+
+impl Ranges {
+	/// Count `range`, returning whether the union changed.
+	pub(super) fn add(&mut self, range: Range) -> bool {
+		if range.is_empty() {
+			return false;
+		}
+		let policy = range.policy();
+		let several = self.classes.len() > 1 || self.classes.keys().any(|rank| *rank != policy.rank());
+		self.held(several);
+		let (_, class) = (self.classes.entry(policy.rank())).or_insert_with(|| (policy, Class::default()));
+		class.add(range) && self.moved(several)
+	}
+
+	/// Uncount `range`, returning whether the union changed.
+	pub(super) fn remove(&mut self, range: Range) -> bool {
+		if range.is_empty() {
+			return false;
+		}
+		let several = self.classes.len() > 1;
+		self.held(several);
+		let rank = range.policy().rank();
+		let (_, class) = self.classes.get_mut(&rank).expect("a counted policy");
+		let moved = class.remove(range);
+		if class.held == 0 {
+			self.classes.remove(&rank);
+		}
+		moved && self.moved(several)
+	}
+
+	/// The union in [`Range`] order, costing its own length rather than the audience's.
+	pub(super) fn union(&self) -> Vec<Range> {
+		self.union.get_or_init(|| self.fold()).clone()
+	}
+
+	/// Hold the union before a change when `several` policies are asked around it, so
+	/// [`Self::moved`] has it to compare against.
+	fn held(&self, several: bool) {
+		if several {
+			self.union.get_or_init(|| self.fold());
+		}
+	}
+
+	/// Whether a change that moved one policy's union moved the union: always with one policy
+	/// asked, and otherwise only when the fold comes out different.
+	fn moved(&mut self, several: bool) -> bool {
+		let Some(old) = self.union.take() else {
+			return true;
+		};
+		if !several {
+			return true;
+		}
+		let union = self.fold();
+		let moved = union != old;
+		self.union = OnceCell::from(union);
+		moved
+	}
+
+	/// Fold every policy's union, dropping a range that ranges at covering policies cover.
+	fn fold(&self) -> Vec<Range> {
+		let mut above = Above::default();
+		let mut union = Vec::new();
+		for (policy, class) in self.classes.values() {
+			let spans = class.union();
+			union.extend(
+				(spans.iter())
+					.filter(|range| !above.covers(range))
+					.map(|range| range.with_policy(*policy)),
+			);
+			above.extend(spans);
+		}
+		union.sort_unstable();
+		union
+	}
+}
+
+/// What ranges at covering policies already ask, as a range of one policy is checked against
+/// them: the same spans [`Class`] merges ranges into.
+#[derive(Default)]
+struct Above {
+	/// Whether a range from the oldest group follows the live edge, covering everything.
+	all: bool,
+	/// The time spans, merged where they overlap or touch, as exclusive spans of starts by start.
+	runs: BTreeMap<u64, Option<u64>>,
+	/// The furthest end of a range from the oldest group.
+	oldest: Option<u64>,
+	/// Live joins by lag and end, under the widest budget.
+	joins: BTreeMap<(Option<Duration>, Option<u64>), Duration>,
+}
+
+impl Above {
+	fn covers(&self, range: &Range) -> bool {
+		if self.all {
+			return true;
+		}
+		match Shape::of(range) {
+			Shape::Empty => true,
+			Shape::Open => false,
+			Shape::Time(start, end) => self.runs.range(..=start).next_back().is_some_and(|(_, run)| match run {
+				None => true,
+				Some(run) => end.is_some_and(|end| end <= *run),
+			}),
+			Shape::Join(join, budget) => self.joins.get(&join).is_some_and(|widest| *widest >= budget),
+			Shape::Oldest(end) => self.oldest.is_some_and(|furthest| furthest >= end),
+		}
+	}
+
+	/// Take in one policy's union.
+	fn extend(&mut self, ranges: &[Range]) {
+		for range in ranges {
+			match Shape::of(range) {
+				Shape::Empty => {}
+				Shape::Open => self.all = true,
+				Shape::Time(start, end) => self.span(start, end),
+				Shape::Join(join, budget) => {
+					let widest = self.joins.entry(join).or_default();
+					*widest = (*widest).max(budget);
+				}
+				Shape::Oldest(end) => self.oldest = self.oldest.max(Some(end)),
+			}
+		}
+	}
+
+	/// Merge the exclusive span of starts `start..end` into [`Self::runs`].
+	fn span(&mut self, mut start: u64, mut end: Option<u64>) {
+		// One before it that reaches it takes it in.
+		if let Some((&before, &reach)) = self.runs.range(..=start).next_back()
+			&& reach.is_none_or(|reach| reach >= start)
+		{
+			start = before;
+			end = end.zip(reach).map(|(end, reach)| end.max(reach));
+		}
+		// As does it each one starting inside it.
+		while let Some((&next, &reach)) = self.runs.range(start..).next() {
+			if end.is_some_and(|end| next > end) {
+				break;
+			}
+			self.runs.remove(&next);
+			end = end.zip(reach).map(|(end, reach)| end.max(reach));
+		}
+		self.runs.insert(start, end);
+	}
+}
+
+/// The ranges of one policy, counted so that one change costs O(log n).
+#[derive(Default)]
+struct Class {
+	/// How many non-empty ranges are counted.
+	held: usize,
 	/// Holders of a range from the oldest group following the live edge, which covers every
 	/// other range.
 	open: usize,
@@ -62,9 +226,9 @@ impl Shape {
 	}
 }
 
-impl Ranges {
+impl Class {
 	/// Count `range`, returning whether the union changed.
-	pub(super) fn add(&mut self, range: Range) -> bool {
+	fn add(&mut self, range: Range) -> bool {
 		let hidden = self.open > 0;
 		let changed = match Shape::of(&range) {
 			Shape::Empty => return false,
@@ -89,12 +253,15 @@ impl Ranges {
 				furthest.is_none_or(|furthest| end > furthest) && !hidden
 			}
 		};
-		self.union.take();
+		self.held += 1;
+		if changed {
+			self.union.take();
+		}
 		changed
 	}
 
 	/// Uncount `range`, returning whether the union changed.
-	pub(super) fn remove(&mut self, range: Range) -> bool {
+	fn remove(&mut self, range: Range) -> bool {
 		let hidden = |ranges: &Self| ranges.open > 0;
 		let changed = match Shape::of(&range) {
 			Shape::Empty => return false,
@@ -122,13 +289,17 @@ impl Ranges {
 				self.oldest.last_key_value().map(|(furthest, _)| *furthest) != furthest && !hidden(self)
 			}
 		};
-		self.union.take();
+		self.held -= 1;
+		if changed {
+			self.union.take();
+		}
 		changed
 	}
 
-	/// The union in [`Range`] order, costing its own length rather than the audience's.
-	pub(super) fn union(&self) -> Vec<Range> {
-		self.union.get_or_init(|| self.fold()).clone()
+	/// The union at the default policy, in [`Range`] order, costing its own length rather
+	/// than the audience's.
+	fn union(&self) -> &[Range] {
+		self.union.get_or_init(|| self.fold())
 	}
 
 	fn fold(&self) -> Vec<Range> {
@@ -143,11 +314,13 @@ impl Ranges {
 				start: Start::Time(start),
 				// A run past its start ends at or past one more.
 				end: end.map(|end| end - 1),
+				..Range::ALL
 			})
 			.collect();
 		union.extend(self.oldest.last_key_value().map(|(&end, _)| Range {
 			start: Start::Oldest,
 			end: Some(end),
+			..Range::ALL
 		}));
 		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
 			let budget = *budgets.last_key_value()?.0;
@@ -157,6 +330,7 @@ impl Ranges {
 					max: max_of(budget),
 				},
 				end,
+				..Range::ALL
 			})
 		}));
 		union.sort_unstable();
@@ -323,6 +497,7 @@ mod tests {
 		let oldest = |end| Range {
 			start: Start::Oldest,
 			end: Some(end),
+			..Range::ALL
 		};
 		let mut ranges = Ranges::default();
 		assert!(ranges.add(oldest(3)));
@@ -337,7 +512,7 @@ mod tests {
 	}
 
 	/// Each change reports exactly whether the union moved, and the union matches a full fold
-	/// of what is held.
+	/// of what is held, across a few policies that cover one another in each way.
 	#[test]
 	fn incremental_union_matches_a_full_fold() {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x72616e676573);
@@ -359,6 +534,11 @@ mod tests {
 				let range = Range {
 					start: start(&mut rng),
 					end: rng.random_bool(0.6).then(|| rng.random_range(0..12)),
+					priority: rng.random_range(0..3),
+					order: match rng.random_bool(0.5) {
+						true => Order::Ascending,
+						false => Order::Descending,
+					},
 				};
 				held.push(range);
 				ranges.add(range)

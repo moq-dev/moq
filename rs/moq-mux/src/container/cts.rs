@@ -23,6 +23,13 @@ impl Container for Wire {
 		self.0
 	}
 
+	fn decode_order(&self) -> bool {
+		true
+	}
+
+	// The writer waits on the cts-encoders quest: the binding frame APIs carry no decode time,
+	// and a draft-18..22 hop stamps every object at its Group ID, losing the decode time the
+	// offset counts from.
 	fn writable(&self) -> Result<(), Self::Error> {
 		Err(moq_net::Error::Unsupported.into())
 	}
@@ -32,13 +39,12 @@ impl Container for Wire {
 		_group: &mut moq_net::group::Producer,
 		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
-		// CTS encoding requires a separate DTS per frame (not yet carried by `container::Frame`).
+		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
 
 	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
-		// CTS needs each frame's DTS as the transport timestamp, which `container::Frame`
-		// does not carry yet; writing CTS = 0 with the PTS would mislabel reordered video.
+		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
 
@@ -64,6 +70,7 @@ impl Container for Wire {
 
 		Ok(vec![Frame {
 			timestamp,
+			decode: (cts != 0).then_some(frame.timestamp),
 			payload: frame.payload,
 			keyframe: false,
 			duration: None,
@@ -143,6 +150,7 @@ mod tests {
 			.with_buffer(std::time::Duration::from_secs(1));
 		let err = producer.write(Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(b"pkt"),
 			keyframe: true,
 			duration: None,
@@ -166,6 +174,7 @@ mod tests {
 		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		let frame = Frame {
 			timestamp: Timestamp::from_millis(33).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(b"pkt"),
 			keyframe: true,
 			duration: None,

@@ -253,6 +253,7 @@ pub(crate) fn marked_frame(index: u64, mark: u8) -> crate::container::Frame {
 	payload.extend_from_slice(&nal);
 	crate::container::Frame {
 		timestamp: Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
+		decode: None,
 		payload: payload.freeze(),
 		keyframe,
 		duration: None,
@@ -285,6 +286,7 @@ pub(crate) fn video_frame(timestamp_us: u64, keyframe: bool) -> crate::container
 	}
 	crate::container::Frame {
 		timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+		decode: None,
 		payload: payload.freeze(),
 		keyframe,
 		duration: None,
@@ -295,6 +297,7 @@ pub(crate) fn video_frame(timestamp_us: u64, keyframe: bool) -> crate::container
 pub(crate) fn raw_frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> crate::container::Frame {
 	crate::container::Frame {
 		timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+		decode: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
 		duration: None,
@@ -633,10 +636,9 @@ impl std::task::Wake for Woken {
 /// sequence, not their time, so a join placed by time alone would land on the newest. Oldest
 /// first, as the tests read them back.
 pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: None,
-			max: Some(max),
-		})])
-		.with_order(moq_net::track::Order::Ascending)
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		min: None,
+		max: Some(max),
+	})
+	.with_order(moq_net::track::Order::Ascending)])
 }

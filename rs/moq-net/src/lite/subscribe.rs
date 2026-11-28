@@ -58,6 +58,28 @@ impl Subscribe<'_> {
 	}
 }
 
+pub(crate) use crate::track::Policy;
+
+/// A lite-07 SUBSCRIBE_UPDATE's change to a live range in place, which keeps where it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retune {
+	/// Its new priority and order.
+	pub policy: Policy,
+	/// A live join's new max age, `None` for no limit; always `None` for any other range.
+	pub max: Option<std::time::Duration>,
+}
+
+#[cfg(test)]
+impl Retune {
+	/// A retune of a live join's max age alone, at the default priority and order.
+	pub(crate) fn max(max: Option<std::time::Duration>) -> Self {
+		Self {
+			policy: Policy::default(),
+			max,
+		}
+	}
+}
+
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
@@ -99,11 +121,59 @@ pub struct Range {
 	pub start: Option<Anchor>,
 	/// Where delivery stops, or `None` to follow the live edge.
 	pub end: Option<Anchor>,
+	/// How urgently this range's groups go out, higher first. Lite07+ carries one per range;
+	/// earlier wires carry [`Subscribe::priority`] for the whole subscription instead.
+	pub priority: i8,
+	/// Which of this range's pending groups goes out first. Lite07+ carries one per range;
+	/// earlier wires carry [`Subscribe::order`] for the whole subscription instead.
+	pub order: Order,
 }
 
 impl Range {
-	/// Everything from the oldest group the max age allows onward.
-	pub const OPEN: Self = Self { start: None, end: None };
+	/// Everything from the oldest group the max age allows onward, at the default priority and
+	/// order.
+	pub const OPEN: Self = Self {
+		start: None,
+		end: None,
+		priority: 0,
+		order: Order::Descending,
+	};
+
+	/// This range's span at `policy`'s priority and order.
+	pub(crate) fn with_policy(self, policy: Policy) -> Self {
+		Self {
+			priority: policy.priority,
+			order: policy.order,
+			..self
+		}
+	}
+
+	/// This range's priority and order.
+	pub(crate) fn policy(&self) -> Policy {
+		Policy {
+			priority: self.priority,
+			order: self.order,
+		}
+	}
+
+	/// Whether `other` asks for the same span, whatever its policy and live join's max age:
+	/// the edit a SUBSCRIBE_UPDATE retunes in place rather than placing afresh.
+	fn retunes(&self, other: &Self) -> bool {
+		let start = match (self.start, other.start) {
+			(Some(Anchor::Live { min, .. }), Some(Anchor::Live { min: other, .. })) => min == other,
+			(Some(Anchor::Joined { at, .. }), Some(Anchor::Joined { at: other, .. })) => at == other,
+			(start, other) => start == other,
+		};
+		start && self.end == other.end
+	}
+
+	/// This range's live join max age, `None` for one that is not a live join.
+	fn max(&self) -> Option<Option<std::time::Duration>> {
+		match self.start {
+			Some(Anchor::Live { max, .. } | Anchor::Joined { max, .. }) => Some(max),
+			_ => None,
+		}
+	}
 
 	/// Whether the range follows the live edge, starting at it or never ending, so its
 	/// SUBSCRIBE_START always carries a Largest.
@@ -137,6 +207,7 @@ impl Range {
 					None => Position::group(group + 1),
 				})
 			}),
+			..Self::OPEN
 		}
 	}
 }
@@ -149,14 +220,30 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let identity = super::identity::decode_pin(r, version)?;
 		let node = super::identity::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
-		let priority = super::priority::from_wire(r.u8()?);
 
-		let (order, max_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (Order::Descending, None, vec![Range::OPEN]),
+		// An older wire's one priority and order apply to its one range.
+		let (priority, order, max_delay, ranges) = match version {
+			Version::Lite01 | Version::Lite02 => {
+				let priority = super::priority::from_wire(r.u8()?);
+				let range = Range::OPEN.with_policy(Policy {
+					priority,
+					order: Order::Descending,
+				});
+				(priority, Order::Descending, None, vec![range])
+			}
+			// Each range carries its own priority and order.
+			_ if version.has_ranges() => {
+				let ranges = decode_ranges(r, version)?;
+				let policy = Policy::top(ranges.iter().map(Range::policy));
+				(policy.priority, policy.order, None, ranges)
+			}
 			_ => {
+				let priority = super::priority::from_wire(r.u8()?);
 				let order = decode_order(r, version)?;
 				let max_delay = decode_max_delay(r, version)?;
-				(order, max_delay, decode_ranges(r, version)?)
+				let ranges = decode_ranges(r, version)?;
+				let ranges = stamped(ranges, Policy { priority, order });
+				(priority, order, max_delay, ranges)
 			}
 		};
 		let meta = decode_meta(r, version)?;
@@ -180,12 +267,14 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		super::identity::encode_pin(w, version, self.identity.as_ref())?;
 		super::identity::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
-		w.u8(super::priority::to_wire(self.priority));
 
 		match version {
 			// No field carries a range: the publisher serves the live edge.
-			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite01 | Version::Lite02 => w.u8(super::priority::to_wire(self.priority)),
+			// Each range carries its own priority and order.
+			_ if version.has_ranges() => encode_ranges(w, version, &self.ranges)?,
 			_ => {
+				w.u8(super::priority::to_wire(self.priority));
 				encode_order(w, version, self.order)?;
 				encode_max_delay(w, version, self.max_delay)?;
 				encode_ranges(w, version, &self.ranges)?;
@@ -193,6 +282,11 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		}
 		encode_meta(w, version, self.meta)
 	}
+}
+
+/// `ranges` at `policy`, the one an older wire carries for the whole subscription.
+fn stamped(ranges: Vec<Range>, policy: Policy) -> Vec<Range> {
+	ranges.into_iter().map(|range| range.with_policy(policy)).collect()
 }
 
 /// Decode SUBSCRIBE's trailing `Meta` byte, lite-07's only: 1 for headers alone, 0 for the
@@ -283,7 +377,11 @@ fn decode_ranges(r: &mut Decoder<'_>, version: Version) -> Result<Vec<Range>, De
 			None => crate::track::Position::group(group + 1),
 		})
 	});
-	Ok(vec![Range { start, end }])
+	Ok(vec![Range {
+		start,
+		end,
+		..Range::OPEN
+	}])
 }
 
 /// Encode the inverse of [`decode_ranges`].
@@ -331,17 +429,39 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 	// count the bytes can't back runs out before it costs anything.
 	let mut ranges = Vec::new();
 	for _ in 0..count {
+		let policy = decode_policy(r)?;
 		let start = decode_anchor(r, false)?;
 		let end = decode_anchor(r, true)?;
-		ranges.push(Range { start, end });
+		ranges.push(
+			Range {
+				start,
+				end,
+				..Range::OPEN
+			}
+			.with_policy(policy),
+		);
 	}
 	Ok(ranges)
+}
+
+/// Decode a lite-07 range's or retune's `Priority` then `Group Order`.
+fn decode_policy(r: &mut Decoder<'_>) -> Result<Policy, DecodeError> {
+	let priority = super::priority::from_wire(r.u8()?);
+	let order = decode_order(r, Version::Lite07)?;
+	Ok(Policy { priority, order })
+}
+
+/// Encode the inverse of [`decode_policy`].
+fn encode_policy(w: &mut Encoder<'_>, policy: Policy) -> Result<(), EncodeError> {
+	w.u8(super::priority::to_wire(policy.priority));
+	encode_order(w, Version::Lite07, policy.order)
 }
 
 /// Encode the inverse of [`decode_range_list`].
 fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), EncodeError> {
 	w.varint(ranges.len() as u64)?;
 	for range in ranges {
+		encode_policy(w, range.policy())?;
 		for (anchor, end) in [(range.start, false), (range.end, true)] {
 			let (kind, values) = wire_anchor(anchor, end)?;
 			w.varint(kind)?;
@@ -363,7 +483,8 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 			.flatten()
 			.try_fold(size(kind)?, |total, value| Some(total + size(*value)?))
 	};
-	Some(anchor(range.start, false)? + anchor(range.end, true)?)
+	// Its priority and order, a byte each.
+	Some(2 + anchor(range.start, false)? + anchor(range.end, true)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
@@ -405,10 +526,7 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 /// as its lag then its max age, each in milliseconds rounded up, plus one so zero says no
 /// limit, and one already placed as its position then its max age, each only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
-	// Plus one, so zero says no limit.
-	let millis = |limit: Option<std::time::Duration>| {
-		limit.map_or(0, |limit| crate::track::live_millis(limit).saturating_add(1))
-	};
+	let millis = wire_millis;
 	Ok(match anchor {
 		None => (0, [None, None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
@@ -417,6 +535,11 @@ fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 
 		Some(Anchor::Live { min, max }) => (3, [Some(millis(min)), Some(millis(max)), None]),
 		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(millis(max))]),
 	})
+}
+
+/// A lite-07 age limit in whole milliseconds, rounded up, plus one so zero says no limit.
+fn wire_millis(limit: Option<std::time::Duration>) -> u64 {
+	limit.map_or(0, |limit| crate::track::live_millis(limit).saturating_add(1))
 }
 
 /// Step over the retired `Ordered` byte on a version whose layout still has it.
@@ -808,8 +931,12 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			_ => {}
 		}
 
-		let priority = super::priority::from_wire(r.u8()?);
-		let order = decode_order(r, version)?;
+		// Lite-07 carries a priority and order per range, which the publisher reads off the
+		// live ranges once it applies the edit.
+		let (priority, order) = match version.has_ranges() {
+			true => (0, Order::Descending),
+			false => (super::priority::from_wire(r.u8()?), decode_order(r, version)?),
+		};
 		let max_delay = decode_max_delay(r, version)?;
 		let ranges = match version.has_ranges() {
 			true => {
@@ -821,11 +948,14 @@ impl<'a> Message<'a> for SubscribeUpdate {
 				let add = decode_range_list(r)?;
 				let mut retune = Vec::new();
 				for _ in 0..r.varint()? {
-					retune.push((r.varint()?, r.varint_opt()?.map(std::time::Duration::from_millis)));
+					let id = r.varint()?;
+					let policy = decode_policy(r)?;
+					let max = r.varint_opt()?.map(std::time::Duration::from_millis);
+					retune.push((id, Retune { policy, max }));
 				}
 				RangeEdit::Edit { remove, add, retune }
 			}
-			false => RangeEdit::Replace(decode_ranges(r, version)?),
+			false => RangeEdit::Replace(stamped(decode_ranges(r, version)?, Policy { priority, order })),
 		};
 
 		let wanted_group = match version.has_refresh() {
@@ -850,8 +980,10 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			_ => {}
 		}
 
-		w.u8(super::priority::to_wire(self.priority));
-		encode_order(w, version, self.order)?;
+		if !version.has_ranges() {
+			w.u8(super::priority::to_wire(self.priority));
+			encode_order(w, version, self.order)?;
+		}
 		encode_max_delay(w, version, self.max_delay)?;
 		match (&self.ranges, version.has_ranges()) {
 			(RangeEdit::Edit { remove, add, retune }, true) => {
@@ -861,9 +993,10 @@ impl<'a> Message<'a> for SubscribeUpdate {
 				}
 				encode_range_list(w, add)?;
 				w.varint(retune.len() as u64)?;
-				for (id, max) in retune {
+				for (id, retune) in retune {
 					w.varint(*id)?;
-					w.varint_opt(max.map(crate::track::live_millis))?;
+					encode_policy(w, retune.policy)?;
+					w.varint_opt(retune.max.map(crate::track::live_millis))?;
 				}
 			}
 			(RangeEdit::Replace(ranges), false) => encode_ranges(w, version, ranges)?,
@@ -883,12 +1016,12 @@ pub enum RangeEdit {
 	/// Before lite-07: the whole list, replacing the live one.
 	Replace(Vec<Range>),
 	/// Lite-07: retire the ranges with these Range IDs, then add these, each taking the next
-	/// Range ID, then give each live join named in `retune` that max age in place, keeping
-	/// where it was placed.
+	/// Range ID, then give each live range named in `retune` that priority and order, and a
+	/// live join that max age, in place, keeping where it was placed.
 	Edit {
 		remove: Vec<u64>,
 		add: Vec<Range>,
-		retune: Vec<(u64, Option<std::time::Duration>)>,
+		retune: Vec<(u64, Retune)>,
 	},
 }
 
@@ -1052,17 +1185,19 @@ impl LiveRanges {
 				}
 				// Retuned before the adds, so a retune names a range live before this edit.
 				let mut retuned: Vec<(u64, Range)> = Vec::with_capacity(retune.len().min(self.live.len()));
-				for (id, max) in retune {
-					// Each live join once: one retuned twice in an edit says nothing a single one doesn't.
+				for (id, retune) in retune {
+					// Each range once: one retuned twice in an edit says nothing a single one doesn't.
 					if retuned.iter().any(|(tuned, _)| *tuned == id) {
 						return Err(DecodeError::InvalidValue);
 					}
 					let mut range = self.remove(id).ok_or(DecodeError::InvalidValue)?;
-					let Some(Anchor::Live { max: live, .. } | Anchor::Joined { max: live, .. }) = &mut range.start
-					else {
-						return Err(DecodeError::InvalidValue);
-					};
-					*live = max;
+					match &mut range.start {
+						Some(Anchor::Live { max: live, .. } | Anchor::Joined { max: live, .. }) => *live = retune.max,
+						// Only a live join has a max age to change.
+						_ if retune.max.is_some() => return Err(DecodeError::InvalidValue),
+						_ => {}
+					}
+					range = range.with_policy(retune.policy);
 					self.insert(id, range);
 					retuned.push((id, range));
 				}
@@ -1155,24 +1290,26 @@ impl LiveRanges {
 			})
 			.copied()
 			.collect();
-		// A live join wanted again under another max age, its placement kept.
+		// A range wanted again under another priority or order, or a live join under another
+		// max age, its placement kept.
 		let mut retune = Vec::new();
 		remove.retain(|&id| {
 			let key = key_of(id);
 			let live = self.live[&id];
-			let found = added.iter().enumerate().find_map(|(index, (wanted_key, range))| {
-				let max = match (live.start, range.start) {
-					(Some(Anchor::Live { min, .. }), Some(Anchor::Live { min: wanted, max })) if wanted == min => max,
-					(Some(Anchor::Joined { at, .. }), Some(Anchor::Joined { at: wanted, max })) if wanted == at => max,
-					_ => return None,
-				};
-				(*wanted_key == key && range.end == live.end).then_some((index, max))
-			});
-			let Some((index, max)) = found else {
+			let found = (added.iter()).position(|(wanted_key, range)| *wanted_key == key && live.retunes(range));
+			let Some(index) = found else {
 				return true;
 			};
 			let (_, range) = added.remove(index);
-			retune.push((id, range, max));
+			let max = range.max().flatten();
+			retune.push((
+				id,
+				range,
+				Retune {
+					policy: range.policy(),
+					max,
+				},
+			));
 			false
 		});
 		let add: Vec<Range> = added.iter().map(|(_, range)| *range).collect();
@@ -1216,11 +1353,19 @@ pub struct SubscribeDrop {
 	/// Why the groups were given up: a stream error code on lite-07 and later, or an
 	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
+
+	/// Lite-07 with `OLD`: the `Max Age` the groups were judged stale under, or `None` for the
+	/// publisher's own, which settles every reader. Ignored for any other drop.
+	pub max_age: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "async")]
 impl SubscribeDrop {
 	/// Name `groups` given up with `err`, as `version` carries it.
+	///
+	/// An `OLD` drop named here depends on no reader's `Max Age`, so it settles every reader as
+	/// the publisher's own does. [`Self::stale`] names the one a staleness verdict was judged
+	/// under.
 	pub fn new(groups: std::ops::Range<u64>, err: &StreamError, version: Version) -> Self {
 		Self {
 			groups,
@@ -1228,6 +1373,39 @@ impl SubscribeDrop {
 			error: match version.has_drop_code() {
 				true => version.encode_stream_code(err).into(),
 				false => 0,
+			},
+			max_age: None,
+		}
+	}
+
+	/// Name `groups` judged stale under `max_age`, `None` for the publisher's own.
+	pub fn stale(groups: std::ops::Range<u64>, max_age: Option<std::time::Duration>, version: Version) -> Self {
+		Self {
+			max_age,
+			..Self::new(groups, &StreamError::Old, version)
+		}
+	}
+
+	/// Name `groups` given up as `hole`: lite-07 skips what was never produced with `SKIP`,
+	/// and earlier versions drop it as not found. A stale verdict names the budget it was
+	/// judged under, no limit being the publisher's own max age; an `OLD` drop with no verdict
+	/// of its own, such as one whose upstream stream was reset as old, names `unjudged`.
+	pub(crate) fn given_up(
+		groups: std::ops::Range<u64>,
+		hole: &crate::track::Hole,
+		unjudged: Option<std::time::Duration>,
+		version: Version,
+	) -> Self {
+		use crate::track::Hole;
+		match hole {
+			Hole::Skip if version.has_skip() => Self::new(groups, &StreamError::Skip, version),
+			hole => match hole.stale_budget() {
+				Some(budget) => Self::stale(groups, crate::track::max_of(budget), version),
+				// The max age goes out only with an OLD code.
+				None => Self {
+					max_age: unjudged,
+					..Self::new(groups, &hole.error(), version)
+				},
 			},
 		}
 	}
@@ -1283,7 +1461,11 @@ impl<'a> Message<'a> for SubscribeDrop {
 
 		let groups = decode_groups(r, version)?;
 		let error = r.varint()?;
-		Ok(Self { groups, error })
+		let max_age = match is_stale_code(version, error) {
+			true => r.varint_opt()?.map(std::time::Duration::from_millis),
+			false => None,
+		};
+		Ok(Self { groups, error, max_age })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -1296,9 +1478,18 @@ impl<'a> Message<'a> for SubscribeDrop {
 
 		encode_groups(w, &self.groups, version)?;
 		w.varint(self.error)?;
+		if is_stale_code(version, self.error) {
+			w.varint(wire_millis(self.max_age))?;
+		}
 
 		Ok(())
 	}
+}
+
+/// Whether a SUBSCRIBE_DROP with Error Code `error` carries the `Max Age` it was judged
+/// under: an `OLD` drop on lite-07 and later.
+fn is_stale_code(version: Version, error: u64) -> bool {
+	version.has_judged_drop() && error == u64::from(StreamError::Old.to_code())
 }
 
 /// A response message on the subscribe stream, prefixed with a type discriminator
@@ -1403,6 +1594,7 @@ mod test {
 				let msg = SubscribeDrop {
 					groups: groups.clone(),
 					error: 0,
+					max_age: None,
 				};
 				let data = msg.encode_bytes(version).unwrap();
 				assert_eq!(SubscribeDrop::decode_slice(&data, version).unwrap().0.groups, groups);
@@ -1420,6 +1612,7 @@ mod test {
 			let msg = SubscribeDrop {
 				groups: groups.clone(),
 				error: skip,
+				max_age: None,
 			};
 			let data = msg.encode_bytes(Version::Lite07).unwrap();
 			let decoded = SubscribeDrop::decode_slice(&data, Version::Lite07).unwrap().0;
@@ -1437,6 +1630,7 @@ mod test {
 			SubscribeDrop {
 				groups: 3..3,
 				error: skip,
+				max_age: None,
 			}
 			.encode_bytes(Version::Lite07)
 			.is_err()
@@ -1445,6 +1639,7 @@ mod test {
 			let reversed = SubscribeDrop {
 				groups: std::ops::Range { start: 3, end: 1 },
 				error: 0,
+				max_age: None,
 			};
 			assert!(reversed.encode_bytes(version).is_err());
 		}
@@ -1571,7 +1766,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_restored_on_lite07() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 7 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 7,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
@@ -1587,6 +1786,35 @@ mod test {
 		}
 	}
 
+	/// A lite-07 OLD drop carries the max age it was judged under, in milliseconds plus one, so
+	/// zero names the publisher's own. No other drop, and no earlier version, carries one.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_lite07_old_drop_carries_its_judged_max_age() {
+		let old = u64::from(StreamError::Old.to_code());
+		for (max_age, wire) in [
+			(None, 0u8),
+			(Some(std::time::Duration::ZERO), 1),
+			(Some(std::time::Duration::from_millis(9)), 10),
+		] {
+			let msg = SubscribeDrop::stale(1..4, max_age, Version::Lite07);
+			let buf = msg.encode_bytes(Version::Lite07).unwrap();
+			assert_eq!(buf.as_ref(), [4, 1, 4, old as u8, wire]);
+			let decoded = SubscribeDrop::decode_slice(&buf, Version::Lite07).unwrap().0;
+			assert_eq!(decoded, msg);
+		}
+		// A drop depending on no budget settles every reader.
+		assert_eq!(
+			SubscribeDrop::new(1..4, &StreamError::Old, Version::Lite07).max_age,
+			None
+		);
+		let skip = SubscribeDrop::new(1..4, &StreamError::Skip, Version::Lite07);
+		assert_eq!(skip.encode_bytes(Version::Lite07).unwrap().as_ref(), [3, 1, 4, 0x3a]);
+		let lite06 = SubscribeDrop::stale(1..4, Some(std::time::Duration::from_millis(9)), Version::Lite06);
+		let buf = lite06.encode_bytes(Version::Lite06).unwrap();
+		assert_eq!(buf.as_ref(), [3, 1, 3, 0]);
+	}
+
 	/// Lite-07 carries skips in SUBSCRIBE_DROP with error code SKIP (0x3a); type 3 is unknown.
 	#[test]
 	fn subscribe_drop_skip_and_type_3_unknown() {
@@ -1594,6 +1822,7 @@ mod test {
 		let resp = SubscribeResponse::Drop(SubscribeDrop {
 			groups: 1..4,
 			error: skip,
+			max_age: None,
 		});
 		let buf = resp.encode_bytes(Version::Lite07).unwrap();
 		assert_eq!(buf.as_ref(), [2, 3, 1, 4, 0x3a]);
@@ -1614,7 +1843,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_type_2_on_lite05() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 0 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 0,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -1630,7 +1863,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_type_1_on_lite04() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 0 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 0,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
 			.unwrap();
@@ -1657,6 +1894,7 @@ mod test {
 			ranges: vec![Range {
 				start: absolute(7, 0),
 				end: absolute(10, 0),
+				..Range::OPEN
 			}],
 			meta: false,
 		}
@@ -1669,6 +1907,7 @@ mod test {
 			ranges: vec![Range {
 				start: absolute(7, 4),
 				end: absolute(9, 3),
+				..Range::OPEN
 			}],
 			..subscribe_sample()
 		}
@@ -1681,6 +1920,15 @@ mod test {
 		crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg)
 			.unwrap()
 			.into_owned()
+	}
+
+	/// `ranges` as a wire before lite-07 decodes them: at `msg`'s one priority and order.
+	fn legacy(msg: &Subscribe<'_>, ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+		let policy = Policy {
+			priority: msg.priority,
+			order: msg.order,
+		};
+		ranges.into_iter().map(|range| range.with_policy(policy)).collect()
 	}
 
 	fn encode(msg: &Subscribe<'_>, version: Version) -> Result<Vec<u8>, EncodeError> {
@@ -1713,7 +1961,10 @@ mod test {
 	#[test]
 	fn subscribe_frame_bounds_roundtrip() {
 		let msg = framed_sample();
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 	}
 
 	/// The whole-group defaults are what a version without the fields decodes to, so
@@ -1725,6 +1976,7 @@ mod test {
 		msg.ranges = vec![Range {
 			start: None,
 			end: absolute(10, 0),
+			..Range::OPEN
 		}];
 
 		let lite05 = encode(&msg, Version::Lite05).unwrap();
@@ -1749,7 +2001,7 @@ mod test {
 			Subscribe::decode_msg(r, v)
 		})
 		.unwrap();
-		assert_eq!(got.ranges, msg.ranges);
+		assert_eq!(got.ranges, legacy(&msg, msg.ranges.clone()));
 	}
 
 	/// Lite06 carries the raw floor; pre-06 wires encode the key + 1 with 0 meaning
@@ -1761,12 +2013,19 @@ mod test {
 		msg.ranges = vec![Range {
 			start: absolute(7, 0),
 			end: None,
+			..Range::OPEN
 		}];
 
 		let lite05 = encode(&msg, Version::Lite05).unwrap();
 		let lite06 = encode(&msg, Version::Lite06).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite05).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 		// The raw byte differs: 7 on the wire, not 7 + 1.
 		assert_ne!(lite05, lite06);
 
@@ -1781,16 +2040,19 @@ mod test {
 			Subscribe::decode_msg(r, v)
 		})
 		.unwrap();
-		assert_eq!(got.ranges, [Range::OPEN]);
+		assert_eq!(got.ranges, legacy(&msg, [Range::OPEN]));
 
 		// On the pre-06 wire an explicit group 0 is key + 1, distinct from an
 		// absent start (the latest group).
 		let explicit = encode(&msg, Version::Lite05).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite05).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 		msg.ranges = vec![Range::OPEN];
 		let latest = encode(&msg, Version::Lite05).unwrap();
 		assert_ne!(explicit, latest);
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, [Range::OPEN]);
+		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, [Range::OPEN]));
 		assert_eq!(encode(&msg, Version::Lite06).unwrap(), absent);
 	}
 
@@ -1800,7 +2062,10 @@ mod test {
 	fn frame_start_may_qualify_group_zero_on_lite06() {
 		let mut msg = framed_sample();
 		msg.ranges[0].start = absolute(0, 4);
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 	}
 
 	/// Silently widening to the whole group would deliver frames the caller excluded.
@@ -1840,14 +2105,17 @@ mod test {
 			Range {
 				start: None,
 				end: Some(Anchor::Time(2)),
+				..Range::OPEN
 			},
 			Range {
 				start: Some(Anchor::Time(1_500)),
 				end: Some(Anchor::Time(3_500)),
+				..Range::OPEN
 			},
 			Range {
 				start: Some(Anchor::Time(0)),
 				end: Some(Anchor::Time(u64::MAX)),
+				..Range::OPEN
 			},
 		];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
@@ -1878,22 +2146,26 @@ mod test {
 		msg.ranges = vec![Range {
 			start: absolute(7, 0),
 			end: absolute(10, 0),
+			..Range::OPEN
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let wire = encode(&msg, Version::Lite07).unwrap();
-		// Type 2, group 7, frame 0, then type 2, group 10, frame 0, then a payload `Meta`.
-		assert!(wire.ends_with(&[1, 2, 7, 0, 2, 10, 0, 0]), "{wire:?}");
+		// The count, priority 0 and descending, then type 2, group 7, frame 0, then type 2,
+		// group 10, frame 0, then a payload `Meta`.
+		assert!(wire.ends_with(&[1, 0x80, 0, 2, 7, 0, 2, 10, 0, 0]), "{wire:?}");
 
 		// Group 0 works cleanly without underflow: [Position(0, 0), Position(1, 0)) and
 		// even an empty [None, Position(0, 0)).
 		msg.ranges = vec![Range {
 			start: absolute(0, 0),
 			end: absolute(1, 0),
+			..Range::OPEN
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		msg.ranges = vec![Range {
 			start: None,
 			end: absolute(0, 0),
+			..Range::OPEN
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 	}
@@ -1904,34 +2176,37 @@ mod test {
 		let mut msg = framed_sample();
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let framed = encode(&msg, Version::Lite07).unwrap();
-		// Type 2, start 7, frame 4, then type 2, start 9, frame 3, which it stops before.
-		assert!(framed.ends_with(&[1, 2, 7, 4, 2, 9, 3, 0]), "{framed:?}");
-		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(6));
+		// The policy, then type 2, start 7, frame 4, then type 2, start 9, frame 3, which it
+		// stops before, then a payload `Meta`.
+		assert!(framed.ends_with(&[1, 0x80, 0, 2, 7, 4, 2, 9, 3, 0]), "{framed:?}");
+		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(8));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
+			..Range::OPEN
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let position = encode(&msg, Version::Lite07).unwrap();
-		// Type 2, start 7, frame 4, then no end, then a payload `Meta`.
-		assert!(position.ends_with(&[1, 2, 7, 4, 0, 0]), "{position:?}");
+		// The policy, then type 2, start 7, frame 4, then no end, then a payload `Meta`.
+		assert!(position.ends_with(&[1, 0x80, 0, 2, 7, 4, 0, 0]), "{position:?}");
 		assert_eq!(
 			range_size(&msg.ranges[0], Version::Lite07.into()),
-			Some(4),
+			Some(6),
 			"the size a range takes counts both fields"
 		);
 
 		let decode = |tail: &[u8]| {
 			let mut wire = position.clone();
-			wire.truncate(position.len() - 6);
+			wire.truncate(position.len() - 8);
+			wire.extend_from_slice(&[1, 0x80, 0]);
 			wire.extend_from_slice(tail);
 			wire.push(0);
 			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
 		};
-		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
-		assert!(decode(&[1, 2, 7, 0, 0]).is_ok());
-		assert!(decode(&[1, 1, 7, 2, 9, 4]).is_ok());
-		assert!(decode(&[1, 1, 7, 2, 9, 0]).is_ok());
+		assert!(decode(&[2, 7, 4, 0]).is_ok());
+		assert!(decode(&[2, 7, 0, 0]).is_ok());
+		assert!(decode(&[1, 7, 2, 9, 4]).is_ok());
+		assert!(decode(&[1, 7, 2, 9, 0]).is_ok());
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -1943,14 +2218,17 @@ mod test {
 			Range {
 				start: Some(Anchor::Time(1)),
 				end: Some(Anchor::Time(4)),
+				..Range::OPEN
 			},
 			Range {
 				start: Some(Anchor::Time(3)),
 				end: None,
+				..Range::OPEN
 			},
 			Range {
 				start: Some(Anchor::Time(9_000)),
 				end: None,
+				..Range::OPEN
 			},
 		);
 		let mut sent = LiveRanges::new(version, &[a, b]);
@@ -2013,6 +2291,7 @@ mod test {
 		let one = Range {
 			start: absolute(1 << 40, 1 << 40),
 			end: absolute(1 << 41, 1 << 40),
+			..Range::OPEN
 		};
 		// Each update fits in a message, but together they would not fit in a SUBSCRIBE.
 		let mut refused = false;
@@ -2033,6 +2312,7 @@ mod test {
 		let range = |group| Range {
 			start: absolute(group, 0),
 			end: None,
+			..Range::OPEN
 		};
 		let first = live
 			.apply(RangeEdit::Edit {
@@ -2075,6 +2355,7 @@ mod test {
 			.map(|group| Range {
 				start: absolute(group << 20, 0),
 				end: absolute((group << 20) + 1, 0),
+				..Range::OPEN
 			})
 			.collect();
 		assert!(matches!(live.edit(&wide), Err(EncodeError::TooLarge)));
@@ -2101,9 +2382,9 @@ mod test {
 
 		msg.ranges = vec![Range::OPEN];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last before `Meta`: a count of one, then two anchors of type 0.
-		let at = buf.len() - 4;
-		assert_eq!(&buf[at..], [1, 0, 0, 0]);
+		// The list is last before `Meta`: a count of one, the policy, then two anchors of type 0.
+		let at = buf.len() - 6;
+		assert_eq!(&buf[at..], [1, 0x80, 0, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -2156,10 +2437,12 @@ mod test {
 			vec![Range {
 				start: Some(Anchor::Time(1_500)),
 				end: None,
+				..Range::OPEN
 			}],
 			vec![Range {
 				start: None,
 				end: Some(Anchor::Time(1)),
+				..Range::OPEN
 			}],
 		];
 		for version in [Version::Lite03, Version::Lite05, Version::Lite06] {
@@ -2250,6 +2533,7 @@ mod test {
 				max,
 			}),
 			end: None,
+			..Range::OPEN
 		};
 		for (max, wire) in [
 			(None, None),
@@ -2275,6 +2559,7 @@ mod test {
 				max,
 			}),
 			end: Some(Anchor::Time(9_000)),
+			..Range::OPEN
 		};
 		for (range, wire) in [
 			(joined(1_500, 0, None), joined(1_500, 0, None)),
@@ -2290,24 +2575,26 @@ mod test {
 			assert_eq!(roundtrip(&msg, Version::Lite07).ranges, vec![wire], "{range:?}");
 		}
 
-		// The count, the type, group, frame, and max age plus one, then the end's type and time,
-		// 251 and 9000 each in two bytes, then a payload `Meta`.
+		// The count, the policy, the type, group, frame, and max age plus one, then the end's
+		// type and time, 251 and 9000 each in two bytes, then a payload `Meta`.
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![joined(5, 0, Some(ms(250)))];
 		let buf = encode(&msg, Version::Lite07).unwrap();
-		let tail = [1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0];
+		let tail = [1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0];
 		assert_eq!(&buf[buf.len() - tail.len()..], tail);
 
 		// An end can't be a join, placed or not.
 		msg.ranges = vec![Range {
 			start: None,
 			end: joined(5, 0, None).start,
+			..Range::OPEN
 		}];
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
 
 		msg.ranges = vec![Range {
 			start: joined(5, 1, None).start,
 			end: None,
+			..Range::OPEN
 		}];
 		for version in [Version::Lite03, Version::Lite05, Version::Lite06] {
 			assert!(matches!(encode(&msg, version), Err(EncodeError::Version)), "{version}");
@@ -2326,6 +2613,7 @@ mod test {
 				max,
 			}),
 			end: None,
+			..Range::OPEN
 		};
 		let mut sent = LiveRanges::new(version, &[joined(5, Some(ms(500)))]);
 		let mut live_side = LiveRanges::new(version, &[joined(5, Some(ms(500)))]);
@@ -2335,7 +2623,7 @@ mod test {
 			RangeEdit::Edit {
 				remove: vec![],
 				add: vec![],
-				retune: vec![(0, None)],
+				retune: vec![(0, Retune::max(None))],
 			}
 		);
 		live_side.apply(edit).unwrap();
@@ -2365,10 +2653,12 @@ mod test {
 				max,
 			}),
 			end: None,
+			..Range::OPEN
 		};
 		let time = Range {
 			start: Some(Anchor::Time(5)),
 			end: None,
+			..Range::OPEN
 		};
 		let mut sent = LiveRanges::new(version, &[live(100, Some(ms(500))), time]);
 		let mut live_side = LiveRanges::new(version, &[live(100, Some(ms(500))), time]);
@@ -2379,7 +2669,7 @@ mod test {
 			RangeEdit::Edit {
 				remove: vec![],
 				add: vec![],
-				retune: vec![(0, Some(ms(2000)))],
+				retune: vec![(0, Retune::max(Some(ms(2000))))],
 			}
 		);
 		let update = SubscribeUpdate {
@@ -2418,16 +2708,27 @@ mod test {
 			add: vec![],
 			retune,
 		};
+		let max = |max| Retune::max(max);
 		assert!(
-			live_side.clone().apply(retune(vec![(1, None)])).is_err(),
-			"a time start"
+			live_side.clone().apply(retune(vec![(1, max(Some(ms(5))))])).is_err(),
+			"a time start has no max age"
 		);
-		assert!(live_side.clone().apply(retune(vec![(0, None)])).is_err(), "retired");
 		assert!(
-			live_side.clone().apply(retune(vec![(2, None), (2, None)])).is_err(),
+			live_side.clone().apply(retune(vec![(1, max(None))])).is_ok(),
+			"but takes a new policy"
+		);
+		assert!(
+			live_side.clone().apply(retune(vec![(0, max(None))])).is_err(),
+			"retired"
+		);
+		assert!(
+			live_side
+				.clone()
+				.apply(retune(vec![(2, max(None)), (2, max(None))]))
+				.is_err(),
 			"twice"
 		);
-		assert!(live_side.apply(retune(vec![(2, None)])).is_ok());
+		assert!(live_side.apply(retune(vec![(2, max(None))])).is_ok());
 	}
 
 	/// Lite-07 carries a live join's lag as a start Anchor in whole milliseconds, rounded up,
@@ -2439,6 +2740,7 @@ mod test {
 		let live = |min| Range {
 			start: Some(Anchor::Live { min, max: None }),
 			end: Some(Anchor::Time(9)),
+			..Range::OPEN
 		};
 		for (min, wire) in [
 			(ms(0), ms(0)),
@@ -2477,8 +2779,9 @@ mod test {
 				max: None,
 			}),
 			end: None,
+			..Range::OPEN
 		}];
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, vec![Range::OPEN]);
+		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, [Range::OPEN]));
 
 		// A live end is refused both ways.
 		msg.ranges = vec![Range {
@@ -2487,11 +2790,14 @@ mod test {
 				min: ms(250),
 				max: None,
 			}),
+			..Range::OPEN
 		}];
 		assert!(msg.encode_bytes(Version::Lite07).is_err());
 		let mut buf = Vec::new();
 		let mut w = Encoder::new(&mut buf, Version::Lite07.into());
 		w.varint(1).unwrap();
+		w.u8(0x80);
+		w.u8(0);
 		for value in [0, 3, 250] {
 			w.varint(value).unwrap();
 		}
@@ -2501,41 +2807,81 @@ mod test {
 		));
 	}
 
-	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
-	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
+	/// Lite-07 carries each range's `Priority` then `Group Order`, on a SUBSCRIBE's ranges and
+	/// a SUBSCRIBE_UPDATE's retunes alike, and refuses an order it does not define.
 	#[test]
-	fn group_order_roundtrips_on_lite07() {
+	fn range_policy_roundtrips_on_lite07() {
 		use crate::track::Order;
 
 		let version = Version::Lite07;
 		for order in [Order::Ascending, Order::Descending] {
+			let policy = Policy { priority: -3, order };
 			let mut msg = subscribe_sample();
-			msg.order = order;
-			assert_eq!(roundtrip(&msg, version).order, order);
+			msg.ranges = vec![Range::OPEN.with_policy(policy)];
+			let got = roundtrip(&msg, version);
+			assert_eq!(got.ranges[0].policy(), policy);
+			// The subscription as a whole runs at its one range's policy.
+			assert_eq!((got.priority, got.order), (policy.priority, policy.order));
 
 			let update = SubscribeUpdate {
 				wanted_group: None,
-				priority: 3,
-				max_delay: Some(std::time::Duration::from_millis(250)),
-				ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
-				order,
+				priority: 0,
+				max_delay: None,
+				ranges: RangeEdit::Edit {
+					remove: Vec::new(),
+					add: Vec::new(),
+					retune: vec![(0, Retune { policy, max: None })],
+				},
+				order: Order::Descending,
 			};
 			let mut buf = Vec::new();
 			update
 				.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 				.unwrap();
-			// The priority, then the order.
-			assert_eq!(buf[1], u8::from(order == Order::Ascending));
+			// The retune ends the edit: its Range ID, priority, order, then no max age, then no
+			// wanted group.
+			let at = buf.len() - 5;
+			assert_eq!(
+				&buf[at..],
+				[
+					0,
+					super::super::priority::to_wire(-3),
+					u8::from(order == Order::Ascending),
+					0,
+					0
+				]
+			);
 			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, |r, v| SubscribeUpdate::decode_msg(r, v))
 				.unwrap();
-			assert_eq!(got.order, order);
+			assert_eq!(got.ranges, update.ranges);
 
-			buf[1] = 2;
+			buf[at + 2] = 2;
 			assert!(matches!(
 				crate::coding::decode_buf(&mut buf.as_slice(), version, |r, v| SubscribeUpdate::decode_msg(r, v)),
 				Err(DecodeError::InvalidValue)
 			));
 		}
+
+		// Ranges at different policies: the subscription runs at the highest priority, newest
+		// first if any range there asks so.
+		let mut msg = subscribe_sample();
+		msg.ranges = vec![
+			Range::OPEN.with_policy(Policy {
+				priority: 1,
+				order: Order::Ascending,
+			}),
+			Range {
+				start: absolute(7, 0),
+				end: absolute(10, 0),
+				..Range::OPEN
+			}
+			.with_policy(Policy {
+				priority: 5,
+				order: Order::Ascending,
+			}),
+		];
+		let got = roundtrip(&msg, version);
+		assert_eq!((got.priority, got.order), (5, Order::Ascending));
 	}
 
 	/// No earlier wire has `Group Order`, so an ascending subscription falls back to
@@ -2549,6 +2895,7 @@ mod test {
 			msg.ranges = vec![Range {
 				start: absolute(7, 0),
 				end: absolute(10, 0),
+				..Range::OPEN
 			}];
 			let descending = encode(&msg, version).unwrap();
 			msg.order = Order::Ascending;

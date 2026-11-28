@@ -39,7 +39,7 @@ quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net
 quest gate just rs tla moq-net/verify/recover/StaleRecover.tla
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.3M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.7M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. StaleRecover checks two budgets the copy retunes between and three readers in under a second; with `Rule = "stand"` it fails `AnswersAsUpstream`, with `Rule = "ask"` `AsksOnlyWhenWider`, and with `Recorded = "current"` `AnswersAsUpstream`. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.1M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.4M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. StaleRecover checks two budgets the copy retunes between and three readers in under a second; with `Rule = "stand"` it fails `AnswersAsUpstream`, with `Rule = "ask"` `AsksOnlyWhenWider`, and with `Recorded = "current"` `AnswersAsUpstream`. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 
@@ -51,25 +51,25 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a draining replaced copy's cache evicts (`Copy::drains`, `Evict`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. StaleRecover's rows sync to `541c0839bfdcf0050b23ca217c4b35efa51941f3` plus the copy's judging budget (`judge_under`, `judged_under`) and `Recover::outgrows_judging` that model it. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `e9737346bf5fcd76f671988574fb624193e5737b`, for ResumeReader and StaleRecover alike. Run `git log e9737346bf.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/resume.rs` `Reader::sync`, `boundary`, `Copy::cap` (reuse of a route's copy, new copy at the boundary, replaced copies capped there) | `Sync`, `Boundary`, `Cap`, `Serve` |
-| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps`, `Copy::drains` | `Backfill`, `BackfillGaps`, `Scan` |
+| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps`, `rescan_drains`, `Copy::drains`, `Copy::may_drain` | `Backfill`, `BackfillGaps`, `Rescan`, `DrainsBy` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_first`, `deliverable`, `take`, `Copy::done` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
 | `rs/moq-net/src/model/track.rs` `Cursor::poll_recv_with` (the pick in Group Order) | `Peek` |
 | `rs/moq-net/src/model/resume.rs` `Reader::let_go`, `Copy::retains` | `LetGo`, `Retains` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, `Producer::end`, `Phase::Finished` | `Serve`, `FrontFinish`, `FrontFail` |
 | `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `max_key`, `Consumer::latest_key`, `Consumer::poll_arrived`, `track::Subscriber::has_unread_group`, `Producer::finish_shared` | `Seal`, `Held`, `MayLand`, `Latest`, `Landed`, `HasUnread`, `Settle` |
-| `rs/moq-net/src/model/track.rs` `TrackState::evict_group`, `evicted_groups`, `Consumer::evicted` | `Evict`, `Evicted`, `Arrived` |
+| `rs/moq-net/src/model/track.rs` `TrackState::evict_group` | `Evict`, `Arrived` |
 | `rs/moq-net/src/model/resume.rs` `Recover::undelivered`, `outgrows_judging`, `poll_serving` (StaleRecover) | `Recover` |
 | `rs/moq-net/src/model/track.rs` `Producer::judge_under`, `Consumer::judged_under`, `settles` (StaleRecover) | `Retune`, `Reset`, `Recover` |
-| `rs/moq-net/src/lite/subscriber.rs` `SubStream::stale_budget` (StaleRecover) | `Reset` (`Recorded`) |
+| `rs/moq-net/src/lite/subscriber.rs` `narrowest` (StaleRecover) | `Reset` (`Recorded`) |
 
 ## Not covered
 
 StaleRecover covers one group, one route, and a publisher that holds the group for every request; it leaves out frames, caps, and route changes, which the tests in `resume.rs` own.
 
-ResumeReader: whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires (nor is the budget clock a replaced copy runs on, `since` and `drained`, modeled), and local ranges (`set_range`, a lowered floor's backfill), ordered reads, ascending order, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. Only a route no longer served evicts, and a group a route evicted is owed only by the routes still holding it, since the fill a cursor of its own would ask for it is left out. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.
+ResumeReader: the ranked pick a publisher stuck behind a group waiting for stream credit reads with (`Pick::Ranked`), where each copy ranks its own best and `poll_first` takes the best rank, is left out, and so is the group such a publisher gives back to every copy unread when it gives way (`Subscriber::give_back`): SendCredit.tla models both, and every other read picks in Group Order and never gives a group back. Whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires (nor is the budget clock a replaced copy runs on, `since` and `drained`, modeled), and local ranges (`set_range`, a lowered floor's backfill), ordered reads, ascending order, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. Only a route no longer served evicts, and a group a route evicted is owed only by the routes still holding it, since the fill a cursor of its own would ask for it is left out. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.

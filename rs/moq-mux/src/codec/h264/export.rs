@@ -138,6 +138,7 @@ mod tests {
 		}
 		let frame = crate::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			decode: None,
 			payload: payload.freeze(),
 			keyframe: false, // Legacy wire format drops this; Consumer reconstructs.
 			duration: None,

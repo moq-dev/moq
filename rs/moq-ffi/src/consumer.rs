@@ -64,15 +64,11 @@ impl From<moq_mux::container::Delay> for MoqDelay {
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`] with its
 /// live joins stated as `delay.min`.
 ///
-/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, no `delay.min`
-/// and a zero `delay.max`, everything still fresh, newest first) and change the fields you care
-/// about.
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (no `delay.min` and a zero
+/// `delay.max`, everything still fresh, one range at priority 0, newest first) and change the
+/// fields you care about.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
-	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
-	/// The default 0 is the midpoint.
-	#[uniffi(default = 0)]
-	pub priority: i8,
 	/// How far behind the live edge this subscriber plays: where a range with no start begins,
 	/// and how late a non-latest group may fall before it is skipped.
 	pub delay: MoqDelay,
@@ -84,11 +80,6 @@ pub struct MoqSubscription {
 	/// subscription's read filter: it reads only the groups its own ranges cover.
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
-	/// Which group comes first, as the publisher sends them and `recv_group` returns those held,
-	/// or null for newest first. Before moq-lite-07 the publisher sends newest first whatever this
-	/// asks, and `recv_group` still returns those held in this order.
-	#[uniffi(default = None)]
-	pub order: Option<MoqOrder>,
 }
 
 /// A subscription with moq-net's defaults, which starts at the newest group and skips a
@@ -98,10 +89,8 @@ pub struct MoqSubscription {
 #[uniffi::export]
 pub fn moq_subscription_defaults() -> MoqSubscription {
 	MoqSubscription {
-		priority: moq_net::track::Subscription::default().priority,
 		delay: moq_mux::container::Delay::default().into(),
 		ranges: None,
-		order: None,
 	}
 }
 
@@ -116,7 +105,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 ///
 /// Over a session older than moq-lite-07, a start between two groups reaches the publisher as
 /// the first group at or after it, missing the one containing it.
-#[derive(Clone, Copy, uniffi::Record)]
+#[derive(Clone, Copy, Default, uniffi::Record)]
 pub struct MoqRange {
 	/// Where delivery starts, or null for no start, which the subscription's [`MoqDelay`]
 	/// places: a stated `min` is a live join that far behind the live edge (zero is the latest
@@ -128,10 +117,21 @@ pub struct MoqRange {
 	/// live edge.
 	#[uniffi(default = None)]
 	pub end: Option<MoqTimestamp>,
+	/// Delivery priority of this range's groups; higher values preempt lower ones under
+	/// bandwidth contention. The default 0 is the midpoint. Before moq-lite-07 the publisher
+	/// sends every range at the highest priority any range asks.
+	#[uniffi(default = 0)]
+	pub priority: i8,
+	/// Which of this range's groups comes first, as the publisher sends them and `recv_group`
+	/// returns those held, or null for newest first. Before moq-lite-07 the publisher sends
+	/// newest first whatever this asks, and `recv_group` returns those held in the order of the
+	/// subscription's highest-priority ranges.
+	#[uniffi(default = None)]
+	pub order: Option<MoqOrder>,
 }
 
-/// Which of a subscription's groups comes first, as the publisher sends them and `recv_group`
-/// returns those held, mirroring [`moq_net::track::Order`]. Before moq-lite-07 the publisher
+/// Which of a range's groups comes first, as the publisher sends them and `recv_group` returns
+/// those held, mirroring [`moq_net::track::Order`]. Before moq-lite-07 the publisher
 /// sends newest first whatever this asks.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqOrder {
@@ -159,6 +159,8 @@ impl MoqRange {
 				None => moq_net::track::Start::Oldest,
 			},
 			end: self.end.map(range_time).transpose()?,
+			priority: self.priority,
+			order: self.order.map_or_else(Default::default, Into::into),
 		})
 	}
 }
@@ -200,18 +202,13 @@ impl MoqSubscription {
 	/// The subscription without its delay, each range with no start still from the oldest group,
 	/// and that delay, for a caller widening it before it subscribes.
 	pub(crate) fn resolve(self) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), MoqError> {
-		let mut subscription = moq_net::track::Subscription::default()
-			.with_priority(self.priority)
-			.with_ranges([moq_net::track::Range::ALL]);
+		let mut subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 		if let Some(ranges) = self.ranges {
 			let ranges = ranges
 				.into_iter()
 				.map(MoqRange::resolve)
 				.collect::<Result<Vec<_>, _>>()?;
 			subscription = subscription.with_ranges(ranges);
-		}
-		if let Some(order) = self.order {
-			subscription = subscription.with_order(order.into());
 		}
 		Ok((subscription, self.delay.into()))
 	}

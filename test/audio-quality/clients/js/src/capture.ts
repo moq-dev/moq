@@ -45,7 +45,7 @@ export class Capture {
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
 				// The decoder's live join: its delay behind the live edge and its max, both with the warmup.
-				const asked = { priority: Catalog.PRIORITY.audio };
+				const asked = { ranges: [{ priority: Catalog.PRIORITY.audio }] };
 				const playout = (delay: Duration, max: Duration, warmup: number): Container.Delay => ({
 					min: delay.add(Duration.millis(warmup)),
 					max: maxDelay({ delay, maxDelay: max }).add(Duration.millis(warmup)),

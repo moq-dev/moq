@@ -511,7 +511,8 @@ impl Window {
 
 	/// Retire the ranges keyed `retired`, then resolve `added`, leaving every other range
 	/// where it resolved. A key added again replaces its range, but a live join added again
-	/// with only its `max` changed keeps where it started. Costs the ranges edited, never the
+	/// with only its `max` or policy changed keeps where it started, as does any other range
+	/// with only its policy changed. Costs the ranges edited, never the
 	/// rest.
 	pub fn edit(
 		&mut self,
@@ -537,12 +538,16 @@ impl Window {
 			Joining::At(group) => Some(group),
 			Joining::Since(_) => None,
 		};
+		// A live join keeps where it started whatever its `max`, and any range whose policy
+		// alone moved keeps where it resolved.
 		let retuned: BTreeSet<u64> = (added.iter())
 			.filter(|(key, range)| {
-				range
-					.join()
-					.is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join))
-					&& self.joining.get(key).copied().and_then(placed) == placed(joining(*key))
+				let old = self.ranges.get(key);
+				let kept = match range.join() {
+					Some(join) => old.and_then(Range::join) == Some(join),
+					None => old.is_some_and(|old| old != range && old.with_policy(range.policy()) == *range),
+				};
+				kept && self.joining.get(key).copied().and_then(placed) == placed(joining(*key))
 			})
 			.map(|(key, _)| *key)
 			.collect();
@@ -631,6 +636,40 @@ impl Window {
 			.filter_map(|key| range(*key))
 			.filter(|range| !range.is_empty())
 			.map(|range| (range.end.unwrap_or(u64::MAX), range.budget()))
+			.collect()
+	}
+
+	/// The range keyed `key`, as given.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn range(&self, key: u64) -> Option<&Range> {
+		self.ranges.get(&key)
+	}
+
+	/// Each range with the groups it reads, as [`Self::covering`] counts them: a placed span's
+	/// run, or every group up to its end for a range not placed yet.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn reads(&self) -> impl Iterator<Item = (&Range, ops::RangeInclusive<u64>)> + '_ {
+		let placed = (self.spans.iter()).filter_map(|(id, span)| Some((self.ranges.get(id)?, span.groups.clone()?)));
+		let unplaced = (self.pending.iter().chain(&self.reaching)).filter_map(|id| {
+			let range = self.ranges.get(id).filter(|range| !range.is_empty())?;
+			Some((range, 0..=range.end.unwrap_or(u64::MAX)))
+		});
+		placed.chain(unplaced)
+	}
+
+	/// The ranges covering group `key`, by key, each with the budget `range` of its key gives: a
+	/// range not yet placed may cover any group up to its end, as in [`Self::budget`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn covering<'a>(&self, key: u64, range: impl Fn(u64) -> Option<&'a Range>) -> Vec<(u64, Duration)> {
+		let placed = (self.spans.iter())
+			.filter(|(_, span)| span.groups.as_ref().is_some_and(|run| run.contains(&key)))
+			.map(|(id, _)| *id);
+		let unplaced = (self.pending.iter().chain(&self.reaching))
+			.copied()
+			.filter(|id| range(*id).is_some_and(|range| !range.is_empty() && range.end.is_none_or(|last| last >= key)));
+		placed
+			.chain(unplaced)
+			.filter_map(|id| range(id).map(|range| (id, range.budget())))
 			.collect()
 	}
 
@@ -1679,7 +1718,11 @@ mod tests {
 			Some(time) => Start::Time(time),
 			None => Start::Oldest,
 		};
-		Range { start, end: end.into() }
+		Range {
+			start,
+			end: end.into(),
+			..Default::default()
+		}
 	}
 
 	/// A live join `min` behind the live edge, or with no lag limit for `None`.
@@ -1690,6 +1733,7 @@ mod tests {
 				max: None,
 			},
 			end: end.into(),
+			..Default::default()
 		}
 	}
 
@@ -1935,6 +1979,7 @@ mod tests {
 				max,
 			},
 			end,
+			..Default::default()
 		};
 		let ranges: BTreeMap<u64, Range> = [
 			(0, join(40, Some(narrow), None)),
@@ -2008,6 +2053,7 @@ mod tests {
 		let history = Range {
 			start: Start::Time(5001),
 			end: Some(8999),
+			..Default::default()
 		};
 		let max = Duration::from_secs(1);
 		let join = Range::from(Start::Live {

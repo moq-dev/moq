@@ -37,9 +37,9 @@ const GRACE = Duration.millis(100);
  */
 function frame(payload: string, version: Version, delta = 0): Uint8Array {
 	const bytes = new TextEncoder().encode(payload);
-	// Every field is under 64, so each is a one-byte varint; the delta is zigzagged.
+	// Every field is under 64, so each is a one-byte varint; lite-05/06 zigzag-encode the delta.
 	if (delta < 0 || delta >= 32) throw new RangeError("a one-byte delta only");
-	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta * 2, ...bytes]);
+	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta, ...bytes]);
 	return new Uint8Array([delta * 2, bytes.byteLength, ...bytes]);
 }
 
@@ -58,7 +58,9 @@ function groupStream(subscriber: Subscriber, key: bigint, subscribe = 0n) {
 	let first = true;
 	return {
 		write: (payload: string) => {
-			controller.enqueue(frame(payload, subscriber.version, first ? Number(key) : 0));
+			// Lite-07 counts the first delta from the group's start, so its first frame sits there.
+			const at = first && !hasLengthFirst(subscriber.version) ? Number(key) : 0;
+			controller.enqueue(frame(payload, subscriber.version, at));
 			first = false;
 		},
 		finish: () => controller.close(),

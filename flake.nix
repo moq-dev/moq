@@ -36,14 +36,15 @@
       url = "github:kixel-ai/quest";
       inputs.flake-utils.follows = "flake-utils";
     };
-    # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
-    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind, or the library
-    # rust2-bench preloads into each counted process, starts new Kixel Quest series, since
-    # either can count differently.
-    rust2 = {
-      url = "github:kixel-ai/rust2";
+    # swole, which counts each bench's instructions under the Valgrind its own nixpkgs
+    # pins (`just rs instructions`). A bump that moves that Valgrind, or the library swole
+    # preloads into each counted process, starts new Kixel Quest series, since either can
+    # count differently.
+    swole = {
+      url = "github:kixel-ai/swole";
+      # No `quest` follows: swole's nixpkgs follows its quest, so a bump of moq's quest
+      # would move Valgrind and restart every series.
       inputs.flake-utils.follows = "flake-utils";
-      inputs.quest.follows = "quest";
     };
   };
 

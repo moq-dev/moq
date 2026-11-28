@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class Loss(unittest.TestCase):
-    def test_confirmed_loss_survives_reordering_recovery(self):
+    def test_loss_is_lifetime_lost_over_expected(self):
         import json
 
         with tempfile.TemporaryDirectory() as directory:
@@ -31,12 +31,11 @@ class Loss(unittest.TestCase):
                     frames_sent=t,
                     frames_recv=t,
                     groups_expected=100,
-                    groups_present=present,
                     groups_lost=lost,
                     latency_p50_ms=1,
                     latency_p99_ms=2,
                 )
-                for t, present, lost in [(1000, 90, 2), (6000, 99, 3)]
+                for t, lost in [(1000, 2), (6000, 3)]
             ]
             stats.write_text("".join(json.dumps(row) + "\n" for row in rows))
             result = subprocess.run(
@@ -74,7 +73,7 @@ if not a.pid:
     assert '--duration' not in rest
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, bytes_sent=t*10, bytes_recv=t*10,
-        frames_sent=t, frames_recv=t, groups_expected=1, groups_present=1, groups_lost=0,
+        frames_sent=t, frames_recv=t, groups_expected=1, groups_lost=0,
         latency_p50_ms=1, latency_p99_ms=1))+'\\n' for t in range(500,10000,500)))
     with open(os.environ['READY'], 'w') as ready:
         ready.write('ready')
@@ -122,7 +121,7 @@ p.add_argument('--output', type=pathlib.Path, required=True)
 a, _ = p.parse_known_args()
 assert a.duration == '10s'
 a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, bytes_sent=t*10, bytes_recv=t*10,
-    frames_sent=t, frames_recv=t, groups_expected=1, groups_present=1, groups_lost=0,
+    frames_sent=t, frames_recv=t, groups_expected=1, groups_lost=0,
     latency_p50_ms=1, latency_p99_ms=1))+'\\n' for t in (0, 5000, 10000)))
 """)
             fake.chmod(0o755)

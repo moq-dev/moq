@@ -278,9 +278,8 @@ test("a window refresh reuses the newest timestamp", async () => {
 	expect(event?.at?.as(Time.Timescale.MILLI)).toBe(30);
 });
 
-// An op may carry a timestamp older than its group's first frame, but a new group must start past
-// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
-// edit, then restates the window there. (Mirrors the Rust
+// An op may carry its group's start, but a new group must start past it, so a refresh whose newest
+// timestamp is still the group's own start waits for a later edit, then restates the window there. (Mirrors the Rust
 // `a_refresh_after_older_edits_waits_for_a_later_one`.)
 test("a window refresh after an older edit waits for a later one", async () => {
 	const track = new Track.Producer("test").accept({
@@ -290,8 +289,8 @@ test("a window refresh after an older edit waits for a later one", async () => {
 	});
 	const producer = new Producer<Rec>({ track });
 	producer.push({ n: 0 }, Time.Timestamp.fromMillis(30));
-	// Ops may carry timestamps older than their group's first frame.
-	producer.push({ n: 1 }, Time.Timestamp.fromMillis(10));
+	// Ops may carry their group's start.
+	producer.push({ n: 1 }, Time.Timestamp.fromMillis(30));
 
 	const joiner = track.subscribe();
 	await settle();

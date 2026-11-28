@@ -18,7 +18,7 @@ import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import * as Identity from "./identity.ts";
 import * as Path from "./path.ts";
-import type { Timestamp } from "./time.ts";
+import type { Timescale, Timestamp } from "./time.ts";
 import type {
 	Demand,
 	Groups,
@@ -636,6 +636,14 @@ export interface ResumeShell {
 /** A drift policy a handed-out group keeps applying; see `hooks.expireGroup`. */
 export interface Expiry {
 	expired: () => boolean;
+	/** The budget in milliseconds the group is judged under, which a stale verdict names. */
+	budget?: () => number;
+	/**
+	 * Whether the group aged past `budget` milliseconds, held to the publisher's max age, as
+	 * {@link expired} judges its own: a range wanting it that long stops wanting it then. Arms a
+	 * wakeup on {@link changed} for when it would.
+	 */
+	aged?: (budget: number) => boolean;
 	changed: readonly Getter<unknown>[];
 }
 
@@ -753,7 +761,7 @@ export interface ResumeSource {
 	 */
 	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
-	lowestBuffered(delivered: Delivered): bigint | undefined;
+	lowestBuffered(delivered: Delivered, fresh?: boolean): bigint | undefined;
 	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
 	keyAfter(key: bigint): bigint | undefined;
 	/** Why a copy still serving refuses the reader's ranges; see `hooks.refused`. */
@@ -787,6 +795,8 @@ export interface ResumeSource {
 	runs(start: bigint, end: bigint): Run[];
 	/** The reader's own window, which spans every copy, synced. */
 	window(): Window;
+	/** The reader's ranges covering group `key`, by index, with their budgets; see `hooks.servingCovering`. */
+	covering(key: bigint): [bigint, number][];
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
@@ -797,6 +807,8 @@ export interface ResumeSource {
 	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
+	/** Whether an ordered read of a copy this reader keeps waits for a group in `[start, end)`; see `hooks.owes`. */
+	owes(start: bigint, end: bigint): boolean;
 	/** Whether the serving route's copy names every start on its wire; see `hooks.provenTrack`. */
 	proven(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -1102,7 +1114,13 @@ export const hooks: {
 	 */
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
-	cachedLargest: (producer: Producer) => Position | undefined;
+	cachedLargest: (producer: Producer, timescale?: Timescale) => Position | undefined;
+	/**
+	 * The first frame of the finished group `key` cached by a producer whose moq-timestamp Object ID
+	 * at `timescale` is at least `id`, or its frame count when none is or the copy no longer holds
+	 * frame 0; undefined when the group isn't cached and finished. Assigned by `track.ts`.
+	 */
+	finishedTimedFrame: (producer: Producer, key: bigint, id: bigint, timescale: Timescale) => number | undefined;
 	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
 	acceptedInfo: (producer: Producer) => Info | undefined;
 	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
@@ -1227,6 +1245,12 @@ export const hooks: {
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
+	 * The ranges of a subscriber covering group `key`, by key, each with how long in milliseconds it
+	 * keeps the group worth delivering once superseded: a range not yet placed may cover any group up
+	 * to its end. Mirrors the Rust `Subscriber::covering`; assigned by `track.ts`.
+	 */
+	servingCovering: (subscriber: Subscriber, key: bigint) => [bigint, number][];
+	/**
 	 * Where a live join a subscriber placed at `placed` starts under `budget` milliseconds, as a
 	 * publisher reports it: past the groups the budget expired, unless an upstream's answer placed
 	 * it. Mirrors the Rust `Subscriber::join_start`; assigned by `track.ts`.
@@ -1328,9 +1352,9 @@ export const hooks: {
 	/**
 	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
 	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`
-	 * as a front's compaction reads it.
+	 * as a front's compaction reads it. With `fresh`, only one not stale even at the track's max age.
 	 */
-	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
+	lowestBuffered: (subscriber: Subscriber, delivered: Delivered, fresh?: boolean) => bigint | undefined;
 	/** The first key the subscriber holds unread past `key`, on any copy it reads. Mirrors the Rust `TrackState::key_after`. */
 	keyAfter: (subscriber: Subscriber, key: bigint) => bigint | undefined;
 	/** Why the subscriber's ranges can't be served, which its reads fail with. Mirrors the Rust `Subscriber::refused`. */
@@ -1364,11 +1388,6 @@ export const hooks: {
 	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/** Whether `producer`'s cache currently holds a non-aborted group `key` (optionally whole). */
 	producerHoldsGroup: (producer: Producer, key: bigint, whole?: boolean) => boolean;
-	/**
-	 * How many cached groups the subscriber's track evicted so far. Mirrors the Rust
-	 * `Consumer::evicted`.
-	 */
-	evictions: (subscriber: Subscriber) => number;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
@@ -1419,6 +1438,13 @@ export const hooks: {
 	 * reader on any copy it keeps; see {@link Land}.
 	 */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
+	/**
+	 * Whether an ordered read of the subscriber still waits for a group in `[start, end)`: one a fill
+	 * it asked has yet to answer, or one its received copy's live feed owes within its budget. Arms
+	 * the read's wakeups for that wait. A front's reader asks the copies it keeps. Mirrors the Rust
+	 * `track::Subscriber::owes`.
+	 */
+	owes: (subscriber: Subscriber, start: bigint, end: bigint) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };
 	/** Whether `position` is a subscriber's largest and its group ended there, so no frame follows it. */
@@ -1506,6 +1532,18 @@ export const hooks: {
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
+	 * The moq-timestamp Object ID of a group's last frame at `timescale`: a copy without frame 0
+	 * answers its last timestamp's offset from the start, which the ID is never below. Undefined
+	 * before any frame. Assigned by `group.ts`.
+	 */
+	groupLastTimedId: (group: GroupProducer, timescale: Timescale) => bigint | undefined;
+	/**
+	 * The first frame whose moq-timestamp Object ID at `timescale` is at least `id`, or the next
+	 * frame to be written when none is yet; undefined when the copy no longer holds frame 0.
+	 * Assigned by `group.ts`.
+	 */
+	groupTimedFrame: (group: GroupProducer, id: bigint, timescale: Timescale) => number | undefined;
+	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
 	 */
@@ -1553,6 +1591,11 @@ export const hooks: {
 	/** Whether a group counts as content: its first frame landed, or it ended. */
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
+	/**
+	 * The moq-timestamp Object ID at `timescale` of frame `index`, which the reader still holds
+	 * from frame 0; undefined when it doesn't. Assigned by `group.ts`.
+	 */
+	groupTimedId: (group: GroupConsumer, index: number, timescale: Timescale) => bigint | undefined;
 	groupSettledFrames: (group: GroupConsumer) => number | undefined;
 	groupStarted: (group: GroupConsumer) => boolean;
 	/** The first frame this copy begins at: past 0 for one missing its head. */
@@ -1762,6 +1805,9 @@ export const hooks: {
 	servingResolvedKeys: () => {
 		throw new Error("track.ts not loaded");
 	},
+	servingCovering: () => {
+		throw new Error("track.ts not loaded");
+	},
 	joinStart: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1787,6 +1833,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	finishedTimedFrame: () => {
 		throw new Error("track.ts not loaded");
 	},
 	acceptedInfo: () => {
@@ -1933,9 +1982,6 @@ export const hooks: {
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
-	evictions: () => {
-		throw new Error("track.ts not loaded");
-	},
 	landed: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1964,6 +2010,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	mayLand: () => {
+		throw new Error("track.ts not loaded");
+	},
+	owes: () => {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {
@@ -2065,6 +2114,12 @@ export const hooks: {
 	groupFrameCount: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupLastTimedId: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupTimedFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
 	bindGroupTimed: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -2117,6 +2172,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupIndex: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupTimedId: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupSettledFrames: () => {

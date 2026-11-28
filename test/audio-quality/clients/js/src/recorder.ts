@@ -90,8 +90,7 @@ async function record(): Promise<void> {
 
 	const decoder = format(config);
 	const track = broadcast.track(name).subscribe({
-		priority: Catalog.PRIORITY.audio,
-		ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } } }],
+		ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } }, priority: Catalog.PRIORITY.audio }],
 	});
 	info = {
 		transport: connection.transport,

@@ -97,10 +97,10 @@ A Track is identified by a unique UTF-8 name within a Broadcast.
 A Track is either a **Track of Groups** or a **datagram Track** ({{datagrams}}), fixed for its lifetime.
 The two kinds occupy separate namespaces, so a datagram Track and a Track of Groups may share a name.
 
-Each subscription targets one Track and combines publisher preferences (`Publisher Priority`, `Publisher Max Age`) with subscriber preferences (`Subscriber Priority`, `Group Order`, and per-live-join `Max Age`) to prioritize and expire Groups under congestion ({{prioritization}}, {{expiration}}).
+Each subscription targets one Track and combines publisher preferences (`Publisher Priority`, `Publisher Max Age`) with subscriber preferences (per-Range `Subscriber Priority` and `Group Order`, and per-live-join `Max Age`) to prioritize and expire Groups under congestion ({{prioritization}}, {{expiration}}).
 
 ## Group {#group}
-A Group is an append-only sequence of Frames addressed by its **start**: a timestamp in the Track's `Timescale` (its frame 0 timestamp, or a bare number when `Timescale = 0`).
+A Group is an append-only sequence of Frames addressed by its **start**: a timestamp in the Track's `Timescale` (normally its frame 0 timestamp, or a bare number when `Timescale = 0`).
 No two Groups of a Track share a start; moq-lite carries no Group sequence numbers.
 
 A Group's span is `[start, End)` ({{group-end}}).
@@ -115,7 +115,9 @@ A Group ends in one of three states:
 
 ## Frame {#frame}
 Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start`.
-Each frame carries a transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration). Whether it is a presentation or a decode time is up to the payload format (hang's `cts` container, for one, sends decode-order timestamps).
+Each frame carries a transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration).
+A Group's timestamps never decrease in write order.
+Whether a timestamp is a presentation or a decode time is up to the payload format: one with B-frames stamps decode time and carries the composition offset in its payload, as hang's `cts` container does.
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any lower-start Group; a receiver MAY reset violating streams (`STOP_SENDING`) with `TIMESTAMP_MISMATCH`.
@@ -407,11 +409,15 @@ Relays MUST NOT announce a path merely because they resolved it; producers SHOUL
 Publishers SHOULD schedule Group Streams and datagrams by priority (within QUIC implementation limits).
 
 ### Priority
-`Subscriber Priority` (mutable via `SUBSCRIBE_UPDATE` / `DATAGRAMS_UPDATE`) takes precedence over `Publisher Priority` (immutable in `TRACK_INFO` / `DATAGRAMS_INFO`, used for ties and relay upstream fan-in).
+`Subscriber Priority` (set per Range, mutable via a `SUBSCRIBE_UPDATE` retune or `DATAGRAMS_UPDATE`) takes precedence over `Publisher Priority` (immutable in `TRACK_INFO` / `DATAGRAMS_INFO`, used for ties and relay upstream fan-in).
 Both are `u8` with **higher = more urgent** and `128` as the default midpoint.
 
+Each Range carries its own `Subscriber Priority` and `Group Order`, so one subscription can ask for its live edge urgently and its history in the background.
+A Group goes out at the highest `Subscriber Priority` among the Ranges still wanting it, in that priority's `Group Order` (descending if Ranges at it disagree).
+A Range wants each Group it covers until the Group ages past the Range's `Max Age` ({{expiration}}), so a Group a live join and a history Range both cover falls to the history Range's priority and order once the live join's `Max Age` passes, including a Group already in flight.
+
 ### Group Order {#group-order}
-Within a subscription, publishers SHOULD transmit pending Groups in the subscriber's `Group Order`: descending (`0x0`, newest first, the default, shedding backlog under congestion) or ascending (`0x1`, oldest first, draining history/backlog).
+Among pending Groups at one priority, publishers SHOULD transmit them in the `Group Order` of the Ranges wanting them: descending (`0x0`, newest first, the default, shedding backlog under congestion) or ascending (`0x1`, oldest first, draining history/backlog).
 `Group Order` affects transmission order only; staleness dropping is governed by [Expiration](#expiration).
 Subscribers MUST tolerate gaps and out-of-order Group arrival.
 
@@ -775,14 +781,14 @@ SUBSCRIBE Message {
   Minted (8),
   Node (..),
   Track Name (s),
-  Subscriber Priority (8),
-  Group Order (8),        ; 0x0 = descending, 0x1 = ascending
   Range Count (i),        ; >= 1 (0 -> PROTOCOL_VIOLATION)
   Range (..) ...,
   Meta (8),               ; 0x0 = payload, 0x1 = metadata (other -> PROTOCOL_VIOLATION)
 }
 
 Range {
+  Subscriber Priority (8),
+  Group Order (8),        ; 0x0 = descending, 0x1 = ascending (other -> PROTOCOL_VIOLATION)
   Start (Anchor),
   End (Anchor),
 }
@@ -796,7 +802,7 @@ Anchor {
 }
 ~~~
 
-Each Range implicitly takes the next 0-based `Range ID` on the stream; the subscription is the union of its Ranges (delivering each Group once; relays whose merged Ranges exceed message size SHOULD coalesce across the narrowest gaps).
+Each Range implicitly takes the next 0-based `Range ID` on the stream; the subscription is the union of its Ranges (delivering each Group once, at the priority and order of the Ranges wanting it ({{prioritization}}); relays whose merged Ranges exceed message size SHOULD coalesce across the narrowest gaps).
 A Time `End` includes the Group containing it; a Position `End` is exclusive, stopping before `(Timestamp, Frame)`.
 `Meta = 0x1` makes it a [metadata subscription](#metadata), fixed for its life.
 
@@ -818,8 +824,6 @@ A Range resolves once (updates keeping it live never re-resolve it).
 ~~~
 SUBSCRIBE_UPDATE Message {
   Message Length (i),
-  Subscriber Priority (8),
-  Group Order (8),
   Remove Count (i),
   Range ID (i) ...,
   Range Count (i),
@@ -831,12 +835,14 @@ SUBSCRIBE_UPDATE Message {
 
 Retune {
   Range ID (i),
-  Max Age opt(i),
+  Subscriber Priority (8),
+  Group Order (8),
+  Max Age opt(i),         ; 0 unless the Range is Live/Joined
 }
 ~~~
 
-Restates `Subscriber Priority`, `Group Order`, and `Wanted Start`; edits live Ranges (retire `Remove` IDs, retune `Max Age` of remaining Live/Joined Ranges without re-resolving, then append new Ranges taking sequential Range IDs).
-Invalid/duplicate Range IDs, retuning a non-Live/Joined Range, leaving zero live Ranges, or exceeding `65,535` bytes for the resulting live Ranges -> `PROTOCOL_VIOLATION`.
+Restates `Wanted Start`; edits live Ranges (retire `Remove` IDs, retune the priority and order of remaining Ranges and the `Max Age` of Live/Joined ones without re-resolving, then append new Ranges taking sequential Range IDs).
+Invalid/duplicate Range IDs, a non-zero `Max Age` retuning a non-Live/Joined Range, leaving zero live Ranges, or exceeding `65,535` bytes for the resulting live Ranges -> `PROTOCOL_VIOLATION`.
 
 Widening Ranges serves newly covered Groups not already delivered or dropped; shrinking sends no drops; updates never reopen dropped Groups.
 `Wanted Start` > publisher's largest start evaluates as a refresh request ({{track-info}}).
@@ -879,6 +885,7 @@ SUBSCRIBE_DROP Message {
   Group Start (i),
   Group End (i),          ; exclusive; Group End <= Group Start -> PROTOCOL_VIOLATION
   Error Code (i),         ; stream error code
+  [Max Age opt(i)],       ; present iff Error Code = OLD
 }
 ~~~
 
@@ -889,7 +896,8 @@ Dropping a whole held Group names `[start, max(End, start + 1))`.
 
 Drops are final on their subscription and, for any `Error Code` but `SKIP`, end active readers of affected Groups with it (unless another Group Stream already completed the Group).
 A publisher names each start once, besides the starts of a `GROUP_END` a reset may have cut ([Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
-A relay settles downstream readers with an upstream `OLD` drop only if their `Max Age <=` the narrowest upstream live-join `Max Age` and their Ranges cover every group above the dropped start.
+An `OLD` drop's `Max Age` (ms + 1) is what the publisher judged the Groups stale under: the largest `Max Age` of the live joins covering them, or `0` for `Publisher Max Age`, which settles every reader. A drop with no verdict of its own, such as a Group whose upstream stream was reset `OLD`, names the narrowest `Max Age` the subscription's live joins ask.
+A relay settles downstream readers with an upstream `OLD` drop only if their `Max Age <=` the drop's `Max Age` and their Ranges cover every group above the dropped start.
 
 #### Skips (`SKIP`) {#subscribe-skip}
 A `SUBSCRIBE_DROP` with `Error Code = SKIP` (`0x3A`) names starts the original publisher declared will never hold a Group: final, ends no readers, and a publisher MUST NOT later create a Group there.
@@ -1002,13 +1010,15 @@ GROUP Message {
 ~~~
 FRAME Message {
   Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END); metadata: inflated size + 1
-  [Timestamp Delta (i)],  ; zigzag-encoded signed delta; omitted if Timescale == 0
+  [Timestamp Delta (i)],  ; zigzag on a stream's first FRAME, else unsigned; omitted if Timescale == 0
   [Inflated Size (i)],    ; present iff Track Compression != none and not metadata
   [Payload (..)],         ; absent on a metadata subscription
 }
 ~~~
-`Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the `GROUP`'s Group Start, so frame 0's delta is `0`.
-It is zigzag-mapped so small magnitudes of either sign fit in a 1-byte varint: encode `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift), decode `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
+`Timestamp Delta` counts in `Timescale` ticks.
+The first `FRAME` of a stream carries a signed delta from the `GROUP`'s Group Start, zigzag-mapped (encode `(signed << 1) ^ (signed >> 63)` with an arithmetic shift, decode `(unsigned >> 1) ^ -(unsigned & 1)`), so frame 0 at its Group Start carries `0` and one presenting before it, as a joined Group's leading media may, still fits.
+Every later `FRAME` carries an unsigned delta from the prior `FRAME`'s timestamp on this stream: a Group's timestamps never decrease, so a publisher MUST NOT write a frame below its predecessor.
+A receiver treats a delta that leaves the timestamp range as malformed.
 When compressed, receivers MUST check `Inflated Size` against resource limits before inflating and treat any mismatching inflated length as malformed.
 On a [metadata subscription](#metadata)'s Group Stream, a `FRAME` carries no `Inflated Size` and no `Payload`, and its `Payload Length` is the inflated size + 1, so an empty frame still reads `1` and `GROUP_END` keeps `0`.
 
@@ -1018,7 +1028,7 @@ Shares `FRAME`'s leading varint using the reserved value `0`:
 ~~~
 GROUP_END Message {
   Payload Length (i) = 0,
-  End Delta (i),          ; non-negative delta from the highest stream frame timestamp (or Group Start if empty/scale-less)
+  End Delta (i),          ; non-negative delta from last stream frame timestamp (or Group Start if empty/scale-less)
 }
 ~~~
 End is never below any frame timestamp of the Group (including frames not carried on this stream, e.g., before a Position `Start`), and no greater than the next Group's start.
@@ -1089,11 +1099,11 @@ This document has no IANA actions.
 - Added Tracks Stream (`0x8`: `TRACKS`, `TRACKS_ADD`/`REMOVE`/`FINISH` with `Kind`, `SYNCED`).
 - Added `TRACK_INFO` `Refresh`, `Refresh Interval`, `Compression`, optional `Publisher Max Age`, and scale-less `Timescale = 0`; added `SUBSCRIBE_UPDATE.Wanted Start`.
 - Replaced Group sequence numbers with timestamp `Group Start` (`< 2^61`; `2^64-1` reserved) and added `GROUP_END` (`Payload Length = 0` followed by `End Delta`) with non-overlapping `[start, End)` group spans.
-- Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
+- Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), moved `Subscriber Priority` onto each Range beside a new `Group Order` (retuned per Range by `SUBSCRIBE_UPDATE`), added `Max Age` to `SUBSCRIBE_DROP(OLD)`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
 - Removed the Fetch Stream (`0x3`) and `FETCH`: single-group and frame-slice reads are bounded `SUBSCRIBE` Ranges with `Position` Anchors. A `Position` Anchor allows `Frame = 0`, names only the Group starting exactly at its `Timestamp`, and is exclusive as an `End`; reaching it closes the Group Stream with `FIN` and no `GROUP_END`. A subscriber's clean `FIN` ends only its updates: the publisher delivers the remaining Ranges and then FINs, so a `SUBSCRIBE` followed at once by `FIN` is a one-round-trip request, and a reset cancels.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
-- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a zigzag `Timestamp Delta` (omitted when scale-less), and optional `Inflated Size`.
-- A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
+- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a `Timestamp Delta` (omitted when scale-less) that is zigzag from the Group Start on a stream's first `FRAME` and unsigned from the prior `FRAME` after it, replacing earlier versions' zigzag delta on every `FRAME`, and optional `Inflated Size`.
+- A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time, and never decreases within a Group.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.
 - Added `SUBSCRIBE.Meta` for a metadata subscription (`0x1`), fixed for its life, whose `FRAME`s carry no `Inflated Size` or payload, `Payload Length` being the inflated size + 1. A relay serves one from a payload copy or a metadata subscription upstream, from the Track's one payload subscription only where its upstream cannot carry the mode, and never serves a payload reader from metadata.

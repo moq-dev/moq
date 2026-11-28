@@ -318,11 +318,16 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	///
 	/// Streams with HIGHER values are transmitted first. This is the transport trait's
 	/// convention (matching W3C `sendOrder` and quinn's scheduler) and the model's
-	/// [`Subscription::priority`](crate::track::Subscription), where higher values preempt
+	/// [`Range::priority`](crate::track::Range), where higher values preempt
 	/// lower ones. The lite priority queue's rank is the opposite (0 = most urgent); rank
 	/// holders convert via `PriorityHandle::send_order`.
 	pub fn set_priority(&mut self, priority: i64) {
 		self.stream.as_mut().unwrap().set_priority(priority);
+	}
+
+	/// Move the stream into `group`, a send group of its session.
+	pub fn set_group(&mut self, group: &S::Group) {
+		self.stream.as_mut().unwrap().set_group(group);
 	}
 
 	/// Cast the writer to a different version, used during version negotiation.

@@ -14,6 +14,7 @@ import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
+import { everyRange, topPolicy } from "./subscription.test-util.ts";
 import { Timescale } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -55,7 +56,7 @@ function lateAcks(transport: MockTransport) {
 
 // Resolve once the subscription `track` serves asks for `want`.
 async function priority(track: TrackProducer, want: number): Promise<void> {
-	while (track.subscription.peek()?.priority !== want) await track.subscription.changed();
+	while (topPolicy(track.subscription.peek())?.priority !== want) await track.subscription.changed();
 }
 
 test.each([Lite.ALPN_07_WIP, ...Object.values(Ietf.ALPN)])(
@@ -68,17 +69,17 @@ test.each([Lite.ALPN_07_WIP, ...Object.values(Ietf.ALPN)])(
 		const [client, server] = await session(protocol, origin);
 
 		const remote = wireOf(client).consume(path);
-		const low = remote.track("video").subscribe({ priority: LOW });
+		const low = remote.track("video").subscribe(everyRange({}, { priority: LOW }));
 		await priority(video, LOW);
 
 		// A second subscriber at a higher priority raises the one upstream request.
-		const high = remote.track("video").subscribe({ priority: HIGH });
+		const high = remote.track("video").subscribe(everyRange({}, { priority: HIGH }));
 		await priority(video, HIGH);
 
 		// Leaving lowers it again.
 		high.close();
 		await priority(video, LOW);
-		expect(video.subscription.peek()?.priority).toBe(LOW);
+		expect(topPolicy(video.subscription.peek())?.priority).toBe(LOW);
 
 		low.close();
 		remote.close();
@@ -111,9 +112,9 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 	});
 	try {
 		const remote = wireOf(client).consume(path);
-		const low = remote.track("video").subscribe({ priority: LOW });
+		const low = remote.track("video").subscribe(everyRange({}, { priority: LOW }));
 		await priority(video, LOW);
-		const high = remote.track("video").subscribe({ priority: HIGH });
+		const high = remote.track("video").subscribe(everyRange({}, { priority: HIGH }));
 		await priority(video, HIGH);
 		high.close();
 		await priority(video, LOW);
@@ -143,12 +144,12 @@ test.each(Object.values(Ietf.ALPN))("%s sends no update when the last subscriber
 	const [client, server] = await session(protocol, origin);
 	try {
 		const remote = wireOf(client).consume(path);
-		const track = remote.track("video").subscribe({ priority: LOW });
+		const track = remote.track("video").subscribe(everyRange({}, { priority: LOW }));
 		await priority(video, LOW);
 		await track.info();
 		track.close();
 		while (video.subscription.peek() !== undefined) {
-			expect(video.subscription.peek()?.priority).toBe(LOW);
+			expect(topPolicy(video.subscription.peek())?.priority).toBe(LOW);
 			await video.subscription.changed();
 		}
 		remote.close();
@@ -175,14 +176,14 @@ test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to e
 	const encode = spyOn(SubscribeUpdate.prototype, "encode").mockRejectedValue(broken);
 	try {
 		const remote = wireOf(client).consume(path);
-		const track = remote.track("video").subscribe({ priority: LOW });
+		const track = remote.track("video").subscribe(everyRange({}, { priority: LOW }));
 		await priority(video, LOW);
 		await track.info();
-		const high = remote.track("video").subscribe({ priority: HIGH });
+		const high = remote.track("video").subscribe(everyRange({}, { priority: HIGH }));
 		expect(await track.closed).toBe(broken);
 		expect(await high.closed).toBe(broken);
 		while (video.subscription.peek() !== undefined) {
-			expect(video.subscription.peek()?.priority).toBe(LOW);
+			expect(topPolicy(video.subscription.peek())?.priority).toBe(LOW);
 			await video.subscription.changed();
 		}
 		expect(closed).toBeUndefined();

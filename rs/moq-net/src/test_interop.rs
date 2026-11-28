@@ -274,9 +274,9 @@ fn lite_values() -> Vec<u64> {
 	values
 }
 
-/// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta on
-/// a timed track, the payload size, then the payload. The header names a frame start, which
-/// lite-06 and later carry.
+/// One GROUP header and its frames, as a publisher writes them: a timestamp delta on
+/// a timed track (unsigned from group start on lite-07, zigzag from 0 before), the payload
+/// size, then the payload. The header names a frame start, which lite-06 and later carry.
 fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i64>, usize)>) -> Vec<u8> {
 	let mut buf = Vec::new();
 	let w = &mut Encoder::new(&mut buf, version.into());
@@ -286,11 +286,21 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 		frame_start: if version.has_frame_bounds() { 200 } else { 0 },
 	};
 	header.encode(w, version).unwrap();
+	let length_first = version.has_length_first();
 	for (delta, size) in frames {
-		if let Some(delta) = delta {
-			w.varint(varint::zigzag(delta)).unwrap();
+		if length_first {
+			w.varint(size as u64 + 1).unwrap();
 		}
-		w.varint(size as u64).unwrap();
+		if let Some(delta) = delta {
+			let wire = match version.has_group_end() {
+				true => u64::try_from(delta).expect("lite-07 delta must be non-negative"),
+				false => varint::zigzag(delta),
+			};
+			w.varint(wire).unwrap();
+		}
+		if !length_first {
+			w.varint(size as u64).unwrap();
+		}
 		w.slice(&vec![0xAB; size]);
 	}
 	buf
@@ -364,7 +374,7 @@ fn lite_varint_interop() {
 			[
 				(Some(0), 10),
 				(Some(33_333), 300),
-				(Some(-1_000), 20_000),
+				(Some(if version.has_group_end() { 1_000 } else { -1_000 }), 20_000),
 				(Some(1 << 40), 1),
 			],
 		);
