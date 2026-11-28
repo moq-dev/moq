@@ -1,0 +1,13 @@
+diff --git a/js/hang/src/container/track.ts b/js/hang/src/container/track.ts
+index 0b0e956189..8af1c88a4c 100644
+--- a/js/hang/src/container/track.ts
++++ b/js/hang/src/container/track.ts
+@@ -26,7 +26,7 @@ export const MAX_AGE = Duration.millis(30_000);
+  * audio packet decodes on its own and a group per packet spends a stream per packet. Mirrors the
+  * Rust `moq_mux::container::Join::DEFAULT`.
+  */
+-export const JOIN = Duration.millis(100);
++export const JOIN = Duration.millis(20);
+ 
+ /**
+  * Track properties for a track carrying media frames, for `Track.Producer.accept`.
