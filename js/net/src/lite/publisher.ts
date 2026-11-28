@@ -1579,6 +1579,7 @@ export class Publisher {
 				initial: BigInt(asked.length),
 				requested,
 				oneShot: oneShot !== undefined,
+				maxAge: info.maxAge?.asMillis(),
 			});
 			if (result === "one-shot" && oneShot) {
 				track.close();
@@ -1938,6 +1939,9 @@ export class Publisher {
 			// Lite-07 single-group Position request eligible for one-shot fetch handoff if
 			// subscriber FIN arrives after SUBSCRIBE (e.g. in a separate QUIC STREAM frame).
 			oneShot?: boolean;
+			// The track's Publisher Max Age in milliseconds, undefined for none: no subscriber
+			// budget reaches past it.
+			maxAge?: number;
 		},
 	): Promise<boolean | "one-shot"> {
 		const { sub, broadcast, stamp, publisher, compress, meta, named, bounds, initial, requested } = serving;
@@ -2199,6 +2203,17 @@ export class Publisher {
 			return true;
 		};
 
+		// Whether a wider budget may still reverse a run stale under `stale` milliseconds: on lite-07, not
+		// one judged under the track's own max age, or an upstream's under no bound at all, past which no
+		// budget reaches. Earlier drafts name a drop with no range, which a capped read could still serve.
+		// Mirrors the Rust `reversible`, whose bound also takes in the hop's cache ceiling, which a
+		// TypeScript publisher does not have.
+		const reversible = (stale: number | undefined): boolean => {
+			if (stale === undefined) return false;
+			if (!hasRanges(this.version)) return true;
+			return stale < (serving.maxAge ?? Number.POSITIVE_INFINITY);
+		};
+
 		// The keys named once given up: those from `from` on, and on lite-07 those in a disjoint history
 		// range below it, so the subscriber settles that range with the same verdict as a direct
 		// reader. Mirrors the Rust `TrackRun::owed`.
@@ -2331,18 +2346,20 @@ export class Publisher {
 					// subscription's record alone, so a wider budget may still serve it: a front's copies keep
 					// it, or each would give it up again on every scan an update widening the budget asks for,
 					// ahead of every group. A final one stays told for the same reason; an update that asks
-					// below the start names it then. Mirrors the Rust `TrackRun::resolve`.
+					// below the start names it then. On lite-07, a run stale under the track's own max age is
+					// final all the same (see `reversible`): a relay reading from the oldest group would
+					// otherwise wait on it forever. Mirrors the Rust `TrackRun::resolve`.
 					let reach = startKey;
 					for (let i = skipped.size - 1; i >= 0; i--) {
 						const range = skipped.all[i];
 						if (range.start >= reach) continue;
-						if (range.end < reach || range.stale !== undefined) break;
+						if (range.end < reach || reversible(range.stale)) break;
 						reach = range.start;
 					}
 					const send = owed(reach);
 					for (const range of skipped.all) {
 						for (const below of runGaps(send, range.start, range.end)) {
-							if (range.stale !== undefined) record?.untell(below.start, below.end);
+							if (reversible(range.stale)) record?.untell(below.start, below.end);
 							else unsent.set(below.start, below.end, range);
 						}
 						for (const part of send) {
@@ -2484,7 +2501,7 @@ export class Publisher {
 						throw recv.error;
 					case "drop":
 						if (!startSent) skipped.set(recv.start, recv.end, recv);
-						else if (startKey !== undefined && recv.start < startKey && recv.stale !== undefined) {
+						else if (startKey !== undefined && recv.start < startKey && reversible(recv.stale)) {
 							// A stale run below the start goes unnamed, as at the start, so a wider budget may
 							// still serve it: one widening the budget gives each up again otherwise.
 							const send = owed(startKey);

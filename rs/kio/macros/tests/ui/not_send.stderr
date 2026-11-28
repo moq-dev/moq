@@ -1,0 +1,27 @@
+error[E0277]: `Rc<String>` cannot be sent between threads safely
+  --> tests/ui/not_send.rs:26:16
+   |
+26 |     assert_send::<M>();
+   |                   ^ `Rc<String>` cannot be sent between threads safely
+   |
+   = help: within `M`, the trait `Send` is not implemented for `Rc<String>`
+note: required because it appears within the type `MStateB`
+  --> tests/ui/not_send.rs:18:22
+   |
+18 |         let b: u64 = wait!(B => self.values.poll_pop(waiter))?;
+   |                            ^
+note: required because it appears within the type `MState`
+  --> tests/ui/not_send.rs:13:28
+   |
+13 | #[kio::machine(self.state: MState)]
+   |                            ^^^^^^
+note: required because it appears within the type `M`
+  --> tests/ui/not_send.rs:7:8
+   |
+ 7 | struct M {
+   |        ^
+note: required by a bound in `assert_send`
+  --> tests/ui/not_send.rs:23:19
+   |
+23 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`

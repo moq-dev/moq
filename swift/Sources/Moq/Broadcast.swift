@@ -22,6 +22,15 @@ public final class BroadcastConsumer: Sendable {
         return TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
+    /// Subscribe to a track's metadata by name: its groups and each frame's header, without
+    /// the payload. A subscription of its own beside any `subscribeTrack` of the same track; to
+    /// read the payload after all, subscribe to the track from the group reached.
+    /// `subscription` works as in `subscribeTrack`.
+    public func subscribeMeta(name: String, subscription: Subscription? = nil) async throws -> MetaConsumer {
+        try checkSubscription(subscription)
+        return MetaConsumer(try await ffi.subscribeMeta(name: name, subscription: subscription))
+    }
+
     /// Fetch one complete group by track name and group start without holding
     /// a live subscription. The group may still be receiving frames.
     public func fetchGroup(

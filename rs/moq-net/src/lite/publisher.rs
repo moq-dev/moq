@@ -6050,6 +6050,13 @@ fn due(range: &crate::track::Range, started: bool) -> Option<u64> {
 	range.end.map(|last| last.saturating_add(1))
 }
 
+/// Whether a wider budget may still reverse `hole`: a stale verdict judged under less than
+/// `bound`, if any (see [`TrackRun::final_bound`]).
+fn reversible(hole: &Hole, bound: Option<Duration>) -> bool {
+	hole.stale_budget()
+		.is_some_and(|budget| bound.is_none_or(|bound| budget < bound))
+}
+
 impl TrackRun {
 	fn new(
 		ctx: Subscription,
@@ -6873,10 +6880,13 @@ impl TrackRun {
 		let Poll::Ready((range, hole)) = polled else {
 			return Ok(false);
 		};
+		let unowed = matches!(self.start, Start::Resolved(start) if range.start < start)
+			&& hole.stale_budget().is_some()
+			&& reversible(&hole, self.final_bound());
 		match &mut self.start {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
 			// A stale run below the start goes unnamed, as at the start (see [`Self::resolve`]).
-			&mut Start::Resolved(start) if range.start < start && hole.stale_budget().is_some() => {
+			&mut Start::Resolved(start) if unowed => {
 				let owed = self.owed(start);
 				for below in owed.gaps(&range) {
 					self.track.record_mut().untell(below);
@@ -7263,13 +7273,17 @@ impl TrackRun {
 		// budget may still serve it: a front's copies keep it, or each would give it up again on
 		// every scan an update widening the budget asks for, one poll at a time ahead of every
 		// group. A final one stays told for the same reason; an update that asks below the start
-		// names it then.
+		// names it then. On lite-07, whose ranges bound what a stale verdict was judged within, a
+		// run stale under the track's own freshness bound is final all the same (see
+		// [`Self::final_bound`]): a relay reading from the oldest group would otherwise wait on it
+		// forever.
+		let bound = self.final_bound();
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
 				continue;
 			}
-			if range.end < reach || hole.stale_budget().is_some() {
+			if range.end < reach || reversible(hole, bound) {
 				break;
 			}
 			reach = range.start;
@@ -7277,9 +7291,9 @@ impl TrackRun {
 		let send = self.owed(reach);
 		for (range, hole) in skipped.iter() {
 			for below in send.gaps(range) {
-				match hole.stale_budget() {
-					Some(_) => self.track.record_mut().untell(below),
-					None => self.unsent.insert(below, hole.clone()),
+				match reversible(hole, bound) {
+					true => self.track.record_mut().untell(below),
+					false => self.unsent.insert(below, hole.clone()),
 				}
 			}
 			for part in send.overlapping(range) {
@@ -7292,6 +7306,14 @@ impl TrackRun {
 			writer.buffer(&lite::SubscribeResponse::End(end))?;
 		}
 		Ok(())
+	}
+
+	/// The budget past which no subscriber's reaches, which makes a stale verdict judged under it
+	/// final: on lite-07, the track's own freshness bound, or an upstream's verdict under no bound
+	/// at all. Earlier drafts name a drop with no range, which a capped read could still serve, so
+	/// none is final there.
+	fn final_bound(&self) -> Option<Duration> {
+		(self.ctx.version.has_ranges()).then(|| self.track.max_age_bound().unwrap_or(Duration::MAX))
 	}
 
 	/// The keys named once given up: those from `from` on, and on lite-07 those in a disjoint
@@ -11096,6 +11118,33 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// History stale under the track's own freshness bound is named below an oldest range's
+	/// start, as a final run is: no budget a subscriber asks reaches past that bound, so a relay
+	/// copy reading from the oldest group would otherwise wait on it forever.
+	#[kio::test]
+	async fn lite07_names_history_stale_under_the_bound_below_the_start() {
+		let info = broadcast::Info {
+			cache_duration: Some(Duration::from_secs(30)),
+			..Default::default()
+		};
+		let track = track::Producer::new(Arc::new(info), "test", crate::track::Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut old = track.append_group(at(10)).unwrap();
+		old.write_frame(at(10), b"x".as_slice()).unwrap();
+		old.finish().unwrap();
+		let mut open = track.append_group(at(1_000)).unwrap();
+		for n in 0..60 {
+			open.write_frame(at(1_000 + n * 1_000), b"x".as_slice()).unwrap();
+			kio::clock::sleep(Duration::from_secs(1)).await;
+		}
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.start.resolved(), Some(1_000));
+		let named = holes(&mut writer, &log).await;
+		assert_eq!(named.first().map(|(_, run)| run.start), Some(0), "{named:?}");
+		assert_eq!(named.last().map(|(_, run)| run.end), Some(1_000), "{named:?}");
 	}
 
 	/// A copy whose feed start resolved before its upstream said where the live edge is resolves

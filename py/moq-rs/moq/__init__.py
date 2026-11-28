@@ -53,6 +53,8 @@ from .session import (
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
+    MetaConsumer,
+    MetaGroup,
     TrackConsumer,
 )
 from .types import (
@@ -71,6 +73,7 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    FrameHeader,
     Grant,
     Identity,
     Order,
@@ -130,6 +133,7 @@ __all__ = [
     "Error",
     "ErrorScope",
     "Frame",
+    "FrameHeader",
     "ProtocolError",
     "ProtocolKind",
     "QuicConfig",
@@ -141,6 +145,8 @@ __all__ = [
     "GrantConsumer",
     "GroupConsumer",
     "GroupProducer",
+    "MetaConsumer",
+    "MetaGroup",
     "OriginConsumer",
     "OriginProducer",
     "Order",

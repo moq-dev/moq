@@ -16,9 +16,9 @@ yet, and the TLA+ model already checks the design.
 
 - The deleted `quest/m9/verus-kio-log.md` (removed in 0e5fe75cdd) planned
   this after kio's log proof, if that proof's cost was acceptable.
-- kio now proves `src/log.rs` in CI
-  ([kixel-ai/kio#12](https://github.com/kixel-ai/kio/pull/12); its justfile's
-  `verify` recipe and CONTRIBUTING.md's "Verified code"). Its cost is the
+- kio proves `rs/kio/src/log.rs` in Nightly
+  ([kixel-ai/kio#12](https://github.com/kixel-ai/kio/pull/12); `just rs verify`
+  and `rs/kio/AGENTS.md`'s "Verified code"). Its cost is the
   reference: about 2.1 proof lines per code line, 46 trusted sites, plain
   build time unchanged, and `just verify` 23 s cold and 2.4 s warm. Copy its
   layout: the proof in attribute syntax so the files stay plain Rust, and a

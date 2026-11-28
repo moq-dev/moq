@@ -785,6 +785,10 @@ pub(crate) struct TrackState {
 	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
 	// track's largest position once it was reported: anything received past that outdates it.
 	object_edge: Option<((u64, u64), Position)>,
+	// The narrowest budget any upstream subscription feeding this copy asked, `None` while none
+	// asked a live join: a group whose stream that upstream reset as too old may have been
+	// judged under it, so the verdict stands only for a reader no wider.
+	judging: Option<Duration>,
 
 	// Cached groups by key: the single source of truth for what is cached. The
 	// two orderings below hold bare keys and validate against this map, so a
@@ -6512,6 +6516,18 @@ impl Producer {
 		}
 	}
 
+	/// An upstream subscription feeding this copy asks a live join under `budget`, before it
+	/// reaches the wire: that upstream may judge a group too old under it from then on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn judge_under(&self, budget: Duration) {
+		if self.state.read().judging.is_some_and(|judging| judging <= budget) {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.judging = Some(state.judging.map_or(budget, |judging| judging.min(budget)));
+		}
+	}
+
 	/// Record the upstream Object ID separately from the frame ordinal readers count.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
@@ -8161,6 +8177,12 @@ impl Consumer {
 		}
 	}
 
+	/// The narrowest budget an upstream subscription feeding this copy asked (see
+	/// [`Producer::judge_under`]), `None` while none asked one.
+	pub(crate) fn judged_under(&self) -> Option<Duration> {
+		self.with_state(|state| state?.read().judging)
+	}
+
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
@@ -8792,6 +8814,15 @@ impl Consumer {
 			return serving.skipped_below(key);
 		}
 		self.with_state(|state| state.map_or(0, |state| state.read().skipped_below(key)))
+	}
+
+	/// The freshness bound this track holds every reader to, `None` when unlimited.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		if let Some(serving) = self.serving() {
+			return serving.max_age_bound();
+		}
+		self.with_state(|state| state.and_then(|state| state.read().max_age_bound()))
 	}
 
 	/// Ready once [`Self::latest_key`] is `Some`: the track holds a group. Stays pending
@@ -9446,7 +9477,7 @@ struct Drift {
 
 /// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
 /// resolve.
-type Coverage = Option<(Cover, Option<u64>)>;
+pub(super) type Coverage = Option<(Cover, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
@@ -9457,7 +9488,7 @@ type Coverage = Option<(Cover, Option<u64>)>;
 /// that very cap, else the verdict may rest on groups above the cap it never sees. Any other
 /// reader treats the run as unknown, and fills it on a request of its own: the upstream
 /// subscription never delivers a group it dropped.
-fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
+pub(super) fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
 	let Some(stale) = hole.stale_budget() else {
 		return true;
 	};
@@ -13959,6 +13990,16 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().span_end(end),
 			Inner::Resume(resume, _) => resume.span_end(end),
+		}
+	}
+
+	/// The freshness bound the track holds this reader to, whatever budget it asks: `None`
+	/// when unlimited. A run stale under it stays stale under any wider budget.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().max_age_bound(),
+			Inner::Resume(resume, _) => resume.max_age_bound(),
 		}
 	}
 

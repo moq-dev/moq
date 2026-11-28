@@ -20,7 +20,3 @@ Approach:
 2. Move behavioral tests that only need public or `test-support` items into `rs/moq-net-tests` (splitting into multiple `[[test]]` binaries or sibling test crates only where parallel compile time wins without inflating link cost). Keep truly white-box unit tests that access private internals only when moving them would widen default public API; where narrow helpers are needed, gate them behind `#[cfg(feature = "test-support")]` with doc comments (since `sh/text.sh` forbids `#[doc(hidden)]`).
 3. Verify `sh/rs/select.sh` stops selecting `moq-net`'s 41 downstream crates when editing moved tests under `rs/moq-net-tests/`.
 4. Measure and report before/after `moq_net` `cargo nextest run --no-run` CPU and wall time on (a) a test-only edit and (b) a 1-line edit to `rs/moq-net/src/lib.rs`, plus verify full test count parity.
-
-## Related
-
-- [Trim local just check Rust CPU](/quest/m0/trim-local-check-cpu.md) - cuts the other major local `moq` Rust CPU costs (`cross-lint`, `cargo doc`, `CARGO_MANIFEST_DIR`)

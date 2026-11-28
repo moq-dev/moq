@@ -161,6 +161,15 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
+/**
+ * The read side of a metadata subscription: yields a track's groups in arrival order, each frame as
+ * its header alone.
+ */
+typealias MetaConsumer = uniffi.moq.MoqMetaConsumer
+
+/** One group of a metadata subscription: yields its frames' headers, without their payloads. */
+typealias MetaGroup = uniffi.moq.MoqMetaGroup
+
 // Data types.
 /**
  * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
@@ -173,6 +182,12 @@ typealias Datagram = uniffi.moq.MoqDatagram
  * scale-less track.
  */
 typealias Frame = uniffi.moq.MoqFrame
+
+/**
+ * A frame's header without its payload, as a metadata subscription reads it: the declared payload
+ * `size` in bytes (0 for an empty frame) and its timestamp.
+ */
+typealias FrameHeader = uniffi.moq.MoqFrameHeader
 
 /**
  * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null

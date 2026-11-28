@@ -10980,3 +10980,43 @@ async fn group_calls_wake_ready_after_unlocking() {
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
 }
+
+/// A metadata subscription reads each frame's declared size and timestamp, an empty frame as
+/// size 0, and ends the group and the track where the payload reads would.
+#[tokio::test]
+async fn subscribe_meta_reads_headers() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("video".into(), Some(timed_info())).unwrap();
+	let meta = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_meta("video".into(), None)
+		.await
+		.unwrap();
+	let group = track.append_group(us(0)).unwrap();
+	for (at, payload) in [(0, &b"key"[..]), (1, b"")] {
+		group
+			.write_frame(MoqFrame {
+				payload: payload.to_vec(),
+				timestamp: us(at),
+			})
+			.unwrap();
+	}
+	group.finish().unwrap();
+
+	let read = kio::clock::timeout(TIMEOUT, meta.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.expect("a group");
+	assert_eq!(read.start(), 0);
+	let mut headers = Vec::new();
+	while let Some(header) = kio::clock::timeout(TIMEOUT, read.next_header()).await.unwrap().unwrap() {
+		headers.push((header.size, micros(header.timestamp)));
+	}
+	assert_eq!(headers, [(3, 0), (0, 1)]);
+
+	track.finish().unwrap();
+	let end = kio::clock::timeout(TIMEOUT, meta.recv_group()).await.unwrap().unwrap();
+	assert!(end.is_none(), "the track finished");
+}

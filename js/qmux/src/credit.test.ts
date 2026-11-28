@@ -149,4 +149,13 @@ describe("StreamLimit", () => {
 		expect(limit.takePending()).toBe(true);
 		expect(limit.open(1n)).toBe(true);
 	});
+
+	test("never advertises past the 2^60 MAX_STREAMS can carry", () => {
+		const max = 1n << 60n;
+		const limit = new StreamLimit(max - 1n, () => {});
+		expect(limit.open(max - 2n)).toBe(true);
+		limit.close();
+		limit.close();
+		expect(limit.max).toBe(max);
+	});
 });

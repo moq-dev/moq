@@ -1500,7 +1500,7 @@ mod tests {
 		assert_eq!(
 			first.sync.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
-				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.saturating_duration_since(moq_net::time::EPOCH)
 				.as_micros(),
 		);
 	}
@@ -1543,7 +1543,7 @@ mod tests {
 			assert_eq!(
 				clock.wall.as_micros().unwrap(),
 				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
-					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.saturating_duration_since(moq_net::time::EPOCH)
 					.as_micros()
 			);
 			for (name, kind, expected) in [

@@ -5,6 +5,12 @@
 pub use kio::clock::Instant;
 pub(crate) use kio::clock::{Deadline, Deadlines};
 
+/// MoQ's epoch, 2020-01-01T00:00:00Z: wall times on the wire count from it.
+///
+/// Counting from 50 years after the Unix epoch keeps a millisecond count about 1.5e12
+/// smaller, trimming a byte or two off its varint.
+pub const EPOCH: kio::clock::Wall = kio::clock::Wall::from_unix_secs(1_577_836_800);
+
 use crate::Error;
 
 /// A state machine polled with caller-supplied time.

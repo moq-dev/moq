@@ -11,11 +11,12 @@ import type { Consumer as GroupConsumer } from "./group.ts";
 import type * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
+import * as Meta from "./meta.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
 import { checkName } from "./util/utf8.ts";
-import { type Broadcast, type Produced, registerWire, trackOf, wireOf } from "./wire.ts";
+import { type Broadcast, type Produced, registerWire, trackMetaOf, trackOf, wireOf } from "./wire.ts";
 
 export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
 
@@ -745,6 +746,14 @@ export class Consumer {
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
 	track(name: string): track.Consumer {
 		return trackOf(name, this);
+	}
+
+	/**
+	 * Get a lazy handle to a track's metadata: its groups and each frame's header, without the
+	 * payload. See {@link Meta}.
+	 */
+	meta(name: string): Meta.Consumer {
+		return Meta.consumerOf(trackMetaOf(name, this));
 	}
 
 	/**

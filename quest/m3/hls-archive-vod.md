@@ -17,7 +17,7 @@ playlist instead of `2 * segment_length`.
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS audit):
 
 - ✅ Gate archive/VOD indexing in `moq-hls` on metadata-only subscriptions
-  ([subscribe-meta.md](/quest/m2/subscribe-meta.md)) backed by header-only
+  ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) backed by header-only
   archive reads so playlist rendering never downloads media payloads for
   catalog-described renditions (rejected: lazy per-rendition full-object scan
   before metadata-only; synthetic fixed-grid VOD playlist without scanning
@@ -68,8 +68,4 @@ Scope:
      downloads only payload bytes covering that segment's groups.
 
 Public API: additive VOD/range playlist API in `moq-hls`. Wire: none beyond
-[subscribe-meta.md](/quest/m2/subscribe-meta.md).
-
-## Required
-
-- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - metadata-only subscriber API so archive playlist rendering downloads zero media payloads
+metadata subscriptions.

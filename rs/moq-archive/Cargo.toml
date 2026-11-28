@@ -29,7 +29,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
-kio = { workspace = true, features = ["manual"] }
+kio = { path = "../kio", features = ["manual"] }
 moq-crypto = { workspace = true, features = ["provider"] }
 object_store = { workspace = true, features = ["fs", "aws-base", "reqwest"] }
 s3s = "0.17"
