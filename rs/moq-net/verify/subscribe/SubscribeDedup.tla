@@ -15,9 +15,9 @@
 (* whose Max Age has not expired it, in that priority's order, Descending  *)
 (* breaking ties. A group every covering range expired is OLD, named in    *)
 (* SUBSCRIBE_DROP under the widest Max Age that covers it (`Budget::at`,   *)
-(* `Consumer::expired_under`). With `Shed`, it may also give a wanted      *)
-(* group up for stream credit (`give_way`, `shed`), as OLD with no verdict *)
-(* of its own, named under the narrowest live join's Max Age, `0` (no      *)
+(* `Consumer::expired_under`). With `Shed`, it may also drop a wanted      *)
+(* group OLD with no verdict of its own, as when its upstream stream was   *)
+(* reset OLD, named under the narrowest live join's Max Age, `0` (no       *)
 (* limit here) when there is none (`hole`, `Subscription::narrowest`).     *)
 (*                                                                         *)
 (* The relay's copy records a drop under exactly the Max Age the wire      *)
@@ -57,7 +57,7 @@ CONSTANTS
     Prios,        \* the priorities a range may ask
     Orders,       \* the group orders a range may ask, of "asc" and "desc"
     FiniteMaxes,  \* the finite Max Ages a live join may ask, in ages
-    Shed,         \* the publisher may give a wanted group up for stream credit
+    Shed,         \* the publisher may drop a wanted group OLD with no verdict of its own
     FoldPrios,    \* the priorities `FoldRule` mixes, at either order
     FoldMix       \* how many ranges `FoldRule` mixes at most
 
@@ -318,8 +318,8 @@ Judge(g) ==
     /\ verdict' = [verdict EXCEPT ![g] = [kind |-> "judged", m |-> PubJudged(g), age |-> age[g]]]
     /\ UNCHANGED <<edge, relayVars, pubR, pubSnap, sends>>
 
-\* `give_way` or `shed`: a wanted group given up for stream credit, OLD with no verdict
-\* of its own, named under the narrowest live join's Max Age.
+\* `hole`: a wanted group dropped OLD with no verdict of its own, such as one whose upstream
+\* stream was reset OLD, named under the narrowest live join's Max Age.
 GiveUp(g) ==
     /\ Shed
     /\ g <= edge

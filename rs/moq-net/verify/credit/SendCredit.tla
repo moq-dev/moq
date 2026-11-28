@@ -32,7 +32,9 @@
 (* Mixed ranges cover some at another policy: `HistOnly` groups only an    *)
 (* oldest-first history range at a lower priority covers, and `Both`       *)
 (* groups a live join covers too, which ages them into history oldest      *)
-(* first (`poll_policy`). Under `Late`, groups arrive over time, in any    *)
+(* first (`poll_policy`). A waiting group that ages skips its next open    *)
+(* for one cursor pass (`TrackRun::rerank`), so a cached group that now    *)
+(* outranks it goes first. Under `Late`, groups arrive over time, in any   *)
 (* order, rather than all at the start.                                    *)
 (*                                                                         *)
 (* The receiver is abstract: a stream sent whole or reset is eventually    *)
@@ -88,6 +90,7 @@ Above(a, b) ==
 (*             "fin" (sent whole, unlisted), "reset" (preempted), or       *)
 (*             "closed" (freed by the peer)                                *)
 (*   aged:     the `Both` groups aged past the live join, by subscription  *)
+(*   rerank:   per subscription, its waiting group aged since last pass    *)
 (*   opening:  per subscription, the group waiting for credit, or 0        *)
 (*   awake:    per subscription, its `TrackRun` has a wake pending         *)
 (*   asked:    per subscription, its open waits on the transport's credit  *)
@@ -213,10 +216,10 @@ Cursor(x, s, k) ==
     IN [z EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
 
 \* One pass of `TrackRun::poll_step`: the waiting open, then the cursor. A pass that changes
-\* nothing parks the task.
+\* nothing parks the task. A waiting group that aged skips the open for this pass.
 Step(s) ==
     /\ v.awake[s]
-    /\ LET y == PollOpen(v, s)
+    /\ LET y == IF v.rerank[s] THEN [v EXCEPT !.rerank[s] = FALSE] ELSE PollOpen(v, s)
            ready == Admitted(y, s)
        IN IF ready = {}
           THEN v' = IF y = v THEN [v EXCEPT !.awake[s] = FALSE] ELSE y
@@ -233,7 +236,8 @@ CanAge(p) == p[2] \in Both /\ p \notin v.aged /\ \A j \in Both : j < p[2] => <<p
 
 Age(p) ==
     /\ CanAge(p)
-    /\ v' = Wake([v EXCEPT !.aged = v.aged \cup {p}], {p[1]})
+    /\ v' = Wake([v EXCEPT !.aged = v.aged \cup {p},
+                           !.rerank[p[1]] = v.rerank[p[1]] \/ v.opening[p[1]] = p[2]], {p[1]})
 
 \* A serving stream is sent whole and leaves the list; its task wakes the `TrackRun`. A live
 \* group's producer never finishes it.
@@ -253,6 +257,7 @@ Free(p) ==
 Init ==
     v = [st |-> [p \in Pairs |-> IF Late THEN "pending" ELSE "cached"],
          aged |-> {},
+         rerank |-> [s \in Subs |-> FALSE],
          opening |-> [s \in Subs |-> 0],
          awake |-> [s \in Subs |-> TRUE],
          asked |-> [s \in Subs |-> FALSE],
@@ -304,6 +309,7 @@ Weight == Cardinality(Subs) * (1 + 2 * (Scale + 2 * G)) + 1
 Counted == Weight * (SumSet(LAMBDA p: StRank(v.st[p]), Pairs) + Cardinality(v.aged))
            + Cardinality(Placed(v)) + 2 * Waiting(v)
 Waits == Cardinality({s \in Subs : v.asked[s]}) + Cardinality({s \in Subs : ~v.awake[s]})
+         + Cardinality({s \in Subs : ~v.rerank[s]})
 
 Progress ==
     [][\/ Quiet
