@@ -475,8 +475,13 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 	while let Some(item) = track.next_item().await? {
 		// A gap names the starts given up, which are times rather than a count of groups, so
 		// loss is counted from the sequence numbers either side of it instead.
-		let track::Item::Group(mut group) = item else {
-			continue;
+		let mut group = match item {
+			track::Item::Group(group) => group,
+			track::Item::Gap { range, error, .. } => {
+				tracing::debug!(?range, %error, "groups given up");
+				continue;
+			}
+			_ => continue,
 		};
 		let mut number = None;
 		match read_group(&mut group, &mut learned_shape, &mut number, stats).await {
@@ -558,6 +563,9 @@ impl<'a> Sequence<'a> {
 			Some(last) if number > last => number - last - 1,
 			_ => 0,
 		};
+		if skipped > 0 {
+			tracing::debug!(last = ?self.last, number, "groups skipped");
+		}
 		self.last = Some(number);
 		// Grow the denominator first, so a snapshot that acquires `groups_lost` before
 		// reading `groups_expected` never sees more lost than expected.

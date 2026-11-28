@@ -2,10 +2,11 @@
 
 ## Goal
 
-`chat`'s 2,000 viewers join `main`'s relay without it losing a group: over at
+`chat`'s 2,000 viewers join `main`'s relay as smoothly as `release`'s: over at
 least ten alternating rounds of `just bench-relay origin/release quic` on a
-shared host, no `main` round loses more groups than `release`'s worst, and its
-UDP receive queue fills the 16 MiB buffer no more often than `release`'s.
+shared host, `main`'s UDP receive queue drops datagrams no more often than
+`release`'s, and no `main` round delivers a lower `recv_fps` or a higher
+latency p99 than `release`'s worst.
 
 ## Plan
 
@@ -17,10 +18,16 @@ m0, and adding a cut gate first.
 
 Facts:
 
-- In every round that lost groups, the relay's UDP receive queue
-  (`udp_rx_queue_bytes` in `host.jsonl`) was 6.4 MiB or deeper, and in most
-  it filled the 16 MiB buffer and the kernel dropped datagrams. `main` filled
-  it in 8 of 14 rounds, `release` in 1 of 13, on `fedora` at load 29 to 70.
+- The relay's UDP receive queue (`udp_rx_queue_bytes` and `udp_drops` in
+  `host.jsonl`) fills the 16 MiB buffer and the kernel drops datagrams.
+  `main`'s dropped in 7 of 10 rounds and `release`'s in none; with the older
+  arrival-order generator it filled in 8 of 14 `main` rounds and 1 of 13
+  `release` rounds, on `fedora` at load 29 to 70.
+- Read in key order, those rounds deliver 5.5k to 15.8k of the offered 20k
+  frames/s with latency p99 up to 4.5 s, and mostly read 0 `loss_pct`: the
+  groups arrive late, and viewers joining late expect fewer. `loss_pct` does
+  not separate the relays, since `release`'s reads 1.2% to 6.1% from the
+  ordered reader waiting on a relay without drop forwarding.
 - The publisher's group streams reached the relay 2.0 to 2.7 s after the
   publisher opened them, so some arrived past the viewers' 2 s budget and
   others never arrived. No viewer was sent a drop for the groups the relay
