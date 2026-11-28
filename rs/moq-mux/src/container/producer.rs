@@ -277,10 +277,11 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 			.ok_or_else(|| crate::Error::UnsupportedContainer("a streamed frame".into()))?;
 		let group = self.group.take().expect("prepare opens a group");
 		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
-		// The prefix carries the presentation time, and the transport the newest so far, as
-		// [`hang::container::Frame::write_to`] stamps it.
+		// A prefix carrying the presentation time leaves the transport the newest so far, as
+		// [`hang::container::Frame::write_to`] stamps it. A decode-order container's transport
+		// is its timing, so a frame below the group's latest is refused instead.
 		let transport = match group.latest() {
-			Some(latest) if timestamp < latest => latest,
+			Some(latest) if timestamp < latest && !self.container.decode_order() => latest,
 			_ => timestamp,
 		};
 		let mut writer = group.create_frame(moq_net::frame::Info {
@@ -647,6 +648,11 @@ where
 	/// grouping follows the caller's `cut`/`seek` boundaries rather than opening a group per frame.
 	pub fn needs_keyframe(&self) -> bool {
 		self.group.is_none()
+	}
+
+	/// Whether the container reads [`Frame::decode`]; the others drop it.
+	pub(crate) fn decode_order(&self) -> bool {
+		self.container.decode_order()
 	}
 
 	/// One past the track's largest group start, even an empty group's: the lowest start a group
@@ -1662,6 +1668,30 @@ mod tests {
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, None, "PTS spacing alone is not jitter");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
+	}
+
+	/// A streamed frame presenting below its group's latest rides the transport at the latest
+	/// when its prefix carries the presentation time, and is refused where the transport is
+	/// the frame's only timing, as the buffered path refuses it.
+	#[test]
+	fn a_streamed_reordered_frame_is_raised_or_refused() {
+		use crate::container::Kind;
+		for (container, raised) in [
+			(Container::Legacy(Kind::Video), true),
+			(Container::Raw(Kind::Video), false),
+		] {
+			let track = track_producer("video", hang::container::track_info(hang::catalog::PRIORITY.video));
+			let mut producer = Producer::new(track, container);
+			let stream = |producer: &mut Producer<Container>, at: u64, keyframe: bool| {
+				let mut streamed = producer.open(frame(at, keyframe), 2)?;
+				streamed.write(&[0xDE, 0xAD])?;
+				producer.commit(streamed)
+			};
+			stream(&mut producer, 0, true).unwrap();
+			stream(&mut producer, 66_000, false).unwrap();
+			let result = stream(&mut producer, 33_000, false);
+			assert_eq!(result.is_ok(), raised, "{result:?}");
+		}
 	}
 
 	type Rendition = Producer<Container, hang::catalog::VideoConfig>;

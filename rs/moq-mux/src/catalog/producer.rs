@@ -2244,6 +2244,32 @@ mod test {
 		catalog.snapshot().audio.renditions.into_keys().collect()
 	}
 
+	/// A container this build only decodes is refused before its rendition is advertised, and the
+	/// name stays free for a container it can write.
+	#[test]
+	fn a_decode_only_container_publishes_no_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Cts;
+		let info = catalog.track_info(hang::catalog::PRIORITY.audio);
+
+		let net = broadcast.create_track("audio0", info.clone()).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let err = catalog.audio(net, wire, config.clone()).err();
+		assert!(
+			matches!(err, Some(crate::Error::Moq(moq_net::Error::Unsupported))),
+			"{err:?}"
+		);
+		assert!(audio(&catalog).is_empty());
+
+		config.container = Container::Raw;
+		let net = broadcast.create_track("audio0", info).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let _audio = catalog.audio(net, wire, config).unwrap();
+		assert_eq!(audio(&catalog), ["audio0"]);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn a_timestamp_stamps_both_tracks() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();

@@ -750,7 +750,7 @@ export class Publisher {
 			// fill ends exactly where a Next Object subscription begins, which is what lets
 			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
 			// group with no gap and no overlap.
-			const timescale = idTimescale(info, msg.propertiesWanted, version);
+			const timescale = idTimescale(info, version);
 			const edge = liveEdge(track, timescale);
 			const fill =
 				msg.fill && msg.forward && Filter.isDraft20(version)
@@ -2329,7 +2329,7 @@ export class Publisher {
 			try {
 				const broadcast = await this.#resolve(name, hold.signal);
 				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
-				const timescale = idTimescale(info, msg.propertiesWanted, version);
+				const timescale = idTimescale(info, version);
 				const largest = wireOf(broadcast).largest(msg.trackName, timescale);
 				answer = new TrackStatusOk({
 					largest: largest && { groupId: largest.group, objectId: BigInt(largest.frame) },
@@ -2669,10 +2669,11 @@ type FillServe =
 /** Snapshot the live edge of a track. */
 /**
  * The timescale a subscription's moq-timestamp Object IDs count in: a timed track's, on a draft-23+
- * session whose subscriber learns the track's properties. Undefined means dense frame ordinals.
+ * session, whether or not the request asked for track properties, so an Object ID names one frame.
+ * Undefined means dense frame ordinals.
  */
-function idTimescale(info: Info, propertiesWanted: boolean, version: IetfVersion): Timescale | undefined {
-	return propertiesWanted && hasTimestampObjectIds(version) ? (info.timescale ?? undefined) : undefined;
+function idTimescale(info: Info, version: IetfVersion): Timescale | undefined {
+	return hasTimestampObjectIds(version) ? (info.timescale ?? undefined) : undefined;
 }
 
 /**

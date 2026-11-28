@@ -547,7 +547,7 @@ Compression is signaled by the transport, not the catalog or track name; session
 An edge serves a broadcast as HLS/DASH using a fixed segment grid derived solely from `sync.interval` ({{sync-interval}}); broadcasts without `sync.interval` are not served.
 
 - **Segment length**: smallest whole multiple of `sync.interval` that is at least 1 second. Grid lines fall at every multiple of segment length in PTS time.
-- **Placement**: each group spans `[group_start, next_group_start)` (or first frame timestamp if untimed) in transport time, which is decode time on a `cts` track, and belongs to the segment of the first grid line it contains, or if it contains none, the line it starts after. Segments hold whole groups and share numbering across all renditions. A segment starts at its first group's start, or at its grid line when that group starts after it; a gap starts at its line; each lasts until the next segment starts. HLS addresses segments by segment number (media sequence and URL), DASH by `$Time$`.
+- **Placement**: each group spans `[group_start, next_group_start)` (or first frame timestamp if untimed) and belongs to the segment of the first grid line it contains, or if it contains none, the line it starts after. Segments hold whole groups and share numbering across all renditions. A segment starts at its first group's start, or at its grid line when that group starts after it; a gap starts at its line; each lasts until the next segment starts. HLS addresses segments by segment number (media sequence and URL), DASH by `$Time$`.
 - **Gaps & overruns**: a grid line where no group starts a segment is emitted as HLS `EXT-X-GAP` and omitted from DASH `SegmentTimeline`. Overrunning groups stay at their first line; surrounding duration policy is up to the edge.
 - **Durations & listing**: `EXT-X-TARGETDURATION` is `ceil(2 * segment_length / 1000)` seconds (where `segment_length` is in milliseconds). A segment is listed once a later segment starts or the track ends (joining mid-segment waits for the next segment start). Backwards timestamps start a per-rendition discontinuity (`EXT-X-PROGRAM-DATE-TIME` resynchronizes across renditions).
 
@@ -585,7 +585,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- A Group's transport timestamps never decrease: a `legacy` or `loc` publisher stamps a reordered frame at the newest presentation time so far in its Group while its prefix keeps its own, and an HLS or DASH edge places a `cts` track's groups by their decode-time starts.
+- A Group's transport timestamps never decrease: a `legacy` or `loc` publisher stamps a reordered frame at the newest presentation time so far in its Group while its prefix keeps its own.
 - An HLS or DASH edge places a group on the segment grid by its start rather than its first frame's timestamp, and a hole between groups whose skipped starts the publisher declared is no playhead event.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.

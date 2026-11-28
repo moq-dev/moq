@@ -128,6 +128,14 @@ impl ContainerTrait for Container {
 		}
 	}
 
+	fn writable(&self) -> Result<(), Self::Error> {
+		match self {
+			Self::Cts(kind) => cts::Wire(*kind).writable(),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).writable(),
+			_ => Ok(()),
+		}
+	}
+
 	fn decode_order(&self) -> bool {
 		matches!(
 			self,

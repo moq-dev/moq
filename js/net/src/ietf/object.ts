@@ -392,9 +392,9 @@ export class Frame {
 	static decode(c: Cursor, flags: GroupFlags, offset = false, sparse = false): Frame {
 		let delta = 0;
 		if (flags.hasSubgroupObject) {
-			// A compact stream's first Object ID is its subgroup and any later delta a gap.
-			// Neither is supported, so refuse one of any size before the rest of the object
-			// can fail differently.
+			// A compact stream's first Object ID is its subgroup, and only subgroup 0 is
+			// supported, so refuse one of any size before the rest of the object can fail
+			// differently. Later objects carry plain deltas: decode them without this flag.
 			const id = c.varint();
 			if (!id.equals(U64.ZERO)) throw new ObjectIdGap(id);
 		} else {

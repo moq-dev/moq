@@ -845,6 +845,31 @@ test("a received frame's time is Group ID + Object ID - TIMESTAMP_TIE in ID_TIME
 	track.close();
 });
 
+test("a compact subgroup stream's later objects carry sparse timestamp ID deltas", async () => {
+	const { subscriber, track } = await subscribeTrack({
+		version: Version.DRAFT_23,
+		properties: { timescale: Timescale.MICRO },
+	});
+	// The first Object ID names subgroup 0; the next delta of 32 is Object ID 33.
+	const objects = new Uint8Array([0, 1, 42, 32, 1, 43]);
+	const header = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 7n,
+		subGroupId: 0n,
+		publisherPriority: 0,
+		flags: { ...groupFlags(true), hasSubgroupObject: true },
+	});
+	await subscriber.handleGroup(header, new Reader(undefined, objects, Version.DRAFT_23));
+	const group = await track.ordered().nextGroup();
+	const first = await group?.readFrame();
+	expect(first?.timestamp).toEqual(new Timestamp(7, Timescale.MICRO));
+	const second = await group?.readFrame();
+	expect(second?.payload).toEqual(new Uint8Array([43]));
+	expect(second?.timestamp).toEqual(new Timestamp(40, Timescale.MICRO));
+	expect(track.closed.peek()).toBeUndefined();
+	track.close();
+});
+
 test("a group whose key no timestamp holds is refused, not the track", async () => {
 	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
 	const reader = new Reader(undefined, encodeStamped([]), VERSION);

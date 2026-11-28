@@ -111,6 +111,15 @@ fn track_properties(
 		}
 		unknown.retain(|property| property.id != 0x06);
 	}
+	// Draft-23 frees 0x08 (LOC uses it), which before draft-23 is the transport TIMESCALE
+	// this egress restates: forwarding it would duplicate that, or time an untimed track.
+	if track.version.timestamp_object_ids() && !version.timestamp_object_ids() {
+		let legacy = super::properties::LEGACY_TIMESCALE;
+		if track.sealed().any(|id| id == legacy) {
+			return Err(Error::Unsupported);
+		}
+		unknown.retain(|property| property.id != legacy);
+	}
 	// Sealed ID_TIMESCALE (0x40B70) declares sparse moq-timestamp Object IDs, which would
 	// contradict dense pre-Draft23 egress Object IDs.
 	if !version.timestamp_object_ids() && track.sealed().any(|id| id == 0x40B70) {
@@ -2065,8 +2074,7 @@ impl SubscribeTrack {
 		// ends exactly where a Next Object subscription begins, which is what lets the draft's
 		// current-group join (Next Object plus a StartGroup=1 fill) cover the group with no gap
 		// and no overlap.
-		let timed =
-			publisher.version.timestamp_object_ids() && msg.properties_wanted && subscribed.info().timescale.is_some();
+		let timed = publisher.version.timestamp_object_ids() && subscribed.info().timescale.is_some();
 		let edge = live_edge_for(track, timed);
 		// Refused above, before subscribing, as anything else that counts groups back.
 		let Ok(mut range) = filter_range(msg.filter, edge) else {
@@ -2090,7 +2098,7 @@ impl SubscribeTrack {
 			publisher.version,
 			range,
 		)
-		.timed(msg.properties_wanted)
+		.timed(true)
 		.compression(flate)
 		.ranked(publisher.priority.clone());
 		serve.filter = msg.filter;
@@ -5196,7 +5204,7 @@ impl FetchOpen {
 		// Draft-23 (section 3.2) names the Largest Object when the requested range reaches it,
 		// and the answer then ends there. A one-group range reaches it only in the group that
 		// holds it, read past it.
-		let timed = self.properties_wanted && version.timestamp_object_ids();
+		let timed = version.timestamp_object_ids();
 		let largest = fetch_largest(&track, joined, timed)
 			.filter(|_| ietf::FetchOk::id(version) != ietf::FetchOk::ID)
 			.filter(|largest| largest.group == key && until.is_none_or(|until| largest.object < until));
@@ -5384,7 +5392,7 @@ impl FetchOpen {
 					else {
 						unreachable!("waiting on SETUP");
 					};
-					let timed = self.properties_wanted && self.publisher.version.timestamp_object_ids();
+					let timed = self.publisher.version.timestamp_object_ids();
 					let prepare =
 						FetchPreparing::new(track, range, largest_filter, joined, self.priority, compression, timed);
 					self.state = FetchState::Prepare {
@@ -6853,7 +6861,8 @@ impl TrackServe {
 		}
 	}
 
-	/// Enable sparse timestamp Object IDs when `ID_TIMESCALE` was delivered on this request.
+	/// Enable sparse timestamp Object IDs on a timed draft-23+ track. They never depend on
+	/// whether the request asked for track properties, so an Object ID names one frame.
 	fn timed(mut self, timed: bool) -> Self {
 		self.timed = timed && self.version.timestamp_object_ids() && self.track.info().timescale.is_some();
 		self
@@ -12469,6 +12478,30 @@ mod serve_tests {
 		}
 	}
 
+	/// A draft-23 timed track's Object IDs are its timestamps whether or not the request asked
+	/// for Track Properties, so one Object ID names one frame on every request.
+	#[kio::test]
+	async fn timestamp_object_ids_ignore_properties_wanted() {
+		for wanted in [true, false] {
+			let mut h = serve(Version::Draft23);
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"t0".as_slice())
+				.unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(7).unwrap(), b"t1".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+
+			let mut msg = subscribe(Filter::Unfiltered, None);
+			msg.properties_wanted = wanted;
+			run_live(&mut h, msg).await;
+
+			// Object ID 7 follows 0 as delta 6, with an empty properties block.
+			assert_eq!(occurrences(&h.log, &[6, 0, 2, b't', b'1']), 1, "wanted={wanted}");
+		}
+	}
+
 	/// Dispatch one request stream, returning the refusal code it wrote.
 	///
 	/// `handle_stream` returning `Ok` is what keeps the session open: the dispatch loop
@@ -15790,6 +15823,51 @@ mod serve_tests {
 				"hop={hop}"
 			);
 		}
+	}
+
+	/// Draft 23 frees 0x08 for LOC's TIMESCALE, which before draft 23 is the transport
+	/// TIMESCALE: it crosses back as 0x06 does, dropped when mutable, refused when sealed.
+	#[test]
+	fn track_property_0x08_does_not_cross_to_draft_22() {
+		let upstream = |block: &[u8]| {
+			let properties =
+				crate::coding::decode_buf(&mut bytes::Bytes::copy_from_slice(block), Version::Draft23, |r, v| {
+					ietf::Properties::decode(r, v)
+				})
+				.unwrap();
+			track::Info {
+				properties: Some(Arc::new(crate::model::object::TrackProperties {
+					version: Version::Draft23,
+					values: properties.unknown,
+				})),
+				..track::Info::timed()
+			}
+		};
+		let ids = |properties: ietf::Properties| properties.unknown.iter().map(|p| p.id).collect::<Vec<_>>();
+
+		// 0x08 = 90000, 0x3801 = "hi"
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, Version::Draft23.into());
+		w.varint(0x08).unwrap();
+		w.varint(90_000).unwrap();
+		w.varint(0x3801 - 0x08).unwrap();
+		w.bytes(b"hi").unwrap();
+		let mutable = upstream(&block);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft23, true).unwrap()),
+			[0x08, 0x3801]
+		);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft22, true).unwrap()),
+			[0x3801]
+		);
+
+		let sealed = upstream(&[0x0b, 2, 0x08, 42]);
+		assert!(track_properties(&sealed, true, Version::Draft23, true).is_ok());
+		assert!(matches!(
+			track_properties(&sealed, true, Version::Draft22, true),
+			Err(Error::Unsupported)
+		));
 	}
 
 	/// A range ending inside its group stops at its End Object, which draft 22 counts

@@ -97,6 +97,7 @@ impl Live {
 		};
 		for frame in &entry.frames {
 			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
+			let timestamp = replayed(timestamp, open.group.latest());
 			open.group.write_frame(timestamp, frame.payload.clone())?;
 			open.next += 1;
 		}
@@ -349,13 +350,20 @@ async fn serve_group<S: ObjectStore>(
 	let Ok(Some(mut producer)) = fill.accept(sequence, None) else {
 		return;
 	};
+	// Raised from the group's first stored frame on, skipped ones included, so a read
+	// starting mid-group serves each frame the timestamp a whole read does.
+	let mut latest = None;
 	for (index, stored) in stored {
-		if index < frame {
-			continue;
-		}
 		let written = timestamp(stored.timestamp, timescale, sequence)
 			.map_err(|_| moq_net::Error::ProtocolViolation)
-			.and_then(|timestamp| producer.write_frame(timestamp, stored.payload.clone()));
+			.and_then(|timestamp| {
+				let timestamp = replayed(timestamp, latest);
+				latest = Some(timestamp);
+				if index < frame {
+					return Ok(());
+				}
+				producer.write_frame(timestamp, stored.payload.clone())
+			});
 		if let Err(err) = written {
 			tracing::warn!(sequence, %err, "archived group is malformed");
 			let _ = producer.abort(err);
@@ -382,6 +390,16 @@ pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
 }
 
 /// A stored timestamp on its track, which must be timed exactly when the frame is.
+/// A stored frame's timestamp, raised to the newest before it in its group: an archive
+/// recorded before groups refused decreasing timestamps, or from an unchecked lite-05/06
+/// copy, may hold one, which a `legacy` payload's own presentation time makes harmless.
+fn replayed(timestamp: Timestamp, latest: Option<Timestamp>) -> Timestamp {
+	match latest {
+		Some(latest) if timestamp < latest => latest,
+		_ => timestamp,
+	}
+}
+
 fn timestamp(value: Option<u64>, timescale: Option<Timescale>, sequence: u64) -> Result<Timestamp> {
 	match (value, timescale) {
 		(Some(value), Some(timescale)) => Timestamp::new(value, timescale).map_err(|_| Error::Id(value)),

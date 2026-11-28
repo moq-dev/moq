@@ -1995,7 +1995,9 @@ export class Subscriber {
 			// through it, at or past the Object ID the head ends before (see Join).
 			const join = subscription.join?.key === group.groupId ? subscription.join : undefined;
 			let first = join?.outstanding === true;
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, first, sparse);
+			// Only the first object's ID names a compact stream's subgroup; later ones are deltas.
+			let flags = group.flags;
+			const decode = (c: Cursor) => Frame.decode(c, flags, first, sparse);
 			let priorObject: bigint | undefined;
 			// A Prior Group ID Gap is applied once per group.
 			let gapped = false;
@@ -2007,6 +2009,7 @@ export class Subscriber {
 				const frame =
 					stream.tryDecode(decode) ??
 					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
+				if (flags.hasSubgroupObject) flags = { ...flags, hasSubgroupObject: false };
 				if (!producer && (frame === null || frame instanceof Error)) {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;

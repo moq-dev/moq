@@ -1928,7 +1928,12 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 		}
 		let timestamp = placement.offset.apply(sample.timestamp)?;
-		let decode = sample.decode().map(|decode| placement.offset.apply(decode)).transpose()?;
+		// Mapped only where read: an edit list can place the first decode time before the
+		// clock's zero even though its presentation time maps to it.
+		let decode = match producer.decode_order() {
+			true => sample.decode().map(|decode| placement.offset.apply(decode)).transpose()?,
+			false => None,
+		};
 		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;
 		let frame = crate::container::Frame {
 			timestamp,

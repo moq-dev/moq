@@ -28,6 +28,12 @@ impl Container for Wire {
 		true
 	}
 
+	// Not advertised yet: a draft-18..22 hop stamps every object at its Group ID, losing the
+	// decode time the offset counts from, and the binding frame APIs carry no decode time.
+	fn writable(&self) -> Result<(), Self::Error> {
+		Err(moq_net::Error::Unsupported.into())
+	}
+
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		// The offset is unsigned: a frame never presents before it decodes.
 		match frame.decode.is_some_and(|decode| frame.timestamp < decode) {

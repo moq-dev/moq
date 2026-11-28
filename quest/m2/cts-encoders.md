@@ -19,13 +19,14 @@ The timestamp work
 timestamps never decrease and landed the pieces this builds on:
 
 - `moq_mux::container::Frame::decode` and `Container::decode_order`: a `cts` or
-  `raw` producer groups by decode time and writes it to the transport, and the
-  `cts` container writes.
+  `raw` producer groups by decode time and writes it to the transport. The
+  `cts` writer exists and is unit tested, but `cts::Wire::writable` still
+  refuses it, so no catalog advertises a `cts` rendition yet.
 - `legacy` and `loc` stamp the transport with the newest presentation time so
   far in the group, keeping each frame's own in the payload, so B-frame imports
   keep working without `cts`.
-- MPEG-TS, FLV, and fMP4 importers already fill `decode`; they still default to
-  `legacy`.
+- FLV and fMP4 importers fill `decode` (fMP4 only for a decode-order output);
+  MPEG-TS does not yet. All three still default to `legacy`.
 
 Switching the defaults there failed about 40 moq-mux tests whose splice,
 open-GOP, and leading-picture handling is keyed by presentation time (for
@@ -33,7 +34,8 @@ example `video_continuing_keeps_a_leading_picture_below_its_start`,
 `h264_join_drops_a_leading_picture_before_the_old_content_ends`,
 `open_gop_spans_hold_no_other_start`, and the TS recovery tests). Rework the
 producer's decode-order grouping until those behaviors hold on a `cts` track,
-then flip the defaults.
+fill `decode` in the MPEG-TS importer, let `cts::Wire::writable` pass, then
+flip the defaults.
 
 Open questions:
 
@@ -46,4 +48,10 @@ Open questions:
   list on a verbatim timebase) then shifts that track's presentation times;
   decide how the timebase keeps decode times non-negative.
 - libmoq and moq-ffi frame APIs carry no decode time, so a binding cannot
-  publish reordered `cts`.
+  publish reordered `cts`: keep `cts` refused there until they do.
+- A moq-transport draft-18..22 hop carries dense Object IDs and stamps every
+  object at its Group ID, losing the decode time a `cts` offset counts from
+  (`legacy` survives, since its payload holds the presentation time). Decide
+  whether a `cts` track refuses such a hop or the hop stays unsupported.
+- The HLS export refuses `cts` renditions (`rs/moq-hls/src/export/rendition.rs`);
+  serve them, placing groups by their transport (decode-time) starts.

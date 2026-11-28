@@ -3021,7 +3021,7 @@ test("LARGEST_OBJECT is the live edge", async () => {
 	}
 });
 
-/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects stay dense without ID_TIMESCALE. */
+/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; draft-23 Object IDs stay timestamps either way. */
 test.each([
 	[ALPN.DRAFT_20, Version.DRAFT_20],
 	[ALPN.DRAFT_22, Version.DRAFT_22],
@@ -3050,7 +3050,7 @@ test.each([
 		const served = await nextUni(fx.uni);
 		const reader = new Reader(served, undefined, version);
 		const header = await GroupMessage.decode(reader, version);
-		const expectsTimedIds = propertiesWanted && version === Version.DRAFT_23;
+		const expectsTimedIds = version === Version.DRAFT_23;
 		expect(header.flags.hasExtensions).toBe(expectsTimedIds);
 
 		await reader.u53(); // object id delta
@@ -5268,7 +5268,7 @@ test("a max age is never sent as MAX_CACHE_DURATION", () => {
 	expect(properties.maxCacheDuration).toBeUndefined();
 });
 
-test("draft-23: TRACK_STATUS reports sparse objectLargest only when properties are wanted", async () => {
+test("draft-23: TRACK_STATUS reports sparse objectLargest whether or not properties are wanted", async () => {
 	const version = Version.DRAFT_23;
 	for (const propertiesWanted of [true, false]) {
 		const pair = createMockTransportPair(ALPNS[version]);
@@ -5285,7 +5285,7 @@ test("draft-23: TRACK_STATUS reports sparse objectLargest only when properties a
 		const r = wire();
 		expect(await r.u53()).toBe(TrackStatusOk.id);
 		const ok = await TrackStatusOk.decode(r, version);
-		expect(ok.largest).toEqual({ groupId: 1000n, objectId: propertiesWanted ? 33n : 1n });
+		expect(ok.largest).toEqual({ groupId: 1000n, objectId: 33n });
 		origin.close();
 	}
 });
