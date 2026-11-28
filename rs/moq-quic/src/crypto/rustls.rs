@@ -11,7 +11,7 @@ use rustls::{
 
 use crate::{
 	ConnectionId, Side, TransportError, TransportErrorCode,
-	crypto::{self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys},
+	crypto::{self, CryptoError, HandshakeData, HeaderKey, KeyPair, Keys},
 	endpoint::ConnectError,
 	transport_parameters::TransportParameters,
 };
@@ -28,18 +28,50 @@ impl From<Side> for rustls::Side {
 /// A rustls TLS session
 pub(crate) struct TlsSession {
 	version: Version,
-	got_handshake_data: bool,
 	next_secrets: Option<Secrets>,
-	inner: Connection,
 	initial: Suite,
+	state: Tls,
+}
+
+/// Whether rustls still runs the session.
+enum Tls {
+	/// rustls drives the handshake, and on a client stays to read session tickets after it.
+	Live {
+		/// Boxed, so a confirmed session is not as large as rustls' own state.
+		inner: Box<Connection>,
+		got_handshake_data: bool,
+	},
+	/// A confirmed server's outcome, kept after rustls and its handshake buffers are freed: a
+	/// QUIC client sends nothing after its Finished. The TLS exporter secret goes with rustls,
+	/// so anything bound to it must be derived before this state.
+	Confirmed {
+		handshake: HandshakeData,
+		peer: Option<Vec<CertificateDer<'static>>>,
+	},
 }
 
 impl TlsSession {
-	fn side(&self) -> Side {
-		match self.inner {
-			Connection::Client(_) => Side::Client,
-			Connection::Server(_) => Side::Server,
+	fn new(version: Version, inner: Connection, initial: Suite) -> Self {
+		Self {
+			version,
+			next_secrets: None,
+			initial,
+			state: Tls::Live {
+				inner: Box::new(inner),
+				got_handshake_data: false,
+			},
 		}
+	}
+}
+
+/// What `inner` negotiated: its ALPN and, on a server, the client's SNI.
+fn negotiated(inner: &Connection) -> HandshakeData {
+	HandshakeData {
+		alpn: inner.alpn_protocol().map(|x| x.into()),
+		server_name: match inner {
+			Connection::Client(_) => None,
+			Connection::Server(session) => session.server_name().map(|x| x.into()),
+		},
 	}
 }
 
@@ -49,30 +81,44 @@ impl crypto::Session for TlsSession {
 	}
 
 	fn handshake_data(&self) -> Option<HandshakeData> {
-		if !self.got_handshake_data {
-			return None;
+		match &self.state {
+			Tls::Live {
+				got_handshake_data: false,
+				..
+			} => None,
+			Tls::Live { inner, .. } => Some(negotiated(inner)),
+			Tls::Confirmed { handshake, .. } => Some(handshake.clone()),
 		}
-		Some(HandshakeData {
-			alpn: self.inner.alpn_protocol().map(|x| x.into()),
-			server_name: match &self.inner {
-				Connection::Client(_) => None,
-				Connection::Server(session) => session.server_name().map(|x| x.into()),
-			},
-		})
 	}
 
 	fn peer_identity(&self) -> Option<Vec<CertificateDer<'static>>> {
-		let chain = self.inner.peer_certificates()?;
-		Some(chain.iter().map(|cert| cert.clone().into_owned()).collect())
+		match &self.state {
+			Tls::Live { inner, .. } => Some(inner.peer_certificates()?.to_vec()),
+			Tls::Confirmed { peer, .. } => peer.clone(),
+		}
 	}
 
 	fn is_handshaking(&self) -> bool {
-		self.inner.is_handshaking()
+		match &self.state {
+			Tls::Live { inner, .. } => inner.is_handshaking(),
+			Tls::Confirmed { .. } => false,
+		}
 	}
 
 	fn read_handshake(&mut self, buf: &[u8]) -> Result<bool, TransportError> {
-		self.inner.read_hs(buf).map_err(|e| {
-			if let Some(alert) = self.inner.alert() {
+		let Tls::Live {
+			inner,
+			got_handshake_data,
+		} = &mut self.state
+		else {
+			// What rustls answers any message a client sends after its Finished.
+			return Err(TransportError::new(
+				TransportErrorCode::crypto(rustls::AlertDescription::UnexpectedMessage.into()),
+				"TLS message after the handshake".into(),
+			));
+		};
+		inner.read_hs(buf).map_err(|e| {
+			if let Some(alert) = inner.alert() {
 				TransportError {
 					code: TransportErrorCode::crypto(alert.into()),
 					frame: None,
@@ -83,16 +129,16 @@ impl crypto::Session for TlsSession {
 				TransportError::PROTOCOL_VIOLATION(format!("TLS error: {e}"))
 			}
 		})?;
-		if !self.got_handshake_data {
+		if !*got_handshake_data {
 			// Hack around the lack of an explicit signal from rustls to reflect ClientHello being
 			// ready on incoming connections, or ALPN negotiation completing on outgoing
 			// connections.
-			let have_server_name = match &self.inner {
+			let have_server_name = match inner.as_ref() {
 				Connection::Client(_) => false,
 				Connection::Server(session) => session.server_name().is_some(),
 			};
-			if self.inner.alpn_protocol().is_some() || have_server_name || !self.is_handshaking() {
-				self.got_handshake_data = true;
+			if inner.alpn_protocol().is_some() || have_server_name || !inner.is_handshaking() {
+				*got_handshake_data = true;
 				return Ok(true);
 			}
 		}
@@ -100,9 +146,17 @@ impl crypto::Session for TlsSession {
 	}
 
 	fn transport_parameters(&self) -> Result<Option<TransportParameters>, TransportError> {
-		match self.inner.quic_transport_parameters() {
+		let Tls::Live { inner, .. } = &self.state else {
+			// Read during the handshake only, so a confirmed session no longer holds them.
+			return Ok(None);
+		};
+		let side = match inner.as_ref() {
+			Connection::Client(_) => Side::Client,
+			Connection::Server(_) => Side::Server,
+		};
+		match inner.quic_transport_parameters() {
 			None => Ok(None),
-			Some(buf) => match TransportParameters::read(self.side(), &mut io::Cursor::new(buf)) {
+			Some(buf) => match TransportParameters::read(side, &mut io::Cursor::new(buf)) {
 				Ok(params) => Ok(Some(params)),
 				Err(e) => Err(e.into()),
 			},
@@ -110,7 +164,10 @@ impl crypto::Session for TlsSession {
 	}
 
 	fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
-		let keys = match self.inner.write_hs(buf)? {
+		let Tls::Live { inner, .. } = &mut self.state else {
+			return None;
+		};
+		let keys = match inner.write_hs(buf)? {
 			KeyChange::Handshake { keys } => keys,
 			KeyChange::OneRtt { keys, next } => {
 				self.next_secrets = Some(next);
@@ -128,6 +185,21 @@ impl crypto::Session for TlsSession {
 				remote: Box::new(keys.remote.packet),
 			},
 		})
+	}
+
+	fn confirmed(&mut self) {
+		// A client stays live to read the session tickets a server may send at any time.
+		let Tls::Live { inner, .. } = &self.state else {
+			return;
+		};
+		if !matches!(**inner, Connection::Server(_)) {
+			return;
+		}
+		debug_assert!(!inner.is_handshaking(), "confirmed before the handshake completed");
+		self.state = Tls::Confirmed {
+			handshake: negotiated(inner),
+			peer: inner.peer_certificates().map(<[_]>::to_vec),
+		};
 	}
 
 	fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn crypto::PacketKey>>> {
@@ -161,18 +233,6 @@ impl crypto::Session for TlsSession {
 
 		let (aad, tag) = pseudo_packet.split_at_mut(tag_start);
 		key.open_in_place(nonce, aad, tag).is_ok()
-	}
-
-	fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), ExportKeyingMaterialError> {
-		self.inner
-			.export_keying_material(output, label, Some(context))
-			.map_err(|_| ExportKeyingMaterialError)?;
-		Ok(())
 	}
 }
 
@@ -256,13 +316,7 @@ impl crypto::ClientConfig for QuicClientConfig {
 			.to_owned();
 		let inner = rustls::quic::ClientConnection::new(self.inner.clone(), version, server_name, to_vec(params))
 			.map_err(ConnectError::Tls)?;
-		Ok(Box::new(TlsSession {
-			version,
-			got_handshake_data: false,
-			next_secrets: None,
-			inner: Connection::Client(inner),
-			initial,
-		}))
+		Ok(Box::new(TlsSession::new(version, Connection::Client(inner), initial)))
 	}
 }
 
@@ -314,13 +368,7 @@ impl crypto::ServerConfig for QuicServerConfig {
 				crypto: Some(Arc::new(e)),
 			}
 		})?;
-		Ok(Box::new(TlsSession {
-			version,
-			got_handshake_data: false,
-			next_secrets: None,
-			inner: Connection::Server(inner),
-			initial,
-		}))
+		Ok(Box::new(TlsSession::new(version, Connection::Server(inner), initial)))
 	}
 
 	fn initial_keys(&self, version: crate::Version, dst_cid: ConnectionId) -> Option<Keys> {

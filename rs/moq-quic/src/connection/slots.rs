@@ -4,12 +4,17 @@ use std::ops::{Bound, RangeBounds};
 /// Slots per chunk, one bit each in [`Chunk::mask`].
 pub(super) const CHUNK: usize = 64;
 
+/// Slots a chunk allocates until a packet number passes them, so an idle connection's few
+/// packets in flight, such as a keep-alive's, hold a fraction of a full chunk.
+const FIRST: usize = 4;
+
 /// Entries keyed by increasing packet numbers, in chunks of [`CHUNK`] consecutive slots.
 ///
 /// A port of [quinn-rs/quinn#2942](https://github.com/quinn-rs/quinn/pull/2942). Lookups near
 /// either end are O(1), the rest O(log chunks). An emptied chunk is freed wherever it sits, so an
 /// entry outliving its neighbors holds at most one chunk, rather than every slot after it as one
-/// ring of packet numbers would.
+/// ring of packet numbers would. A chunk allocates [`FIRST`] slots, and all [`CHUNK`] only once
+/// its packet numbers pass them.
 pub(super) struct Slots<T> {
 	chunks: VecDeque<Chunk<T>>,
 }
@@ -17,7 +22,8 @@ pub(super) struct Slots<T> {
 struct Chunk<T> {
 	/// The packet number of slot 0.
 	offset: u64,
-	slots: Box<[Option<T>; CHUNK]>,
+	/// [`FIRST`] or [`CHUNK`] slots.
+	slots: Box<[Option<T>]>,
 	/// Bit `i` is set when slot `i` holds an entry; never zero.
 	mask: u64,
 }
@@ -44,11 +50,17 @@ impl<T> Slots<T> {
 		if let Some(chunk) = self.chunks.back_mut()
 			&& let Some(slot) = chunk.slot(pn)
 		{
+			if slot >= chunk.slots.len() {
+				let mut slots = std::mem::take(&mut chunk.slots).into_vec();
+				slots.reserve_exact(CHUNK - slots.len());
+				slots.resize_with(CHUNK, || None);
+				chunk.slots = slots.into_boxed_slice();
+			}
 			chunk.slots[slot] = Some(value);
 			chunk.mask |= 1 << slot;
 			return;
 		}
-		let mut slots = Box::new([const { None }; CHUNK]);
+		let mut slots: Box<[Option<T>]> = std::iter::repeat_with(|| None).take(FIRST).collect();
 		slots[0] = Some(value);
 		self.chunks.push_back(Chunk {
 			offset: pn,
@@ -78,14 +90,14 @@ impl<T> Slots<T> {
 
 	pub(super) fn get(&self, pn: u64) -> Option<&T> {
 		let chunk = &self.chunks[self.chunk(pn)?];
-		chunk.slots[chunk.slot(pn)?].as_ref()
+		chunk.slots.get(chunk.slot(pn)?)?.as_ref()
 	}
 
 	pub(super) fn remove(&mut self, pn: u64) -> Option<T> {
 		let index = self.chunk(pn)?;
 		let chunk = &mut self.chunks[index];
 		let slot = chunk.slot(pn)?;
-		let value = chunk.slots[slot].take()?;
+		let value = chunk.slots.get_mut(slot)?.take()?;
 		chunk.mask &= !(1 << slot);
 		if chunk.mask == 0 {
 			self.chunks.remove(index);
@@ -146,13 +158,13 @@ impl<T> Slots<T> {
 	pub(super) fn into_values(self) -> impl Iterator<Item = T> {
 		self.chunks
 			.into_iter()
-			.flat_map(|chunk| chunk.slots.into_iter().flatten())
+			.flat_map(|chunk| chunk.slots.into_vec().into_iter().flatten())
 	}
 
 	/// Slots allocated, present or not.
 	#[cfg(test)]
 	pub(super) fn slots(&self) -> usize {
-		self.chunks.len() * CHUNK
+		self.chunks.iter().map(|chunk| chunk.slots.len()).sum()
 	}
 
 	/// The index of the only chunk that may hold `pn`, checking the newest and oldest first.
@@ -212,7 +224,8 @@ mod tests {
 		for pn in [0, 1, 10, 10 * N, 10 * N + 3, 30 * N] {
 			slots.insert(pn, pn);
 		}
-		assert_eq!(slots.slots(), 3 * CHUNK);
+		// The first chunk grew past its first slots; the other two still fit in theirs.
+		assert_eq!(slots.slots(), CHUNK + 2 * FIRST);
 		for pn in [0, 1, 10, 10 * N, 10 * N + 3, 30 * N] {
 			assert_eq!(slots.get(pn), Some(&pn));
 		}
