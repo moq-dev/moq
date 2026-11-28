@@ -77,12 +77,12 @@ impl Refusals {
 	}
 	/// Add every kind from another readout.
 	pub fn add(&mut self, other: Self) {
-		self.refused += other.refused;
-		self.unavailable += other.unavailable;
-		self.request += other.request;
-		self.forbidden += other.forbidden;
-		self.membership += other.membership;
-		self.expired += other.expired;
+		self.refused = self.refused.saturating_add(other.refused);
+		self.unavailable = self.unavailable.saturating_add(other.unavailable);
+		self.request = self.request.saturating_add(other.request);
+		self.forbidden = self.forbidden.saturating_add(other.forbidden);
+		self.membership = self.membership.saturating_add(other.membership);
+		self.expired = self.expired.saturating_add(other.expired);
 	}
 	/// Whether any cumulative count went backwards.
 	pub fn regressed(&self, previous: &Self) -> bool {
@@ -200,10 +200,10 @@ impl Failures {
 	}
 	/// Add every kind from another readout.
 	pub fn add(&mut self, other: Self) {
-		self.idle_timeout += other.idle_timeout;
-		self.transport += other.transport;
-		self.application += other.application;
-		self.expired += other.expired;
+		self.idle_timeout = self.idle_timeout.saturating_add(other.idle_timeout);
+		self.transport = self.transport.saturating_add(other.transport);
+		self.application = self.application.saturating_add(other.application);
+		self.expired = self.expired.saturating_add(other.expired);
 	}
 	/// Whether any cumulative count went backwards.
 	pub fn regressed(&self, previous: &Self) -> bool {

@@ -125,7 +125,13 @@ pub struct Consumer {
 impl Consumer {
 	/// Wrap an origin consumer. `config`'s `prefix` must match the producing
 	/// side.
+	///
+	/// # Panics
+	///
+	/// If `config.grace` is zero: a returning node's counters would be folded
+	/// into the total and then added again.
 	pub fn new(origin: origin::Consumer, config: Config) -> Self {
+		assert!(!config.grace.is_zero(), "aggregate grace must be non-zero");
 		Self { origin, config }
 	}
 
