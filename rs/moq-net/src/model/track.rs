@@ -37303,6 +37303,95 @@ mod test {
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 	}
 
+	/// Forgetting untold gaps across a multi-range subscription with mixed budgets must not
+	/// reopen `forgotten_debt` on subsequent live probes while the budgets are unchanged, and
+	/// must still reopen once a forgotten segment's budget widens.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_mixed_budget_debt_fold_does_not_reopen_without_widening() {
+		let pool = crate::cache::Pool::new(crate::cache::Config::default());
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let mut producer = Producer::new(broadcast, "test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(200).unwrap();
+		write_group(&producer, 200);
+		write_group(&producer, 500);
+		producer.drop_groups(501..2000, StreamError::NotFound);
+		write_group(&producer, 2000);
+		let sub = Subscription::default().with_ranges([
+			Range {
+				start: Start::Live {
+					min: None,
+					max: Some(Duration::from_millis(100)),
+				},
+				end: Some(200),
+			},
+			Range {
+				start: Start::Time(500),
+				end: None,
+			},
+		]);
+		let mut subscriber = producer.subscribe(sub);
+		let waiter = kio::Waiter::noop();
+		// Restrict owed drops to 2000.. so untold gaps across both the 100 ms range (0..200)
+		// and the unbounded history range (501..2000) are forgotten under debt.
+		let mut owed = RangeSet::new();
+		owed.insert(2000..u64::MAX);
+		subscriber.set_drop_owed(owed);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert_eq!(drain_groups(&mut subscriber), [2000, 500]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+
+		pool.resize(1);
+		subscriber.settle_record(None);
+		// Evict 501..2000 from state.drops and mark the track unfed so a spurious reopen of
+		// forgotten_debt under unchanged mixed budgets would immediately ask a fill for 501..2000.
+		producer.set_unfed(true);
+		producer.forget_drops(501..2000);
+
+		// A live wake with unchanged mixed budgets must not reopen the forgotten span or
+		// ask fills again.
+		let mut next = producer.create_group(group::Info { start: 2001 }).unwrap();
+		next.write_frame(Timestamp::from_millis(2001).unwrap(), &b"x"[..])
+			.unwrap();
+		next.finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [2001]);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"unchanged mixed budgets must not reopen forgotten_debt"
+		);
+
+		// Widening the 100 ms segment to 2 s (covering 0..200, age 1801 ms <= 2 s) must reopen
+		// and ask a fill for 0..200.
+		let widened = Subscription::default().with_ranges([
+			Range {
+				start: Start::Live {
+					min: None,
+					max: Some(Duration::from_secs(2)),
+				},
+				end: Some(200),
+			},
+			Range {
+				start: Start::Time(500),
+				end: None,
+			},
+		]);
+		subscriber.update(widened).unwrap();
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("widening the 100 ms segment to 2 s must reopen 0..201");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 201));
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"widening 0..201 must not reopen the unchanged 501..2000 segment"
+		);
+	}
+
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds
 	/// it as a stale verdict under that age rather than a loss for good: the readers waiting now
 	/// are refused, a later reader no wider is settled without asking, and once the verdict is

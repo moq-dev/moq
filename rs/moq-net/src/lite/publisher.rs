@@ -12441,6 +12441,56 @@ mod serve_group_test {
 		}
 	}
 
+	/// If a serving copy first adopts UNROUTABLE for a gap and later receives an upstream SKIP
+	/// for those same keys, refreshing the adopted verdict ensures that even if the shared drop
+	/// cache evicts the SKIP before a budget widening serves the adjacent group, the reaching
+	/// lookup forwards the SKIP (and continues below it) rather than suppressing it with the
+	/// stale UNROUTABLE error.
+	#[kio::test]
+	async fn a_reclaimed_skip_replacing_unroutable_is_forwarded_as_reaching_drop() {
+		let version = Version::Lite06;
+		let mut front = track::Routed::new("test", crate::track::Info::timed());
+		for key in (0..1000).step_by(20) {
+			write_group(&mut front.copy, key, key);
+			front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+		}
+		front.copy.drop_groups(850..860, crate::StreamError::Unroutable);
+		let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+		let subscriber = front
+			.logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.expect("an accepted logical track answers at once")
+			.unwrap();
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.start.resolved(), Some(880));
+
+		// Upstream replaces UNROUTABLE on 850..860 with SKIP; step so the copy refreshes its
+		// adopted verdict, then evict 850..860 from state.drops so reaching_drops falls back
+		// to the copy's miss ledger.
+		front.copy.skip_received(850..860);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		front.copy.forget_drops(850..860);
+
+		let named = drops(&mut writer, &log, version).await.len();
+		run.replace(lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Some(Duration::from_millis(120)),
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		});
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let widened = drops(&mut writer, &log, version).await.split_off(named);
+		assert_eq!(
+			widened,
+			vec![(841, 849), (850, 859)],
+			"reclaimed SKIP replacing UNROUTABLE must be forwarded as a reaching drop"
+		);
+	}
+
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,
 	/// not only at the end.
 	#[kio::test]

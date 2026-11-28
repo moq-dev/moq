@@ -133,9 +133,10 @@ pub(super) struct Misses {
 	/// clearing `judged` or `at`, and invalidated only when a lowered start, wider owed-drop
 	/// set, or wider budget makes those keys relevant again.
 	forgotten_debt: Option<ops::Range<u64>>,
-	/// The narrowest budget across all verdicts forgotten into [`Self::forgotten_debt`], so
-	/// any widening past even the tightest forgotten verdict triggers re-judging.
-	forgotten_narrowest: Option<Duration>,
+	/// Narrowest forgotten budget per contiguous budget stretch within [`Self::forgotten_debt`],
+	/// bounded by the subscription's budget stretches so unchanged mixed-budget ranges do not
+	/// spuriously reopen while any segment widening past its forgotten budget triggers re-judging.
+	forgotten_budgets: RangeMap<u64, Duration>,
 }
 
 /// A stale verdict a reader holds: the budget it was judged under, and whose judgement it is.
@@ -1067,6 +1068,15 @@ impl Misses {
 				self.stale.remove(0..low);
 				self.adopted_errors.remove(0..low);
 				self.deferred.remove(0..low);
+				if let Some(debt) = self.forgotten_debt.as_mut() {
+					if debt.end <= low {
+						self.forgotten_debt = None;
+						self.forgotten_budgets.clear();
+					} else if debt.start < low {
+						debt.start = low;
+						self.forgotten_budgets.remove(0..low);
+					}
+				}
 			}
 			// What the window no longer covers is forgotten, and what it newly covers
 			// judged, within what the probe judges: from the floor up to the newest group,
@@ -1154,6 +1164,45 @@ impl Misses {
 		for changed in drops.since(self.drops_revision) {
 			for run in self.deferred.overlapping(changed.clone()) {
 				candidates.insert(run);
+			}
+			// Refresh already-given-up verdicts when a newer non-stale drop or skip replaces
+			// them (for example, an upstream SKIP replacing an adopted UNROUTABLE error), so
+			// post-eviction fallback keeps the newer verdict without overwriting locally judged
+			// stale runs with an adopted stale verdict.
+			let mut refresh = Vec::new();
+			for run in self.given_up.overlapping(&changed) {
+				let span = run.start.max(changed.start)..run.end.min(changed.end);
+				if span.is_empty() {
+					continue;
+				}
+				for (drop_run, hole) in state.drops.overlapping(&span) {
+					let part = drop_run.start.max(span.start)..drop_run.end.min(span.end);
+					if !part.is_empty() && (*hole == Hole::Skip || hole.stale_budget().is_none()) {
+						refresh.push((part, hole.clone()));
+					}
+				}
+			}
+			if !refresh.is_empty() {
+				for (part, hole) in refresh {
+					if hole == Hole::Skip {
+						self.skipped.insert(part.clone());
+						self.stale.remove(part.clone());
+						self.adopted_errors.remove(part);
+					} else {
+						for seg in self.skipped.gaps(&part) {
+							self.stale.remove(seg.clone());
+							if hole.error() == crate::StreamError::NotFound {
+								self.adopted_errors.remove(seg);
+							} else {
+								self.adopted_errors.insert(seg, hole.error());
+							}
+						}
+					}
+				}
+				self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
+				if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
+					self.adopted_under = None;
+				}
 			}
 			// A drop or skip landing on the track settles in-flight fills for the keys it
 			// covers under this reader's budget, so the reader withdraws them at once.
@@ -1881,18 +1930,23 @@ impl Misses {
 	/// rests on, such as the cap the upstream judged it within.
 	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
 		let mut taken = self.widen(&drift.budget);
-		if let Some(debt) = self.forgotten_debt.as_ref()
-			&& self.forgotten_narrowest.is_none_or(|narrowest| {
-				drift
-					.budget
-					.runs(debt.clone())
-					.into_iter()
-					.any(|(_, now)| now > narrowest)
-			}) {
-			let debt = self.forgotten_debt.take().expect("checked above");
-			self.forgotten_narrowest = None;
-			self.judged.remove(debt);
-			self.at = None;
+		if let Some(debt) = self.forgotten_debt.clone() {
+			let widened: Vec<ops::Range<u64>> = self
+				.forgotten_budgets
+				.overlapping(&debt)
+				.flat_map(|(seg, &old)| {
+					let seg = seg.start.max(debt.start)..seg.end.min(debt.end);
+					drift
+						.budget
+						.runs(seg)
+						.into_iter()
+						.filter(move |(_, now)| *now > old)
+						.map(|(part, _)| part)
+				})
+				.collect();
+			for part in widened {
+				self.reopen_forgotten(part);
+			}
 		}
 		if self
 			.adopted_under
@@ -2046,8 +2100,7 @@ impl Misses {
 	}
 
 	/// Invalidate any debt-forgotten verdicts overlapping `span` so the next probe re-judges
-	/// them once a lowered start or newly owed range makes them relevant again.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	/// them once a lowered start, wider budget, or newly owed range makes them relevant again.
 	pub fn reopen_forgotten(&mut self, span: ops::Range<u64>) {
 		let Some(debt) = self.forgotten_debt.clone() else {
 			return;
@@ -2068,7 +2121,9 @@ impl Misses {
 			Some(debt)
 		};
 		if self.forgotten_debt.is_none() {
-			self.forgotten_narrowest = None;
+			self.forgotten_budgets.clear();
+		} else {
+			self.forgotten_budgets.remove(hit);
 		}
 	}
 }
@@ -2515,31 +2570,68 @@ impl super::super::record::Beside for Misses {
 		if cleared.is_empty() {
 			return;
 		}
-		for run in cleared {
-			for (_, judged) in self.stale.overlapping(&run) {
-				self.forgotten_narrowest = Some(
-					self.forgotten_narrowest
-						.map_or(judged.budget, |prev| prev.min(judged.budget)),
-				);
+		let mut debt = self.forgotten_debt.take();
+		for run in &cleared {
+			debt = Some(match debt {
+				Some(prev) => prev.start.min(run.start)..prev.end.max(run.end),
+				None => run.clone(),
+			});
+		}
+		let debt = debt.expect("cleared is non-empty");
+		if let Some(budget) = &self.budget {
+			for (seg, current) in budget.runs(debt.clone()) {
+				let mut limit = current;
+				for run in &cleared {
+					let overlap = run.start.max(seg.start)..run.end.min(seg.end);
+					if !overlap.is_empty() {
+						for (_, judged) in self.stale.overlapping(&overlap) {
+							limit = limit.min(judged.budget);
+						}
+					}
+				}
+				tighten_forgotten(&mut self.forgotten_budgets, seg, limit);
 			}
-			if let Some(budget) = &self.budget {
-				for (_, current) in budget.runs(run.clone()) {
-					self.forgotten_narrowest = Some(self.forgotten_narrowest.map_or(current, |prev| prev.min(current)));
+		} else {
+			let mut limit = Duration::MAX;
+			for run in &cleared {
+				for (_, judged) in self.stale.overlapping(run) {
+					limit = limit.min(judged.budget);
 				}
 			}
+			tighten_forgotten(&mut self.forgotten_budgets, debt.clone(), limit);
+		}
+		for run in cleared {
 			self.given_up.remove(run.clone());
 			self.skipped.remove(run.clone());
 			self.stale.remove(run.clone());
-			self.adopted_errors.remove(run.clone());
-			self.forgotten_debt = Some(match self.forgotten_debt.take() {
-				Some(prev) => prev.start.min(run.start)..prev.end.max(run.end),
-				None => run,
-			});
+			self.adopted_errors.remove(run);
 		}
+		self.forgotten_debt = Some(debt);
 		self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
 		if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
 			self.adopted_under = None;
 		}
+	}
+}
+
+/// Lower the recorded budget ceiling in `map` over `range` to at most `limit`, preserving any
+/// narrower ceiling already stored.
+fn tighten_forgotten(map: &mut RangeMap<u64, Duration>, range: ops::Range<u64>, limit: Duration) {
+	if range.is_empty() {
+		return;
+	}
+	let mut updates = Vec::new();
+	for (existing, &prev) in map.overlapping(&range) {
+		let part = existing.start.max(range.start)..existing.end.min(range.end);
+		if !part.is_empty() && limit < prev {
+			updates.push(part);
+		}
+	}
+	for gap in map.gaps(&range) {
+		updates.push(gap);
+	}
+	for part in updates {
+		map.insert(part, limit);
 	}
 }
 
