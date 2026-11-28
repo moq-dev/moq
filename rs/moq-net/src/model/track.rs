@@ -10555,6 +10555,27 @@ pub(super) struct Peeked {
 	arrival: Option<Taken>,
 }
 
+/// What one walk of a cursor's read came to.
+enum Walked {
+	Found(Peeked),
+	/// The feed ended with nothing left to hand out.
+	Ended,
+	/// The feed ended as the window moved, which may reach what the walk passed or ask a lookup
+	/// the read has yet to send: the read starts over.
+	Again,
+}
+
+impl Walked {
+	/// What the read returns, or `None` to start it over.
+	fn settled(self) -> Option<Option<Peeked>> {
+		match self {
+			Self::Found(peeked) => Some(Some(peeked)),
+			Self::Ended => Some(None),
+			Self::Again => None,
+		}
+	}
+}
+
 /// Where a recv-order candidate came from, which taking it advances past.
 #[derive(Clone, Copy)]
 enum Taken {
@@ -12308,31 +12329,35 @@ impl Cursor {
 	}
 
 	fn poll_peek_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		self.sync();
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
-		}
-		self.admit();
+		loop {
+			self.sync();
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			self.admit();
 
-		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.reoffer(&drift.budget);
-		self.probe(self.floor(), &drift, waiter);
-		// A time start's lookup the probe took in may have been refused.
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
+			// One scan for the whole poll, so walking a backlog off stays linear in its size.
+			let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+			self.reoffer(&drift.budget);
+			self.probe(self.floor(), &drift, waiter);
+			// A time start's lookup the probe took in may have been refused.
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			// Or answered, moving the window over groups the walk passed while it read nothing,
+			// which nothing wakes it for once the window settles.
+			self.admit();
+			if let Some(misses) = &mut self.misses {
+				misses.pick_up();
+			}
+			if let Some(peeked) = ready!(self.poll_recv_with(drift, waiter))?.settled() {
+				return Poll::Ready(Ok(peeked));
+			}
 		}
-		// Or answered, moving the window over groups the walk passed while it read nothing,
-		// which nothing wakes it for once the window settles.
-		self.admit();
-		if let Some(misses) = &mut self.misses {
-			misses.pick_up();
-		}
-		self.poll_recv_with(drift, waiter)
 	}
 
 	/// [`Self::poll_peek_recv`] once synced, judging against `drift`.
-	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
+	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Walked>> {
 		self.poll_heads(waiter);
 		self.expire_heads(&drift, waiter);
 		loop {
@@ -12387,7 +12412,7 @@ impl Cursor {
 					let ended = matches!(polled, Poll::Ready(Ok(false)));
 					if (ended || polled.is_pending()) && self.watch_time() {
 						if ended {
-							return self.poll_peek_recv(waiter);
+							return Poll::Ready(Ok(Walked::Again));
 						}
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
@@ -12401,7 +12426,7 @@ impl Cursor {
 						}
 						// Nothing reads the kept-out keys now: a read polled again asks anew.
 						self.kept_out = None;
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(Walked::Ended));
 					}
 					if self.owe_arrivals() {
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
@@ -12422,7 +12447,7 @@ impl Cursor {
 				self.ask_head(consumer.start, waiter);
 				continue;
 			}
-			return Poll::Ready(Ok(Some(Peeked {
+			return Poll::Ready(Ok(Walked::Found(Peeked {
 				group: consumer,
 				arrival: Some(taken),
 			})));
@@ -12737,32 +12762,31 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_peek_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		let next = self.next_key;
-		self.sync();
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
+		loop {
+			let next = self.next_key;
+			self.sync();
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			let floor = next.max(self.floor());
+			// One scan for the whole poll, so walking a backlog off stays linear in its size.
+			let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+			self.probe(floor, &drift, waiter);
+			// A time start's lookup the probe took in may have been refused.
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			if let Some(misses) = &mut self.misses {
+				misses.pick_up();
+			}
+			if let Some(peeked) = ready!(self.poll_next_with(floor, drift, waiter))?.settled() {
+				return Poll::Ready(Ok(peeked));
+			}
 		}
-		let floor = next.max(self.floor());
-		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.probe(floor, &drift, waiter);
-		// A time start's lookup the probe took in may have been refused.
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
-		}
-		if let Some(misses) = &mut self.misses {
-			misses.pick_up();
-		}
-		self.poll_next_with(floor, drift, waiter)
 	}
 
 	/// [`Self::poll_peek_next`] once synced, from `floor`, judging against `drift`.
-	fn poll_next_with(
-		&mut self,
-		mut floor: u64,
-		mut drift: Drift,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Peeked>>> {
+	fn poll_next_with(&mut self, mut floor: u64, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Walked>> {
 		let end = self.end_key;
 		self.poll_heads(waiter);
 		// Where the gap below the candidate starts: groups stepped over as stale are cached.
@@ -12783,7 +12807,7 @@ impl Cursor {
 			let ended = matches!(polled, Poll::Ready(Ok((None, _))));
 			if (ended || polled.is_pending()) && self.watch_time() {
 				if ended {
-					return self.poll_peek_next(waiter);
+					return Poll::Ready(Ok(Walked::Again));
 				}
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
@@ -12806,7 +12830,7 @@ impl Cursor {
 				// may count a conviction. This `None` can be an artifact of a floor
 				// that will lower again. A conviction never committed is dropped
 				// uncounted with the cursor.
-				return Poll::Ready(Ok(None));
+				return Poll::Ready(Ok(Walked::Ended));
 			};
 			// In order means a group a fill still owes below this one comes first. Its
 			// answer, or giving it up, wakes us.
@@ -12903,7 +12927,7 @@ impl Cursor {
 			break group;
 		};
 
-		Poll::Ready(Ok(Some(Peeked { group, arrival: None })))
+		Poll::Ready(Ok(Walked::Found(Peeked { group, arrival: None })))
 	}
 
 	fn advance_key(&mut self, group: group::Consumer) -> group::Consumer {
@@ -21397,12 +21421,19 @@ mod test {
 			let Poll::Ready(Ok(drift)) = cursor.poll_drift(&cursor.servable, &noop) else {
 				panic!("a drift");
 			};
-			let peeked = match ordered {
+			let walked = match ordered {
 				true => cursor.poll_next_with(cursor.next_key.max(cursor.floor()), drift, &noop),
 				false => cursor.poll_recv_with(drift, &noop),
 			};
-			let Poll::Ready(Ok(Some(peeked))) = peeked else {
+			let Poll::Ready(Ok(Walked::Again)) = walked else {
 				panic!("ordered={ordered}: the read ended without the group");
+			};
+			let peeked = match ordered {
+				true => cursor.poll_peek_next(&noop),
+				false => cursor.poll_peek_recv(&noop),
+			};
+			let Poll::Ready(Ok(Some(peeked))) = peeked else {
+				panic!("ordered={ordered}: the read started over without the group");
 			};
 			assert_eq!(peeked.group.start, 0, "ordered={ordered}");
 		}
@@ -23752,7 +23783,7 @@ mod test {
 				true => cursor.poll_next_with(0, drift, &waiter),
 				false => cursor.poll_recv_with(drift, &waiter),
 			};
-			let Poll::Ready(Ok(Some(peeked))) = res else {
+			let Poll::Ready(Ok(Walked::Found(peeked))) = res else {
 				panic!("group 0 is the newest group its range reads (ordered: {ordered})");
 			};
 			assert_eq!(peeked.group.start, 0);
