@@ -31,7 +31,7 @@ Counters are cumulative; readers derive rates over an interval and treat a
 replacement or decrease as a reset. Bitrate, latency, RTT, estimated rate,
 and sample age are gauges. Loss is cumulative lost bytes and packets, and
 `sentBytes` is the bytes the connection sent across every broadcast it
-carries, with unavailable transport measurements absent. Missing rendition counters
+carries, `uptime` is the reporter's monotonic clock in milliseconds, with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 

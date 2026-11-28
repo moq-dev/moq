@@ -72,6 +72,7 @@ export namespace Echo {
 			rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			sentBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			uptime: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		}, $strip>>;
 	}, $loose>;
 	export const TRACK: "feedback.json";
@@ -195,6 +196,7 @@ export namespace Stats {
 			rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			sentBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+			uptime: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		}, $strip>>;
 	}, $loose>;
 	export type Transport = infer<typeof Stats.TransportSchema>;
@@ -205,6 +207,7 @@ export namespace Stats {
 		rate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		sentBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
+		uptime: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 	}, $strip>;
 }
 ```

@@ -123,7 +123,8 @@ pub struct Limits<T> {
 /// use. The rendition shares are not measured against real traffic; a 1% rise in time spent
 /// buffering cost viewers of a 90-minute live event over three minutes of watching (Dobrian et al.,
 /// SIGCOMM 2011). The loss and headroom numbers divided by media bytes; the connection's sent
-/// counter adds overhead and retransmissions on native QUIC, which nudges both toward worse.
+/// counter adds overhead and retransmissions on native QUIC, which nudges headroom toward worse
+/// and loss toward better.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Thresholds {

@@ -5,6 +5,7 @@
 		"lostBytes": 300,
 		"lostPackets": 2,
 		"sentBytes": 2097152,
+		"uptime": 5000,
 		"age": 5
 	},
 	"renditions": {
