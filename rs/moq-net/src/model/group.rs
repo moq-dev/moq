@@ -4828,12 +4828,28 @@ impl Consumer {
 		self.poll_expiry(waiter, true)
 	}
 
-	/// The error the group was aborted with, an eviction included, as of now.
+	/// Whether the copy this cursor reads lost frames it has yet to read: aborted, released
+	/// short of them, or cut before them, registering `waiter` until it does. A route may still
+	/// bring them, which [`Self::poll_finished`] asks. Unlike it, a finished group parks rather
+	/// than answering, so a caller holding many polls none of them ready.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn aborted(&self) -> Option<Error> {
-		match &self.cursor.state.read().outcome {
-			Outcome::Aborted(abort) => Some(abort.error().clone()),
-			_ => None,
+	pub(crate) fn poll_lost(&self, waiter: &kio::Waiter) -> bool {
+		let index = self.cursor.index;
+		let lost = |state: &GroupState| {
+			state.past_cut(index)
+				|| match &state.outcome {
+					Outcome::Released(total, ..) => index < *total,
+					Outcome::Aborted(_) => true,
+					Outcome::Open | Outcome::Finished(..) => false,
+				}
+		};
+		match self.cursor.state.poll(waiter, |state| match lost(state) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => true,
+			Poll::Ready(Err(state)) => lost(&state),
+			Poll::Pending => false,
 		}
 	}
 
