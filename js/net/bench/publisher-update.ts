@@ -84,11 +84,11 @@ async function run(ranges: number, edited: number | "steer", updates: number): P
 		}
 		await update.encode(client.writer, Version.DRAFT_07);
 	}
-	client.writer.close();
+	// A lite-07 FIN asks for what the ranges name, which never arrives: cancel instead.
+	client.close();
 	await serving;
 	const elapsed = performance.now() - start;
 	publisher.close();
-	client.close();
 	pair.client.close();
 	pair.server.close();
 	broadcast.close();

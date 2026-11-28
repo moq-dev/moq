@@ -18,7 +18,7 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
-//! A one-relay FETCH fixture asserts one upstream FETCH per group during setup.
+//! A one-relay FETCH fixture asserts one upstream request per group during setup.
 //! `session_delivery_fetch_range` FETCHes missing groups independently, swept over burst length.
 //! `session_range_updates` widens established draft-22 subscriptions over a fresh cached
 //! burst's largest group, swept over burst length and concurrent requests. Narrowing and
@@ -1049,8 +1049,13 @@ impl<B: Backend> Room<B> {
 			);
 		}
 		if shape.fetch && shape.relays == 1 {
-			// Both FETCH types encode in one byte and every request names one group.
-			let kind = if room.cluster.version.is_lite() { 3 } else { 0x16 };
+			// Every request names one group and its type encodes in one byte. moq-lite-07 has no
+			// FETCH: it asks for a held group with a SUBSCRIBE bounded to it.
+			let kind = match room.cluster.version.as_str() {
+				"moq-lite-07-wip" => 2,
+				_ if room.cluster.version.is_lite() => 3,
+				_ => 0x16,
+			};
 			let upstream_fetches = room
 				.cluster
 				._pairs
@@ -1063,7 +1068,7 @@ impl<B: Backend> Room<B> {
 						.count()
 				})
 				.sum::<usize>();
-			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per group");
+			assert_eq!(upstream_fetches, room.groups, "one upstream request per group");
 		}
 		room
 	}
