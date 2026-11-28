@@ -2727,38 +2727,43 @@ test("lite draft-07: a finished track answers a live range and its withheld drop
 	}
 });
 
-// An unjudged OLD drop withheld for the first SUBSCRIBE_START names no wider a max age than the
-// narrowest the subscription asked while it was held: a widening since never judged it. Mirrors the
-// Rust `lite07_a_withheld_unjudged_drop_keeps_the_narrowest_max_age`.
-test("lite draft-07: a withheld unjudged drop keeps the narrowest max age", async () => {
-	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({ version, ranges: [{ start: { live: { min: 0, max: 100 } } }] });
-	try {
-		hooks.receiveTrack(sub.track);
-		hooks.startTrack(sub.track, { start: 0n });
-		const next = readResponse(sub, version);
-		sub.serve(0n);
-		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode.Old) });
-		await settle();
-		expect(next.read.msg).toBeUndefined();
+// An unjudged OLD drop held, while delivery is unresolved or for the first SUBSCRIBE_START, names no
+// wider a max age than the narrowest the subscription asked while it was held: a widening since never
+// judged it. Mirrors the Rust `lite07_a_held_unjudged_drop_keeps_the_narrowest_max_age`.
+for (const resolved of [true, false]) {
+	test(`lite draft-07: a held unjudged drop keeps the narrowest max age (resolved ${resolved})`, async () => {
+		const version = Version.DRAFT_07;
+		const sub = await servedSubscription({ version, ranges: [{ start: { live: { min: 0, max: 100 } } }] });
+		try {
+			hooks.receiveTrack(sub.track);
+			// Resolved, the drop waits for the first START, which the unknown edge holds back; unresolved,
+			// it waits for delivery to resolve.
+			hooks.startTrack(sub.track, resolved ? { start: 0n } : {});
+			const next = readResponse(sub, version);
+			sub.serve(0n);
+			hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode.Old) });
+			await settle();
+			expect(next.read.msg).toBeUndefined();
 
-		const before = sub.track.subscription.peek();
-		await new SubscribeUpdate({
-			priority: 0,
-			ranges: [],
-			retune: [[0n, { priority: 0, order: "descending", max: 1000 }]],
-		}).encode(sub.client.writer, version);
-		while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
-		sub.track.finishAt({ group: 2n, frame: 0 });
-		const start = await next.done;
-		if (!("start" in start)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(start)}`);
-		const drop = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("drop" in drop)) throw new Error(`expected SUBSCRIBE_DROP, got ${Object.keys(drop)}`);
-		expect([drop.drop.start, drop.drop.end, drop.drop.maxAge]).toEqual([1n, 2n, 100]);
-	} finally {
-		await sub.close();
-	}
-});
+			const before = sub.track.subscription.peek();
+			await new SubscribeUpdate({
+				priority: 0,
+				ranges: [],
+				retune: [[0n, { priority: 0, order: "descending", max: 1000 }]],
+			}).encode(sub.client.writer, version);
+			while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
+			if (!resolved) hooks.startTrack(sub.track, { start: 0n });
+			sub.track.finishAt({ group: 2n, frame: 0 });
+			const start = await next.done;
+			if (!("start" in start)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(start)}`);
+			const drop = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in drop)) throw new Error(`expected SUBSCRIBE_DROP, got ${Object.keys(drop)}`);
+			expect([drop.drop.start, drop.drop.end, drop.drop.maxAge]).toEqual([1n, 2n, 100]);
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the START waits for it, holding the

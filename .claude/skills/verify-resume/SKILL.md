@@ -51,7 +51,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a replaced copy was left to drain and no longer drains, checked on a poll with nothing to hand out (`Copy::drains`, `Reader::rescan_drains`, `Rescan`) or when that copy is let go (`LetGo`'s `gaveUp`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. StaleRecover's rows sync to `541c0839bfdcf0050b23ca217c4b35efa51941f3` plus the copy's judging budget (`judge_under`, `judged_under`) and `Recover::outgrows_judging` that model it. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `e91efb9653c0b0bad08040d72bc7bd7c14b685c1`, for ResumeReader and StaleRecover alike. Run `git log e91efb9653.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

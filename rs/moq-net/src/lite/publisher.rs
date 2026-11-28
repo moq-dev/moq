@@ -6085,6 +6085,10 @@ struct Ranges {
 	/// How many of `states` still wait, so a pass with none waiting costs nothing.
 	waiting: usize,
 	delivery: Delivery,
+	/// The narrowest max age the subscription asked while drops given up were held, for
+	/// delivery to resolve or for the first SUBSCRIBE_START, `Duration::MAX` with none held. An
+	/// unjudged `OLD` among them names no wider, since a widening since never judged it.
+	held_narrowest: Duration,
 }
 
 /// One lite-07 range's answer.
@@ -6109,14 +6113,8 @@ enum Delivery {
 		skipped: RangeMap<u64, Hole>,
 	},
 	/// Delivery starts at `from`, but no range is answered yet, as one following an edge this
-	/// hop does not know leaves it: the drops given up since, sent after the first START, and
-	/// the narrowest max age the subscription asked as they were held, which caps what an
-	/// unjudged `OLD` among them names.
-	Withheld {
-		from: u64,
-		held: RangeMap<u64, Hole>,
-		narrowest: Duration,
-	},
+	/// hop does not know leaves it: the drops given up since, sent after the first START.
+	Withheld { from: u64, held: RangeMap<u64, Hole> },
 	/// A range is answered, so drops go out as they are given up.
 	Answered { from: u64 },
 }
@@ -6138,6 +6136,7 @@ impl Answer {
 					served: None,
 					skipped: RangeMap::new(),
 				},
+				held_narrowest: Duration::MAX,
 			}),
 		}
 	}
@@ -7036,10 +7035,6 @@ impl TrackRun {
 		let mut idle = Idle::start(&mut self.idle, waiter);
 		let polled = self.poll_track(writer, idle.waiter());
 		idle.finish(&mut self.idle, (), polled.is_pending());
-		// Ranked anew, the group still waiting may take credit once the track side had its look.
-		if std::mem::take(&mut self.rerank) && polled.is_pending() {
-			return Poll::Ready(Ok(ControlFlow::Continue(())));
-		}
 		polled
 	}
 
@@ -7113,6 +7108,11 @@ impl TrackRun {
 		// With nothing left to hand out, no group that gave way waits unread.
 		if polled.is_pending() && matches!(admit, Admit::Best) {
 			self.gave_way = false;
+		}
+		// Ranked anew, the group still waiting may take credit now the cursor had its look. Not
+		// before: a drop or start answered above returns ahead of it.
+		if std::mem::take(&mut self.rerank) && polled.is_pending() {
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 		if let Poll::Ready(res) = polled {
 			match res? {
@@ -7299,12 +7299,17 @@ impl TrackRun {
 
 	/// Hold `groups` given up as `hole` until delivery resolves, which names them then.
 	fn hold_hole(&mut self, groups: Range<u64>, hole: Hole) {
+		let asked = self.track.subscription().narrowest();
 		match &mut self.answer {
-			Answer::Single(Single::Waiting { skipped, .. })
-			| Answer::Ranges(Ranges {
+			Answer::Single(Single::Waiting { skipped, .. }) => skipped.insert(groups, hole),
+			Answer::Ranges(Ranges {
 				delivery: Delivery::Unresolved { skipped, .. },
+				held_narrowest,
 				..
-			}) => skipped.insert(groups, hole),
+			}) => {
+				*held_narrowest = (*held_narrowest).min(asked);
+				skipped.insert(groups, hole);
+			}
 			_ => unreachable!("held only while delivery is unresolved"),
 		}
 	}
@@ -7404,16 +7409,14 @@ impl TrackRun {
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
 	/// produced with `SKIP`, and earlier versions drop it as not found. A stale verdict names
 	/// the `Max Age` it was judged under, no limit being the publisher's own, and an `OLD` drop
-	/// with no verdict of its own the narrowest its live ranges ask, so only a reader no wider
-	/// settles on it.
+	/// with no verdict of its own the narrowest its live ranges ask, and ask while it was held
+	/// (see [`Ranges::held_narrowest`]), so only a reader no wider settles on it.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
-		self.hole_within(groups, hole, Duration::MAX)
-	}
-
-	/// [`Self::hole`], an unjudged `OLD` naming no more than `narrowest` either: the narrowest
-	/// asked while it was held, since a widening since never judged it.
-	fn hole_within(&self, groups: std::ops::Range<u64>, hole: &Hole, narrowest: Duration) -> lite::SubscribeResponse {
-		let unjudged = crate::track::max_of(self.track.subscription().narrowest().min(narrowest));
+		let held = match &self.answer {
+			Answer::Ranges(ranges) => ranges.held_narrowest,
+			_ => Duration::MAX,
+		};
+		let unjudged = crate::track::max_of(self.track.subscription().narrowest().min(held));
 		lite::SubscribeResponse::Drop(lite::SubscribeDrop::given_up(groups, hole, unjudged, self.ctx.version))
 	}
 
@@ -7425,17 +7428,15 @@ impl TrackRun {
 		hole: Hole,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
+		let asked = self.track.subscription().narrowest();
 		match &mut self.answer {
 			// A group served before delivery resolved, whose stream failed: the start names it.
 			Answer::Ranges(Ranges {
-				delivery: Delivery::Unresolved { skipped, .. },
-				..
-			}) => skipped.insert(groups, hole),
-			Answer::Ranges(Ranges {
-				delivery: Delivery::Withheld { held, narrowest, .. },
+				delivery: Delivery::Unresolved { skipped: held, .. } | Delivery::Withheld { held, .. },
+				held_narrowest,
 				..
 			}) => {
-				*narrowest = (*narrowest).min(self.track.subscription().narrowest());
+				*held_narrowest = (*held_narrowest).min(asked);
 				held.insert(groups, hole);
 			}
 			_ => writer.buffer(&self.hole(groups, &hole))?,
@@ -7454,17 +7455,22 @@ impl TrackRun {
 			return Ok(());
 		};
 		ranges.answer(start.id);
-		let (held, narrowest) = match &mut ranges.delivery {
-			Delivery::Withheld { from, held, narrowest } => {
-				let held = (std::mem::take(held), *narrowest);
+		let held = match &mut ranges.delivery {
+			Delivery::Withheld { from, held } => {
+				let held = std::mem::take(held);
 				ranges.delivery = Delivery::Answered { from: *from };
 				held
 			}
 			_ => return Ok(()),
 		};
-		for (groups, hole) in held {
-			writer.buffer(&self.hole_within(groups, &hole, narrowest))?;
+		// Empty while delivery resolves, whose own held drops go out after its starts.
+		if held.is_empty() {
+			return Ok(());
 		}
+		for (groups, hole) in held {
+			writer.buffer(&self.hole(groups, &hole))?;
+		}
+		self.release_held();
 		Ok(())
 	}
 
@@ -7774,7 +7780,6 @@ impl TrackRun {
 				let held = Delivery::Withheld {
 					from: start,
 					held: RangeMap::new(),
-					narrowest: Duration::MAX,
 				};
 				match std::mem::replace(&mut ranges.delivery, held) {
 					Delivery::Unresolved { skipped, .. } => skipped,
@@ -7806,7 +7811,23 @@ impl TrackRun {
 		self.report_started(false, writer, &kio::Waiter::noop())?;
 		let from = self.answer.from().expect("resolved above");
 		self.name_skipped(from, &skipped, writer)?;
+		// Sent now unless still withheld for the first START, which releases them then.
+		let withheld = self
+			.answer
+			.ranges()
+			.is_some_and(|ranges| matches!(&ranges.delivery, Delivery::Withheld { held, .. } if !held.is_empty()));
+		if !withheld {
+			self.release_held();
+		}
 		Ok(())
+	}
+
+	/// The held drops went out, so the bound they were held under caps no later one: it is
+	/// below `Duration::MAX` only while some drop is held.
+	fn release_held(&mut self) {
+		if let Some(ranges) = self.answer.ranges() {
+			ranges.held_narrowest = Duration::MAX;
+		}
 	}
 
 	/// Name the runs in `skipped`, given up before delivery resolved at `start`, as they would
@@ -11940,51 +11961,65 @@ mod serve_group_test {
 		);
 	}
 
-	/// An unjudged OLD drop withheld for the first SUBSCRIBE_START names no wider a max age than
-	/// the narrowest the subscription asked while it was held: a widening since never judged it.
+	/// An unjudged OLD drop held, while delivery is unresolved or for the first SUBSCRIBE_START,
+	/// names no wider a max age than the narrowest the subscription asked while it was held: a
+	/// widening since never judged it.
 	#[kio::test]
-	async fn lite07_a_withheld_unjudged_drop_keeps_the_narrowest_max_age() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		track.received();
-		track.await_edge();
-		track.request_start(Some(0)).unwrap();
-		let live = |max: u64| lite::Range {
-			start: Some(lite::Anchor::Live {
-				min: Some(Duration::ZERO),
-				max: Some(Duration::from_millis(max)),
-			}),
-			..lite::Range::OPEN
-		};
-		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[live(100)]);
-		write_group(&mut track, 0, 0);
-		track.drop_groups(1..2, StreamError::Old);
-		track.start_resolved(0).unwrap();
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(starts(&responses(&mut writer, &log).await), [], "the edge is unknown");
+	async fn lite07_a_held_unjudged_drop_keeps_the_narrowest_max_age() {
+		for resolved in [true, false] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.received();
+			track.await_edge();
+			track.request_start(Some(0)).unwrap();
+			let live = |max: u64| lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: Some(Duration::ZERO),
+					max: Some(Duration::from_millis(max)),
+				}),
+				..lite::Range::OPEN
+			};
+			let (mut run, mut writer, log) = lite07_run_ranges(&track, &[live(100)]);
+			write_group(&mut track, 0, 0);
+			track.drop_groups(1..2, StreamError::Old);
+			// Resolved, the drop waits for the first START, which the unknown edge holds back;
+			// unresolved, it waits for delivery to resolve.
+			if resolved {
+				track.start_resolved(0).unwrap();
+			}
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(starts(&responses(&mut writer, &log).await), [], "no range is answered");
 
-		run.update(lite::SubscribeUpdate {
-			wanted_group: None,
-			priority: 0,
-			max_delay: None,
-			ranges: lite::Applied::Edit {
-				retired: Vec::new(),
-				added: Vec::new(),
-				retuned: vec![(0, live(1000))],
-			},
-			order: Order::Descending,
-		});
-		track.finish_at(track::Position::group(2)).unwrap();
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let answered = responses(&mut writer, &log).await;
-		let drop = answered.iter().find_map(|msg| match msg {
-			lite::SubscribeResponse::Drop(drop) if drop.groups == (1..2) => Some(drop.max_age),
-			_ => None,
-		});
-		assert_eq!(drop, Some(Some(Duration::from_millis(100))), "{answered:?}");
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: None,
+				ranges: lite::Applied::Edit {
+					retired: Vec::new(),
+					added: Vec::new(),
+					retuned: vec![(0, live(1000))],
+				},
+				order: Order::Descending,
+			});
+			if !resolved {
+				track.start_resolved(0).unwrap();
+			}
+			track.finish_at(track::Position::group(2)).unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let answered = responses(&mut writer, &log).await;
+			let drop = answered.iter().find_map(|msg| match msg {
+				lite::SubscribeResponse::Drop(drop) if drop.groups == (1..2) => Some(drop.max_age),
+				_ => None,
+			});
+			assert_eq!(
+				drop,
+				Some(Some(Duration::from_millis(100))),
+				"resolved {resolved}: {answered:?}"
+			);
+		}
 	}
 
 	/// A track that ends before its first group answers every range with its SUBSCRIBE_END at
@@ -12347,10 +12382,10 @@ mod serve_group_test {
 	/// A group waiting for credit that ages out of its live join into a lower history rank is
 	/// ranked anew against the groups waiting in the cache before it may take credit, so one that
 	/// now outranks it takes its place without a track event first, credit freeing as it ages or
-	/// not.
+	/// not, and an upstream drop forwarded on that pass or not.
 	#[kio::test]
 	async fn lite07_a_waiting_group_aging_down_lets_a_cached_one_take_its_place() {
-		for credit in [false, true] {
+		for (credit, upstream_drop) in [(false, false), (true, false), (true, true)] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
@@ -12395,6 +12430,9 @@ mod serve_group_test {
 			);
 			kio::clock::sim::advance(Duration::from_secs(2)).await;
 			*gate.write().ok().unwrap() = credit;
+			if upstream_drop {
+				track.drop_groups(3..4, StreamError::Old);
+			}
 			while run.poll_step(&mut writer, &waiter).is_ready() {}
 			let first = log.orders().first().map(|(_, order)| *order);
 			match credit {
