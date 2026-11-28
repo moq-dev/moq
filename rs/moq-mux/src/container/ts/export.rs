@@ -2775,7 +2775,7 @@ where
 			}
 		};
 		let mut grown = Duration::ZERO;
-		for track in self.program.tracks.values_mut() {
+		for (name, track) in self.program.tracks.iter_mut() {
 			if let Some(buffer) = track
 				.buffer
 				.as_mut()
@@ -2788,11 +2788,25 @@ where
 				}
 				let before = audio_reach(buffer, previous, self.program.delay).min(buffer.reach);
 				let reach = audio_reach(buffer, self.program.mux_rate, self.program.delay);
-				buffer.reach = reach.min(before + spare);
 				let before = Buffer {
 					reach: before,
 					..*buffer
 				};
+				// Frames with no slot to spare leave the send-ahead nowhere to grow, so the rate would
+				// miss the audio's deadlines: the delay is shorter than the source sends it ahead.
+				let wanted = Buffer { reach, ..*buffer };
+				if let Some(seen) = seen.filter(|_| spare.is_zero())
+					&& schedule::ahead(Some(&wanted), window) > schedule::ahead(Some(&before), window)
+				{
+					bail_unsupported!(
+						"MPEG-TS multiplex rate {} b/s arrived mid-stream, but the {:?} delay is shorter than the source sends audio track '{name}' ahead: its frames had {:.0} ms to spare, less than the {:?} slot sending it ahead for the rate takes; raise the delay",
+						self.program.mux_rate.unwrap_or_default(),
+						self.program.delay,
+						seen * 1e3,
+						PCR_INTERVAL,
+					);
+				}
+				buffer.reach = reach.min(before.reach + spare);
 				if schedule::ahead(Some(buffer), window) > schedule::ahead(Some(&before), window) {
 					grown = grown.max(buffer.reach);
 				}
