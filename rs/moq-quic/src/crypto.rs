@@ -31,11 +31,6 @@ pub struct HandshakeData {
 	pub server_name: Option<String>,
 }
 
-/// The requested keying material is longer than the handshake's hash can export.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
-pub(crate) struct ExportKeyingMaterialError;
-
 /// A cryptographic session (commonly TLS)
 pub(crate) trait Session: Send + Sync + 'static {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
@@ -73,25 +68,14 @@ pub(crate) trait Session: Send + Sync + 'static {
 	/// keys to encrypt data with.
 	fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys>;
 
+	/// The handshake is confirmed: drop what only the handshake reads
+	fn confirmed(&mut self);
+
 	/// Compute keys for the next key update
 	fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>>;
 
 	/// Verify the integrity of a retry packet
 	fn is_valid_retry(&self, orig_dst_cid: ConnectionId, header: &[u8], payload: &[u8]) -> bool;
-
-	/// Fill `output` with `output.len()` bytes of keying material derived
-	/// from the [Session]'s secrets, using `label` and `context` for domain
-	/// separation.
-	///
-	/// This function will fail, returning [ExportKeyingMaterialError],
-	/// if the requested output length is too large.
-	#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
-	fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), ExportKeyingMaterialError>;
 }
 
 /// A pair of keys for bidirectional communication

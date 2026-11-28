@@ -196,11 +196,11 @@ int32_t moq_consume_audio_cancel(uint32_t track);
 int32_t moq_consume_read(uint32_t read, moq_media_read *dst);
 int32_t moq_consume_read_free(uint32_t read);
 moq_subscription moq_subscription_defaults(void);
-int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
-int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
-int32_t moq_consume_track_frame_free(uint32_t frame);
+int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_read, void *user_data);
+int32_t moq_consume_track_read(uint32_t read, moq_raw_read *dst);
+int32_t moq_consume_track_read_free(uint32_t read);
 int32_t moq_consume_track_cancel(uint32_t track);
-int32_t moq_consume_meta(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_header_callback on_header, void *user_data);
+int32_t moq_consume_meta(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_meta_callback on_read, void *user_data);
 int32_t moq_consume_meta_update(uint32_t meta, const moq_subscription *subscription);
 int32_t moq_consume_meta_cancel(uint32_t meta);
 
@@ -231,14 +231,20 @@ the frame's group key (a datagram's sequence). Every write takes a non-NULL
 timestamp: `moq_publish_track_frame` and `moq_publish_group_frame` convert
 theirs to the track's timescale, a microsecond one unless
 `moq_track_info.timescale` sets another with `timescale_present` true, and `moq_publish_group_start` reads
-the key a scale-less group's frames carry. `moq_consume_track_frame` points
-`moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
-is freed.
+the key a scale-less group's frames carry. `moq_consume_track_read` points
+`moq_raw_read.frame.timestamp` at the timestamp read, never NULL, valid until
+the read is freed.
+
+A failure that belongs to one group is that group's: a raw reader gets a
+`MOQ_RAW_READ_GAP` read naming the groups it read past and why (`code`, and a
+`reason` valid until the read is freed), then reads on. Its callback's terminal
+`<= 0` means only that the track ended.
 
 `moq_consume_meta` reads a track's metadata: each frame's group, index,
-declared size, and timestamp in a `moq_header`, without its payload. Each header
-is borrowed for its callback, so there is nothing to free. It is a subscription
-of its own beside any `moq_consume_track` of the same track.
+declared size, and timestamp in a `moq_meta_read`'s `header`, without its
+payload, and a gap for a group that failed partway. Each read is borrowed for
+its callback, so there is nothing to free. It is a subscription of its own
+beside any `moq_consume_track` of the same track.
 
 A zeroed `moq_track_info`, like a NULL one, advertises a zero max age, how long
 a superseded group stays fresh, so only the live edge is served. Set

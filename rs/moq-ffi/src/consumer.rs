@@ -508,7 +508,7 @@ impl TrackInner {
 		}
 	}
 
-	/// The first frame of the next group in start order, skipping completed empty groups.
+	/// The first frame of the next group in start order, skipping completed empty and failed groups.
 	///
 	/// One poll does the whole step, so it never trusts a slot it filled on an earlier poll:
 	/// a group `next_group` took from `pending` in between is simply gone, and the wake it
@@ -533,9 +533,9 @@ impl TrackInner {
 			ordered.pending = None;
 			match result {
 				Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
-				// An empty group, or one that expired here or at a hop that reset it.
-				Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => continue,
-				Err(err) => return Poll::Ready(Err(err.into())),
+				// An empty group, or a failed one, which is that group's gap: only the track's own
+				// end, from the next group read, ends this read.
+				Ok(None) | Err(_) => continue,
 			}
 		}
 	}
@@ -628,9 +628,10 @@ impl MoqTrackConsumer {
 	/// Read the first frame of the next group, including its timestamp.
 	///
 	/// Convenience for tracks using one-frame-per-group (like moq-boy's
-	/// status/command tracks). Completed empty groups are skipped. Returns `None`
-	/// only when the track ends. Cancelling one call keeps the current group so a
-	/// later `read_frame` or [`Self::next_group`] still sees it.
+	/// status/command tracks). Completed empty groups are skipped, and so is a group that
+	/// fails, which is that group's gap. Returns `None` only when the track ends, and an error
+	/// only when it ends with one. Cancelling one call keeps the current group so a later
+	/// `read_frame` or [`Self::next_group`] still sees it.
 	///
 	/// Shares the ordered cursor with [`Self::next_group`], committing the track
 	/// the same way.

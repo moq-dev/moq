@@ -45,8 +45,10 @@ Scope in `rs/moq-hls`:
        watcher, combine wire `GROUP_END` / `SUBSCRIBE_DROP(SKIP)` with marker
        detection from what metadata already reports: recognize candidate
        discontinuity or trailing stop markers by their tiny declared wire size
-       (at most the container's empty-frame encoding) and probe only those tiny
-       candidate frames when ambiguous, pulling no real media frames.
+       (accounting for LOC variable-length headers, not only fixed empty-frame
+       sizes; noted from [moq-dev/moq#9699](https://github.com/moq-dev/moq/pull/9699))
+       and probe only those tiny candidate frames when ambiguous, pulling no
+       real media frames.
      - **Resized video hand-over:** limit keyframe payload probing strictly to
        video renditions with inline parameter sets (no catalog `description`)
        that can resize without a catalog update, so catalog-described video

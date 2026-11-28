@@ -135,15 +135,16 @@ static void check_wanted(const Handle *ops, uint32_t handle, const char *name, i
     int32_t next_handle = ops->serve((uint32_t)request);
     CHECK(next_handle > 0);
 
-    // What the freed handle already published may come first.
+    // What the freed handle already published may come first, and a group it left open is a gap
+    // the reader reads past.
     for (;;) {
         int32_t frame = next(frames);
         CHECK(frame > 0);
-        moq_frame read;
+        moq_raw_read read;
         memset(&read, 0, sizeof(read));
-        CHECK(moq_consume_track_frame((uint32_t)frame, &read) == 0);
-        bool done = served(&read);
-        CHECK(moq_consume_track_frame_free((uint32_t)frame) == 0);
+        CHECK(moq_consume_track_read((uint32_t)frame, &read) == 0);
+        bool done = read.kind == MOQ_RAW_READ_FRAME && served(&read.frame);
+        CHECK(moq_consume_track_read_free((uint32_t)frame) == 0);
         if (done) break;
     }
 
@@ -154,7 +155,7 @@ static void check_wanted(const Handle *ops, uint32_t handle, const char *name, i
     // to cancel.
     CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
     for (int32_t frame; (frame = next(frames)) > 0;) {
-        CHECK(moq_consume_track_frame_free((uint32_t)frame) == 0);
+        CHECK(moq_consume_track_read_free((uint32_t)frame) == 0);
     }
     // The origin keeps a joined track wanted past the reader's leaving, so it is finished instead.
     CHECK(ops->finish((uint32_t)next_handle) == 0);

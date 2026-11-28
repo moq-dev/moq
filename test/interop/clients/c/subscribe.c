@@ -404,17 +404,18 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
         done(c, &c->finish.done_health);
         return;
     }
-    moq_frame info;
-    int32_t read = moq_consume_track_frame((uint32_t)frame, &info);
+    moq_raw_read info;
+    int32_t read = moq_consume_track_read((uint32_t)frame, &info);
     const char payload[] = "session-alive";
     pthread_mutex_lock(&c->mu);
-    // Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
-    if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
-        memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
+    // Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds. A gap is
+    // a failure too: the health group is never cut.
+    if (read < 0 || info.kind != MOQ_RAW_READ_FRAME || info.frame.payload_size != sizeof(payload) - 1 ||
+        memcmp(info.frame.payload, payload, sizeof(payload) - 1) != 0 ||
         ++c->finish.health_frames != 1) c->finish.failed = 1;
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
-    moq_consume_track_frame_free((uint32_t)frame);
+    moq_consume_track_read_free((uint32_t)frame);
 }
 
 static void on_finish_health(void *ud, moq_follow_event event, int32_t broadcast) {

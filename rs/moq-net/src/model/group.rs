@@ -4344,6 +4344,10 @@ impl Drop for Batch {
 }
 
 /// Consume a group, frame-by-frame.
+///
+/// A read's error belongs to this group alone, whatever it says: the track reads on, so a
+/// reader moves to the next group rather than matching the error. Only the track's own reads
+/// report that the track ended.
 pub struct Consumer {
 	cursor: Cursor,
 

@@ -15,6 +15,12 @@ downstream IETF session that forwards it.
 Mirror the lite publisher fix from the PR that finished
 `js-data-errors-stay-on-their-track`: only errors from this session's own
 decodes (updates on the request stream) reach the connection's violation
-path. A served track's error ends only that subscription. Cover it with a
+path. A served track's error ends only that subscription. Also update
+`runDatagrams` (`js/net/src/lite/publisher.ts:2998`) to wrap with
+`servedError(error(err))` instead of passing raw `error(err)` to
+`stream.abort` (found in the 2026-11-28 audit of
+[moq-dev/moq#9829](https://github.com/moq-dev/moq/pull/9829)). Cover it with a
 relay-chain test like `js/net/src/data-errors.test.ts`, over an IETF
-downstream, where the upstream track is aborted with a `ProtocolViolation`.
+downstream, where the upstream track is aborted with a `ProtocolViolation`, plus
+a lite-07 datagram downstream case verifying `runDatagrams` resets with a
+malformed-track error while the downstream session stays open.

@@ -9,12 +9,12 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::decode::Read;
-use crate::ffi::{OnHeader, OnStatus};
+use crate::ffi::{OnMeta, OnStatus, ReturnCode};
 use crate::task::{Task, Terminal};
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_header, moq_json_value,
-	moq_json_window_event, moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config,
-	moq_video_properties,
+	moq_json_window_event, moq_json_window_kind, moq_meta_read, moq_raw_gap, moq_raw_read, moq_raw_read_kind,
+	moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
 };
 
 struct DatagramTaskEntry {
@@ -227,6 +227,61 @@ impl<T> Timed<T> {
 	}
 }
 
+/// A raw read buffered for C: a frame, or groups the reader read past.
+enum RawRead {
+	Frame(Timed<bytes::Bytes>),
+	Gap(RawGap),
+}
+
+/// Groups a raw or metadata reader read past, and why.
+struct RawGap {
+	range: std::ops::Range<u64>,
+	code: i32,
+	/// Kept beside the code so the pointer C borrows stays valid as long as the read.
+	reason: String,
+	protocol: Option<crate::moq_protocol_error>,
+}
+
+impl RawGap {
+	fn new(range: std::ops::Range<u64>, error: moq_net::Error) -> Self {
+		let error = Error::from(error);
+		Self {
+			range,
+			code: error.code(),
+			reason: error.to_string(),
+			protocol: error.protocol(),
+		}
+	}
+
+	/// A group that failed after the reader took it.
+	fn failed(group: &moq_net::group::Info, error: moq_net::Error) -> Self {
+		Self::new(group.start..group.start.saturating_add(1), error)
+	}
+
+	/// The C view, borrowing the reason.
+	fn to_c(&self) -> moq_raw_gap {
+		moq_raw_gap {
+			start: self.range.start,
+			end: self.range.end,
+			code: self.code,
+			reason: self.reason.as_ptr().cast(),
+			reason_len: self.reason.len(),
+			protocol: self.protocol.unwrap_or(moq_raw_gap::default().protocol),
+			has_protocol: self.protocol.is_some(),
+		}
+	}
+}
+
+/// An empty frame, for a read that holds none.
+fn no_frame() -> moq_frame {
+	moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		keyframe: false,
+	}
+}
+
 /// A JSON value pre-serialized to a string, with its frame timestamp.
 fn json_value(value: moq_json::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
 	Ok(Timed::new(serde_json::to_string(&value.value)?, value.at))
@@ -279,15 +334,15 @@ pub struct Consume {
 	/// Raw track consumer tasks (no media/container framing).
 	raw_task: NonZeroSlab<RawTaskEntry>,
 
-	/// Buffered raw frames ready for consumption.
-	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
+	/// Buffered raw frames and gaps ready for consumption.
+	raw_read: NonZeroSlab<RawRead>,
 
 	/// Raw track refresh waits. Close withdraws the request; the task delivers one callback,
 	/// then removes itself.
 	raw_refresh: NonZeroSlab<Task>,
 
 	/// Metadata subscription tasks, which deliver each frame's header alone.
-	meta_task: NonZeroSlab<RawTaskEntry<OnHeader>>,
+	meta_task: NonZeroSlab<RawTaskEntry<OnMeta>>,
 
 	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
@@ -717,7 +772,7 @@ impl Consume {
 	}
 
 	/// Read the tagged media item; payload pointers borrow it until [`Self::read_free`].
-	pub fn read(&self, id: Id, dst: &mut crate::moq_media_read) -> Result<(), Error> {
+	pub fn read(&self, id: Id) -> Result<crate::moq_media_read, Error> {
 		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
 		let (kind, gap, end) = read.info();
 		let frame = match read {
@@ -734,9 +789,7 @@ impl Consume {
 				keyframe: false,
 			},
 		};
-		*dst = crate::moq_media_read { kind, frame, gap, end };
-
-		Ok(())
+		Ok(crate::moq_media_read { kind, frame, gap, end })
 	}
 
 	pub fn read_free(&mut self, frame: Id) -> Result<(), Error> {
@@ -776,14 +829,15 @@ impl Consume {
 	/// Subscribe to a raw track by name, delivering each frame's payload as-is.
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
-	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
-	/// in start order. Frames must be released with [`Self::raw_frame_close`].
+	/// non-media tracks. `on_read` is called with a read ID for each frame, in start
+	/// order, and for each gap the reader read past. Reads must be released with
+	/// [`Self::raw_read_free`].
 	pub fn raw_track(
 		&mut self,
 		broadcast: Id,
 		name: &str,
 		subscription: RawSubscription,
-		on_frame: OnStatus,
+		on_read: OnStatus,
 	) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
@@ -794,7 +848,7 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let (task, mut close) = Task::new(on_frame);
+		let (task, mut close) = Task::new(on_read);
 		let control = RawControl::Pending(None);
 		let id = self.raw_task.insert(RawTaskEntry {
 			task,
@@ -821,7 +875,7 @@ impl Consume {
 						Self::update_raw(&control, Self::raw_update(&control, subscription))?;
 					}
 				}
-				Self::run_raw(on_frame, track, close).await
+				Self::run_raw(on_read, track, close).await
 			}))
 			.await;
 
@@ -879,35 +933,45 @@ impl Consume {
 		// Deliver every frame in start order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
-		// producer wrote, regardless of how it was grouped.
+		// producer wrote, regardless of how it was grouped. A group read past, skipped
+		// or failed partway, arrives as a gap, and only the track's own end ends this.
 		//
 		// `close` is a oneshot that panics if polled after completion, so a `Stop`
 		// must unwind the whole task rather than fall through to the outer loop.
 		loop {
-			let mut group = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
+			let item = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::track::Item>, Error>> {
 				if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				// The C API reports no gaps.
-				Poll::Ready(Ok(match ready!(track.poll_next_group(waiter))? {
-					Some(group) => RawStep::Item(group),
+				Poll::Ready(Ok(match ready!(track.poll_next_item(waiter))? {
+					Some(item) => RawStep::Item(item),
 					None => RawStep::End,
 				}))
 			})
 			.await?
 			{
-				RawStep::Item(group) => group,
+				RawStep::Item(item) => item,
 				// Track finished or the consumer was closed: nothing left to deliver.
 				RawStep::End | RawStep::Stop => return Ok(()),
 			};
 
-			if Self::run_group(callback, &mut group, &mut close).await? {
-				return Ok(());
+			match item {
+				moq_net::track::Item::Group(mut group) => {
+					if Self::run_group(callback, &mut group, &mut close).await? {
+						return Ok(());
+					}
+				}
+				moq_net::track::Item::Gap { range, error, .. } => {
+					Self::deliver_raw(callback, RawRead::Gap(RawGap::new(range, error)))?;
+				}
+				// An item this version does not know is nothing to deliver.
+				_ => {}
 			}
 		}
 	}
 
-	/// Deliver every frame of `group` in order, returning whether `close` fired.
+	/// Deliver every frame of `group` in order, then a gap if it failed, returning whether
+	/// `close` fired.
 	///
 	/// `close` is a oneshot that panics if polled after completion, so a `true` must unwind
 	/// the whole task.
@@ -917,35 +981,39 @@ impl Consume {
 		close: &mut oneshot::Receiver<()>,
 	) -> Result<bool, Error> {
 		loop {
-			let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+			let read = match kio::wait(|waiter| -> Poll<RawStep<RawRead>> {
 				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
-					return Poll::Ready(Ok(RawStep::Stop));
+					return Poll::Ready(RawStep::Stop);
 				}
-				match ready!(group.poll_read_frame(waiter)) {
-					Ok(Some(frame)) => Poll::Ready(Ok(RawStep::Item(frame))),
-					// A group superseded, as one a dropped producer left open while read, is passed
-					// as the UniFFI raw reader passes it. Any other failure, such as a publisher's
-					// abort, ends the track with it, so a truncated group is never silent.
-					Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
-						Poll::Ready(Ok(RawStep::End))
-					}
-					Err(err) => Poll::Ready(Err(err.into())),
-				}
+				Poll::Ready(match ready!(group.poll_read_frame(waiter)) {
+					Ok(Some(frame)) => RawStep::Item(RawRead::Frame(Timed::new(frame.payload, frame.timestamp))),
+					Ok(None) => RawStep::End,
+					// A failed group is that group's gap, whatever it failed with.
+					Err(err) => RawStep::Item(RawRead::Gap(RawGap::failed(group, err))),
+				})
 			})
-			.await?
+			.await
 			{
-				RawStep::Item(frame) => frame,
-				// Group read to its end, or superseded.
+				RawStep::Item(read) => read,
+				// Group read to its end.
 				RawStep::End => return Ok(false),
 				// Consumer closed mid-group: terminate without touching `close` again.
 				RawStep::Stop => return Ok(true),
 			};
 
-			// Hold the lock only to buffer the read; release it before the callback.
-			let frame = Timed::new(frame.payload, frame.timestamp);
-			let frame_id = State::lock().consume.raw_frame.insert(frame)?;
-			callback.call(Ok(frame_id));
+			let gap = matches!(read, RawRead::Gap(_));
+			Self::deliver_raw(callback, read)?;
+			if gap {
+				return Ok(false);
+			}
 		}
+	}
+
+	/// Buffer a raw read and hand its ID to C, holding the lock only to buffer it.
+	fn deliver_raw(callback: OnStatus, read: RawRead) -> Result<(), Error> {
+		let id = State::lock().consume.raw_read.insert(read)?;
+		callback.call(Ok(id));
+		Ok(())
 	}
 
 	pub fn raw_track_update(&mut self, track: Id, subscription: RawSubscription) -> Result<(), Error> {
@@ -1018,34 +1086,42 @@ impl Consume {
 			.close(Error::TrackNotFound)
 	}
 
-	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
-	/// frame is released with [`Self::raw_frame_close`].
-	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
-		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
-
-		*dst = moq_frame {
-			payload: frame.item.as_ptr(),
-			payload_size: frame.item.len(),
-			timestamp: frame.timestamp(),
-			keyframe: false,
-		};
-
-		Ok(())
+	/// Fill `dst` with a raw frame or gap. Its pointers are valid until the read is released
+	/// with [`Self::raw_read_free`].
+	pub fn raw_read(&self, read: Id) -> Result<moq_raw_read, Error> {
+		Ok(match self.raw_read.get(read).ok_or(Error::FrameNotFound)? {
+			RawRead::Frame(frame) => moq_raw_read {
+				kind: moq_raw_read_kind::MOQ_RAW_READ_FRAME,
+				frame: moq_frame {
+					payload: frame.item.as_ptr(),
+					payload_size: frame.item.len(),
+					timestamp: frame.timestamp(),
+					keyframe: false,
+				},
+				gap: moq_raw_gap::default(),
+			},
+			RawRead::Gap(gap) => moq_raw_read {
+				kind: moq_raw_read_kind::MOQ_RAW_READ_GAP,
+				frame: no_frame(),
+				gap: gap.to_c(),
+			},
+		})
 	}
 
-	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
-		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
+	pub fn raw_read_free(&mut self, read: Id) -> Result<(), Error> {
+		self.raw_read.remove(read).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 
 	/// Subscribe to a track's metadata by name, delivering each frame's header alone, group by
-	/// group in arrival order, each borrowed for its callback.
+	/// group in arrival order, and a gap for each group that failed partway, each borrowed for
+	/// its callback.
 	pub fn meta_track(
 		&mut self,
 		broadcast: Id,
 		name: &str,
 		subscription: RawSubscription,
-		on_header: OnHeader,
+		on_read: OnMeta,
 	) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
@@ -1056,7 +1132,7 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let (task, mut close) = Task::new(on_header);
+		let (task, mut close) = Task::new(on_read);
 		let id = self.meta_task.insert(RawTaskEntry {
 			task,
 			control: RawControl::Pending(None),
@@ -1080,7 +1156,7 @@ impl Consume {
 						Self::update_raw(&control, Self::raw_update(&control, subscription))?;
 					}
 				}
-				Self::run_meta(on_header, track, close).await
+				Self::run_meta(on_read, track, close).await
 			}))
 			.await;
 
@@ -1095,7 +1171,7 @@ impl Consume {
 	}
 
 	async fn run_meta(
-		callback: OnHeader,
+		callback: OnMeta,
 		mut track: moq_net::meta::Subscriber,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -1118,33 +1194,46 @@ impl Consume {
 			};
 
 			loop {
-				let header = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Info>, Error>> {
+				let header = match kio::wait(|waiter| -> Poll<RawStep<moq_net::Result<moq_net::frame::Info>>> {
 					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
-						return Poll::Ready(Ok(RawStep::Stop));
+						return Poll::Ready(RawStep::Stop);
 					}
-					match ready!(group.poll_next_header(waiter)) {
-						Ok(Some(header)) => Poll::Ready(Ok(RawStep::Item(header))),
-						// A superseded group is passed as the raw reader passes it.
-						Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
-							Poll::Ready(Ok(RawStep::End))
-						}
-						Err(err) => Poll::Ready(Err(err.into())),
-					}
+					Poll::Ready(match ready!(group.poll_next_header(waiter)) {
+						Ok(Some(header)) => RawStep::Item(Ok(header)),
+						Ok(None) => RawStep::End,
+						Err(err) => RawStep::Item(Err(err)),
+					})
 				})
-				.await?
+				.await
 				{
 					RawStep::Item(header) => header,
 					RawStep::End => break,
 					RawStep::Stop => return Ok(()),
 				};
 
-				let header = moq_header {
-					group: group.start,
-					frame: group.index() - 1,
-					size: header.size,
-					timestamp: header.timestamp.into(),
+				let read = match header {
+					Ok(header) => moq_meta_read {
+						kind: moq_raw_read_kind::MOQ_RAW_READ_FRAME,
+						header: moq_header {
+							group: group.start,
+							frame: group.index() - 1,
+							size: header.size,
+							timestamp: header.timestamp.into(),
+						},
+						gap: moq_raw_gap::default(),
+					},
+					// A failed group is that group's gap, whatever it failed with.
+					Err(err) => {
+						let gap = RawGap::failed(&group, err);
+						callback.read(&moq_meta_read {
+							kind: moq_raw_read_kind::MOQ_RAW_READ_GAP,
+							header: moq_header::default(),
+							gap: gap.to_c(),
+						});
+						break;
+					}
 				};
-				callback.header(&header);
+				callback.read(&read);
 			}
 		}
 	}

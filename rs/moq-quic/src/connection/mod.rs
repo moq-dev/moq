@@ -175,7 +175,8 @@ pub struct Connection {
 	path_counter: u64,
 	/// Whether MTU detection is supported in this environment
 	allow_mtud: bool,
-	prev_path: Option<(ConnectionId, PathData)>,
+	/// The path before a migration and the CID it used, boxed since most connections never migrate
+	prev_path: Option<Box<(ConnectionId, PathData)>>,
 	state: State,
 	side: ConnectionSide,
 	key_phase: bool,
@@ -1438,7 +1439,7 @@ impl Connection {
 
 	/// Send PATH_CHALLENGE for a previous path if necessary
 	fn send_path_challenge(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<Transmit> {
-		let (prev_cid, prev_path) = self.prev_path.as_mut()?;
+		let (prev_cid, prev_path) = self.prev_path.as_deref_mut()?;
 		let challenge = prev_path.challenge.as_mut().filter(|challenge| challenge.pending)?;
 		challenge.pending = false;
 		let token = challenge.token;
@@ -1652,7 +1653,7 @@ impl Connection {
 				Timer::PathValidation => {
 					debug!("path validation failed");
 					match self.prev_path.take() {
-						Some((_, prev)) => self.fall_back(now, prev),
+						Some(prev) => self.fall_back(now, prev.1),
 						None => self.path.challenge = None,
 					}
 				}
@@ -1835,18 +1836,6 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
-	/// `label` and `context` for domain separation
-	#[cfg(test)]
-	pub(crate) fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), crypto::ExportKeyingMaterialError> {
-		self.crypto.export_keying_material(output, label, context)
-	}
-
 	/// Whether the connection is in the process of being established
 	///
 	/// If this returns `false`, the connection may be either established or closed, as
@@ -1920,7 +1909,7 @@ impl Connection {
 		}
 		self.bandwidth_probe.set_target(bytes_per_second);
 		bandwidth_probe::report_target(&mut *self.path.congestion, bytes_per_second);
-		if let Some((_, prev)) = &mut self.prev_path {
+		if let Some((_, prev)) = self.prev_path.as_deref_mut() {
 			bandwidth_probe::report_target(&mut *prev.congestion, bytes_per_second);
 		}
 	}
@@ -2474,7 +2463,7 @@ impl Connection {
 		let in_flight_mtu_probes = [
 			self.path.mtud.in_flight_mtu_probe(pn_space),
 			self.prev_path
-				.as_ref()
+				.as_deref()
 				.and_then(|(_, prev)| prev.mtud.in_flight_mtu_probe(pn_space)),
 		];
 		let rtt = self.path.rtt.conservative();
@@ -2603,7 +2592,7 @@ impl Connection {
 				self.datagrams().drop_oversized();
 			}
 			// The previous path's losses close their burst there, and judge only its own MTU
-			if let Some((_, prev)) = &mut self.prev_path
+			if let Some((_, prev)) = self.prev_path.as_deref_mut()
 				&& prev.mtud.black_hole_detected(now)
 			{
 				self.stats.path.black_holes_detected += 1;
@@ -3034,13 +3023,7 @@ impl Connection {
 				*token = Bytes::new();
 			}
 		}
-		let space = &mut self.spaces[space_id];
-		space.crypto = None;
-		space.time_of_last_ack_eliciting_packet = None;
-		space.loss_time = None;
-		// Its probes can never be sent, and one left owed would read as a probe in flight
-		space.loss_probes = 0;
-		let sent_packets = mem::take(&mut space.sent_packets);
+		let sent_packets = self.spaces[space_id].discard();
 		for packet in sent_packets.into_values() {
 			self.remove_in_flight(&packet);
 		}
@@ -3482,6 +3465,7 @@ impl Connection {
 					// Server-only
 					self.spaces[SpaceId::Data].pending.handshake_done = true;
 					self.discard_space(now, SpaceId::Handshake);
+					self.crypto.confirmed();
 					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
@@ -3695,7 +3679,7 @@ impl Connection {
 						&& remote == self.path.remote
 					{
 						self.path.validated = true;
-						if let Some((_, prev_path)) = &mut self.prev_path {
+						if let Some((_, prev_path)) = self.prev_path.as_deref_mut() {
 							prev_path.challenge = None;
 						}
 						if challenge.short {
@@ -3712,7 +3696,7 @@ impl Connection {
 							// Kept only to fall back to while this path validates
 							self.prev_path = None;
 						}
-					} else if let Some((_, prev_path)) = &mut self.prev_path
+					} else if let Some((_, prev_path)) = self.prev_path.as_deref_mut()
 						&& remote == prev_path.remote
 						&& prev_path.challenge.is_some_and(|challenge| challenge.token == token)
 					{
@@ -3958,9 +3942,9 @@ impl Connection {
 		// The peer is back on the address validated before an apparent migration, which was
 		// spurious, as when an attacker forwards a copy of its packet (RFC 9000 §9.3.3). Return to
 		// that path, skipping validation and keeping its loss detection and congestion state (§9.3).
-		if let Some((_, prev)) = self.prev_path.take_if(|(_, prev)| prev.remote == remote) {
+		if let Some(prev) = self.prev_path.take_if(|prev| prev.1.remote == remote) {
 			trace!("returning to the previous path");
-			self.fall_back(now, prev);
+			self.fall_back(now, prev.1);
 			return;
 		}
 		self.path_counter = self.path_counter.wrapping_add(1);
@@ -3996,7 +3980,7 @@ impl Connection {
 			prev.challenge = Some(Challenge::new(self.rng.random()));
 			// We haven't updated the remote CID yet, this captures the remote CID we were using on
 			// the previous path.
-			self.prev_path = Some((self.rem_cids.active(), prev));
+			self.prev_path = Some(Box::new((self.rem_cids.active(), prev)));
 		}
 
 		self.timers.set(
@@ -4044,7 +4028,7 @@ impl Connection {
 	/// The path a packet sent on path `generation` counts against: the previous one if it went
 	/// there, otherwise the current one
 	fn sent_path(&mut self, generation: u64) -> &mut PathData {
-		match &mut self.prev_path {
+		match self.prev_path.as_deref_mut() {
 			Some((_, prev)) if prev.generation() == generation => prev,
 			_ => &mut self.path,
 		}
@@ -4777,7 +4761,7 @@ impl Connection {
 			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
 			|| self
 				.prev_path
-				.as_ref()
+				.as_deref()
 				.is_some_and(|(_, prev)| prev.challenge.is_some_and(|challenge| challenge.pending))
 			|| !self.path_responses.is_empty()
 	}
@@ -4787,7 +4771,7 @@ impl Connection {
 		// Visit known paths from newest to oldest to find the one `packet` was sent on
 		for path in [&mut self.path]
 			.into_iter()
-			.chain(self.prev_path.as_mut().map(|(_, data)| data))
+			.chain(self.prev_path.as_deref_mut().map(|(_, data)| data))
 		{
 			if path.remove_in_flight(packet) {
 				return;

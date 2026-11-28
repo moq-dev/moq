@@ -1,16 +1,6 @@
-import * as Moq from "@moq/net";
+import type * as Moq from "@moq/net";
 
 import { Decoder, type Event, type Group } from "./decoder.ts";
-
-// A group that ended early rather than failing: the next one restates the window, so a gap is
-// something to resync from. Old and Evicted are how the publisher says it dropped a group it was
-// still serving, which reads the same here.
-const GAPS: Moq.StreamCode[] = [
-	Moq.StreamCode.TooFarBehind,
-	Moq.StreamCode.Old,
-	Moq.StreamCode.Evicted,
-	Moq.StreamCode.GroupTooLarge,
-];
 
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
@@ -76,11 +66,11 @@ export class Consumer<T> {
 			let frame: Moq.Group.Frame | undefined;
 			try {
 				frame = await this.#group.readFrame();
-			} catch (err) {
-				// A locally raised gap carries its code too, so this catches both sides.
-				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
-
-				// The next group starts with a checkpoint that accounts for everything missed.
+			} catch {
+				// A failed group is that group's gap: the next group starts with a checkpoint that
+				// accounts for everything missed. Only the track's own error, from the next group
+				// read, ends the consumer.
+				this.#group.close();
 				this.#group = undefined;
 				this.#codec = undefined;
 				continue;

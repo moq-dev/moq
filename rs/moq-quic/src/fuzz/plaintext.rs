@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use crate::{
 	ConnectionId, Side, TransportError, Version, client,
 	coding::{BufExt, BufMutExt},
-	crypto::{self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys, PacketKey},
+	crypto::{self, CryptoError, HandshakeData, HeaderKey, KeyPair, Keys, PacketKey},
 	endpoint::ConnectError,
 	server,
 	transport_parameters::TransportParameters,
@@ -198,14 +198,7 @@ impl crypto::Session for Session {
 			.is_some_and(|tag| payload[tag..] == [0; 16])
 	}
 
-	fn export_keying_material(
-		&self,
-		_output: &mut [u8],
-		_label: &[u8],
-		_context: &[u8],
-	) -> Result<(), ExportKeyingMaterialError> {
-		Err(ExportKeyingMaterialError)
-	}
+	fn confirmed(&mut self) {}
 }
 
 fn keys() -> Keys {
