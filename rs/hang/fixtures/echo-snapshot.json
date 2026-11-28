@@ -4,6 +4,7 @@
 		"rate": 7000000,
 		"lostBytes": 150,
 		"lostPackets": 1,
+		"sentBytes": 1048576,
 		"age": 6
 	},
 	"renditions": {

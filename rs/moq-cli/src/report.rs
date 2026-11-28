@@ -135,6 +135,7 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 		transport.rate = rate.map(moq_net::bandwidth::Rate::as_bps);
 		transport.lost_bytes = stats.bytes_lost;
 		transport.lost_packets = stats.packets_lost;
+		transport.sent_bytes = stats.bytes_sent;
 	}
 	transport
 }
@@ -423,6 +424,49 @@ async fn snapshot(
 /// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
 pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+	follow_report(origin, path, |_, value| Ok(value.to_string())).await
+}
+
+/// `export health`: grade the broadcast's publisher reports as `export report` follows them and
+/// write each [`hang::health::Health`] to stdout as a JSON line.
+pub async fn print_health(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+	let mut grader = Grader::default();
+	follow_report(origin, path, |observer, value| {
+		let snapshot = serde_json::from_value(value).context("malformed report")?;
+		let health = grader.grade(hang::health::Report::new(observer, snapshot));
+		Ok(serde_json::to_string(&health)?)
+	})
+	.await
+}
+
+/// Grades each report against the one before it, over the time between receiving them.
+#[derive(Default)]
+struct Grader {
+	previous: Option<(hang::health::Report<hang::stats::Snapshot>, kio::clock::Instant)>,
+}
+
+impl Grader {
+	fn grade(&mut self, current: hang::health::Report<hang::stats::Snapshot>) -> hang::health::Health {
+		let now = kio::clock::now();
+		// A report is graded as it arrives, so it has no age to be stale by.
+		let mut sample = hang::health::Sample::new(&current, Duration::ZERO);
+		if let Some((previous, at)) = &self.previous {
+			sample = sample.with_previous(previous, now.duration_since(*at));
+		}
+		let health = hang::health::publisher(&sample, &hang::health::Thresholds::default());
+		self.previous = Some((current, now));
+		health
+	}
+}
+
+/// Call `line` with each report of the broadcast at `path`, and the observer that read it, and write
+/// what it returns to stdout, following the track the catalog's `stats` section names until the
+/// catalog and that track have both ended.
+async fn follow_report(
+	origin: moq_net::origin::Consumer,
+	path: String,
+	mut line: impl FnMut(hang::health::Observer, serde_json::Value) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	let broadcast = origin
 		.follow(path.as_str(), None)?
@@ -430,6 +474,7 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{path}`"))?
 		.context("went offline before serving")?;
+	let observer = hang::health::Observer::new(broadcast.info().path.clone(), broadcast.info().identity.clone());
 	let source = moq_mux::Source::new(origin, broadcast.clone());
 	let mut catalog = Some(source.catalog::<()>(CatalogFormat::Hang).await?);
 
@@ -457,7 +502,7 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 			}
 			value = snapshot(&mut track) => match value? {
 				Some(value) => {
-					stdout.write_all(format!("{value}\n").as_bytes()).await?;
+					stdout.write_all(format!("{}\n", line(observer.clone(), value)?).as_bytes()).await?;
 					stdout.flush().await?;
 				}
 				None if catalog.is_none() => return Ok(()),
@@ -666,6 +711,32 @@ mod tests {
 		);
 		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
+	}
+
+	/// A grade spans the time between reports, over the connection's sent bytes: a second
+	/// broadcast on the connection counts against the headroom.
+	#[tokio::test(start_paused = true)]
+	async fn health_grades_the_connection_not_one_broadcast() {
+		let report = |sent| {
+			let mut snapshot = hang::stats::Snapshot::default();
+			snapshot.transport.rate = Some(1_000_000);
+			snapshot.transport.lost_bytes = Some(0);
+			snapshot.transport.sent_bytes = Some(sent);
+			let observer = hang::health::Observer::new(moq_net::Path::from_static("room/live"), None);
+			hang::health::Report::new(observer, snapshot)
+		};
+		let mut grader = Grader::default();
+		let first = grader.grade(report(0));
+		assert_eq!(first.interval, None);
+
+		// 1 MB over 4 s is 2 Mb/s against a 1 Mb/s rate, though no rendition sent a byte.
+		kio::clock::sleep(Duration::from_secs(4)).await;
+		let health = grader.grade(report(1_000_000));
+		assert_eq!(health.interval, Some(Duration::from_secs(4)));
+		let headroom = &health.transport.evidence[2];
+		assert_eq!(headroom.input, hang::health::Input::Headroom);
+		assert_eq!(headroom.value, Some(0.5));
+		assert_eq!(headroom.verdict, hang::health::Verdict::Unhealthy);
 	}
 
 	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.

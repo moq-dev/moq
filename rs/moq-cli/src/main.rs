@@ -959,6 +959,9 @@ fn spawn_export(
 			ExportSink::Report => {
 				tasks.spawn(report::print_report(origin.consume(), name));
 			}
+			ExportSink::Health => {
+				tasks.spawn(report::print_health(origin.consume(), name));
+			}
 			ExportSink::Echo => {
 				tasks.spawn(report::print_echo(origin.consume(), name));
 			}

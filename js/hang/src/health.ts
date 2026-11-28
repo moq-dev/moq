@@ -71,9 +71,9 @@ export interface Thresholds {
 export interface TransportThresholds {
 	/** Round-trip time. */
 	rtt: Limits<Duration>;
-	/** Transport bytes lost per media byte sent (publisher only). */
+	/** Transport bytes lost per byte the connection sent (publisher only). */
 	loss: Limits;
-	/** Estimated rate over the media bitrate sent (publisher only); lower is worse. */
+	/** Estimated rate over the bitrate the connection sent (publisher only); lower is worse. */
 	headroom: Limits;
 }
 
@@ -177,8 +177,8 @@ export interface Health {
 
 /**
  * Grade a publisher's self-report.
- * Loss and headroom divide the connection's transport counters by this broadcast's media, so they
- * hold when the broadcast is the only one its connection publishes.
+ * Loss and headroom divide the connection's loss and rate by the bytes the connection sent, so they
+ * hold however many broadcasts it carries. A report without `sentBytes` grades them unknown.
  */
 export function publisher(sample: Sample<Stats.Snapshot>, thresholds: Thresholds = defaultThresholds()): Health {
 	return assess(sample, PUBLISHER, thresholds);
@@ -285,7 +285,6 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 	}
 	const interval = previous ? sample.interval : undefined;
 
-	let sent = 0;
 	const entries: [string, Rendition][] = [];
 	for (const [id, rendition] of Object.entries(current.renditions ?? {})) {
 		const delta = previous && {
@@ -297,7 +296,6 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 		const entry: Rendition = { verdict: worst(evidence), evidence };
 		if (delta && interval !== undefined) {
 			const bytes = count(delta, kind.bytes);
-			sent += bytes;
 			entry.frames = count(delta, kind.frames);
 			entry.bytes = bytes;
 			entry.bitrate = bitrate(bytes, interval);
@@ -312,8 +310,7 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 			current: current.transport ?? {},
 			previous: previous && (previous.transport ?? {}),
 			age: sample.age,
-			sent,
-			media: interval === undefined ? undefined : bitrate(sent, interval),
+			interval,
 		},
 		kind.role,
 		thresholds,
@@ -344,8 +341,7 @@ interface Link {
 	current: Stats.Transport;
 	previous?: Stats.Transport;
 	age: Duration;
-	sent: number;
-	media?: number;
+	interval?: Duration;
 }
 
 function connection(link: Link, role: Role, thresholds: Thresholds): Connection {
@@ -355,20 +351,22 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 		previous && (previous.age === undefined || Duration.millis(previous.age).le(thresholds.stale))
 			? previous
 			: undefined;
-	const lost = (counter: (t: Stats.Transport) => number | undefined) => {
+	const delta = (counter: (t: Stats.Transport) => number | undefined) => {
 		const current = counter(link.current);
 		const previous = fresh && counter(fresh);
 		return current === undefined || previous === undefined ? undefined : Math.max(0, current - previous);
 	};
-	const lostBytes = lost((t) => t.lostBytes);
-	const lostPackets = lost((t) => t.lostPackets);
+	const lostBytes = delta((t) => t.lostBytes);
+	const lostPackets = delta((t) => t.lostPackets);
+	const sent = delta((t) => t.sentBytes);
 
 	const rtt = { degraded: limits.rtt.degraded.asMillis(), unhealthy: limits.rtt.unhealthy.asMillis() };
 	const evidence = [above("rtt", link.current.rtt, rtt)];
 	if (role === "publisher") {
-		const loss = lostBytes === undefined ? undefined : ratio(lostBytes, link.sent);
+		const loss = lostBytes === undefined || sent === undefined ? undefined : ratio(lostBytes, sent);
+		const media = sent === undefined || link.interval === undefined ? undefined : bitrate(sent, link.interval);
 		const rate = link.current.rate;
-		const headroom = rate !== undefined && link.media ? rate / link.media : undefined;
+		const headroom = rate !== undefined && media ? rate / media : undefined;
 		evidence.push(above("loss", loss, limits.loss));
 		evidence.push(below("headroom", headroom, limits.headroom));
 	}
@@ -390,12 +388,12 @@ function sameObserver(a: Observer, b: Observer): boolean {
 }
 
 function decreased<R>(previous: Snapshot<R>, current: Snapshot<R>, kind: Kind<R>): boolean {
-	const lost = (counter: (t: Stats.Transport) => number | undefined) => {
+	const wentDown = (counter: (t: Stats.Transport) => number | undefined) => {
 		const before = previous.transport && counter(previous.transport);
 		const after = current.transport && counter(current.transport);
 		return before !== undefined && after !== undefined && after < before;
 	};
-	if (lost((t) => t.lostBytes) || lost((t) => t.lostPackets)) return true;
+	if (wentDown((t) => t.lostBytes) || wentDown((t) => t.lostPackets) || wentDown((t) => t.sentBytes)) return true;
 	return Object.entries(current.renditions ?? {}).some(([id, rendition]) => {
 		const before = own(previous.renditions, id);
 		return before !== undefined && kind.decreased(before, rendition);

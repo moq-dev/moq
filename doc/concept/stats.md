@@ -29,8 +29,9 @@ The shared schemas are `hang::{stats, echo}::Snapshot` and
 Container-specific sections can sit beside `transport` and `renditions`.
 Counters are cumulative; readers derive rates over an interval and treat a
 replacement or decrease as a reset. Bitrate, latency, RTT, estimated rate,
-and sample age are gauges. Loss is cumulative lost bytes and packets,
-with unavailable transport measurements absent. Missing rendition counters
+and sample age are gauges. Loss is cumulative lost bytes and packets, and
+`sentBytes` is the bytes the connection sent across every broadcast it
+carries, with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
@@ -42,7 +43,8 @@ it reads and records its newest arrival. In the browser, `<moq-publish stats>`
 and `echo-path` do the same for the [publisher](/lib/js/publish#stats-and-feedback),
 and `<moq-watch echo>` reports what its [player](/lib/js/watch#feedback)
 received, decoded, and played, with only the PROBE round-trip time as its
-transport. See the
+transport. A browser publisher likewise reports no `sentBytes`, so it grades on
+RTT alone. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
 the feedback convention.
 
@@ -147,8 +149,8 @@ Container sections such as `mpegts` are not read.
 | Input | Role | Value | Degraded | Unhealthy |
 | --- | --- | --- | --- | --- |
 | `rtt` | both | Round-trip time, ms. | 300 | 800 |
-| `loss` | publisher | Transport bytes lost per media byte sent. | 0.02 | 0.1 |
-| `headroom` | publisher | Estimated `rate` over the media bitrate sent. | below 1.5 | below 1 |
+| `loss` | publisher | Transport bytes lost per byte the connection sent. | 0.02 | 0.1 |
+| `headroom` | publisher | Estimated `rate` over the bitrate the connection sent. | below 1.5 | below 1 |
 | `skipped` | publisher | Frames skipped, as a share of frames sent or skipped. | 0.01 | 0.05 |
 | `late` | viewer | Late frames per frame received. | 0.01 | 0.05 |
 | `errors` | viewer | Decode errors per frame received. | 0.01 | 0.05 |
@@ -156,10 +158,12 @@ Container sections such as `mpegts` are not read.
 
 These are defaults the caller can override, as is the five-second stale limit.
 A viewer's loss counters describe its own uplink, so they are reported but not
-graded. Loss and headroom divide the connection's transport counters by the
-report's own media, so they hold when the broadcast is the only one its
-connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals. The rendition limits are not
+graded. Loss and headroom divide the connection's loss and rate by the change in its
+`sentBytes`, so they hold however many broadcasts it carries; a report without
+`sentBytes`, or one whose previous transport sample is stale, leaves both
+`unknown`. Native QUIC counts overhead and retransmissions in `sentBytes` and a
+browser's WebTransport does not. The transport limits were measured on one paced TS feed
+through a shaped link over five-second intervals, dividing by media bytes. The rendition limits are not
 measured against real traffic, and no CLI viewer reports `late`, `errors`, or
 `stalled`.
 

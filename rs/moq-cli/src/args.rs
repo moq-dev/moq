@@ -1113,6 +1113,8 @@ pub enum ExportSink {
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's media reports (`import --report`) to stdout as JSON lines.
 	Report,
+	/// Write the grade of the broadcast's media reports (`import --report`) to stdout as JSON lines.
+	Health,
 	/// Write the feedback of every `.echo` broadcast under `--broadcast` to stdout as JSON lines.
 	Echo,
 }
@@ -1129,6 +1131,7 @@ impl ExportSink {
 			Self::Webrtc(_) | Self::Rtc(_) => "webrtc",
 			Self::Archive(_) => "archive",
 			Self::Report => "report",
+			Self::Health => "health",
 			Self::Echo => "echo",
 		})
 	}
@@ -1137,6 +1140,7 @@ impl ExportSink {
 	fn report(&self) -> Option<&'static str> {
 		match self {
 			Self::Report => Some("report"),
+			Self::Health => Some("health"),
 			Self::Echo => Some("echo"),
 			_ => None,
 		}

@@ -593,8 +593,10 @@ viewer could publish beneath: a segment holding `*`, or past 32 segments.
 its newest arrival, until the export ends. It covers the stdout container
 exports and needs a hang catalog, so MSF refuses it.
 
-The `report` and `echo` sinks print reports as JSON lines. `export report`
-follows one broadcast's report track until the broadcast ends; `export echo`
+The `report`, `health`, and `echo` sinks print reports as JSON lines. `export report`
+follows one broadcast's report track until the broadcast ends; `export health`
+prints the same follow as [health](/concept/stats#health) instead, each report graded
+against the one before it over the time between receiving them; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
 final report. Either sink stops reading a report that grows past 1 MiB.
@@ -602,6 +604,7 @@ final report. Either sink stops reading a report that grows past 1 MiB.
 ```bash
 moq ... --broadcast event import --report --echo-path viewers ts < feed.ts
 moq ... --broadcast event export report
+moq ... --broadcast event export health
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo
 ```

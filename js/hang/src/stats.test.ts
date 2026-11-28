@@ -49,7 +49,7 @@ test("optional null measurements mean unavailable rather than measured zero", ()
 		JSON.parse(
 			JSON.stringify(
 				Stats.SnapshotSchema.parse({
-					transport: { rtt: null, rate: null, lostBytes: null, lostPackets: null, age: null },
+					transport: { rtt: null, rate: null, lostBytes: null, lostPackets: null, sentBytes: null, age: null },
 					renditions: { hd: { bitrate: null } },
 				}),
 			),

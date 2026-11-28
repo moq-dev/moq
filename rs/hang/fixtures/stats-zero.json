@@ -4,6 +4,7 @@
 		"rate": 0,
 		"lostBytes": 0,
 		"lostPackets": 0,
+		"sentBytes": 0,
 		"age": 0
 	},
 	"renditions": {

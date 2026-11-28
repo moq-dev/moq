@@ -436,7 +436,8 @@ type ViewerRendition = {
   arrival?: { timestamp: number, wall: number },
 }
 type Transport = {
-  rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number, age?: number,
+  rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number,
+  sentBytes?: number, age?: number,
 }
 ~~~
 
@@ -447,7 +448,7 @@ Rules:
 - Renditions are keyed by the soliciting catalog's unique rendition IDs (even for referenced broadcasts).
 - `frames`/`bytes` count cumulative media payload frames and bytes sent (publisher) or received (viewer); publisher `keyframes` counts sent keyframes and `skipped` frames skipped before sending; viewer `decoded`, `late`, and `errors` count decoded frames, frames too late for playout, and decode errors.
 - `stalls` counts playout stalls, `stalled` is cumulative stalled duration, and `underruns` counts audio buffer underruns; `bitrate` is the latest target encoder bitrate; `arrival` pairs the newest received media timestamp with its arrival wall time.
-- `transport` describes the reporting connection: latest round-trip time `rtt`, estimated bitrate `rate`, cumulative loss counters `lostBytes`/`lostPackets`, and sample `age` at reporting time; gauges MUST NOT be summed across reports.
+- `transport` describes the reporting connection: latest round-trip time `rtt`, estimated bitrate `rate`, cumulative loss counters `lostBytes`/`lostPackets`, cumulative `sentBytes` the connection sent across every broadcast it carries (as its stack counts them, so a reader compares it only with the same connection's earlier report), and sample `age` at reporting time; gauges MUST NOT be summed across reports.
 - MSF conversion carries neither `stats` nor `echo`.
 
 
@@ -572,6 +573,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Added `transport.sentBytes`, the connection's cumulative bytes sent, the denominator for loss and for headroom over the bitrate sent across all the broadcasts the connection carries.
 - An HLS or DASH edge places a group on the segment grid by its start rather than its first frame's timestamp, and a hole between groups whose skipped starts the publisher declared is no playhead event.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.
