@@ -12,8 +12,16 @@ main into release.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
+- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+  to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
+  timestamp-ids ([moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)) (rejected: folding into
+  [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
+  Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
+  bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
+  lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
+  lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
 - ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
-  and [remove `identity` from `hang::catalog`](/quest/m2/remove-catalog-identity.md)
+  and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
   keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,
   grants already moved to `Prefixes`, and wire announcements already carry
@@ -22,7 +30,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 
-- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+- ✅ Added pre-cut Rust API fences (`#[non_exhaustive]`
   on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
   `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
   `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its

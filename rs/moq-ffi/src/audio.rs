@@ -237,16 +237,20 @@ pub enum MoqAudioRead {
 	},
 }
 
-impl From<moq_audio::decode::Read> for MoqAudioRead {
-	fn from(read: moq_audio::decode::Read) -> Self {
-		match read {
+impl MoqAudioRead {
+	/// The binding's read for `read`, or `None` for a kind this binding predates.
+	fn new(read: moq_audio::decode::Read) -> Option<Self> {
+		Some(match read {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
-			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
+			moq_audio::decode::Read::Gap {
+				timestamp, duration, ..
+			} => Self::Gap {
 				timestamp: timestamp.into(),
 				duration: crate::ffi::gap(duration),
 			},
-			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
-		}
+			moq_audio::decode::Read::End { end, .. } => Self::End { end: end.into() },
+			_ => return None,
+		})
 	}
 }
 
@@ -623,9 +627,14 @@ struct ConsumerInner {
 
 impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioRead>, MoqError> {
-		let read = self.consumer.read().await;
-		self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
-		Ok(read?.map(MoqAudioRead::from))
+		loop {
+			let read = self.consumer.read().await;
+			self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
+			let Some(read) = read? else { return Ok(None) };
+			if let Some(read) = MoqAudioRead::new(read) {
+				return Ok(Some(read));
+			}
+		}
 	}
 }
 
@@ -722,11 +731,8 @@ impl MoqAudioConsumer {
 		// Reject malformed or unknown codec names before resolving the broadcast reference.
 		// Decoder setup checks recognized codecs after resolution, without a second codec gate.
 		let reference = catalog_audio.broadcast.clone();
-		let identity = catalog_audio.identity.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), identity.as_deref())
-			.await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -783,7 +789,6 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
-			identity: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,

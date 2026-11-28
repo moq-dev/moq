@@ -821,7 +821,7 @@ mod tests {
 		// restricted server's export into using them.
 		let broad = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let referenced = broad
-			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()), None)
+			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()))
 			.await
 			.unwrap();
 		let mut group = referenced.track("video1").unwrap().fetch_group(0, None).await.unwrap();

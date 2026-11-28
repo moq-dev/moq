@@ -284,21 +284,19 @@ Decided 2026-11-27 (maintainer, on
 [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ Every
 first-party decoder reads `cts` while lite-07 publishers keep writing `legacy`;
 publishers switch to `cts` with [lite-08](/quest/m4/cts-encoders.md)
-(rejected: first-party encoders on `cts` for lite-07). ✅ Whenever groups are
-keyed by frame 0's timestamp, lite-05/06 and draft-18..22 ingress re-keys each
-timed group by its frame 0 timestamp on arrival, breaking their by-sequence
-requests (rejected: leaving those copies unchecked).
+(rejected: first-party encoders on `cts` for lite-07).
 
-Open (maintainer, on
-[moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): whether
-lite-07's group key becomes frame 0's timestamp by construction, so a group
-stream's first `FRAME` carries no timestamp delta and every delta is unsigned.
-Until then a stream's first `FRAME` carries a zigzag delta from the Group
-Start, letting frame 0 precede it.
+Decided 2026-11-27 (maintainer, `/quest-plan` following the frame-0 design pass
+on [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ the cut
+also waits for [keying groups by frame 0](/quest/m2/group-frame-timestamps.md),
+which creates published groups eagerly from frame 0, omits the first `FRAME`
+delta at `Frame Start = 0`, removes zigzag from lite-07, and drops `seek(start)`
+before 0.22 (rejected: folding it into #9794; dropping it).
 
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 
 ## Related
 

@@ -5,7 +5,6 @@ import * as Json from "@moq/json";
 import { Identity, Origin, Path, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { key } from "../../json/src/key.test-util.ts";
-import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
@@ -20,16 +19,6 @@ function publish(origin: Origin.Producer, path: string, identity?: Identity.Vali
 const settle = async (): Promise<void> => {
 	for (let i = 0; i < 5; i++) await yieldNow();
 };
-
-async function quietly<T>(fn: () => Promise<T>): Promise<T> {
-	const warn = console.warn;
-	console.warn = () => {};
-	try {
-		return await fn();
-	} finally {
-		console.warn = warn;
-	}
-}
 
 // Resolves once nobody subscribes to the track.
 async function unwanted(track: Track.Producer): Promise<void> {
@@ -238,7 +227,7 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 	}
 });
 
-it("follows a restarted contributor only for an entry that names no identity", async () => {
+it("follows a restarted contributor", async () => {
 	const origin = new Origin.Producer();
 	// A session that could announce the include, so its absence reads offline.
 	wireOf(origin).attach(true);
@@ -250,27 +239,19 @@ it("follows a restarted contributor only for an entry that names no identity", a
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
 		catalog: Catalog.RootSchema.parse({
-			include: {
-				following: { broadcast: "./extra.hang" },
-				pinned: { broadcast: "./extra.hang", identity: oldIdentity },
-			},
+			include: { following: { broadcast: "./extra.hang" } },
 		}),
 	});
 	const owner = new Effect();
 	try {
 		const following = parent.include(owner, "following");
-		const pinned = parent.include(owner, "pinned");
 		await settle();
 		expect(following.out.active.peek()?.identity).toBe(oldIdentity);
-		expect(pinned.out.active.peek()?.identity).toBe(oldIdentity);
 
-		// The announcement is the online signal: the plain entry follows the restart, while the
-		// one naming the old identity goes offline rather than reading the new one.
+		// The announcement is the online signal: the entry follows the restart.
 		const replacement = publish(origin, "room/extra.hang", newIdentity);
-		await quietly(settle);
+		await settle();
 		expect(following.out.active.peek()?.identity).toBe(newIdentity);
-		expect(pinned.out.active.peek()).toBeUndefined();
-		expect(pinned.out.status.peek()).toBe("offline");
 		replacement.close();
 	} finally {
 		owner.close();
@@ -312,64 +293,17 @@ it("pins the first identity of an include when not following announcements", asy
 	}
 });
 
-it("never reads an include of another identity, but reads a minted one", async () => {
+it("shares the parent's resolution across catalog updates", async () => {
 	const origin = new Origin.Producer();
-	publish(origin, "room/main.hang");
 	const served = Identity.random();
-	const proven = publish(origin, "room/proven.hang", served);
-	const track = defined(proven.createTrack(Catalog.TRACK));
-	// A route over a wire that carries no identity has one its session minted.
-	publish(origin, "room/plain.hang", Mint.fresh());
-	const named = Identity.random();
-	const include = (identity: Identity.Valid) =>
-		Catalog.RootSchema.parse({
-			include: {
-				proven: { broadcast: "./proven.hang", identity },
-				plain: { broadcast: "./plain.hang", identity: named },
-			},
-		});
-	const catalog = new Signal(include(named));
-	const parent = new Broadcast({
-		origin,
-		name: Path.from("room/main.hang"),
-		catalogFormat: "manual",
-		catalog,
-		follow: false,
-	});
-	const owner = new Effect();
-	try {
-		const refused = parent.include(owner, "proven");
-		const accepted = parent.include(owner, "plain");
-		await quietly(settle);
-		expect(refused.out.active.peek()).toBeUndefined();
-		expect(refused.out.error.peek()).toBeUndefined();
-		expect(track.closed.peek()).toBeUndefined();
-		expect(track.demand().wanted.peek()).toBe(false);
-		// A minted identity cannot prove the stream, so the named identity cannot refuse it.
-		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
-
-		// A catalog update naming the served identity admits the stream the request already holds.
-		catalog.set(include(served));
-		await settle();
-		expect(refused.out.active.peek()?.identity).toBe(served);
-	} finally {
-		owner.close();
-		parent.close();
-		origin.close();
-	}
-});
-
-it("shares the parent's resolution, so a new identity checks the held handle", async () => {
-	const origin = new Origin.Producer();
-	const [served, other] = [Identity.random(), Identity.random()];
 	publish(origin, "room/main.hang", served);
 	const extraCatalog = defined(publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK));
-	const entries = (identity?: Identity.Valid) =>
+	const entries = () =>
 		Catalog.RootSchema.parse({
 			include: {
-				sibling: { broadcast: "./extra.hang", identity },
-				self: { broadcast: "./main.hang", identity },
-				empty: { broadcast: "", identity },
+				sibling: { broadcast: "./extra.hang" },
+				self: { broadcast: "./main.hang" },
+				empty: { broadcast: "" },
 			},
 		});
 	const catalog = new Signal(entries());
@@ -403,18 +337,13 @@ it("shares the parent's resolution, so a new identity checks the held handle", a
 			}),
 		);
 
-		// Naming the held identity keeps the same handle rather than resolving the path again.
-		catalog.set(entries(served));
+		// An update keeps the same handle rather than resolving the path again. Forced, since an
+		// equal catalog would not notify.
+		catalog.set(entries(), true);
 		await settle();
 		expect(sibling.out.active.peek()).toBe(held);
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
 		expect(withdrawals).toBe(0);
-
-		// Naming another identity fails the held one.
-		catalog.set(entries(other));
-		await quietly(settle);
-		expect(sibling.out.active.peek()).toBeUndefined();
-		expect(self.out.active.peek()).toBeUndefined();
 	} finally {
 		owner.close();
 		parent.close();
@@ -454,7 +383,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 					hd: sized(1920, 1080, 4_000_000),
 					// A reference of its own, rebased onto the root's broadcast.
 					remote: { ...sized(320, 180, 200_000), broadcast: "./remote.hang" },
-					// A reference back to the include itself still reads the stream its entry names.
+					// A reference back to the include itself, rebased like any other.
 					alt: { ...sized(426, 240, 300_000), broadcast: "./ladder.hang" },
 				},
 			},
@@ -472,7 +401,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const root = (own: Record<string, Catalog.VideoConfig>) =>
 		Catalog.RootSchema.parse({
 			video: { renditions: own },
-			include: { ladder: { broadcast: "./ladder.hang", identity: served } },
+			include: { ladder: { broadcast: "./ladder.hang" } },
 		});
 	const catalog = new Signal(root({ hd: sized(1920, 1080, 5_000_000) }));
 	const broadcast = new Broadcast({ origin, name: Path.from("room/main.hang"), catalogFormat: "manual", catalog });
@@ -481,7 +410,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const selection = new Effect();
 	try {
 		await settle();
-		const ref = { broadcast: "ladder.hang" as Path.Relative, identity: served };
+		const ref = { broadcast: "ladder.hang" as Path.Relative };
 		expect(broadcast.out.catalog.peek()?.video?.renditions).toEqual({
 			hd: sized(1920, 1080, 5_000_000),
 			"ladder/720p": { ...sized(1280, 720, 2_000_000), ...ref, track: "720p" },
@@ -512,7 +441,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 
 		// Reading the selected rendition, as the decoder does, subscribes that track alone.
 		const frames = broadcast
-			.relativeBroadcast(selection, selected?.broadcast, selected?.identity)
+			.relativeBroadcast(selection, selected?.broadcast)
 			?.track(Catalog.track("ladder/720p", selected ?? {}))
 			.subscribe()
 			.ordered();
@@ -542,26 +471,20 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	}
 });
 
-it("dedupes an include's rendition only against a usable one", async () => {
+it("dedupes an include's rendition against the root's", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const [oldIdentity, newIdentity] = [Identity.random(), Identity.random()];
-	const serve = (identity: Identity.Valid) => {
-		const broadcast = publish(origin, "room/extra.hang", identity);
-		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
-			track: defined(broadcast.createTrack(Catalog.TRACK)),
-			deltas: false,
-		});
-		catalog.update(Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), key());
-		return broadcast;
-	};
-	const old = serve(oldIdentity);
+	const extra = publish(origin, "room/extra.hang");
+	new Json.Snapshot.Producer<Catalog.Root>({
+		track: defined(extra.createTrack(Catalog.TRACK)),
+		deltas: false,
+	}).update(Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), key());
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
 		catalog: Catalog.RootSchema.parse({
-			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang", identity: oldIdentity } } },
+			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang" } } },
 			include: { extra: { broadcast: "./extra.hang" } },
 		}),
 	});
@@ -569,17 +492,9 @@ it("dedupes an include's rendition only against a usable one", async () => {
 		await settle();
 		// The root already lists the include's media, so it is listed once.
 		expect(Object.keys(parent.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["v"]);
-
-		// A restart proves the root's entry stale, while the include follows it.
-		const replacement = serve(newIdentity);
-		await quietly(settle);
-		expect(parent.out.catalog.peek()?.video?.renditions).toEqual({
-			"extra/v": { ...video("vp8"), broadcast: "extra.hang" as Path.Relative, track: "v" },
-		});
-		replacement.close();
 	} finally {
 		parent.close();
-		old.close();
+		extra.close();
 		origin.close();
 	}
 });
