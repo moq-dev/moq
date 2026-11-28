@@ -12942,7 +12942,9 @@ fn wire_join(range: &lite::Range) -> Option<(Option<Duration>, Option<u64>)> {
 fn narrowest(live: &lite::LiveRanges) -> Duration {
 	(live.iter())
 		.filter_map(|(_, range)| match range.start {
-			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => Some(max.unwrap_or(Duration::MAX)),
+			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => {
+				Some(max.unwrap_or(Duration::MAX))
+			}
 			_ => None,
 		})
 		.min()

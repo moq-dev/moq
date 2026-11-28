@@ -51,7 +51,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a draining replaced copy's cache evicts (`Copy::drains`, `Evict`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. StaleRecover's rows sync to `541c0839bfdcf0050b23ca217c4b35efa51941f3` plus the copy's judging budget (`judge_under`, `judged_under`) and `Recover::outgrows_judging` that model it. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `065a4c184340f7fc6035db97695327ef7d7e69a8`. Run `git log 065a4c1843.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. StaleRecover's rows sync to the same commit. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -66,10 +66,10 @@ Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backf
 | `rs/moq-net/src/model/track.rs` `TrackState::evict_group`, `evicted_groups`, `Consumer::evicted` | `Evict`, `Evicted`, `Arrived` |
 | `rs/moq-net/src/model/resume.rs` `Recover::undelivered`, `outgrows_judging`, `poll_serving` (StaleRecover) | `Recover` |
 | `rs/moq-net/src/model/track.rs` `Producer::judge_under`, `Consumer::judged_under`, `settles` (StaleRecover) | `Retune`, `Reset`, `Recover` |
-| `rs/moq-net/src/lite/subscriber.rs` `SubStream::stale_budget` (StaleRecover) | `Reset` (`Recorded`) |
+| `rs/moq-net/src/lite/subscriber.rs` `narrowest` (StaleRecover) | `Reset` (`Recorded`) |
 
 ## Not covered
 
 StaleRecover covers one group, one route, and a publisher that holds the group for every request; it leaves out frames, caps, and route changes, which the tests in `resume.rs` own.
 
-ResumeReader: whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires (nor is the budget clock a replaced copy runs on, `since` and `drained`, modeled), and local ranges (`set_range`, a lowered floor's backfill), ordered reads, ascending order, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. Only a route no longer served evicts, and a group a route evicted is owed only by the routes still holding it, since the fill a cursor of its own would ask for it is left out. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.
+ResumeReader: the ranked pick a publisher stuck behind a group waiting for stream credit reads with (`Pick::Ranked`), where each copy ranks its own best and `poll_first` takes the best rank, is left out: SendCredit.tla models it, and every other read picks in Group Order. Whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires (nor is the budget clock a replaced copy runs on, `since` and `drained`, modeled), and local ranges (`set_range`, a lowered floor's backfill), ordered reads, ascending order, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. Only a route no longer served evicts, and a group a route evicted is owed only by the routes still holding it, since the fill a cursor of its own would ask for it is left out. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.

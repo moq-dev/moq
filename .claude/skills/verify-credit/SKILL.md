@@ -13,7 +13,7 @@ Ingest checks the group's pace gate, only at a seal. Past the pace window, the s
 
 When the peer has no connection credit left, moq-quic evicts the lowest-ranked stream holding credit, newest first. It holds off while an evicted reader has not stopped its stream, or while some reader has data it has not looked at, and reruns at every release, read, stop, and arrival, and at a restore when an earlier pass waited on that lease while it was out. A reader arrives late or leaves only under `Late` and `Leave`. Streams in `Plain` are read with `read()`, returning credit as they read. Under `Shrink` the window shrinks once, a debt the next returned credit pays before the peer sees any.
 
-`rs/moq-net/verify/credit/SendCredit.tla` models the sender's wait for stream credit. Each subscription's `TrackRun` hands its groups out one at a time, in any arrival order. One group per subscription waits for credit (`TrackRun::opening`) in the session's line, ranked as `open::Rank` orders it. Only the head asks the transport, and a waiting open resets the lowest-ranked stream it preempts (`Lines::make_room`). While the waiting group is `stuck`, the cursor hands out the group ranked highest by the policy it would go out at now, and only if it outranks the waiting one, which gives way (`give_way`): deferred while an oldest-first range still wants it, taking the place back once it empties or outranks the waiting group, and given up otherwise. Mixed ranges rank some groups at a lower-priority, oldest-first history range: `HistOnly` groups only it covers, and `Both` groups a live join covers until they age into it, oldest first. Under `Late`, groups arrive over time in any order. The receiver is abstract: a stream sent whole or reset is eventually freed, and ReceiveCredit.tla checks that it is. A group in `LiveSubs` at `LiveGroup` is one whose producer never finishes, so its stream keeps its credit until a higher-ranked open resets it, as in `rs/moq-net/tests/integration/stream_credit.rs`.
+`rs/moq-net/verify/credit/SendCredit.tla` models the sender's wait for stream credit. Each subscription's `TrackRun` hands its groups out one at a time, in any arrival order. One group per subscription waits for credit (`TrackRun::opening`) in the session's line, ranked as `open::Rank` orders it. Only the head asks the transport, and a waiting open resets the lowest-ranked stream it preempts (`Lines::make_room`). While the waiting group is `stuck`, ranked below every stream its subscription serves (none included), the cursor hands out the group ranked highest by the policy it would go out at now, and only if it outranks the waiting one, which gives way (`give_way`): it is deferred, taking the place back once it empties or outranks the waiting group. Credit never gives a group up; only a budget does, which the model leaves out. Mixed ranges rank some groups at a lower-priority, oldest-first history range: `HistOnly` groups only it covers, and `Both` groups a live join covers until they age into it, oldest first. Under `Late`, groups arrive over time in any order. The receiver is abstract: a stream sent whole or reset is eventually freed, and ReceiveCredit.tla checks that it is. A group in `LiveSubs` at `LiveGroup` is one whose producer never finishes, so its stream keeps its credit until a higher-ranked open resets it, as in `rs/moq-net/tests/integration/stream_credit.rs`.
 
 Each step is one poll of the code that handles one event, under the connection's lock where the code takes it. TLC checks every ordering under the bounds in each config.
 
@@ -29,9 +29,8 @@ Each step is one poll of the code that handles one event, under the connection's
 | `evict`'s assertion | Receive | Eviction never picks a stream whose reader may still progress (`Assert` in `EvictLoop`). | A reader that would have finished loses its group. |
 | `Progress` and `Ends` | Receive | Every stream is read whole or evicted, and stopped (`AllEnd`). | A stream holds credit forever: the connection hangs. |
 | `WithinCredit` | Send | Never more streams open than the peer granted. | The peer closes the connection with STREAM_LIMIT_ERROR. |
-| `Progress` and `Ends` | Send | Every behavior ends quiet, and once quiet every group was sent and freed or given up, is a live group's stream, or waits only on live streams it may not reset. | A subscription stops sending behind a group that never opens. |
+| `Progress` and `Ends` | Send | Every behavior ends quiet, and once quiet every group was sent and freed, is a live group's stream, or waits only on live streams it may not reset. | A subscription stops sending behind a group that never opens. |
 | `TopDelivered` | Send | Once quiet, each subscription's highest-ranked group reached the peer, was reset for a higher priority, or waits only on live streams it may not reset. | A waiting group holds back a newer one that could reset an unfinished stream: the stall #8607 fixed. |
-| `HistoryKept` | Send | A group an oldest-first range wants is never given up for credit. | A backlog group history still wants is handed out by its live policy and dropped as old. |
 | `NoHeadOfLine` | Send | A subscription parked behind its stuck waiting group holds no group, cached or deferred, that outranks it. | History ranked below the waiting group holds back an urgent group behind it. |
 | `DeferredWaits` | Send | A group is deferred only while another waits for credit. | A deferred group is never refilled, and the subscription ends without it. |
 
@@ -39,7 +38,7 @@ TLC's own liveness check is about a thousand times slower here, so liveness is c
 
 The claim that every stream pauses, charged its slot's allowance, is `EveryPauseFits` and `ChargedAllowance`. It holds because a lease carries the window ingest shapes for the room its chunk leaves (`Lease::set_window`), and the hand back sets it under the same lock before queueing the grant (`HandBack`): set in a later lock hold, a driver on another thread could build the grant from the old window, and credit granted cannot be taken back.
 
-Each model has witnesses (`NeverPaused`, `NeverEvicted`, `NeverStuckWaiting`, `NeverPartial`, `NeverPausedInside`; `NeverPreempts`, `NeverWaits`, `NeverGivesWay`, `NeverBlocked`, `NeverDefers`). Each one is expected to fail, which shows TLC reaches the state. Check one after changing a step's guard.
+Each model has witnesses (`NeverPaused`, `NeverEvicted`, `NeverStuckWaiting`, `NeverPartial`, `NeverPausedInside`; `NeverPreempts`, `NeverWaits`, `NeverBlocked`, `NeverDefers`). Each one is expected to fail, which shows TLC reaches the state. Check one after changing a step's guard.
 
 ## Run
 
@@ -80,7 +79,7 @@ In a receive trace, follow `pc`, `q[s]`'s `arr`, `taken`, `rel`, and `msd`, `cha
 
 ## Coverage
 
-Sync commit: `848e300c2bcdace0a2f343b1bc534c8d5d7e2d7e`. Run `git log 848e300c2b.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/model/group.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `065a4c184340f7fc6035db97695327ef7d7e69a8`. Run `git log 065a4c1843.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/model/group.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -93,7 +92,7 @@ Sync commit: `848e300c2bcdace0a2f343b1bc534c8d5d7e2d7e`. Run `git log 848e300c2b
 | `rs/moq-net/src/model/frame.rs` `Producer::poll_ready`, `Producer::unsealed`, `Producer::room`, `Producer::unsealed_after`; `rs/moq-net/src/model/pace.rs` `window`, `Pace::paced`, `Pace::ahead`, `Pace::took`, `Pace::park`, `Pace::room` | `Paced`, `Unsealed`, `PaceWindow`, `Take`, `Room` |
 | `rs/moq-net/src/model/group.rs` `Producer::poll_paced`, `Producer::room`, `Handle::poll_unowed`, `Handle::owed`; `rs/moq-net/src/model/pace.rs` `Pace::hold`, `Pace::held` | `Paced`, `Room`, `Arrive`, `Drop` |
 | `rs/moq-net/src/transport/boxed.rs` `Budgeted::window`, `Budgeted::pause`, `Budgeted::held`, `Budgeted::release`, `Shared::reserve`, `Pacing::cap`, `Pacing::allowance`, `Slots::take`, `Budgeted::shape`, `Budgeted::shaper`, `Shaper::window` | `PaceWindow`, `Charge`, `charge`, `Stop`, `Cap`, `Allowance`, `LowestFree`, `Shape` |
-| `rs/moq-net/src/lite/publisher.rs` `TrackRun::opening`, `TrackRun::deferred`, `GroupServe::poll_open`, `TrackRun::stuck`, `TrackRun::give_way`, `TrackRun::take_deferred`, `GroupServe::history_wants`, `GroupServe::rank_now`, `TrackRun::poll_step`, `TrackRun::poll_track`, `poll_policy` | `PollOpen`, `Refill`, `Stuck`, `Admitted`, `Outranking`, `Cursor`, `HistWants`, `InGroup`, `Age`, `Step` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::opening`, `TrackRun::deferred`, `GroupServe::poll_open`, `TrackRun::stuck`, `TrackRun::give_way`, `TrackRun::take_deferred`, `GroupServe::defer`, `TrackRun::poll_step`, `TrackRun::poll_track`, `poll_policy` | `PollOpen`, `Refill`, `Stuck`, `Admitted`, `Outranking`, `Cursor`, `InGroup`, `Age`, `Step` |
 | `rs/moq-net/src/model/track.rs` `Subscriber::poll_recv_group_above`, `Cursor::best_unread`, `Cursor::first_unread`; `rs/moq-net/src/model/resume.rs` `Reader::poll_first` | `Best`, `Outranking`, `Admitted` |
 | `rs/moq-net/src/transport/open.rs` `Rank::preempts`, `Line::join`, `Line::leave`, `Line::wake_head`, `Line::resets`, `Lines::make_room`; `rs/moq-net/src/priority.rs` `in_group` | `Rank`, `Above`, `Join`, `Leave`, `Preempts`, `MakeRoom`, `InGroup` |
 
@@ -105,7 +104,7 @@ What the model relies on in that code:
 - Only the head of the line asks the transport, and leaving the line wakes the next head (`Line::leave`).
 - A waiting group gives way to one that outranks it (`give_way`), and while it is `stuck` the cursor hands such a group out. Without either, `SendCreditLive.cfg` breaks `TopDelivered`, which the configs without a live group miss.
 - The cursor's ranked read finds the best group as the best of each range's first group it still wants (`Cursor::best_unread`): within one range's run its groups rank in that range's order, and an older group is never fresher. The model takes the best of all at once (`Best`).
-- Without the ranked read, `SendCreditMixed.cfg` breaks both new rules: judged by its live policy, a `Both` group is handed out, then shed by its aged rank (`HistoryKept`), and a refused history group next in arrival order parks the cursor ahead of a live group that outranks the waiting one (`NoHeadOfLine`).
+- With the admission before the ranked read, `SendCreditMixed.cfg` breaks `NoHeadOfLine`, a refused history group next in arrival order parking the cursor ahead of a live group that outranks the waiting one, and without that rule `Ends`, a `Both` group handed out by its live policy and shed by its aged rank.
 
 ## Not covered
 

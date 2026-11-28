@@ -19,12 +19,13 @@
 (* credit has yet to return, and make no more.                             *)
 (*                                                                         *)
 (* While the waiting group ranks below every stream its subscription       *)
-(* serves (`stuck`), the cursor hands out the group ranked highest by the  *)
-(* policy it would go out at now, only if it outranks the waiting one      *)
-(* (`Admit::Above`), which then gives way (`give_way`): deferred while an  *)
-(* oldest-first range still wants it, taking the place back once it        *)
-(* empties or once it outranks the waiting one, and given up otherwise.    *)
-(* While none waits the cursor hands out any group; otherwise none.        *)
+(* serves, none included (`stuck`), the cursor hands out the group ranked  *)
+(* highest by the policy it would go out at now, only if it outranks the   *)
+(* waiting one (`Admit::Above`), which then gives way (`give_way`): it is  *)
+(* deferred, taking the place back once it empties or once it outranks     *)
+(* the waiting one. Credit never gives a group up; only a budget does,     *)
+(* which the model leaves out. While none waits the cursor hands out any   *)
+(* group; otherwise none.                                                  *)
 (*                                                                         *)
 (* A subscription's groups go newest first, or oldest first in `Asc`.      *)
 (* Mixed ranges cover some at another policy: `HistOnly` groups only an    *)
@@ -74,10 +75,6 @@ InGroup(x, s, k) ==
     IF Historic(x, s, k) THEN -k
     ELSE Scale + (IF s \in Asc THEN -k ELSE k)
 
-\* `GroupServe::history_wants`: an oldest-first range still wants the group, so giving way
-\* defers it rather than giving it up.
-HistWants(s, k) == s \in Asc \/ k \in HistOnly \/ k \in Both
-
 \* Whether rank `a` orders above rank `b`: `open::Rank`'s order, greater first.
 Above(a, b) ==
     \/ a[1] > b[1]
@@ -87,8 +84,8 @@ Above(a, b) ==
 (* The whole state, one record, so a poll's parts compose as functions.    *)
 (*   st:       each group: "pending" (yet to arrive), "cached", "opening", *)
 (*             "deferred" (out of line), "serving" (its stream listed),    *)
-(*             "fin" (sent whole, unlisted), "reset" (preempted),          *)
-(*             "closed" (freed by the peer), or "given" (up, never opened) *)
+(*             "fin" (sent whole, unlisted), "reset" (preempted), or       *)
+(*             "closed" (freed by the peer)                                *)
 (*   aged:     the `Both` groups aged past the live join, by subscription  *)
 (*   opening:  per subscription, the group waiting for credit, or 0        *)
 (*   awake:    per subscription, its `TrackRun` has a wake pending         *)
@@ -199,7 +196,7 @@ PollOpen(x, s) ==
 Stuck(x, s) ==
     LET k == x.opening[s]
         held == {j \in 1..G : x.st[s, j] = "serving"}
-    IN k # 0 /\ held # {} /\ \A j \in held : InGroup(x, s, j) > InGroup(x, s, k)
+    IN k # 0 /\ \A j \in held : InGroup(x, s, j) > InGroup(x, s, k)
 
 \* The highest-ranked of `ks` if it outranks `s`'s waiting group, else none.
 Outranking(x, s, ks) ==
@@ -216,13 +213,11 @@ Admitted(x, s) ==
     ELSE IF Outranking(x, s, Deferred(x, s)) # {} THEN Outranking(x, s, Deferred(x, s))
     ELSE Outranking(x, s, cached)
 
-\* Group `k` takes the place, the waiting group giving way (`give_way`): deferred while history
-\* wants it, given up otherwise.
+\* Group `k` takes the place, the waiting group giving way (`give_way`) to be deferred.
 Cursor(x, s, k) ==
     LET w == x.opening[s]
         z == IF w = 0 THEN x
-             ELSE LET g == [x EXCEPT !.st[s, w] = IF HistWants(s, w) THEN "deferred" ELSE "given",
-                                     !.opening[s] = 0] IN
+             ELSE LET g == [x EXCEPT !.st[s, w] = "deferred", !.opening[s] = 0] IN
                   IF g.rank[s] = <<>> THEN g ELSE Leave(g, s)
     IN [z EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
 
@@ -329,12 +324,12 @@ Guarded == Enabled = ENABLED System
 \* `make_room` finds no stream for it.
 Blocked(s, k) == ~Credit(v) /\ Candidate(v, s, k, Listed(v)) = <<>>
 
-\* Once quiet, every group was sent and freed or given up, is a live group's stream, or waits,
+\* Once quiet, every group was sent and freed, is a live group's stream, or waits,
 \* blocked, or stays cached behind its subscription's blocked open: nothing is left to send
 \* that credit could carry.
 Ends ==
     Quiet => \A p \in Pairs :
-        \/ v.st[p] \in {"closed", "given"}
+        \/ v.st[p] = "closed"
         \/ v.st[p] = "serving" /\ p \in Live
         \/ v.st[p] = "opening" /\ Blocked(p[1], p[2])
         \/ v.st[p] \in {"cached", "deferred"} /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
@@ -346,10 +341,6 @@ TopDelivered ==
         LET k == Best(v, s, 1..G) IN
         \/ v.st[s, k] \in {"serving", "fin", "reset", "closed"}
         \/ v.st[s, k] \in {"cached", "opening"} /\ Blocked(s, k)
-
-\* A group an oldest-first range wants is never given up: superseded only for the live edge, it
-\* waits, deferred or in the cache, rather than being dropped as old.
-HistoryKept == \A p \in Pairs : HistWants(p[1], p[2]) => v.st[p] # "given"
 
 \* A subscription parked behind its stuck waiting group holds no group, cached or deferred, that
 \* outranks it: nothing ranked lower holds one ranked higher back.
@@ -363,7 +354,6 @@ DeferredWaits == \A s \in Subs : Deferred(v, s) # {} => v.opening[s] # 0
 \* Witnesses, each expected to fail.
 NeverPreempts == \A p \in Pairs : v.st[p] # "reset"
 NeverWaits == \A s \in Subs : v.rank[s] = <<>>
-NeverGivesWay == \A p \in Pairs : v.st[p] # "given"
 NeverBlocked == ~(Quiet /\ \E s \in Subs : v.opening[s] # 0)
 NeverDefers == \A p \in Pairs : v.st[p] # "deferred"
 =============================================================================

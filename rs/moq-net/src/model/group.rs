@@ -4828,6 +4828,15 @@ impl Consumer {
 		self.poll_expiry(waiter, true)
 	}
 
+	/// The error the group was aborted with, an eviction included, as of now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn aborted(&self) -> Option<Error> {
+		match &self.cursor.state.read().outcome {
+			Outcome::Aborted(abort) => Some(abort.error().clone()),
+			_ => None,
+		}
+	}
+
 	/// Whether the group has aged past `budget` under the subscription it was handed out
 	/// under, waking once it does: a range wanting it for that long stops wanting it then,
 	/// though another may still. `false` for a group handed out under none.

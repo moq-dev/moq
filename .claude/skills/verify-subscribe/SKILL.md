@@ -70,13 +70,13 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ### SubscribeAccounting.tla
 
-Sync commit: `848e300c2bcdace0a2f343b1bc534c8d5d7e2d7e`. Run `git log 848e300c2b.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `065a4c184340f7fc6035db97695327ef7d7e69a8`. Run `git log 065a4c1843.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `serve`, `mark_served`; `rs/moq-net/src/model/record.rs` `Record::told` | `CursorHand` |
 | `rs/moq-net/src/model/group.rs` `Producer::finish_at`; `rs/moq-net/src/model/track.rs` `TrackState::appended`, `TrackState::span_end` | `Finish`, `ends`, `CursorHole` |
-| `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way` | a group given up for a higher-ranked one, as `Serve`, then `StreamFail` with `old` whose header never arrives |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::take_deferred` | a group that gave way for credit and then aged past its ranges or was evicted, as `Serve`, then `StreamFail` with `old` whose header never arrives |
 | `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `report`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `GroupOutcomes::whole`, `GroupOutcomes::cut`) | `PubOutcomes`, `CutSkip` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `buffer_group_end`, `settle_failed`, `settle_reset`, `accounts`, `poll_given_up`, `GroupContext::reliable_reset`; `rs/moq-net/src/transport/boxed.rs` `Held::reset`, `ListedState::preempted` | `StreamHold`, `StreamFin`, `StreamFail`, `StreamAck`, `SubStop`, `Kept` |
@@ -98,15 +98,15 @@ What the model asks of that code, each found by TLC as a broken rule without it:
 
 ### SubscribeDedup.tla
 
-Sync commit: `848e300c2bcdace0a2f343b1bc534c8d5d7e2d7e`. Run `git log 848e300c2b.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
+Sync commit: `065a4c184340f7fc6035db97695327ef7d7e69a8`. Run `git log 065a4c1843.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/track/demand/ranges.rs` `Ranges::union`, `Ranges::fold`; `rs/moq-net/src/model/track/demand.rs` `Subscriptions::combined` | `Folds`, `Fold`, `Update`, `FoldRule` |
-| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `GroupServe::rank_now`, `GroupServe::poll_steer`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
+| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `TrackRun::take_deferred`, `GroupServe::poll_steer`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `TrackRun::serve`, `TrackRun::mark_served` | `Send`, `told` |
 | `rs/moq-net/src/model/subscription/window.rs` `Budget::at`; `rs/moq-net/src/model/track.rs` `GroupExpiry::is_expired`; `rs/moq-net/src/model/group.rs` `Consumer::expired_under`; `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed` | `Wanting`, `Widest`, `PubJudged`, `Judge` |
-| `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`, `TrackRun::give_way`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |
 | `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop` with `OLD`) | `Arrive`, `rm` |
 | `rs/moq-net/src/model/track.rs` `settles`, `Drift::settles` | `Take` |
 | `rs/moq-net/src/lite/subscriber/fills.rs` `RangeFills`, `Recovery::new` | `Serve` (`recov`), `RecoverAnswer` |
