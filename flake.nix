@@ -742,7 +742,7 @@
                 # Without it, stdenv links every binary with an RPATH to
                 # `<checkout>/outputs/out/lib`, which never exists, so the same
                 # code built in two checkouts differs by its path and counts
-                # different instructions under `just rs instructions`.
+                # different instructions (quest/m0/repeatable-instruction-counts.md).
                 NIX_NO_SELF_RPATH = "1";
 
                 # Local launchers need the exact build without evaluating the flake again.
