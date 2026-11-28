@@ -649,16 +649,6 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Draw a group boundary and start the next group at `start`, in the track's timescale.
-	///
-	/// [`media_cut`](Self::media_cut) keyed explicitly rather than at the next frame's time, which
-	/// has to come after every group the track holds.
-	pub fn media_seek(&mut self, media: Id, start: u64) -> Result<(), Error> {
-		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.seek(start)?;
-		Ok(())
-	}
-
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
 		let Kept { inner, children } = self.media.remove(media).ok_or(Error::MediaNotFound)?;
 		match inner.track.finish() {
@@ -698,15 +688,6 @@ impl Publish {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
 		let result = container.inner.cut();
-		container.driver.check()?;
-		Ok(result?)
-	}
-
-	/// Start a new segment whose first group starts at `start`, in its track's timescale.
-	pub fn container_seek(&mut self, container: Id, start: u64) -> Result<(), Error> {
-		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
-		container.driver.check()?;
-		let result = container.inner.seek(start);
 		container.driver.check()?;
 		Ok(result?)
 	}
@@ -1254,17 +1235,28 @@ impl Publish {
 		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
-	/// Append the next group to a raw track, starting at `start`, returning a group producer.
-	pub fn track_group(&mut self, track: Id, start: moq_net::Timestamp) -> Result<Id, Error> {
+	/// Append the next group to a raw track whose first frame is `payload` at `timestamp`, where
+	/// the group starts, returning a group producer.
+	pub fn track_group(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group(start)?;
+		let group = raw
+			.inner
+			.append_group(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		self.insert_group(group)
 	}
 
-	/// Create a raw group starting at `start`, in the track's timescale, which names it.
-	pub fn track_group_at(&mut self, track: Id, start: u64) -> Result<Id, Error> {
+	/// Create a raw group whose first frame is `payload` at `timestamp`, where the group starts,
+	/// without declaring the starts below it skipped.
+	pub fn track_create_group(
+		&mut self,
+		track: Id,
+		timestamp: moq_net::Timestamp,
+		payload: &[u8],
+	) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.create_group(moq_net::group::Info { start })?;
+		let group = raw
+			.inner
+			.create_group(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		self.insert_group(group)
 	}
 

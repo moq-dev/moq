@@ -97,7 +97,7 @@ func BenchmarkFFI(b *testing.B) {
 	}
 	b.Run("call/start", func(b *testing.B) {
 		track := benchTrack(b, "calls")
-		producer, err := track.AppendGroup(moq.Unscaled(0))
+		producer, err := track.AppendGroup(moq.Frame{Timestamp: moq.Unscaled(0)})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -210,11 +210,12 @@ func benchThroughput(b *testing.B, c benchCase) {
 			}()
 		}
 		for _, track := range tracks {
-			group, err := track.AppendGroup(moq.TimestampFromScale(uint64(n*frames), 1_000_000))
+			first := moq.Frame{Payload: payload, Timestamp: moq.TimestampFromScale(uint64(n*frames), 1_000_000)}
+			group, err := track.AppendGroup(first)
 			if err != nil {
 				return err
 			}
-			for f := range frames {
+			for f := 1; f < frames; f++ {
 				timestamp := moq.TimestampFromScale(uint64(n*frames+f), 1_000_000)
 				if err := group.WriteFrame(moq.Frame{Payload: payload, Timestamp: timestamp}); err != nil {
 					return err

@@ -18,6 +18,16 @@ fn micros(value: u64) -> moq_timestamp {
 	}
 }
 
+/// Append a raw group whose first frame is `payload` at `timestamp`.
+fn track_group(track: u32, payload: &[u8], timestamp: moq_timestamp) -> i32 {
+	unsafe { moq_publish_track_group(track, payload.as_ptr(), payload.len(), &timestamp) }
+}
+
+/// Create a raw group whose first frame is empty, at `us` microseconds.
+fn create_group(track: u32, us: u64) -> i32 {
+	unsafe { moq_publish_track_create_group(track, std::ptr::null(), 0, &micros(us)) }
+}
+
 /// A range time at the group containing `value`, unscaled in the track's timescale.
 fn time(value: u64) -> moq_timestamp {
 	moq_timestamp::unscaled(value)
@@ -1620,11 +1630,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	let timestamp_us = 42_000;
 	let payload = b"codec frame";
 	let loc = moq_loc::encode(timestamp_us, payload).unwrap();
-	let group = id(unsafe { moq_publish_track_group(track, &micros(timestamp_us)) });
-	assert_eq!(
-		unsafe { moq_publish_group_frame(group, loc.as_ptr(), loc.len(), &micros(timestamp_us)) },
-		0
-	);
+	let group = id(track_group(track, &loc, micros(timestamp_us)));
 	assert_eq!(moq_publish_group_finish(group), 0);
 
 	let frame_id = id(frame_cb.recv());
@@ -1986,7 +1992,8 @@ fn publish_track_invalid_broadcast() {
 		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
-	assert!(unsafe { moq_publish_track_group(9999, &micros(0)) } < 0);
+	assert!(track_group(9999, name, micros(0)) < 0);
+	assert!(create_group(9999, 0) < 0);
 	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len(), &micros(0)) } < 0);
 	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len(), &micros(0)) } < 0);
 	assert!(moq_publish_track_finish(9999) < 0);
@@ -2331,19 +2338,20 @@ fn raw_track_publish_consume() {
 
 	// Multi-frame group via the explicit group API, starting at a time converted to the
 	// track's microseconds. A start that doesn't move past the last group is refused.
-	assert!(unsafe { moq_publish_track_group(track, std::ptr::null()) } < 0);
-	assert!(unsafe { moq_publish_track_group(track, &micros(timestamp_us)) } < 0);
+	let parts: [(&[u8], u64); 2] = [(b"part-0", 20_000), (b"part-1", 30_000)];
+	assert!(unsafe { moq_publish_track_group(track, parts[0].0.as_ptr(), parts[0].0.len(), std::ptr::null()) } < 0);
+	assert!(track_group(track, parts[0].0, micros(timestamp_us)) < 0);
 	let start = moq_timestamp {
 		value: 20,
 		scale: 1_000,
 		has_scale: true,
 	};
-	let group = id(unsafe { moq_publish_track_group(track, &start) });
+	let group = id(track_group(track, parts[0].0, start));
 	let mut key = 0;
 	assert_eq!(unsafe { moq_publish_group_start(group, &mut key) }, 0);
 	assert_eq!(key, 20_000);
-	let parts: [(&[u8], u64); 2] = [(b"part-0", 20_000), (b"part-1", 30_000)];
-	for (part, timestamp_us) in parts {
+	for (part, timestamp_us) in &parts[1..] {
+		let (part, timestamp_us) = (*part, *timestamp_us);
 		assert_eq!(
 			unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len(), &micros(timestamp_us)) },
 			0
@@ -2618,12 +2626,12 @@ fn raw_track_sparse_groups_and_known_end() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
-	let group = id(moq_publish_track_group_at(track, 2));
+	let group = id(create_group(track, 2));
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(moq_publish_track_finish_at(track, 5), 0);
-	let group = id(moq_publish_track_group_at(track, 4));
+	let group = id(create_group(track, 4));
 	assert_eq!(moq_publish_group_finish(group), 0);
-	assert!(moq_publish_track_group_at(track, 5) < 0);
+	assert!(create_group(track, 5) < 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
@@ -2636,11 +2644,11 @@ fn raw_group_finish_at_sets_end_and_rejects_below_start() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
-	let group = id(moq_publish_track_group_at(track, 10));
+	let group = id(create_group(track, 10));
 	assert_eq!(moq_publish_group_finish_at(group, 20), 0);
 	assert!(moq_publish_group_finish_at(group, 20) < 0);
 
-	let bad = id(moq_publish_track_group_at(track, 30));
+	let bad = id(create_group(track, 30));
 	assert!(moq_publish_group_finish_at(bad, 25) < 0);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -2656,8 +2664,8 @@ fn raw_track_skips_are_final() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
 	assert_eq!(moq_publish_track_skip(track, 1, 3), 0);
-	assert!(moq_publish_track_group_at(track, 2) < 0);
-	let group = id(moq_publish_track_group_at(track, 3));
+	assert!(create_group(track, 2) < 0);
+	let group = id(create_group(track, 3));
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert!(moq_publish_track_skip(track, 4, 5) < 0);
@@ -2671,7 +2679,7 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	let name = b"aborted";
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	let group = id(track_group(track, b"", micros(0)));
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
 	assert!(moq_publish_group_finish(group) < 0);
 	assert_eq!(moq_publish_track_abort(track, 410), 0);
@@ -2692,11 +2700,7 @@ fn raw_track_ends_on_an_aborted_group() {
 	let frame_cb = Callback::new();
 	let _reader = consume_track(consume, name, &frame_cb);
 
-	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
-	assert_eq!(
-		unsafe { moq_publish_group_frame(group, b"cut".as_ptr(), 3, &micros(0)) },
-		0
-	);
+	let group = id(track_group(track, b"cut", micros(0)));
 	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
 	assert!(frame_cb.recv() < 0, "the abort ends the track");
@@ -2742,13 +2746,11 @@ fn meta_reads_headers() {
 		)
 	});
 
-	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
-	for (payload, at) in [(&b"key"[..], 0), (b"", 1)] {
-		assert_eq!(
-			unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(at)) },
-			0
-		);
-	}
+	let group = id(track_group(track, b"key", micros(0)));
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, std::ptr::null(), 0, &micros(1)) },
+		0
+	);
 	assert_eq!(moq_publish_group_finish(group), 0);
 
 	let headers: Vec<_> = (0..2).map(|_| rx.recv().expect("header")).collect();
@@ -3782,9 +3784,7 @@ fn a_lost_catalog_track_is_a_transport_error() {
 		)
 		.unwrap();
 	let at = moq_net::Timestamp::from_millis(1_000).unwrap();
-	let mut group = track.append_group(at).unwrap();
-	group.write_frame(at, "{}").unwrap();
-	group.finish().unwrap();
+	track.append_group(at, "{}").unwrap().finish().unwrap();
 	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
 
 	let cb = Callback::new();
@@ -3832,8 +3832,7 @@ fn a_holding_reader_reads_every_update_within_its_delay() {
 			.unwrap();
 		for ms in [1_000, 2_000, 3_000] {
 			let at = moq_net::Timestamp::from_millis(ms).unwrap();
-			let mut group = track.append_group(at).unwrap();
-			group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+			let group = track.append_group(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
 			group.finish().unwrap();
 		}
 		// Kept alive, so the reader subscribing later still finds the finished track.
@@ -4154,7 +4153,7 @@ fn double_close_all_resource_types() {
 
 /// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
 /// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does, and `_seek` does the same with a chosen start.
+/// what a live publisher does.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4171,20 +4170,12 @@ fn media_cut_bounds_audio_groups() {
 		);
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
-
-	// The same boundary, with the next group explicitly started past the last.
-	assert_eq!(
-		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(60_000)) },
-		0
-	);
-	assert_eq!(moq_publish_media_seek(media, 100_000), 0);
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
 	assert!(moq_publish_media_discontinuity(9999) < 0);
 	assert!(moq_publish_media_discontinuity(0) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
-	assert!(moq_publish_media_seek(9999, 0) < 0);
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -4844,13 +4835,11 @@ fn track_demand_reports_wanted_and_refresh() {
 	assert_eq!(refresh_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
 
 	// A delta after the first frame puts the group past a `refresh` of 0.
-	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
-	for timestamp_us in [0, 1_000] {
-		assert_eq!(
-			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
-			0
-		);
-	}
+	let group = id(track_group(track, name, micros(0)));
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(1_000)) },
+		0
+	);
 
 	// The group answered the first request, so the next wait lasts until a joiner asks.
 	demand_refresh(watcher, &refresh_cb);
@@ -4912,14 +4901,13 @@ fn track_refresh_fires_once_sent() {
 	let consume = consume_local(broadcast);
 	let track_cb = Callback::new();
 	let consumer = consume_track(consume, name, &track_cb);
-	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
-	for timestamp_us in [0, 1_000] {
-		assert_eq!(
-			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
-			0
-		);
-		assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
-	}
+	let group = id(track_group(track, name, micros(0)));
+	assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(1_000)) },
+		0
+	);
+	assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
 
 	// Nothing reads the demand yet, so a cancelled request is never sent.
 	let refresh_cb = Callback::new();
@@ -5537,9 +5525,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		let reader = producer.subscribe(ascending(7, None));
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+		let group = producer
+			.create_group(moq_net::Timestamp::from_micros(10).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
 		reader
@@ -5604,9 +5591,8 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 			let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 			producer.start_at(held[0]).unwrap();
 			for &key in held {
-				let mut group = producer.create_group(moq_net::group::Info { start: key }).unwrap();
-				group
-					.write_frame(moq_net::Timestamp::from_millis(key).unwrap(), &b"live"[..])
+				let group = producer
+					.create_group(moq_net::Timestamp::from_millis(key).unwrap(), &b"live"[..])
 					.unwrap();
 				group.finish().unwrap();
 			}
@@ -5710,9 +5696,8 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+		let group = producer
+			.create_group(moq_net::Timestamp::from_micros(10).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
 		drop(producer.clone().finish().unwrap());
@@ -5745,7 +5730,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	let group = id(moq_group_request_accept(request));
 	let payload = b"fetched";
 	assert_eq!(
-		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(6_000)) },
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(6)) },
 		0
 	);
 	assert_eq!(moq_publish_group_finish(group), 0);

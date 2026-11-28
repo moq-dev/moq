@@ -9,7 +9,7 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubsc
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
-use crate::media::{MoqFrame, MoqTimestamp};
+use crate::media::MoqFrame;
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
@@ -917,33 +917,36 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
-	/// Append the next group, starting at `start`, returning a producer for writing frames into it.
+	/// Append the next group, whose first frame is `frame`, returning a producer for writing the
+	/// rest of its frames.
 	///
-	/// A timed track converts `start` into its timescale, as [`write_frame`](Self::write_frame)
-	/// does; a scale-less track takes the [unscaled](MoqTimestamp::unscaled) group key. A start
-	/// at or before a group the track holds, or one that doesn't match the track, is refused with
+	/// The group starts at `frame`'s timestamp, converted to the track's timescale as
+	/// [`write_frame`](Self::write_frame) does; a scale-less track takes the
+	/// [unscaled](MoqTimestamp::unscaled) group key. A timestamp at or before a group the track
+	/// holds, or one that doesn't match the track, is refused with
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
-	pub fn append_group(&self, start: MoqTimestamp) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	pub fn append_group(&self, frame: MoqFrame) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let start: moq_net::Timestamp = start.try_into()?;
+		let timestamp: moq_net::Timestamp = frame.timestamp.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(start)?;
+		let group = raw.append_group(timestamp, frame.payload)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
-	/// Create a group starting at `start`, in the track's timescale, which names it.
+	/// Create a group whose first frame is `frame`, starting at its timestamp, which names it.
 	///
 	/// Use this for out-of-order or replayed tracks: unlike [`append_group`](Self::append_group),
 	/// it declares nothing below it skipped. There is no local grace timer, so empty gaps between
 	/// non-contiguous groups must be settled explicitly with
 	/// [`MoqGroupProducer::finish_at`] or [`skip_groups`](Self::skip_groups) (or use
 	/// [`append_group`](Self::append_group) for in-order sparse tracks).
-	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	pub fn create_group(&self, frame: MoqFrame) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let timestamp: moq_net::Timestamp = frame.timestamp.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.create_group(moq_net::group::Info { start })?;
+		let group = raw.create_group(timestamp, frame.payload)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -1187,19 +1190,6 @@ impl MoqGroupProducer {
 }
 
 #[cfg(test)]
-impl MoqGroupProducer {
-	/// Wait until a consumer wants this group.
-	pub(crate) async fn wanted(&self) -> Result<(), MoqError> {
-		let mut demand = match &*self.inner.lock() {
-			GroupPhase::Writing(group) => group.demand(),
-			_ => return Err(MoqError::Closed),
-		};
-		while !demand.wanted_changed().await? {}
-		Ok(())
-	}
-}
-
-#[cfg(test)]
 mod metadata_tests {
 	use super::*;
 
@@ -1207,7 +1197,9 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let group = track
+			.append_group(moq_net::Timestamp::unscaled(0), &b"head"[..])
+			.unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
@@ -1289,13 +1281,13 @@ mod metadata_tests {
 	fn group_finish_at_records_whole_end() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
+		let group = track.create_group(moq_net::Timestamp::unscaled(10), &b"x"[..]).unwrap();
 		let consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		binding.finish_at(20).unwrap();
 		assert_eq!(consumer.end(), Some(20));
 
-		let bad = track.create_group(moq_net::group::Info { start: 30 }).unwrap();
+		let bad = track.create_group(moq_net::Timestamp::unscaled(30), &b"x"[..]).unwrap();
 		let binding = MoqGroupProducer::from_inner(bad);
 		assert!(binding.finish_at(25).is_err());
 	}

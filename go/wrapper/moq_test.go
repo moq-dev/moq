@@ -746,14 +746,12 @@ func TestTrackConsumerRefresh(t *testing.T) {
 	}
 	defer consumer.Cancel()
 	// A delta after the first frame puts the group past a ratio of 0.
-	group, err := track.AppendGroup(ts(0))
+	group, err := track.AppendGroup(moq.Frame{Payload: []byte("key"), Timestamp: ts(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, payload := range []string{"key", "delta"} {
-		if err := group.WriteFrame(moq.Frame{Payload: []byte(payload), Timestamp: ts(0)}); err != nil {
-			t.Fatal(err)
-		}
+	if err := group.WriteFrame(moq.Frame{Payload: []byte("delta"), Timestamp: ts(0)}); err != nil {
+		t.Fatal(err)
 	}
 	if err := consumer.Refresh(newCancelOnWait()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Refresh error = %v, want context.Canceled", err)
@@ -838,11 +836,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cached, err := track.AppendGroup(ts(0))
+	cached, err := track.AppendGroup(moq.Frame{Payload: []byte("cached"), Timestamp: ts(0)})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cached.Finish(); err != nil {
@@ -1049,7 +1044,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
-	group, err := track.AppendGroup(ts(23_456))
+	group, err := track.AppendGroup(moq.Frame{Payload: []byte("group"), Timestamp: ts(23_456)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1058,9 +1053,6 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer groupConsumer.Cancel()
-	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), Timestamp: ts(23_456)}); err != nil {
-		t.Fatal(err)
-	}
 	if err := group.Finish(); err != nil {
 		t.Fatal(err)
 	}
@@ -1098,14 +1090,12 @@ func TestSubscribeMetaReadsHeaders(t *testing.T) {
 	}
 	defer meta.Cancel()
 
-	group, err := track.AppendGroup(ts(0))
+	group, err := track.AppendGroup(moq.Frame{Payload: []byte("key"), Timestamp: ts(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, payload := range []string{"key", ""} {
-		if err := group.WriteFrame(moq.Frame{Payload: []byte(payload), Timestamp: ts(uint64(i))}); err != nil {
-			t.Fatal(err)
-		}
+	if err := group.WriteFrame(moq.Frame{Payload: []byte{}, Timestamp: ts(1)}); err != nil {
+		t.Fatal(err)
 	}
 	if err := group.Finish(); err != nil {
 		t.Fatal(err)
@@ -1150,11 +1140,8 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		group, err := track.AppendGroup(ts(uint64(i) * 1000))
+		group, err := track.AppendGroup(moq.Frame{Payload: []byte("x"), Timestamp: ts(uint64(i) * 1000)})
 		if err != nil {
-			t.Fatal(err)
-		}
-		if err := group.WriteFrame(moq.Frame{Payload: []byte("x"), Timestamp: ts(uint64(i) * 1000)}); err != nil {
 			t.Fatal(err)
 		}
 		if err := group.Finish(); err != nil {
@@ -1190,44 +1177,6 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 }
 
-func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	track, err := broadcast.PublishTrack("status", timedInfo())
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer, err := track.Consume(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer consumer.Cancel()
-
-	empty, err := track.AppendGroup(ts(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := empty.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), Timestamp: ts(2_000)}); err != nil {
-		t.Fatal(err)
-	}
-
-	frame, err := consumer.ReadFrame(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if frame == nil || string(frame.Payload) != "populated" || !sameTime(frame.Timestamp, ts(2_000)) {
-		t.Fatalf("frame = %+v, want payload=populated ts=2000", frame)
-	}
-}
-
 func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
@@ -1237,7 +1186,7 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := track.CreateGroup(2)
+	group, err := track.CreateGroup(moq.Frame{Timestamp: moq.Unscaled(2)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,14 +1199,14 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	if err := track.FinishAt(5); err != nil {
 		t.Fatal(err)
 	}
-	group, err = track.CreateGroup(4)
+	group, err = track.CreateGroup(moq.Frame{Timestamp: moq.Unscaled(4)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := group.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := track.CreateGroup(5); err == nil {
+	if _, err := track.CreateGroup(moq.Frame{Timestamp: moq.Unscaled(5)}); err == nil {
 		t.Fatal("expected group at final start to fail")
 	}
 	if err := track.Finish(); err != nil {
@@ -1508,7 +1457,7 @@ func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
 		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
 	}
 
-	group, err := track.AppendGroup(moq.Unscaled(0))
+	group, err := track.AppendGroup(moq.Frame{Timestamp: moq.Unscaled(0)})
 	if err != nil {
 		t.Fatal(err)
 	}

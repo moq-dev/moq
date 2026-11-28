@@ -81,8 +81,8 @@ async def throughput(case: Case, results: list[dict]) -> None:
         # Each consumer reads on its own task while this one writes each group in turn.
         readers = [asyncio.create_task(read(case, consumer, payload, n)) for consumer in consumers]
         for track in tracks:
-            group = track.append_group(moq.Timestamp(n * case.frames, 1_000_000))
-            for f in range(case.frames):
+            group = track.append_group(payload, moq.Timestamp(n * case.frames, 1_000_000))
+            for f in range(1, case.frames):
                 group.write_frame(payload, moq.Timestamp(n * case.frames + f, 1_000_000))
             group.finish()
         await asyncio.wait_for(asyncio.gather(*readers), ROUND_TIMEOUT)
@@ -114,7 +114,7 @@ async def main() -> None:
         await throughput(case, results)
 
     track = moq.BroadcastProducer().publish_track("calls")
-    group = track.append_group(moq.Timestamp.unscaled(0)).consume()
+    group = track.append_group(b"", moq.Timestamp.unscaled(0)).consume()
     call("start", lambda: group.start, results)
     consumer = track.consume()
     call("info", consumer.info, results)
