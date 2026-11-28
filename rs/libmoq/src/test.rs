@@ -46,8 +46,9 @@ unsafe fn raw_frame(read: u32, dst: *mut moq_frame) -> i32 {
 	code
 }
 
-/// A raw read's gap, failing the test on a frame, and the read freed.
-fn raw_gap(read: u32) -> (std::ops::Range<u64>, i32) {
+/// A raw read's gap, failing the test on a frame, and the read freed: its groups, code, and
+/// protocol error as `(scope, code, kind)`.
+fn raw_gap(read: u32) -> (std::ops::Range<u64>, i32, Option<(u32, u32, u32)>) {
 	let mut raw: moq_raw_read = unsafe { std::mem::zeroed() };
 	assert_eq!(unsafe { moq_consume_track_read(read, &mut raw) }, 0);
 	assert_eq!(
@@ -56,7 +57,12 @@ fn raw_gap(read: u32) -> (std::ops::Range<u64>, i32) {
 		"a frame where a gap was due"
 	);
 	assert!(!raw.gap.reason.is_null() && raw.gap.reason_len > 0, "a gap says why");
-	let gap = (raw.gap.start..raw.gap.end, raw.gap.code);
+	let protocol = raw.gap.protocol;
+	let protocol = raw
+		.gap
+		.has_protocol
+		.then_some((protocol.scope, protocol.code, protocol.kind));
+	let gap = (raw.gap.start..raw.gap.end, raw.gap.code, protocol);
 	assert_eq!(moq_consume_track_read_free(read), 0);
 	gap
 }
@@ -2732,7 +2738,13 @@ fn raw_track_reads_past_an_aborted_group() {
 	);
 	assert_eq!(moq_consume_track_read_free(id(frame_cb.recv())), 0);
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
-	assert_eq!(raw_gap(id(frame_cb.recv())), (0..1, MOQ_ERROR_MOQ));
+	// The publisher's code reaches the reader as the gap's protocol error.
+	let app = moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32;
+	let stream = moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32;
+	assert_eq!(
+		raw_gap(id(frame_cb.recv())),
+		(0..1, MOQ_ERROR_MOQ, Some((stream, 64 + 409, app)))
+	);
 
 	assert_eq!(
 		unsafe { moq_publish_track_frame(track, b"next".as_ptr(), 4, &micros(1)) },

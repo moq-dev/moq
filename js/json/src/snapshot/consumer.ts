@@ -138,8 +138,17 @@ export class Consumer<T> {
 
 			this.#apply(frame.payload);
 			if (skip) {
-				// Apply the rest of the backlog but yield only the head.
-				for (let more = group.tryReadFrame(); more; more = group.tryReadFrame()) {
+				// Apply the rest of the backlog but yield only the head. A group that fails here is
+				// a gap too: yield what it held, and the next read resyncs from the next group.
+				for (;;) {
+					let more: Moq.Group.Frame | undefined;
+					try {
+						more = group.tryReadFrame();
+					} catch {
+						this.#group = undefined;
+						break;
+					}
+					if (!more) break;
 					this.#apply(more.payload);
 					frame = more;
 				}

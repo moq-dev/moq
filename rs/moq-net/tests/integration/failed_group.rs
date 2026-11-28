@@ -88,7 +88,7 @@ async fn hold(reader: &mut track::Subscriber) -> moq_net::group::Consumer {
 	held
 }
 
-/// Write one finished group at `ms` to `track`, then read it from `reader`.
+/// Write one finished group at 100 ms to `track`, then read it from `reader`.
 async fn reads_on(track: &track::Producer, reader: &mut track::Subscriber, version: &str) {
 	let mut group = track.append_group(at(100)).unwrap();
 	group.write_frame(at(100), b"next".as_slice()).unwrap();

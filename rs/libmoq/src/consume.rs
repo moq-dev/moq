@@ -239,6 +239,7 @@ struct RawGap {
 	code: i32,
 	/// Kept beside the code so the pointer C borrows stays valid as long as the read.
 	reason: String,
+	protocol: Option<crate::moq_protocol_error>,
 }
 
 impl RawGap {
@@ -248,6 +249,7 @@ impl RawGap {
 			range,
 			code: error.code(),
 			reason: error.to_string(),
+			protocol: error.protocol(),
 		}
 	}
 
@@ -264,6 +266,8 @@ impl RawGap {
 			code: self.code,
 			reason: self.reason.as_ptr().cast(),
 			reason_len: self.reason.len(),
+			protocol: self.protocol.unwrap_or(moq_raw_gap::default().protocol),
+			has_protocol: self.protocol.is_some(),
 		}
 	}
 }
@@ -769,7 +773,7 @@ impl Consume {
 	}
 
 	/// Read the tagged media item; payload pointers borrow it until [`Self::read_free`].
-	pub fn read(&self, id: Id, dst: &mut crate::moq_media_read) -> Result<(), Error> {
+	pub fn read(&self, id: Id) -> Result<crate::moq_media_read, Error> {
 		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
 		let (kind, gap, end) = read.info();
 		let frame = match read {
@@ -786,9 +790,7 @@ impl Consume {
 				keyframe: false,
 			},
 		};
-		*dst = crate::moq_media_read { kind, frame, gap, end };
-
-		Ok(())
+		Ok(crate::moq_media_read { kind, frame, gap, end })
 	}
 
 	pub fn read_free(&mut self, frame: Id) -> Result<(), Error> {
@@ -1087,8 +1089,8 @@ impl Consume {
 
 	/// Fill `dst` with a raw frame or gap. Its pointers are valid until the read is released
 	/// with [`Self::raw_read_free`].
-	pub fn raw_read(&self, read: Id, dst: &mut moq_raw_read) -> Result<(), Error> {
-		*dst = match self.raw_read.get(read).ok_or(Error::FrameNotFound)? {
+	pub fn raw_read(&self, read: Id) -> Result<moq_raw_read, Error> {
+		Ok(match self.raw_read.get(read).ok_or(Error::FrameNotFound)? {
 			RawRead::Frame(frame) => moq_raw_read {
 				kind: moq_raw_read_kind::MOQ_RAW_READ_FRAME,
 				frame: moq_frame {
@@ -1104,9 +1106,7 @@ impl Consume {
 				frame: no_frame(),
 				gap: gap.to_c(),
 			},
-		};
-
-		Ok(())
+		})
 	}
 
 	pub fn raw_read_free(&mut self, read: Id) -> Result<(), Error> {

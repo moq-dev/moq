@@ -511,7 +511,7 @@ impl TrackInner {
 		}
 	}
 
-	/// The first frame of the next group in start order, skipping completed empty groups.
+	/// The first frame of the next group in start order, skipping completed empty and failed groups.
 	///
 	/// One poll does the whole step, so it never trusts a slot it filled on an earlier poll:
 	/// a group `next_group` took from `pending` in between is simply gone, and the wake it

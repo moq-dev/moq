@@ -700,8 +700,9 @@ pub struct moq_header {
 pub enum moq_raw_read_kind {
 	/// A frame: its payload in a raw read, its header in a metadata read.
 	MOQ_RAW_READ_FRAME = 0,
-	/// Groups the reader read past: skipped, or failed after some of their frames were read.
-	/// The track reads on.
+	/// Groups the reader read past: skipped, or failed after the reader took them. The track
+	/// reads on, unless the failure was the track's own end, which the terminal callback then
+	/// reports too.
 	MOQ_RAW_READ_GAP = 1,
 }
 
@@ -719,6 +720,11 @@ pub struct moq_raw_gap {
 	pub reason: *const c_char,
 	/// The length in bytes of `reason`.
 	pub reason_len: usize,
+	/// The session close or stream reset the failure carried, as [moq_error_protocol] reports
+	/// one. Valid only when `has_protocol` is set.
+	pub protocol: crate::moq_protocol_error,
+	/// Whether the failure carried a protocol error in `protocol`.
+	pub has_protocol: bool,
 }
 
 impl Default for moq_raw_gap {
@@ -729,6 +735,12 @@ impl Default for moq_raw_gap {
 			code: 0,
 			reason: std::ptr::null(),
 			reason_len: 0,
+			protocol: crate::moq_protocol_error {
+				scope: 0,
+				code: 0,
+				kind: 0,
+			},
+			has_protocol: false,
 		}
 	}
 }
@@ -5007,8 +5019,13 @@ pub extern "C" fn moq_consume_audio_cancel(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_read(read: u32, dst: *mut moq_media_read) -> i32 {
 	ffi::enter(move || {
 		let read = ffi::parse_id(read)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().consume.read(read, dst)
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let read = State::lock().consume.read(read)?;
+		// Written, not borrowed: C may pass an uninitialized struct, whose `kind` is no valid enum.
+		unsafe { dst.write(read) };
+		Ok(())
 	})
 }
 
@@ -5146,8 +5163,13 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 pub unsafe extern "C" fn moq_consume_track_read(read: u32, dst: *mut moq_raw_read) -> i32 {
 	ffi::enter(move || {
 		let read = ffi::parse_id(read)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().consume.raw_read(read, dst)
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let read = State::lock().consume.raw_read(read)?;
+		// Written, not borrowed: C may pass an uninitialized struct, whose `kind` is no valid enum.
+		unsafe { dst.write(read) };
+		Ok(())
 	})
 }
 
@@ -5229,8 +5251,8 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// from the group reached.
 ///
 /// `on_read` is called with a [moq_meta_read] for each frame's header, group by group in arrival
-/// order, and for each group that failed after some of its headers were read, a gap after which
-/// the track reads on. Each read is borrowed only for the call: copy what you keep. It is then
+/// order, and for each group that failed after it was received, a gap after which the track
+/// reads on. Each read is borrowed only for the call: copy what you keep. It is then
 /// called exactly once more with a NULL read and a terminal code: `0` (closed cleanly) or a
 /// negative error, which means only that the track itself ended. After the terminal callback,
 /// `on_read` is never called again and `user_data` is never touched again, so release
