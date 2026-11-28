@@ -480,7 +480,9 @@ Consumers MUST ignore renditions with unrecognized `kind`; a missing string `kin
 
 ## legacy {#legacy}
 Default when `container` is absent.
-Each frame is a timestamp in microseconds, encoded as a QUIC variable-length integer ({{!RFC9000, Section 16}}), followed by the codec payload:
+Each frame is a timestamp in microseconds, encoded as a QUIC variable-length integer ({{!RFC9000, Section 16}}), followed by the codec payload.
+That prefix is the frame's presentation time; consumers MUST read it rather than the transport timestamp.
+A Group's transport timestamps never decrease ({{moql}}), so a publisher stamps each frame's transport timestamp with the newest presentation time so far in its Group: a B-frame rides at the frame before it, and a Group starts at its keyframe's presentation time.
 
 - **Video**: an empty codec payload marks the exclusive presentation end of the preceding frame (SHOULD end each group when known; MAY estimate from cadence, never from batching/reorder delay; omit for reordered video if the preceding decode-order frame's end is unknown). Consumers skip it and MUST NOT pass it to a decoder. H.264 without `description` is Annex B; with `description`, AVCC.
 - **Audio**: an empty codec payload marks the exclusive source-media endpoint for terminal trimming, placed *before* any codec drain packets in the same group; consumers decode drain packets and discard samples at or after the endpoint until a later group. AAC (`mp4a.40.*`) without `description` is one ADTS frame per payload; with AudioSpecificConfig in `description`, one raw AAC access unit.
@@ -491,6 +493,7 @@ Each frame is a timestamp in microseconds, encoded as a QUIC variable-length int
 Each frame is one complete fMP4 fragment (`moof`+`mdat`), initialized beforehand with base64-encoded `init` (`ftyp`+`moov`).
 
 - The frame timestamp is the earliest sample's presentation time; fragment timestamps (`tfdt`/offsets) only place samples relative to that earliest sample (or absolute on untimed tracks).
+  A Group's transport timestamps never decrease ({{moql}}), so a fragment whose earliest sample presents before an earlier fragment's in the same Group cannot be published; a reordered stream fragments by GOP, or uses `cts`.
 - A timed track's timescale MUST equal `init`'s `mdhd` timescale.
 - Fragment runs MUST lie back-to-back in `mdat` in `trun` order, with `data_offset` relative to the start of `moof`.
 - Audio samples MUST be marked as sync samples independently of publisher group boundaries.
@@ -572,6 +575,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A Group's transport timestamps never decrease: a `legacy` or `loc` publisher stamps a reordered frame at the newest presentation time so far in its Group while its prefix keeps its own.
 - An HLS or DASH edge places a group on the segment grid by its start rather than its first frame's timestamp, and a hole between groups whose skipped starts the publisher declared is no playhead event.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.

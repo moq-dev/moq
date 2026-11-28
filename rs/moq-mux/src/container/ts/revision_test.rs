@@ -744,6 +744,7 @@ fn write_marked(track: &mut Writer, millis: u64, mark: u8) {
 	track
 		.write(Frame {
 			timestamp: moq_net::Timestamp::from_micros(millis * 1_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: bytes::Bytes::from(payload),
 			keyframe: true,
@@ -1586,6 +1587,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	kio::clock::sleep_until(start.saturating_add(Duration::from_millis(3_000))).await;
 	cue.write(Frame {
 		timestamp: moq_net::Timestamp::from_millis(3_000).unwrap(),
+		decode: None,
 		duration: None,
 		payload: bytes::Bytes::from_static(CUE),
 		keyframe: true,
@@ -1669,6 +1671,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 	private
 		.write(Frame {
 			timestamp: moq_net::Timestamp::from_millis(6_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: bytes::Bytes::from(section),
 			keyframe: true,
@@ -2056,6 +2059,7 @@ async fn a_stream_waiting_for_a_pid_leaves_its_buffer_through_a_rate_change() {
 	private
 		.write(Frame {
 			timestamp: moq_net::Timestamp::from_millis(3_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: bytes::Bytes::from(section),
 			keyframe: true,

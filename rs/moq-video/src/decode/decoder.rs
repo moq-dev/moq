@@ -777,6 +777,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: Some(Timestamp::from_micros(33_333).unwrap()),
 				payload: hevc_keyframe(),
 				keyframe: true,

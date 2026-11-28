@@ -81,6 +81,7 @@ import {
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
+import type { Timescale } from "./time.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import {
@@ -3718,9 +3719,9 @@ export class Front {
 		}
 	}
 
-	largest(name: string, meta = false): track.Position | undefined {
+	largest(name: string, meta = false, timescale?: Timescale): track.Position | undefined {
 		const source = this.#source;
-		return source && (meta ? source.meta : source.wire).largest(name);
+		return source && (meta ? source.meta : source.wire).largest(name, timescale);
 	}
 
 	async fetchGroup(
@@ -3883,7 +3884,7 @@ class FrontConsumer extends broadcast.Consumer {
 			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
-			largest: (name) => front.largest(name),
+			largest: (name, timescale) => front.largest(name, false, timescale),
 			fetchGroup: (name, key, options) => front.fetchGroup(name, key, options),
 		};
 		// Each route's source decides which copy a metadata reader gets; the front keeps the two

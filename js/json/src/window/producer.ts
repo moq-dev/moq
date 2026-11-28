@@ -49,9 +49,9 @@ export class Producer<T> {
 
 	// The sequence of the newest group written; nothing is restated before one.
 	#largest?: bigint;
-	// The newest timestamp written, which a refresh restates the window at. An edit may carry an
-	// older timestamp than its group's first frame, and a new group may not start before that one.
-	// Undefined before the first write.
+	// The newest timestamp written, which a refresh restates the window at. An edit may carry its
+	// group's start, never an earlier one, and a new group must start past it. Undefined before the
+	// first write.
 	#at?: Time.Timestamp;
 	// Stops watching the track's demand.
 	#unwatch?: () => void;

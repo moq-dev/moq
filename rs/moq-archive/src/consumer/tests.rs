@@ -295,6 +295,80 @@ async fn groups_come_from_cached_objects_and_span_them() {
 	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected(true, 2, 0..5));
 }
 
+/// A stored group whose timestamps decrease, recorded before groups refused it, is refused
+/// with `TimestampMismatch`, live and fetched alike, while the track goes on to its end.
+#[tokio::test(start_paused = true)]
+async fn a_decreasing_stored_group_is_refused() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	// Stamped in decode order with presentation times, as a `legacy` B-frame track was.
+	let stored = |start: u64| Entry {
+		sequence: start,
+		frames: [(0, "a"), (2000, "b"), (1000, "c"), (3000, "d")]
+			.map(|(pts, payload)| Frame {
+				timestamp: Some(start + pts),
+				payload: Bytes::from_static(payload.as_bytes()),
+			})
+			.into(),
+	};
+	// Group 0 is filled on request; group 4000, the newest, is the live feed's.
+	archive.object("video", 0, vec![stored(0), stored(4000)]).await;
+	archive.end("video", End::Finish(At { group: 4001, frame: 0 })).await;
+	archive.complete().await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let fetched = fetch(&broadcast, "video", 0).await;
+	assert!(refused(&fetched), "{fetched:?}");
+
+	// A subscription moves past the refused fill and gets the live group, which ends refused.
+	let mut reader = subscribe(&broadcast, "video").await;
+	let mut group = group(&mut reader).await.unwrap();
+	assert_eq!(group.start, 4000);
+	let read = loop {
+		match timeout(Duration::from_secs(10), group.read_frame()).await.unwrap() {
+			Ok(Some(_)) => continue,
+			done => break done.map(|_| Vec::new()),
+		}
+	};
+	assert!(refused(&read), "{read:?}");
+	assert!(next(&mut reader).await.is_none());
+	assert_eq!(reader.finished().await.unwrap(), Position::group(4001));
+}
+
+/// A timed live group whose head was pruned can't be shown never to decrease, so it reads as
+/// gone, as a fill reads it. An untimed one's frames all share its key, so its tail stands.
+#[tokio::test(start_paused = true)]
+async fn a_live_group_with_a_pruned_head_is_served_only_untimed() {
+	for timed in [true, false] {
+		let archive = Archive::new();
+		archive.track("video", 0, timed).await;
+		archive.object("video", 2, vec![frames(timed, 5, 2..4)]).await;
+		archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+		archive.complete().await;
+
+		let (broadcast, _run) = serve(&archive.store).await;
+		let mut reader = subscribe(&broadcast, "video").await;
+		let mut group = group(&mut reader).await.unwrap();
+		assert_eq!(group.start, 5);
+		let read = timeout(Duration::from_secs(10), group.read_frame()).await.unwrap();
+		// A reader from frame 0 finds the untimed head evicted rather than the group gone.
+		match timed {
+			true => assert!(matches!(read, Err(moq_net::Error::NotFound)), "{read:?}"),
+			false => assert!(matches!(read, Err(moq_net::Error::Evicted)), "{read:?}"),
+		}
+		assert!(next(&mut reader).await.is_none());
+		assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+	}
+}
+
+/// Whether a read failed because its group's timestamps decrease.
+fn refused(result: &moq_net::Result<Vec<String>>) -> bool {
+	matches!(
+		result,
+		Err(moq_net::Error::TimestampMismatch | moq_net::Error::Stream(moq_net::StreamError::TimestampMismatch))
+	)
+}
+
 /// A group every reader narrowed past stops its GET, so the groups the fill still owes are read
 /// rather than waiting behind it.
 #[tokio::test(start_paused = true)]

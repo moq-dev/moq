@@ -131,6 +131,7 @@ mod tests {
 	fn frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> Frame {
 		Frame {
 			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::from_static(payload),
 			keyframe,
 			duration: None,
@@ -328,6 +329,7 @@ mod tests {
 			media
 				.write(Frame {
 					timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from_static(payload),
 					keyframe,
 					duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),

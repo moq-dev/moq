@@ -1702,6 +1702,7 @@ mod tests {
 				track
 					.write(crate::container::Frame {
 						timestamp: ts(i * 40_000),
+						decode: None,
 						duration: None,
 						payload: bytes::Bytes::from(vec![0u8; 5_000]),
 						keyframe: true,

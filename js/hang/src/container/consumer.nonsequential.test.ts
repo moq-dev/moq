@@ -320,10 +320,14 @@ async function legacyVideo(groups: number[][]): Promise<string[]> {
 	});
 	for (const pictures of groups) {
 		const group = track.createGroup(BigInt(pictures[0]));
+		// A group's transport times never decrease, so a reordered picture rides at the newest one
+		// so far; its payload keeps its own presentation time.
+		let newest = pictures[0];
 		for (const at of pictures) {
+			newest = Math.max(newest, at);
 			group.writeFrame({
 				payload: encodeLegacyFrame(at, new Uint8Array([0xde])),
-				timestamp: Time.Timestamp.fromMicros(at),
+				timestamp: Time.Timestamp.fromMicros(newest),
 			});
 		}
 		group.finish();

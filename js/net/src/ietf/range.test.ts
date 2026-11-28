@@ -5,6 +5,7 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { withMax } from "../subscription.test-util.ts";
+import { Timescale } from "../time.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
 import { EndOfRange, FetchEndOfRange, FetchFrame } from "./object.ts";
@@ -521,4 +522,63 @@ test("draft-23: a stream failing after an End of Group keeps the finished group"
 	const bytes = await groupThen(request.requestId, [0x80, 0x80, 0x00, 0x00]);
 	await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
 	expect(await payloads(await pending)).toEqual(["a", "b"]);
+});
+
+test("draft-23: standalone FETCH decodes sparse moq-timestamp Object IDs and TIMESTAMP_TIE", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const pending = fx.broadcast.track("video").fetchGroup(1000n);
+	// Answer TRACK_STATUS with ID_TIMESCALE (MILLI).
+	const statusStream = await fx.next();
+	expect(await statusStream.reader.u53()).toBe(TrackStatusRequest.id);
+	await TrackStatusRequest.decode(statusStream.reader, version);
+	await statusStream.writer.u53(TrackStatusOk.id);
+	await new TrackStatusOk({
+		largest: { groupId: 1000n, objectId: 34n },
+		properties: { timescale: Timescale.MILLI },
+	}).encode(statusStream.writer, version);
+	statusStream.writer.close();
+
+	const { stream, request } = await fx.fetch();
+	await stream.writer.u53(FetchOk.idFor(version));
+	await new FetchOk({
+		endOfTrack: false,
+		endLocation: { group: 1000n, object: 34n },
+		largest: { group: 1000n, object: 34n },
+		properties: { timescale: Timescale.MILLI },
+	}).encode(stream.writer, version);
+
+	// Sparse Object IDs: 0 (dts 1000), 33 (dts 1033), 34 with tie=1 (dts 1033).
+	const bytes = await Writer.collect(version, async (writer) => {
+		await writer.u62(request.requestId);
+		await new FetchFrame({ payload: new TextEncoder().encode("f0"), priority: 0 }).encode(
+			writer,
+			{ group: 1000n, object: 0, first: true },
+			version,
+		);
+		await new FetchFrame({ payload: new TextEncoder().encode("f1"), priority: 0 }).encode(
+			writer,
+			{ group: 1000n, object: 33, first: false, previousObject: 0 },
+			version,
+		);
+		await new FetchFrame({ payload: new TextEncoder().encode("f2"), priority: 0, tie: 1n }).encode(
+			writer,
+			{ group: 1000n, object: 34, first: false, previousObject: 33 },
+			version,
+		);
+	});
+	await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
+
+	const group = await pending;
+	const got: { text: string; ms: number }[] = [];
+	for (;;) {
+		const frame = await group.readFrame();
+		if (!frame) break;
+		got.push({ text: new TextDecoder().decode(frame.payload), ms: frame.timestamp.as(Timescale.MILLI) });
+	}
+	expect(got).toEqual([
+		{ text: "f0", ms: 1000 },
+		{ text: "f1", ms: 1033 },
+		{ text: "f2", ms: 1033 },
+	]);
 });

@@ -100,8 +100,9 @@ test("Consumer rejects a later frame below the previous group start", async () =
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(200_000)),
 		});
 		await frame(consumer);
+		// Its transport time can't fall below the frame before it, so only its payload rewinds.
 		current.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(99_000),
+			timestamp: Time.Timestamp.fromMicros(200_000),
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(99_000)),
 		});
 		await expect(frame(consumer)).rejects.toThrow("below");

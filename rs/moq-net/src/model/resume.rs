@@ -1475,6 +1475,13 @@ impl Subscriber {
 		}
 	}
 
+	/// Peek a cached group by key from any active copy without advancing the subscription.
+	#[cfg(feature = "async")]
+	pub(super) fn peek_group(&self, key: u64) -> Option<group::Consumer> {
+		let reader = self.reader();
+		reader.copies.iter().rev().find_map(|copy| copy.track.peek_group(key))
+	}
+
 	/// Poll for the track's declared exclusive end.
 	pub(super) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.reader().poll_finished(waiter)
@@ -15455,6 +15462,76 @@ mod test {
 			chunks.read_chunk().now_or_never(),
 			Some(Err(Error::Unsupported))
 		));
+
+		// A half-read dense Draft-22 frame 1 (timestamp = group start, dense ID 1) resumes
+		// onto a healthy whole Draft-23 copy whose frame 1 carries sparse moq-timestamp ID 33.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let dense = copy();
+		routes.serve(dense.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut open = dense.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"head".as_ref()).unwrap();
+		let mut frame = open
+			.create_frame(crate::frame::Info {
+				size: 4,
+				timestamp: ts(0),
+			})
+			.unwrap();
+		frame.write(b"ab".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"head".to_vec()));
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"ab"
+		);
+		drop(frame);
+		dense.clone().abort(Error::Dropped).unwrap();
+
+		// Relayed from a draft-23 publisher, whose Object IDs are timestamps.
+		let mut info = crate::track::Info::timed();
+		info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: crate::ietf::Version::Draft23,
+			values: Vec::new(),
+		}));
+		let sparse = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+		let mut group = sparse.create_group(group::Info { start: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (id, ms, payload) in [(0u64, 0u64, b"head".as_slice()), (33u64, 33u64, b"abcd".as_slice())] {
+			let mut f = group
+				.create_object(crate::frame::Header {
+					info: crate::frame::Info {
+						size: payload.len() as u64,
+						timestamp: ts(ms),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id,
+						properties: Default::default(),
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			f.write(bytes::Bytes::copy_from_slice(payload)).unwrap();
+			group = f.finish().unwrap();
+		}
+		group.finish().unwrap();
+		routes.serve(sparse.consume());
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"cd"
+		);
+		assert_eq!(chunks.read_chunk().now_or_never().unwrap().unwrap(), None);
 
 		// Ordinal 2 of that copy is Object 8, not Object 2.
 		let routes = Producer::new();

@@ -687,6 +687,7 @@ mod tests {
 		};
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			payload: Bytes::copy_from_slice(payload),
 			keyframe,
 			duration: None,
