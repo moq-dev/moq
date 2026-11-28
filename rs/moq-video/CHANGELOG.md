@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `capture::cameras()` lists a webcam once with the `pipewire` feature: the dedupe read `api.v4l2.path`, which a PipeWire registry global lacks, and now reads `object.path`.
 - A PipeWire camera that another client already runs opens and captures, sharing that client's mode, where it used to time out waiting for a format or a frame.
 - The `pipewire` feature builds next to GUI toolkits that use ashpd's `async-io` backend, such as GPUI. moq-video now uses that backend too, since ashpd refuses to build with both. The portal calls still work under tokio, because zbus runs the D-Bus connection on its own thread.
+- The Media Foundation encoder hands out each access unit as it is encoded. It used to collect only output already queued when the next frame went in, so every frame came out a frame interval late (50 ms at 20 fps on an NVIDIA RTX 500).
+- Windows display and window capture (WGC) honors `capture::Config::width` and `height`, as ScreenCaptureKit does: it scales on the GPU while it converts to NV12, where it used to convert every frame at the full screen size and leave the scaling to the caller.
 
 ### Added
 
