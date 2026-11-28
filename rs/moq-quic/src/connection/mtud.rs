@@ -54,10 +54,34 @@ impl MtuDiscovery {
 	}
 
 	/// Returns the amount of bytes that should be sent as an MTU probe, if any
-	pub(crate) fn poll_transmit(&mut self, now: Instant, next_pn: u64) -> Option<u16> {
+	///
+	/// Nothing is committed until [`Self::on_probe_sent`], so a probe the sender holds back is
+	/// asked for again.
+	pub(crate) fn poll_transmit(&mut self, now: Instant) -> Option<u16> {
 		self.state
 			.as_mut()
-			.and_then(|state| state.poll_transmit(now, self.current_mtu, next_pn))
+			.and_then(|state| state.poll_transmit(now, self.current_mtu))
+	}
+
+	/// A copy for a new path to the same peer address, sharing the confirmed MTU but not an
+	/// in-flight probe, whose ACK or loss reaches the path that sent it: the copy's search
+	/// starts over instead
+	pub(crate) fn fork(&self) -> Self {
+		let mut mtud = self.clone();
+		if let Some(state) = &mut mtud.state
+			&& let Phase::Searching(search) = &state.phase
+			&& search.in_flight_probe.is_some()
+		{
+			state.phase = Phase::Initial;
+		}
+		mtud
+	}
+
+	/// Notifies the [`MtuDiscovery`] that the probe [`Self::poll_transmit`] returned was sent as `pn`
+	pub(crate) fn on_probe_sent(&mut self, pn: u64, size: u16) {
+		if let Some(state) = &mut self.state {
+			state.on_probe_sent(pn, size);
+		}
 	}
 
 	/// Notifies the [`MtuDiscovery`] that the peer's `max_udp_payload_size` transport parameter has
@@ -172,7 +196,7 @@ impl EnabledMtuDiscovery {
 	}
 
 	/// Returns the amount of bytes that should be sent as an MTU probe, if any
-	fn poll_transmit(&mut self, now: Instant, current_mtu: u16, next_pn: u64) -> Option<u16> {
+	fn poll_transmit(&mut self, now: Instant, current_mtu: u16) -> Option<u16> {
 		if let Phase::Initial = &self.phase {
 			// Start the first search
 			self.phase = Phase::Searching(SearchState::new(
@@ -200,22 +224,11 @@ impl EnabledMtuDiscovery {
 			}
 
 			// Retransmit lost probes, if any
-			if 0 < state.lost_probe_count && state.lost_probe_count < MAX_PROBE_RETRANSMITS {
-				state.in_flight_probe = Some(next_pn);
+			if state.retransmitting() {
 				return Some(state.last_probed_mtu);
 			}
 
-			let last_probe_succeeded = state.lost_probe_count == 0;
-
-			// The probe is definitely lost (we reached the MAX_PROBE_RETRANSMITS threshold)
-			if !last_probe_succeeded {
-				state.lost_probe_count = 0;
-				state.in_flight_probe = None;
-			}
-
-			if let Some(probe_udp_payload_size) = state.next_mtu_to_probe(last_probe_succeeded) {
-				state.in_flight_probe = Some(next_pn);
-				state.last_probed_mtu = probe_udp_payload_size;
+			if let Some(probe_udp_payload_size) = state.next_mtu_to_probe() {
 				return Some(probe_udp_payload_size);
 			} else {
 				let next_mtud_activation = now.saturating_add(self.config.interval);
@@ -225,6 +238,27 @@ impl EnabledMtuDiscovery {
 		}
 
 		None
+	}
+
+	/// Commits the probe [`Self::poll_transmit`] returned, sent as `pn`
+	fn on_probe_sent(&mut self, pn: u64, size: u16) {
+		let Phase::Searching(state) = &mut self.phase else {
+			return;
+		};
+		debug_assert_eq!(state.in_flight_probe, None);
+		if !state.retransmitting() {
+			// The last probe's outcome moves the search's bounds
+			match state.lost_probe_count {
+				0 => state.lower_bound = state.last_probed_mtu,
+				// The probe is definitely lost (we reached the MAX_PROBE_RETRANSMITS threshold)
+				_ => {
+					state.upper_bound = state.last_probed_mtu - 1;
+					state.lost_probe_count = 0;
+				}
+			}
+			state.last_probed_mtu = size;
+		}
+		state.in_flight_probe = Some(pn);
 	}
 
 	/// Called when a packet is acknowledged in [`SpaceId::Data`]
@@ -303,24 +337,34 @@ impl SearchState {
 		}
 	}
 
-	/// Determines the next MTU to probe using binary search
-	fn next_mtu_to_probe(&mut self, last_probe_succeeded: bool) -> Option<u16> {
+	/// Whether the last probe size is still being retried after a loss
+	fn retransmitting(&self) -> bool {
+		0 < self.lost_probe_count && self.lost_probe_count < MAX_PROBE_RETRANSMITS
+	}
+
+	/// Determines the next MTU to probe using binary search, from the bounds the last probe's
+	/// outcome leaves, which [`EnabledMtuDiscovery::on_probe_sent`] commits
+	fn next_mtu_to_probe(&self) -> Option<u16> {
 		debug_assert_eq!(self.in_flight_probe, None);
 
-		if last_probe_succeeded {
-			self.lower_bound = self.last_probed_mtu;
-		} else {
-			self.upper_bound = self.last_probed_mtu - 1;
-		}
+		// The largest confirmed size and the largest size not yet ruled out
+		let (lower_bound, upper_bound) = match self.lost_probe_count {
+			0 => (self.last_probed_mtu, self.upper_bound),
+			_ => (self.lower_bound, self.last_probed_mtu - 1),
+		};
 
-		let next_mtu = (self.lower_bound as i32 + self.upper_bound as i32) / 2;
+		// Only sizes above the confirmed one are worth a probe
+		if upper_bound <= lower_bound {
+			return None;
+		}
+		let next_mtu = ((lower_bound as i32 + upper_bound as i32) / 2).max(lower_bound as i32 + 1);
 
 		// Binary search stopping condition
 		if ((next_mtu - self.last_probed_mtu as i32).unsigned_abs() as u16) < self.minimum_change {
 			// Special case: if the upper bound is far enough, we want to probe it as a last
 			// step (otherwise we will never achieve the upper bound)
-			if self.upper_bound.saturating_sub(self.last_probed_mtu) >= self.minimum_change {
-				return Some(self.upper_bound);
+			if upper_bound.saturating_sub(self.last_probed_mtu) >= self.minimum_change {
+				return Some(upper_bound);
 			}
 
 			return None;
@@ -520,6 +564,13 @@ mod tests {
 		MtuDiscovery::new(1_200, 1_200, config)
 	}
 
+	/// Polls for a probe and, if there is one, sends it as `pn`
+	fn send(mtud: &mut MtuDiscovery, now: Instant, pn: u64) -> Option<u16> {
+		let size = mtud.poll_transmit(now)?;
+		mtud.on_probe_sent(pn, size);
+		Some(size)
+	}
+
 	fn completed(mtud: &MtuDiscovery) -> bool {
 		matches!(mtud.state.as_ref().unwrap().phase, Phase::Complete(_))
 	}
@@ -528,7 +579,7 @@ mod tests {
 	fn drive_to_completion(mtud: &mut MtuDiscovery, now: Instant, link_payload_size_limit: u16) -> Vec<u16> {
 		let mut probed_sizes = Vec::new();
 		for probe_pn in 1..100 {
-			let result = mtud.poll_transmit(now, probe_pn);
+			let result = send(mtud, now, probe_pn);
 
 			if completed(mtud) {
 				break;
@@ -585,7 +636,7 @@ mod tests {
 	#[test]
 	fn mtu_discovery_disabled_does_nothing() {
 		let mut mtud = MtuDiscovery::disabled(1_200, 1_200);
-		let probe_size = mtud.poll_transmit(Instant::ZERO, 0);
+		let probe_size = send(&mut mtud, Instant::ZERO, 0);
 		assert_eq!(probe_size, None);
 	}
 
@@ -645,13 +696,13 @@ mod tests {
 		drive_to_completion(&mut mtud, now, 1_500);
 
 		// Polling right after completion does not cause new packets to be sent
-		assert_eq!(mtud.poll_transmit(now, 42), None);
+		assert_eq!(send(&mut mtud, now, 42), None);
 		assert!(completed(&mtud));
 		assert_eq!(mtud.current_mtu, 1_471);
 
 		// Polling after the interval has passed does (taking the current mtu as lower bound)
 		assert_eq!(
-			mtud.poll_transmit(now.saturating_add(Duration::from_secs(600)), 43),
+			send(&mut mtud, now.saturating_add(Duration::from_secs(600)), 43),
 			Some(5235)
 		);
 
@@ -671,7 +722,7 @@ mod tests {
 		let mut mtud = default_mtud();
 
 		let mut probe_sizes = (0..4).map(|i| {
-			let probe_size = mtud.poll_transmit(Instant::ZERO, i);
+			let probe_size = send(&mut mtud, Instant::ZERO, i);
 			assert!(probe_size.is_some(), "no probe returned for packet {i}");
 
 			mtud.on_probe_lost();
@@ -688,6 +739,24 @@ mod tests {
 		let fourth_probe_size = probe_sizes.next().unwrap();
 		assert!(fourth_probe_size < first_probe_size);
 		assert_eq!(fourth_probe_size, first_probe_size - (first_probe_size - 1_200) / 2 - 1);
+	}
+
+	/// A probe the sender holds back, as for the congestion window, is asked for again unchanged,
+	/// and only moves the search once sent
+	#[test]
+	fn held_probe_is_polled_again() {
+		let mut mtud = default_mtud();
+		for pn in 0..MAX_PROBE_RETRANSMITS as u64 {
+			send(&mut mtud, Instant::ZERO, pn).unwrap();
+			mtud.on_probe_lost();
+		}
+		let lowered = mtud.poll_transmit(Instant::ZERO).unwrap();
+		assert_eq!(mtud.poll_transmit(Instant::ZERO), Some(lowered));
+		assert_eq!(mtud.in_flight_mtu_probe(SpaceId::Data), None);
+
+		mtud.on_probe_sent(3, lowered);
+		assert_eq!(mtud.in_flight_mtu_probe(SpaceId::Data), Some(3));
+		assert_eq!(mtud.poll_transmit(Instant::ZERO), None);
 	}
 
 	#[test]
@@ -724,7 +793,7 @@ mod tests {
 	#[should_panic(expected = "Transport parameters received after MTU probing started")]
 	fn mtu_discovery_with_peer_max_udp_payload_size_during_search_panics() {
 		let mut mtud = default_mtud();
-		assert!(mtud.poll_transmit(Instant::ZERO, 0).is_some());
+		assert!(send(&mut mtud, Instant::ZERO, 0).is_some());
 		assert!(matches!(mtud.state.as_ref().unwrap().phase, Phase::Searching(_)));
 		mtud.on_peer_max_udp_payload_size_received(1300);
 	}
@@ -790,7 +859,7 @@ mod tests {
 			let probe_pn = i * 2 - 1;
 			let other_pn = i * 2;
 
-			let result = mtud.poll_transmit(Instant::ZERO, probe_pn);
+			let result = send(&mut mtud, Instant::ZERO, probe_pn);
 
 			if completed(&mtud) {
 				break;
@@ -803,7 +872,7 @@ mod tests {
 			assert_eq!(mtud.in_flight_mtu_probe(SpaceId::Handshake), None);
 
 			// Nothing else to send while the probe is in-flight
-			assert_matches!(mtud.poll_transmit(now, other_pn), None);
+			assert_matches!(send(&mut mtud, now, other_pn), None);
 
 			if i % 2 == 0 {
 				// ACK probe and ensure it results in an increase of current_mtu
@@ -823,6 +892,37 @@ mod tests {
 		assert_eq!(iterations, 25);
 		assert_eq!(mtud.current_mtu, 65527);
 		assert!(completed(&mtud));
+	}
+
+	/// Whatever the link drops, the search probes only sizes above the one it already confirmed
+	/// and below its upper bound, then ends
+	#[test]
+	fn search_probes_only_above_its_lower_bound() {
+		for upper_bound in 1_201..1_210 {
+			for minimum_change in 1..4 {
+				// A limit below the 1_200 lower bound loses every probe, as other losses can
+				for link_payload_size_limit in 1_199..=upper_bound {
+					let config = mtu::Config {
+						upper_bound,
+						minimum_change,
+						..mtu::Config::default()
+					};
+					let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
+					let probed = drive_to_completion(&mut mtud, Instant::ZERO, link_payload_size_limit);
+					let case = format!("{upper_bound} {minimum_change} {link_payload_size_limit}: {probed:?}");
+
+					assert!(completed(&mtud), "{case}");
+					let mut confirmed = 1_200;
+					for &size in &probed {
+						assert!(size > confirmed && size <= upper_bound, "{case}");
+						if size <= link_payload_size_limit {
+							confirmed = size;
+						}
+					}
+					assert_eq!(mtud.current_mtu, confirmed, "{case}");
+				}
+			}
+		}
 	}
 
 	#[test]

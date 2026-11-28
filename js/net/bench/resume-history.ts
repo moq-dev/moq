@@ -216,7 +216,7 @@ async function measure(shape: Case): Promise<Result> {
 }
 
 async function measureOn(clock: Manual, { fronts, names: perRoute, routes, history, access }: Case): Promise<Result> {
-	// One publisher instance per front: every route carries the same broadcasts and tracks.
+	// One publisher identity per front: every route carries the same broadcasts and tracks.
 	const publisher = new OriginProducer();
 	const paths = Array.from({ length: fronts }, (_, index) => Path.from(`room/${index}`));
 	const broadcasts: BroadcastProducer[] = paths.map((path) => {

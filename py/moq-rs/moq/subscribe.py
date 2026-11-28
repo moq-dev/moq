@@ -9,6 +9,8 @@ from moq_ffi import (
     MoqBroadcastConsumer,
     MoqFrame,
     MoqGroupConsumer,
+    MoqMetaConsumer,
+    MoqMetaGroup,
     MoqTrackConsumer,
 )
 
@@ -17,6 +19,7 @@ from ._stream import _Stream
 from .types import (
     FetchGroupOptions,
     Frame,
+    FrameHeader,
     Subscription,
     TrackInfo,
 )
@@ -151,6 +154,66 @@ class TrackConsumer(_Stream[GroupConsumer]):
         self._inner.cancel()
 
 
+class MetaGroup(_Stream[FrameHeader]):
+    """Async iterator of frame headers within a single group of a metadata subscription."""
+
+    def __init__(self, inner: MoqMetaGroup) -> None:
+        self._inner = inner
+
+    @property
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
+
+    async def _next(self) -> FrameHeader | None:
+        return await self.next_header()
+
+    async def next_header(self) -> FrameHeader | None:
+        """Read the next frame's header, without its payload. Returns `None` when the group ends."""
+        header = await self._inner.next_header()
+        return None if header is None else FrameHeader._from_ffi(header)
+
+    def cancel(self) -> None:
+        """Cancel reading this group and stop delivering headers."""
+        self._inner.cancel()
+
+
+class MetaConsumer(_Stream[MetaGroup]):
+    """Async iterator of a metadata subscription's groups, in arrival order.
+
+    Each group is itself an async iterator of frame headers: each frame's declared size and
+    timestamp, without its payload.
+    """
+
+    def __init__(self, inner: MoqMetaConsumer) -> None:
+        self._inner = inner
+
+    async def _next(self) -> MetaGroup | None:
+        return await self.recv_group()
+
+    async def recv_group(self) -> MetaGroup | None:
+        """Return the next group in arrival order, as :meth:`TrackConsumer.recv_group` does.
+
+        Returns `None` when the track ends.
+        """
+        group = await self._inner.recv_group()
+        if group is None:
+            return None
+        return MetaGroup(group)
+
+    def info(self) -> TrackInfo:
+        """Return the publisher-side track properties."""
+        return TrackInfo._from_ffi(self._inner.info())
+
+    def update(self, subscription: Subscription) -> None:
+        """Change this subscriber's delivery preferences, as :meth:`TrackConsumer.update` does."""
+        self._inner.update(subscription._ffi())
+
+    def cancel(self) -> None:
+        """Cancel the subscription and stop delivering groups."""
+        self._inner.cancel()
+
+
 class BroadcastConsumer:
     """The consume side of one broadcast: subscribe to its tracks, catalog, and media.
 
@@ -178,6 +241,15 @@ class BroadcastConsumer:
         """
         return TrackConsumer(await self._inner.subscribe_track(name, _subscription(subscription)))
 
+    async def subscribe_meta(self, name: str, subscription: Subscription | None = None) -> MetaConsumer:
+        """Subscribe to a track's metadata: its groups and each frame's header, without the payload.
+
+        A subscription of its own beside any :meth:`subscribe_track` of the same track. To read
+        the payload after all, subscribe to the track from the group reached.
+        ``subscription`` works as in :meth:`subscribe_track`.
+        """
+        return MetaConsumer(await self._inner.subscribe_meta(name, _subscription(subscription)))
+
     async def fetch_group(
         self,
         name: str,
@@ -196,10 +268,7 @@ class BroadcastConsumer:
 
         The rendition's ``broadcast`` reference, ``None`` or empty, names this
         broadcast; anything else names a sibling relative to it (e.g. ``./source``).
-        Its ``instance`` is the stream the reference names: a broadcast proven to
-        serve another one raises instead of resolving, while a route over a wire
-        that carries no instance cannot prove one, so there it is best effort. Call it on a
-        rendition that carries a reference before :meth:`subscribe_track` or
+        Call it on a rendition that carries a reference before :meth:`subscribe_track` or
         :meth:`fetch_group`, which take a track name rather than a rendition: the
         rendition's ``track``, or ``id`` when unset. The rendition-based consumers in
         the media, audio, and video namespaces resolve it themselves.

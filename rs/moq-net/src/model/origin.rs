@@ -20,7 +20,7 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Error, Instance, InvalidPattern, Path, Pattern, Patterns, Prefixes,
+	Error, Identity, InvalidPattern, Path, Pattern, Patterns, Prefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::{self, Segment},
 	time::{Deadlines, Instant},
@@ -148,10 +148,10 @@ pub struct Config {
 	/// before delivering it: a [`lite06_churn`] mitigation. A moq-lite-07 route and one
 	/// published here never wait.
 	///
-	/// A new route, a removed one, and another instance are delivered at once; only an
+	/// A new route, a removed one, and another identity are delivered at once; only an
 	/// update waits, and a newer change during the wait replaces it. A hop-chain wire
-	/// carries no instance, so each session mints its own, and a fall back onto another
-	/// session's worse path to the same publisher (first hop) reads as another instance:
+	/// carries no identity, so each session mints its own, and a fall back onto another
+	/// session's worse path to the same publisher (first hop) reads as another identity:
 	/// it waits like an update. When a publisher withdraws, a relay that loses its best
 	/// route but still holds routes derived from the withdrawn one sends nothing while
 	/// the withdrawal wave removes them, then one retraction, instead of advertising
@@ -161,9 +161,9 @@ pub struct Config {
 	///
 	/// A relay further out can still pass a stale path to a cursor that already
 	/// retracted the prefix, which would announce it anew. So for two seconds after
-	/// a retraction, an announcement from the same publisher (first hop, instance and
-	/// epoch, or any session's instance for a hop chain) on a strictly worse route waits.
-	/// A republish ranks the same and a restart carries a new instance, epoch, or
+	/// a retraction, an announcement from the same publisher (first hop, identity and
+	/// epoch, or any session's identity for a hop chain) on a strictly worse route waits.
+	/// A republish ranks the same and a restart carries a new identity, epoch, or
 	/// publisher, so neither waits. Zero disables this too.
 	pub(crate) update_hold: Duration,
 }
@@ -199,10 +199,10 @@ pub(super) mod lite06_churn {
 		hops.iter().next().copied().filter(|hop| *hop != super::Hop::UNKNOWN)
 	}
 
-	/// Whether `instance` and `other` may be one broadcast that reached here over two
-	/// sessions: each session mints its own instance for a hop chain, which carries none.
-	pub(super) fn same_stream(instance: &crate::Instance, other: &crate::Instance) -> bool {
-		instance == other || (instance.is_minted() && other.is_minted())
+	/// Whether `identity` and `other` may be one broadcast that reached here over two
+	/// sessions: each session mints its own identity for a hop chain, which carries none.
+	pub(super) fn same_stream(identity: &crate::Identity, other: &crate::Identity) -> bool {
+		identity == other || (identity.is_minted() && other.is_minted())
 	}
 
 	/// Whether a restart onto `meta` may be a fall back from the `delivered` route onto
@@ -213,7 +213,7 @@ pub(super) mod lite06_churn {
 		hunts(&meta.0, meta.6)
 			&& delivered.publisher.is_some()
 			&& delivered.publisher == publisher(&meta.0)
-			&& same_stream(&delivered.instance, &meta.3)
+			&& same_stream(&delivered.identity, &meta.3)
 			&& (meta.1, meta.0.len()) > delivered.rank
 	}
 }
@@ -541,12 +541,12 @@ impl From<i8> for Priority {
 /// and the relays fill in the rest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteInfo {
-	/// The stream the route serves; see [`Self::instance`]. Always set on a route the
+	/// The stream the route serves; see [`Self::identity`]. Always set on a route the
 	/// origin delivers. Given to a route a session lands, `None` mints one.
-	pub(crate) instance: Option<Instance>,
+	pub(crate) identity: Option<Identity>,
 
-	/// Orders the incarnations of one instance: among its routes at one prefix only the
-	/// highest epoch is eligible. Never compared across instances, and never shown to
+	/// Orders the incarnations of one identity: among its routes at one prefix only the
+	/// highest epoch is eligible. Never compared across identities, and never shown to
 	/// readers.
 	pub(crate) epoch: u64,
 
@@ -610,11 +610,11 @@ pub struct RouteInfo {
 }
 
 impl RouteInfo {
-	/// No route yet: no instance, hops, cost or credential, entered here. Crate-private
-	/// because a delivered route always names an instance.
+	/// No route yet: no identity, hops, cost or credential, entered here. Crate-private
+	/// because a delivered route always names an identity.
 	pub(crate) fn new() -> Self {
 		Self {
-			instance: None,
+			identity: None,
 			epoch: 0,
 			hops: Hops::new(),
 			cost: Cost::default(),
@@ -679,16 +679,16 @@ pub(crate) enum Source {
 }
 
 impl RouteInfo {
-	/// The stream the route serves: routes with one instance serve one continuous
+	/// The stream the route serves: routes with one identity serve one continuous
 	/// key space, so a subscription resumes from one to another. Pass it to
 	/// [`Consumer::request`] to pin this stream.
-	pub fn instance(&self) -> &Instance {
-		self.instance.as_ref().expect("a delivered route has an instance")
+	pub fn identity(&self) -> &Identity {
+		self.identity.as_ref().expect("a delivered route has an identity")
 	}
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
 	/// among routes of the same link priority and anonymity, with ties broken by a
-	/// broadcast published on this origin, then hop length, then a hash of the instance
+	/// broadcast published on this origin, then hop length, then a hash of the identity
 	/// and the requested path (except for a route that entered here, at its own path),
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
@@ -704,10 +704,10 @@ impl RouteInfo {
 		self.available
 	}
 
-	/// Serve a stable `instance` at `epoch`; see [`RouteOptions::with_instance`].
+	/// Serve a stable `identity` at `epoch`; see [`RouteOptions::with_identity`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
-		self.instance = Some(instance);
+	pub(crate) fn with_identity(mut self, identity: Identity, epoch: u64) -> Self {
+		self.identity = Some(identity);
 		self.epoch = epoch;
 		self
 	}
@@ -810,16 +810,16 @@ impl RouteInfo {
 }
 
 /// How an application advertises a [`Route`]: its visibility at creation, its price,
-/// its credential, and, rarely, a stable instance.
+/// its credential, and, rarely, a stable identity.
 ///
 /// The default announces at once, at cost 0, under the session's scope, serving a
-/// fresh random instance minted when the route is created.
+/// fresh random identity minted when the route is created.
 #[derive(Clone, Debug, Default)]
 pub struct RouteOptions {
 	hidden: bool,
 	cost: Cost,
 	auth: Option<crate::auth::Credential>,
-	instance: Option<(Instance, u64)>,
+	identity: Option<(Identity, u64)>,
 }
 
 impl RouteOptions {
@@ -852,21 +852,21 @@ impl RouteOptions {
 		self
 	}
 
-	/// Serve a stable `instance` at `epoch`, in place of a freshly minted one.
+	/// Serve a stable `identity` at `epoch`, in place of a freshly minted one.
 	///
-	/// Only for a publisher that continues the instance's key space across restarts,
+	/// Only for a publisher that continues the identity's key space across restarts,
 	/// announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
-	/// stitch every route of one instance together, so a publisher that restarts its
-	/// group keys under an old instance splices unrelated groups into their tracks.
-	/// The highest epoch wins over every older one of the instance, cheaper or not.
-	/// Naming an instance grants nothing: publishing still needs the path's grant.
-	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
-		self.instance = Some((instance, epoch));
+	/// stitch every route of one identity together, so a publisher that restarts its
+	/// group keys under an old identity splices unrelated groups into their tracks.
+	/// The highest epoch wins over every older one of the identity, cheaper or not.
+	/// Naming an identity grants nothing: publishing still needs the path's grant.
+	pub fn with_identity(mut self, identity: Identity, epoch: u64) -> Self {
+		self.identity = Some((identity, epoch));
 		self
 	}
 
-	/// The route metadata these options advertise, under `instance` at `epoch`.
-	/// The price and credential to advertise, naming no instance.
+	/// The route metadata these options advertise, under `identity` at `epoch`.
+	/// The price and credential to advertise, naming no identity.
 	fn info(&self) -> RouteInfo {
 		RouteInfo {
 			cost: self.cost,
@@ -904,44 +904,44 @@ fn fnv(seed: u64, path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
 }
 
 /// The draft's Rendezvous Hash: standard FNV-1a 64 of the requested path, then the
-/// instance, which reads the same on every node, so every relay picks the same one.
-fn rendezvous(path: &str, instance: &Instance) -> u64 {
-	fnv(0xcbf2_9ce4_8422_2325, path, instance.as_str().bytes())
+/// identity, which reads the same on every node, so every relay picks the same one.
+fn rendezvous(path: &str, identity: &Identity) -> u64 {
+	fnv(0xcbf2_9ce4_8422_2325, path, identity.as_str().bytes())
 }
 
-/// The hash that spreads a pool's named instances over `path`s: a named instance reads
+/// The hash that spreads a pool's named identities over `path`s: a named identity reads
 /// the same on every node, so every relay picks the same one. Its basis is
 /// `spreadHash`'s in `js/net`.
-fn instance_key(path: &str, instance: &Instance) -> u64 {
-	fnv(0x420C0DECB00B, path, instance.as_str().bytes())
+fn identity_key(path: &str, identity: &Identity) -> u64 {
+	fnv(0x420C0DECB00B, path, identity.as_str().bytes())
 }
 
-/// The highest epoch each instance reaches among a set of candidates, per claim: an older
-/// incarnation of an instance is never eligible, however cheap, since its publisher was
+/// The highest epoch each identity reaches among a set of candidates, per claim: an older
+/// incarnation of an identity is never eligible, however cheap, since its publisher was
 /// replaced. A claim is its own prefix ([`RouteEntry::claimed`]), wherever it is filed, so a
 /// broader claim shown at a prefix is another claim than the one made there, and its epoch
 /// supersedes nothing of it. Built in one pass, so ranking N candidates stays linear. Only
-/// epochs above 0 are kept, since nothing is below 0: the common case, where every instance
+/// epochs above 0 are kept, since nothing is below 0: the common case, where every identity
 /// announces epoch 0, allocates nothing.
-struct Epochs<'a>(HashMap<(&'a str, &'a Instance), u64>);
+struct Epochs<'a>(HashMap<(&'a str, &'a Identity), u64>);
 
 impl<'a> Epochs<'a> {
 	fn of(candidates: impl Iterator<Item = &'a RouteEntry>) -> Self {
 		let mut highest = HashMap::new();
 		for entry in candidates.filter(|entry| entry.epoch > 0) {
-			let epoch = highest.entry((entry.claimed(), &entry.instance)).or_insert(0);
+			let epoch = highest.entry((entry.claimed(), &entry.identity)).or_insert(0);
 			*epoch = (*epoch).max(entry.epoch);
 		}
 		Self(highest)
 	}
 
-	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same claim.
+	/// Whether a candidate carries `entry`'s identity at a higher epoch on the same claim.
 	fn superseded(&self, entry: &RouteEntry) -> bool {
 		// Checked first, so the common case never walks the entry's prefix for its claim.
 		!self.0.is_empty()
 			&& self
 				.0
-				.get(&(entry.claimed(), &entry.instance))
+				.get(&(entry.claimed(), &entry.identity))
 				.is_some_and(|&highest| highest > entry.epoch)
 	}
 }
@@ -954,12 +954,12 @@ impl<'a> Epochs<'a> {
 /// is being resolved: the requested path for a request, the prefix itself for an
 /// advertisement.
 ///
-/// A tie between two lite-07 claims goes by a rendezvous hash of the instance and `path`,
+/// A tie between two lite-07 claims goes by a rendezvous hash of the identity and `path`,
 /// then the node claiming it, as every node that knows the claim ranks it. Any other tie
-/// beneath `path` goes first by a hash of a named instance and `path`, which spreads a pool
-/// of instances at one prefix: each path picks its own winner, and a named instance reads
+/// beneath `path` goes first by a hash of a named identity and `path`, which spreads a pool
+/// of identities at one prefix: each path picks its own winner, and a named identity reads
 /// alike on every node, so every node picks the same one. Then, between the routes of one
-/// instance, or of instances a session minted (which no other node shares, so a hash of
+/// identity, or of identities a session minted (which no other node shares, so a hash of
 /// them agrees with nothing), the route that has held its rank longest
 /// ([`RouteEntry::since`]): a route of equal rank that arrives later never displaces the
 /// one in use, which would restart it downstream, and in turn at every relay downstream
@@ -967,17 +967,17 @@ impl<'a> Epochs<'a> {
 /// chain refuses loops, not this order, so keeping a route forms none.
 ///
 /// A route that entered here for exactly `path` ties to the newest announcement: no other
-/// node ranks it, and a restarted publisher announces under a new instance, so the restart
+/// node ranks it, and a restarted publisher announces under a new identity, so the restart
 /// takes over at once instead of after the transport retires its old session.
 fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 	let tie = match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
 		(_, true) => (0, 0),
-		// Every node that knows the claim ranks its instance alike, and then the nodes
+		// Every node that knows the claim ranks its identity alike, and then the nodes
 		// claiming it: one publisher reaches several over several sessions.
-		(Some(node), false) => (rendezvous(path.as_str(), &entry.instance), node.relay),
-		(None, false) => match entry.instance.is_minted() {
+		(Some(node), false) => (rendezvous(path.as_str(), &entry.identity), node.relay),
+		(None, false) => match entry.identity.is_minted() {
 			true => (0, entry.since),
-			false => (instance_key(path.as_str(), &entry.instance), entry.since),
+			false => (identity_key(path.as_str(), &entry.identity), entry.since),
 		},
 	};
 	(route_rank(entry), tie, Reverse(entry.id))
@@ -1008,7 +1008,7 @@ fn route_rank(entry: &RouteEntry) -> RouteRank {
 		entry.draining,
 		// The route layer's closest way ahead of its others to the same broadcast. Below
 		// availability, since the route layer marks every way to a broadcast available or
-		// none: a live instance's other way outranks a dead one held unavailable while a
+		// none: a live identity's other way outranks a dead one held unavailable while a
 		// route change moves its closest way to another session. Below the drain, since the
 		// route layer ranks a draining claim below every other, so its closest way drains
 		// only once every way does.
@@ -1024,13 +1024,13 @@ fn route_rank(entry: &RouteEntry) -> RouteRank {
 /// The key [`route_rank`] ranks an entry by: lower wins.
 type RouteRank = (bool, bool, bool, Reverse<Priority>, bool, Cost, bool, usize);
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available, above, standing)`
+/// The `(hops, cost, source, identity, epoch, auth, node, available, above, standing)`
 /// metadata an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
 	Source,
-	Instance,
+	Identity,
 	u64,
 	Option<crate::auth::Credential>,
 	Option<crate::route::NodeId>,
@@ -1054,32 +1054,32 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 
 /// A retraction's quarantine, keyed by prefix in its [`Routes`]: the
 /// retracted route's publisher (none for an anonymous route, which holds
-/// nothing), instance, epoch, and rank, and when the quarantine ends.
+/// nothing), identity, epoch, and rank, and when the quarantine ends.
 #[derive(Clone)]
 struct Quarantine {
 	held: Held,
 	publisher: Option<Hop>,
-	instance: (Instance, u64),
+	identity: (Identity, u64),
 	rank: (Cost, usize),
 }
 
 impl Quarantine {
 	/// Whether `meta` could be a stale path to the retracted publisher: the same
-	/// first hop, instance (see [`lite06_churn::same_stream`]) and epoch, ranked
-	/// strictly worse. A republish ranks the same and a restart carries a new instance
+	/// first hop, identity (see [`lite06_churn::same_stream`]) and epoch, ranked
+	/// strictly worse. A republish ranks the same and a restart carries a new identity
 	/// or epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
 		lite06_churn::hunts(&meta.0, meta.6)
 			&& self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
-			&& lite06_churn::same_stream(&meta.3, &self.instance.0)
-			&& meta.4 == self.instance.1
+			&& lite06_churn::same_stream(&meta.3, &self.identity.0)
+			&& meta.4 == self.identity.1
 			&& (meta.1, meta.0.len()) > self.rank
 	}
 }
 
 /// What a [`Routes`] last delivered as an announce at a prefix.
 struct Delivered {
-	instance: Instance,
+	identity: Identity,
 	/// The publisher and rank, which tell a hop chain's fall back onto a worse session's
 	/// path from a restart; see [`lite06_churn::falls_back`].
 	publisher: Option<Hop>,
@@ -1091,7 +1091,7 @@ struct Delivered {
 impl Delivered {
 	fn new(meta: &RouteMeta) -> Self {
 		Self {
-			instance: meta.3.clone(),
+			identity: meta.3.clone(),
 			publisher: lite06_churn::publisher(&meta.0),
 			rank: (meta.1, meta.0.len()),
 			draining: draining(meta),
@@ -1211,10 +1211,10 @@ struct OriginConsumerState {
 	parked: BTreeMap<(Instant, u64), Path>,
 	next_seq: u64,
 	/// Prefixes whose most recently delivered update was an announce, with the
-	/// instance it named. A pending `Announce` is ambiguous on its own: it is an
+	/// identity it named. A pending `Announce` is ambiguous on its own: it is an
 	/// unseen initial announce (a retraction cancels it entirely) or a metadata
 	/// update on a route the consumer already observed (a retraction must still be
-	/// delivered). The instance tells a restart back to it from one onto another.
+	/// delivered). The identity tells a restart back to it from one onto another.
 	delivered: BTreeMap<Path, Delivered>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
@@ -1321,7 +1321,7 @@ impl OriginConsumerState {
 		self.put(prefix, new);
 	}
 
-	/// Another instance replaces the route at `prefix`, or announces it afresh when
+	/// Another identity replaces the route at `prefix`, or announces it afresh when
 	/// the consumer never saw the old one.
 	fn apply_restart(&mut self, prefix: Path, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let meta = (meta, captures);
@@ -1329,18 +1329,18 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
 			}
-			// Back to the instance the consumer holds, before it saw the restart away:
+			// Back to the identity the consumer holds, before it saw the restart away:
 			// one continuous stream, so a metadata update.
 			_ if self
 				.delivered
 				.get(&prefix)
-				.is_some_and(|delivered| delivered.instance == meta.0.3) =>
+				.is_some_and(|delivered| delivered.identity == meta.0.3) =>
 			{
 				PendingUpdate::Announce(meta)
 			}
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
 			_ if self.delivered.contains_key(&prefix) => PendingUpdate::Restart(meta),
-			// The consumer never saw the old instance, so this is its first announce.
+			// The consumer never saw the old identity, so this is its first announce.
 			_ => PendingUpdate::Announce(meta),
 		};
 		self.put(prefix, new);
@@ -1362,7 +1362,7 @@ impl OriginConsumerState {
 			}
 			// The embedded announce cancels with this retraction; the consumer still
 			// needs the leading one. Its reason is the later one only when both carry
-			// one identity (captures and instance); otherwise the later reason is for a
+			// one identity (captures and identity); otherwise the later reason is for a
 			// route never delivered.
 			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
 				let gone = if old.1 == new.1 && old.0.3 == new.0.3 {
@@ -1393,7 +1393,7 @@ impl OriginConsumerState {
 	///
 	/// A metadata change to a route the consumer holds waits out the update hold
 	/// (see [`Config::update_hold`]), which starts the first time a poll sees it. A
-	/// restart onto another instance goes at once. A stale path to a retracted
+	/// restart onto another identity goes at once. A stale path to a retracted
 	/// publisher waits out its quarantine in `retracted`, settled against `now`.
 	fn scan(
 		&mut self,
@@ -1505,7 +1505,7 @@ impl OriginConsumerState {
 				cost: meta.1,
 				via: Hop::UNKNOWN,
 				source: meta.2,
-				instance: Some(meta.3),
+				identity: Some(meta.3),
 				epoch: meta.4,
 				auth: meta.5,
 				node: meta.6,
@@ -1529,12 +1529,12 @@ impl OriginConsumerState {
 struct RouteEntry {
 	id: u64,
 	/// When the entry last became [live](Self::live), changed its [`route_rank`], or moved to
-	/// another instance or epoch, from the counter [`Self::id`] comes from: of equally ranked
+	/// another identity or epoch, from the counter [`Self::id`] comes from: of equally ranked
 	/// routes, the one held longest keeps winning (see [`route_order`]).
 	since: u64,
-	/// The stream this route serves; see [`RouteInfo::instance`].
-	instance: Instance,
-	/// Which incarnation of the instance; see [`RouteInfo::epoch`].
+	/// The stream this route serves; see [`RouteInfo::identity`].
+	identity: Identity,
+	/// Which incarnation of the identity; see [`RouteInfo::epoch`].
 	epoch: u64,
 	/// Where the entry is filed: the prefix it was announced at, or one of its producer's
 	/// grant prefixes beneath it, so the entry may serve its whole subtree.
@@ -1543,7 +1543,7 @@ struct RouteEntry {
 	/// which [`Lane::above`] already counts: what an update adds to the route it is given.
 	below: u8,
 	/// Every prefix the announcement is filed at, this one included: one claim, whose
-	/// instance moves to a fresh one at each together (see [`OriginState::advance`]).
+	/// identity moves to a fresh one at each together (see [`OriginState::advance`]).
 	filed: Arc<[Path]>,
 	/// The absolute subtrees the announcing producer may not serve, even beneath
 	/// a covering prefix.
@@ -1600,11 +1600,11 @@ struct RouteEntry {
 	/// and building one allocates a segment vector and a canonical string. Holding
 	/// it makes that visit a comparison.
 	claim: Pattern,
-	/// Whether the job routes answering this prefix route take its instance, which it
+	/// Whether the job routes answering this prefix route take its identity, which it
 	/// minted rather than was given: their readers continue on the job's route. It moves
 	/// to a fresh one as each job carrying it stops serving; see [`OriginState::advance`].
 	lends: bool,
-	/// The prefix route, by prefix and id, whose instance this job's route took.
+	/// The prefix route, by prefix and id, whose identity this job's route took.
 	lent: Option<(Path, u64)>,
 }
 
@@ -1662,7 +1662,7 @@ impl RouteEntry {
 			self.hops.clone(),
 			self.cost,
 			self.entered(),
-			self.instance.clone(),
+			self.identity.clone(),
 			self.epoch,
 			self.auth.clone(),
 			self.node,
@@ -1679,11 +1679,11 @@ impl RouteEntry {
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta, ranked: bool) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available, above, standing) = meta;
+		let (hops, cost, source, identity, epoch, auth, node, available, above, standing) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
-			&& *instance == self.instance
+			&& *identity == self.identity
 			&& *epoch == self.epoch
 			&& *auth == self.auth
 			&& *node == self.node
@@ -1773,7 +1773,7 @@ pub(super) struct ServeState {
 	// long-lived origin serving many distinct one-shot paths stays bounded by the live count.
 	served: WeakCache<Path, broadcast::WeakConsumer>,
 
-	// How many times the route changed instance: a front compares it to the count when
+	// How many times the route changed identity: a front compares it to the count when
 	// it asked to tell a released request from an answered one without taking this lock.
 	renewals: Arc<AtomicU64>,
 
@@ -1788,10 +1788,10 @@ pub(super) struct ServeState {
 /// a route flowing back through one of its readers, nor a local view a peer's
 /// route. Every other requester shares the plain front, so fronts scale with
 /// the peers in the path's route chains rather than with viewer sessions. A
-/// request naming an instance other than the path's winner, such as a relay
+/// request naming an identity other than the path's winner, such as a relay
 /// forwarding toward the pool member its own route names, follows that
-/// instance's routes on a front of its own.
-type FrontKey = (Path, Horizon, Option<Instance>);
+/// identity's routes on a front of its own.
+type FrontKey = (Path, Horizon, Option<Identity>);
 
 /// Which routes a reader sees: the split-horizon exclusion and the local-only view.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -1912,7 +1912,7 @@ struct RemoteFront {
 /// The last route a cursor observed at a presented prefix.
 struct CursorRoute {
 	/// The stream it serves.
-	instance: Instance,
+	identity: Identity,
 	/// What the cursor delivered with it.
 	meta: RouteMeta,
 	/// Whether it serves requests: part of the dedupe key, but never delivered.
@@ -2063,7 +2063,7 @@ impl TableCursor {
 		// Compared in place first: most visits find the winner unchanged, and building
 		// what it delivers allocates. Captures follow from the prefix.
 		if previous.is_some_and(|previous| {
-			previous.instance == entry.instance
+			previous.identity == entry.identity
 				&& previous.prefix == entry.prefix
 				&& (!self.lookup || previous.id == entry.id)
 				&& previous.served == served
@@ -2077,7 +2077,7 @@ impl TableCursor {
 		let previous = self.current.insert(
 			presented.clone(),
 			CursorRoute {
-				instance: entry.instance.clone(),
+				identity: entry.identity.clone(),
 				meta: meta.clone(),
 				served,
 				prefix: entry.prefix.clone(),
@@ -2094,15 +2094,15 @@ impl TableCursor {
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
 			}
-			// Another instance: whatever was resolved under the prefix is another stream.
-			Some(previous) if previous.instance != entry.instance => {
+			// Another identity: whatever was resolved under the prefix is another stream.
+			Some(previous) if previous.identity != entry.identity => {
 				if let Ok(mut state) = self.state.write() {
 					state.apply_restart(self.under.rejoin(presented), meta, captures);
 				}
 			}
 			// Unchanged metadata and servability: nothing the consumer could
 			// act on, even if the winning entry itself changed (a failover
-			// between routes of one instance and epoch is invisible, which is the point).
+			// between routes of one identity and epoch is invisible, which is the point).
 			// A servability flip is delivered: a request that failed Unroutable
 			// under an advertise-only route retries on the update, and hiding
 			// it would park that waiter forever. So is another entry serving a
@@ -2402,7 +2402,7 @@ pub enum RouteKind {
 	/// A route now covers the prefix; the cursor had none there.
 	Start,
 	/// The route covering the prefix changed hops, cost, epoch or
-	/// [availability](RouteInfo::available), with the same instance; it is delivered in
+	/// [availability](RouteInfo::available), with the same identity; it is delivered in
 	/// place.
 	Update,
 	/// The origin withdrew the route, as far as this origin knows, and no other covers
@@ -2412,7 +2412,7 @@ pub enum RouteKind {
 	/// arrived on closed, or the route layer lost every path to it. Its origin may still
 	/// serve it; only an [`End`](Self::End) says it stopped.
 	Offline,
-	/// Another [`Instance`] now serves the prefix: another stream, such as a publisher
+	/// Another [`Identity`] now serves the prefix: another stream, such as a publisher
 	/// that restarted, a redundant ingest switching, or a pool failing over.
 	///
 	/// Whatever was resolved under the prefix before is the old stream: drop it and
@@ -2581,7 +2581,7 @@ impl Producer {
 	/// higher wins, and every handle starts at the neutral [`Priority::default`].
 	///
 	/// Applies to the routes a session lands from its peer through this handle, not to
-	/// a route created here. Only an instance's newest epoch is
+	/// a route created here. Only an identity's newest epoch is
 	/// eligible, but among eligible routes priority decides before cost, so links to different
 	/// operators rank by this instead of comparing their metrics. Hand each CDN's
 	/// session its own rank to use the primary while it has a route and fail over to
@@ -2682,11 +2682,11 @@ impl Producer {
 	/// Create a route at exactly `path`, owning a new broadcast to fill.
 	///
 	/// This is how local content enters an origin. Fill the broadcast through
-	/// [`Route::broadcast`]. The route serves a fresh random instance, minted here and
+	/// [`Route::broadcast`]. The route serves a fresh random identity, minted here and
 	/// kept for its lifetime, across [`Route::withdraw`] and [`Route::announce`], since
 	/// its keys continue: a new route is a new stream that never splices into an
 	/// old one. A publisher that continues one key space across restarts may name
-	/// a stable instance instead ([`RouteOptions::with_instance`]).
+	/// a stable identity instead ([`RouteOptions::with_identity`]).
 	///
 	/// Announced at once unless created [`RouteOptions::hidden`]. A hidden route exists
 	/// for nobody until [`Route::announce`]: until then no announce cursor lists it and
@@ -2761,25 +2761,25 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: full,
-			instance: None,
+			identity: None,
 			frames: self.frames.clone(),
 			edges: self.edges.clone(),
 		};
 		let source = info.produce().with_stats(ingress);
-		// A job's route naming no instance takes its prefix route's, held in the table
+		// A job's route naming no identity takes its prefix route's, held in the table
 		// until it first announces; see [`Request::route`].
 		let lender = request
 			.as_ref()
-			.filter(|_| options.instance.is_none())
+			.filter(|_| options.identity.is_none())
 			.map(|request| request.home.clone());
-		let instance = match (&options.instance, &lender) {
-			(None, None) => Some((Instance::random(), 0)),
+		let identity = match (&options.identity, &lender) {
+			(None, None) => Some((Identity::random(), 0)),
 			(named, _) => named.clone(),
 		};
 		let entry = announcing.announce(
 			RouteInfo {
-				instance: instance.as_ref().map(|(instance, _)| instance.clone()),
-				epoch: instance.as_ref().map_or(0, |(_, epoch)| *epoch),
+				identity: identity.as_ref().map(|(identity, _)| identity.clone()),
+				epoch: identity.as_ref().map_or(0, |(_, epoch)| *epoch),
 				..options.info()
 			},
 			Serving {
@@ -2835,7 +2835,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: full,
-			instance: None,
+			identity: None,
 			frames: self.frames.clone(),
 			edges: self.edges.clone(),
 		}
@@ -2945,18 +2945,18 @@ impl Producer {
 	///
 	/// A consumer resolving a path under it through this route is handed to
 	/// [`Claim::poll_requested`] as a [`Request`]: answer it by serving a broadcast already
-	/// held ([`Request::serve`]), under this route's instance, or by creating the path's
+	/// held ([`Request::serve`]), under this route's identity, or by creating the path's
 	/// own exact route ([`Request::route`]). This is how a service answers a whole
 	/// subtree without publishing each path ahead of time; a publisher that
 	/// knows its broadcasts creates each one's exact route with [`Self::route`]
 	/// instead, so subscribers can enumerate them.
 	///
-	/// Unless `options` names an instance, the route lends the one it mints to the exact
+	/// Unless `options` names an identity, the route lends the one it mints to the exact
 	/// routes answering its requests, so a reader that resolved a path through it
 	/// continues on that path's answer rather than restarting. Once an exact route holding
-	/// the lent instance stops serving it (withdrawn, closed, or renamed), this route moves
-	/// to a fresh instance, as a restarted job's keys are another stream: see
-	/// [`Claim::instance`]. A claim naming a stable instance lends nothing, and its
+	/// the lent identity stops serving it (withdrawn, closed, or renamed), this route moves
+	/// to a fresh identity, as a restarted job's keys are another stream: see
+	/// [`Claim::identity`]. A claim naming a stable identity lends nothing, and its
 	/// answers each mint their own.
 	///
 	/// The claim is priced, credentialed and shown like an exact route. It is visible
@@ -2965,15 +2965,15 @@ impl Producer {
 	/// The prefix must overlap this producer's scope. Individual requests remain
 	/// authoritative and are refused when the scope does not cover them.
 	pub fn claim(&self, prefix: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Claim, Error> {
-		// A minted instance lives in the table, which moves it on as its jobs end; see
+		// A minted identity lives in the table, which moves it on as its jobs end; see
 		// [`OriginState::advance`].
 		let info = RouteInfo {
-			instance: options.instance.as_ref().map(|(instance, _)| instance.clone()),
-			epoch: options.instance.as_ref().map_or(0, |(_, epoch)| *epoch),
+			identity: options.identity.as_ref().map(|(identity, _)| identity.clone()),
+			epoch: options.identity.as_ref().map_or(0, |(_, epoch)| *epoch),
 			..options.info()
 		};
 		let advertised = !options.hidden;
-		let lends = options.instance.is_none();
+		let lends = options.identity.is_none();
 		self.serving_route(prefix, info, Some(self.clone()), advertised, lends, options)
 	}
 
@@ -2984,13 +2984,13 @@ impl Producer {
 		prefix: impl TryInto<Path, Error: Into<Error>>,
 		mut info: RouteInfo,
 	) -> Result<Claim, Error> {
-		// A handle that names no instance serves one of its own.
-		let instance = info.instance.get_or_insert_with(Instance::random).clone();
+		// A handle that names no identity serves one of its own.
+		let identity = info.identity.get_or_insert_with(Identity::random).clone();
 		let options = RouteOptions {
 			hidden: false,
 			cost: info.cost,
 			auth: info.auth.clone(),
-			instance: Some((instance, info.epoch)),
+			identity: Some((identity, info.epoch)),
 		};
 		self.serving_route(prefix, info, None, true, false, options)
 	}
@@ -3220,7 +3220,7 @@ impl Announcing {
 		})
 	}
 
-	/// Insert the route. A job's route naming no instance reads as its `lender`'s, the
+	/// Insert the route. A job's route naming no identity reads as its `lender`'s, the
 	/// prefix route its request came through, until it binds one as it announces.
 	fn announce(
 		&self,
@@ -3240,8 +3240,8 @@ impl Announcing {
 			return Err(Error::Closed);
 		}
 
-		// A handle that names no instance serves one of its own.
-		let minted = route.instance.clone().unwrap_or_else(Instance::random);
+		// A handle that names no identity serves one of its own.
+		let minted = route.identity.clone().unwrap_or_else(Identity::random);
 		let filed: Arc<[Path]> = self.prefixes.iter().map(|(prefix, ..)| prefix.clone()).collect();
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim, below) in &self.prefixes {
@@ -3249,14 +3249,14 @@ impl Announcing {
 			let id = shared.next_route;
 			shared.next_route += 1;
 			let stale = shared.withdrawn_through(prefix, &route.hops);
-			let (instance, epoch) = match lender.and_then(|server| shared.lender(prefix, server)) {
-				Some(lent) => (lent.instance, lent.epoch),
+			let (identity, epoch) = match lender.and_then(|server| shared.lender(prefix, server)) {
+				Some(lent) => (lent.identity, lent.epoch),
 				None => (minted.clone(), route.epoch),
 			};
 			shared.routes.insert(RouteEntry {
 				id,
 				since: id,
-				instance,
+				identity,
 				epoch,
 				prefix: prefix.clone(),
 				below: *below,
@@ -3309,7 +3309,7 @@ struct Serving {
 	server: Option<kio::Shared<ServeState>>,
 	source: Option<broadcast::Consumer>,
 	advertised: bool,
-	/// Whether the job routes answering it take its instance; see [`RouteEntry::lends`].
+	/// Whether the job routes answering it take its identity; see [`RouteEntry::lends`].
 	lends: bool,
 }
 
@@ -3319,7 +3319,7 @@ struct Serving {
 /// frame. Created by [`Producer::route`], or by [`Request::route`] to answer a request
 /// with the path's own route. A prefix served on demand is a [`Claim`] instead.
 ///
-/// A route mints its instance when it is created and keeps it for its lifetime, across
+/// A route mints its identity when it is created and keeps it for its lifetime, across
 /// [`withdraw`](Self::withdraw), [`announce`](Self::announce) and reconnects, since it
 /// owns the same broadcast and its keys continue. A new run is a new route.
 ///
@@ -3330,7 +3330,7 @@ struct Serving {
 /// // Fill the catalog before readers can find it.
 /// let route = origin.route("live/alice", RouteOptions::hidden())?;
 /// let _catalog = route.broadcast().create_track("catalog.json", None).ok_or(moq_net::Error::Duplicate)?;
-/// route.announce()?; // visible now, same instance
+/// route.announce()?; // visible now, same identity
 /// route.set_cost(5)?; // re-prices in place
 /// route.withdraw(); // hidden; announce() again continues the same stream
 /// # Ok(())
@@ -3385,13 +3385,13 @@ struct RouteState {
 /// announces, withdrawals and re-prices land in order.
 struct RouteControl {
 	options: RouteOptions,
-	/// The instance and epoch the route advertises, as last seen when [`Self::held`].
-	instance: (Instance, u64),
-	/// Whether the table entry holds the instance: a prefix route that lends its own, which
+	/// The identity and epoch the route advertises, as last seen when [`Self::held`].
+	identity: (Identity, u64),
+	/// Whether the table entry holds the identity: a prefix route that lends its own, which
 	/// moves on as its jobs end (see [`OriginState::advance`]), or a job's route taking one
 	/// from it. An update then names none, leaving the entry's as it is.
 	held: bool,
-	/// Whether a job's route read its instance before it first announced: it then announces
+	/// Whether a job's route read its identity before it first announced: it then announces
 	/// under that one or not at all, so whatever was built from it, such as a signer, stays
 	/// valid.
 	bound: bool,
@@ -3401,13 +3401,13 @@ struct RouteControl {
 
 impl RouteControl {
 	fn new(options: RouteOptions, announcement: &AnnounceProducer, request: Option<Request>) -> Self {
-		let held = options.instance.is_none();
-		let instance = announcement
-			.instance(None)
+		let held = options.identity.is_none();
+		let identity = announcement
+			.identity(None)
 			.expect("a route just inserted has its entries");
 		Self {
 			options,
-			instance,
+			identity,
 			held,
 			bound: false,
 			request,
@@ -3416,9 +3416,9 @@ impl RouteControl {
 
 	/// What to advertise.
 	fn info(&self) -> RouteInfo {
-		let (instance, epoch) = &self.instance;
+		let (identity, epoch) = &self.identity;
 		RouteInfo {
-			instance: (!self.held).then(|| instance.clone()),
+			identity: (!self.held).then(|| identity.clone()),
 			epoch: *epoch,
 			..self.options.info()
 		}
@@ -3441,17 +3441,17 @@ impl RouteState {
 }
 
 impl RouteState {
-	/// See [`Route::instance`] and [`Claim::instance`].
-	fn instance(&self) -> Instance {
+	/// See [`Route::identity`] and [`Claim::identity`].
+	fn identity(&self) -> Identity {
 		let mut control = self.control.lock();
 		if control.held && !control.bound {
 			let lender = control.request.as_ref().map(|request| &request.home);
-			if let Some(current) = self.announcement.instance(lender) {
-				control.instance = current;
+			if let Some(current) = self.announcement.identity(lender) {
+				control.identity = current;
 			}
 			control.bound = control.request.is_some();
 		}
-		control.instance.0.clone()
+		control.identity.0.clone()
 	}
 
 	/// See [`Route::withdraw`] and [`Claim::withdraw`].
@@ -3491,14 +3491,14 @@ impl Route {
 	}
 
 	/// The stream this route serves, minted when it was created unless
-	/// [`RouteOptions::with_instance`] named one.
+	/// [`RouteOptions::with_identity`] named one.
 	///
 	/// A job's route ([`Request::route`]) naming none takes its claim's current one when it
 	/// first announces, or when this reads it first. Read before announcing, it is the one
 	/// the job announces under, and [`Self::announce`] fails with [`Error::Unroutable`] once
 	/// the claim has moved past it.
-	pub fn instance(&self) -> Instance {
-		self.state.instance()
+	pub fn identity(&self) -> Identity {
+		self.state.identity()
 	}
 
 	/// Make the route visible, or keep it so. Idempotent.
@@ -3509,7 +3509,7 @@ impl Route {
 	/// Fails with [`Error::Closed`] once the route's broadcast closed or the origin's
 	/// [`Driver`] was dropped, and with [`Error::Unroutable`], announcing nothing, when a
 	/// job's request was released or its claim retracted meanwhile, or when the job read
-	/// its [`instance`](Self::instance) and its claim has moved past it since: that route
+	/// its [`identity`](Self::identity) and its claim has moved past it since: that route
 	/// can never announce. In that last case the request goes back to the claim's handler,
 	/// its requesters still waiting.
 	pub fn announce(&self) -> Result<(), Error> {
@@ -3518,13 +3518,13 @@ impl Route {
 		let Some(mut request) = control.request.take() else {
 			return self.state.announcement.update_if(info, None, |_| true).map(|_| ());
 		};
-		let bound = std::mem::take(&mut control.bound).then(|| control.instance.0.clone());
+		let bound = std::mem::take(&mut control.bound).then(|| control.identity.0.clone());
 		let mut moved = false;
 		let answer = self.broadcast.consume();
 		let mut resolved = None;
 		// Answered under the table lock that every release takes first, so the route
 		// lands only for a request still pending and no release can slip in between.
-		// A job's route naming no instance takes its claim's current one as it lands, so
+		// A job's route naming no identity takes its claim's current one as it lands, so
 		// whatever resolved through the claim for the path continues on it rather than
 		// restarting.
 		let lender = control.held.then_some(&request.home);
@@ -3540,12 +3540,12 @@ impl Route {
 			if !home {
 				return false;
 			}
-			// A job that read its instance announces under it or not at all. A claim that
+			// A job that read its identity announces under it or not at all. A claim that
 			// lends nothing never moves, and one no longer serving released the request.
 			if let Some(bound) = &bound
 				&& table
 					.lender(&request.path, &request.home)
-					.is_some_and(|lent| lent.instance != *bound)
+					.is_some_and(|lent| lent.identity != *bound)
 			{
 				moved = true;
 				return false;
@@ -3565,7 +3565,7 @@ impl Route {
 			// advertising through the ordinary branch now that the request is taken.
 			self.state.announcement.retract(Retract::Ended);
 			drop(control);
-			// The claim moved past the instance the job read: its requesters wait on for
+			// The claim moved past the identity the job read: its requesters wait on for
 			// the handler to prepare the job again under the new one.
 			request.requeue = moved;
 			drop(request);
@@ -3580,7 +3580,7 @@ impl Route {
 	}
 
 	/// Hide the route from everyone, local and remote alike, keeping its broadcast and
-	/// instance: [`Self::announce`] brings the same stream back. Requests for the path
+	/// identity: [`Self::announce`] brings the same stream back. Requests for the path
 	/// fail with [`Error::Unroutable`] meanwhile, while tracks already in flight carry
 	/// on to their own end. Idempotent.
 	pub fn withdraw(&self) {
@@ -3618,19 +3618,19 @@ impl Route {
 		self.state.announcement.route()
 	}
 
-	/// Announce with `info` as given, instance included when it names one, as a
+	/// Announce with `info` as given, identity included when it names one, as a
 	/// session's update does: for tests that shape an exact route's metadata.
 	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn announce_info(&self, mut info: RouteInfo) -> Result<(), Error> {
 		let mut control = self.state.control.lock();
-		match &info.instance {
-			Some(instance) => {
-				control.instance = (instance.clone(), info.epoch);
+		match &info.identity {
+			Some(identity) => {
+				control.identity = (identity.clone(), info.epoch);
 				control.held = false;
 			}
 			None => {
-				info.instance = Some(control.instance.0.clone());
-				info.epoch = control.instance.1;
+				info.identity = Some(control.identity.0.clone());
+				info.epoch = control.identity.1;
 			}
 		}
 		control.options.cost = info.cost;
@@ -3641,12 +3641,12 @@ impl Route {
 
 impl Claim {
 	/// The stream this claim serves, minted when it was created unless
-	/// [`RouteOptions::with_instance`] named one.
+	/// [`RouteOptions::with_identity`] named one.
 	///
-	/// Unnamed, it can change: the claim moves to a fresh instance each time an answer
+	/// Unnamed, it can change: the claim moves to a fresh identity each time an answer
 	/// holding its current one ends. See [`Producer::claim`].
-	pub fn instance(&self) -> Instance {
-		self.state.instance()
+	pub fn identity(&self) -> Identity {
+		self.state.identity()
 	}
 
 	/// Make the claim visible, or keep it so. Idempotent. Visible to local consumers
@@ -3661,7 +3661,7 @@ impl Claim {
 			.map(|_| ())
 	}
 
-	/// Hide the claim from everyone, local and remote alike, keeping its instance:
+	/// Hide the claim from everyone, local and remote alike, keeping its identity:
 	/// [`Self::announce`] brings it back. Requests beneath it fail with
 	/// [`Error::Unroutable`] meanwhile. Idempotent.
 	pub fn withdraw(&self) {
@@ -3741,12 +3741,12 @@ impl Claim {
 
 	/// Replace a forwarded claim's metadata in place, taken as given.
 	///
-	/// A claim naming no [`RouteInfo::instance`], or the same one, re-prices: consumers
-	/// observe an update and every handle survives. Another instance is another stream:
+	/// A claim naming no [`RouteInfo::identity`], or the same one, re-prices: consumers
+	/// observe an update and every handle survives. Another identity is another stream:
 	/// consumers see a restart, and a re-request never joins what was resolved under the
 	/// old one. Requests still waiting on this handle carry over: the handler is asked
-	/// again under the new instance, and its answer to a request asked before the change
-	/// is dropped, never served under the new one. A request pinned to the old instance
+	/// again under the new identity, and its answer to a request asked before the change
+	/// is dropped, never served under the new one. A request pinned to the old identity
 	/// is refused with [`Error::Unroutable`]. The answers already served are forgotten,
 	/// so the next request for one of those paths asks the handler again too. The
 	/// broadcasts it served keep running for the subscriptions already on them.
@@ -3755,8 +3755,8 @@ impl Claim {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn update(&self, info: RouteInfo) -> Result<(), Error> {
 		let mut control = self.state.control.lock();
-		if let Some(instance) = &info.instance {
-			control.instance = (instance.clone(), info.epoch);
+		if let Some(identity) = &info.identity {
+			control.identity = (identity.clone(), info.epoch);
 			control.held = false;
 		}
 		control.options.cost = info.cost;
@@ -3773,7 +3773,7 @@ impl Claim {
 	}
 
 	/// The route layer let go of the claim this follows: every copy of it the table holds,
-	/// each of the same node, instance and [`Lane::lifecycle`] at any epoch, goes with this one
+	/// each of the same node, identity and [`Lane::lifecycle`] at any epoch, goes with this one
 	/// under one lock, rather than readers seeing the rest in turn as their sessions
 	/// retract them. They end with `ended`, else go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -3832,7 +3832,7 @@ pub(crate) struct AnnounceProducer {
 }
 
 impl AnnounceProducer {
-	/// Replace the route in place, instance included when it names one; see
+	/// Replace the route in place, identity included when it names one; see
 	/// [`Claim::update`].
 	///
 	/// The prefix is fixed at announce time and a [`RouteInfo`] cannot name one: to
@@ -3848,7 +3848,7 @@ impl AnnounceProducer {
 	/// retraction, the teardown) can change its answer before the route lands.
 	///
 	/// A job's route answering its request through `lender`, a prefix route that lends
-	/// its instance, takes that route's instance and epoch as of now.
+	/// its identity, takes that route's identity and epoch as of now.
 	fn update_if(
 		&self,
 		route: RouteInfo,
@@ -3869,7 +3869,7 @@ impl AnnounceProducer {
 		if !admit(&shared) {
 			return Ok(false);
 		}
-		// The requests an instance change released, refused once the table lock is gone: the
+		// The requests an identity change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
 		for (prefix, id) in &self.entries {
@@ -3886,29 +3886,29 @@ impl AnnounceProducer {
 				entry.live(),
 				entry.specificity(),
 				route_rank(entry),
-				entry.instance.clone(),
+				entry.identity.clone(),
 				entry.epoch,
 			);
 			let next = match &lent {
-				Some(lent) => Some((lent.instance.clone(), lent.epoch)),
-				None => route.instance.clone().map(|instance| (instance, route.epoch)),
+				Some(lent) => Some((lent.identity.clone(), lent.epoch)),
+				None => route.identity.clone().map(|identity| (identity, route.epoch)),
 			};
 			let mut spent = None;
-			if let Some((instance, epoch)) = next {
-				if instance != entry.instance {
+			if let Some((identity, epoch)) = next {
+				if identity != entry.identity {
 					// Another stream: what its server was asked, or answered, for the old one
-					// is not its own. Under the table lock, so no front sees the new instance
+					// is not its own. Under the table lock, so no front sees the new identity
 					// while an old answer can still land. A higher epoch of the same one
 					// continues it.
 					if let Some(server) = &entry.server {
 						released.extend(server.lock().renew());
 					}
-					// The instance it took stops serving here.
+					// The identity it took stops serving here.
 					if entry.advertised {
-						spent = entry.lent.take().map(|lender| (lender, entry.instance.clone()));
+						spent = entry.lent.take().map(|lender| (lender, entry.identity.clone()));
 					}
 				}
-				entry.instance = instance;
+				entry.identity = identity;
 				entry.epoch = epoch;
 			}
 			if let Some(lent) = lent {
@@ -3933,15 +3933,15 @@ impl AnnounceProducer {
 					true,
 					entry.specificity(),
 					route_rank(entry),
-					entry.instance.clone(),
+					entry.identity.clone(),
 					entry.epoch,
 				) {
 				entry.since = stamp;
 			}
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
-			if let Some(((lender, lender_id), instance)) = spent {
-				shared.advance(&lender, lender_id, &instance);
+			if let Some(((lender, lender_id), identity)) = spent {
+				shared.advance(&lender, lender_id, &identity);
 			}
 			shared.prune_withdrawn(prefix);
 		}
@@ -3957,16 +3957,16 @@ impl AnnounceProducer {
 		Ok(true)
 	}
 
-	/// The instance and epoch the entries carry, or `None` once they are gone. A job's
+	/// The identity and epoch the entries carry, or `None` once they are gone. A job's
 	/// route not yet announced reads its `lender`'s current one, which it would bind now.
-	fn instance(&self, lender: Option<&kio::Shared<ServeState>>) -> Option<(Instance, u64)> {
+	fn identity(&self, lender: Option<&kio::Shared<ServeState>>) -> Option<(Identity, u64)> {
 		let shared = self.shared.lock();
 		let (prefix, id) = self.entries.first()?;
 		let entry = shared.routes.entry(prefix, *id)?;
 		if let Some(lent) = lender.and_then(|server| shared.lender(prefix, server)) {
-			return Some((lent.instance, lent.epoch));
+			return Some((lent.identity, lent.epoch));
 		}
-		Some((entry.instance.clone(), entry.epoch))
+		Some((entry.identity.clone(), entry.epoch))
 	}
 
 	/// Whether the entries are advertised, or [`Error::Closed`] once they are gone.
@@ -3988,7 +3988,7 @@ impl AnnounceProducer {
 		let (prefix, id) = self.entries.first()?;
 		let entry = shared.routes.entry(prefix, *id).filter(|entry| entry.advertised)?;
 		Some(RouteInfo {
-			instance: Some(entry.instance.clone()),
+			identity: Some(entry.identity.clone()),
 			epoch: entry.epoch,
 			hops: entry.hops.clone(),
 			cost: entry.cost,
@@ -4029,10 +4029,10 @@ impl AnnounceProducer {
 				released.extend(server.lock().renew());
 			}
 			let claim = entry.claim.clone();
-			let spent = entry.lent.take().map(|lender| (lender, entry.instance.clone()));
+			let spent = entry.lent.take().map(|lender| (lender, entry.identity.clone()));
 			shared.sync_route(prefix, &claim, Gone::End);
-			if let Some(((lender, lender_id), instance)) = spent {
-				shared.advance(&lender, lender_id, &instance);
+			if let Some(((lender, lender_id), identity)) = spent {
+				shared.advance(&lender, lender_id, &identity);
 			}
 		}
 		drop(shared);
@@ -4067,7 +4067,7 @@ impl AnnounceProducer {
 			// of the same lite-07 claim, such as one a later showing serves over another
 			// chain, says its claimant still advertises it too.
 			let same_claim = |other: &RouteEntry| {
-				entry.node.is_some() && other.node == entry.node && other.instance == entry.instance
+				entry.node.is_some() && other.node == entry.node && other.identity == entry.identity
 			};
 			if matches!(how, Retract::Withdrawn | Retract::Retired { ended: true })
 				&& let Some(&peer) = entry.hops.iter().last()
@@ -4088,7 +4088,7 @@ impl AnnounceProducer {
 			if entry.advertised
 				&& let Some((lender, lender_id)) = &entry.lent
 			{
-				shared.advance(lender, *lender_id, &entry.instance);
+				shared.advance(lender, *lender_id, &entry.identity);
 			}
 			shared.prune_withdrawn(&entry.prefix);
 		}
@@ -4126,10 +4126,10 @@ struct OwnClaims {
 	routes: Routes,
 	/// The same routes, less those learned on an upstream link.
 	downstream: Routes,
-	/// The claim fed at each prefix: its instance, and whether another node announced it.
-	best: HashMap<Path, (Instance, crate::route::node::Claim, bool)>,
-	/// The instance at each prefix that a route not learned upstream serves.
-	local: HashMap<Path, Instance>,
+	/// The claim fed at each prefix: its identity, and whether another node announced it.
+	best: HashMap<Path, (Identity, crate::route::node::Claim, bool)>,
+	/// The identity at each prefix that a route not learned upstream serves.
+	local: HashMap<Path, Identity>,
 	/// Claims that left since the last feed, told after it: a successor at the same
 	/// prefix must reach the node first, or a peer reading the two apart sees an end.
 	gone: BTreeMap<crate::route::node::Broadcast, crate::route::node::Change>,
@@ -4259,18 +4259,18 @@ impl OwnClaims {
 				announce,
 			} => announce,
 			RouteEvent { kind, announce } => {
-				if let Some((instance, ..)) = self.best.remove(&announce.prefix) {
+				if let Some((identity, ..)) = self.best.remove(&announce.prefix) {
 					let change = match kind {
 						RouteKind::End => Change::Ended,
 						_ => Change::Lost,
 					};
-					self.gone.insert((announce.prefix, instance), change);
+					self.gone.insert((announce.prefix, identity), change);
 				}
 				return None;
 			}
 		};
 		let route = announce.route;
-		let instance = route.instance?;
+		let identity = route.identity?;
 		// Only a route published here has crossed no node.
 		let learned = !route.hops.is_empty();
 		let claim = Claim {
@@ -4295,9 +4295,9 @@ impl OwnClaims {
 		};
 		let was = self
 			.best
-			.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
-		// Another instance took the prefix: the one it served before is gone.
-		if let Some((was, ..)) = was.filter(|(was, ..)| *was != instance) {
+			.insert(announce.prefix.clone(), (identity.clone(), claim, learned));
+		// Another identity took the prefix: the one it served before is gone.
+		if let Some((was, ..)) = was.filter(|(was, ..)| *was != identity) {
 			self.gone.insert((announce.prefix.clone(), was), Change::Ended);
 		}
 		Some(announce.prefix)
@@ -4318,8 +4318,8 @@ impl OwnClaims {
 				kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
 				announce,
 			} => {
-				if let Some(instance) = announce.route.instance {
-					self.local.insert(announce.prefix.clone(), instance);
+				if let Some(identity) = announce.route.identity {
+					self.local.insert(announce.prefix.clone(), identity);
 				}
 				announce.prefix
 			}
@@ -4327,24 +4327,24 @@ impl OwnClaims {
 	}
 
 	/// Feed the node the claim at each of `prefixes`, marked unless a route not learned
-	/// upstream serves the same instance there, and unless this origin forwards what it
+	/// upstream serves the same identity there, and unless this origin forwards what it
 	/// learned. Then end the claims that left, less any that came back since.
 	fn feed(&mut self, mut prefixes: Vec<Path>) {
 		prefixes.sort();
 		prefixes.dedup();
 		for prefix in prefixes {
-			let Some((instance, claim, learned)) = self.best.get(&prefix) else {
+			let Some((identity, claim, learned)) = self.best.get(&prefix) else {
 				continue;
 			};
-			let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(instance);
+			let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(identity);
 			let change = crate::route::node::Change::Live(claim.clone());
-			self.node.own(marked, (prefix, instance.clone()), change);
+			self.node.own(marked, (prefix, identity.clone()), change);
 		}
-		for ((prefix, instance), change) in std::mem::take(&mut self.gone) {
-			if self.best.get(&prefix).is_some_and(|(best, ..)| *best == instance) {
+		for ((prefix, identity), change) in std::mem::take(&mut self.gone) {
+			if self.best.get(&prefix).is_some_and(|(best, ..)| *best == identity) {
 				continue;
 			}
-			self.node.own(false, (prefix, instance), change);
+			self.node.own(false, (prefix, identity), change);
 		}
 	}
 }
@@ -4536,9 +4536,9 @@ struct FrontTask {
 	path: Path,
 	/// The requesters' horizon, applied to every (re)selection.
 	horizon: Horizon,
-	/// The instance the front serves from the start, for requests naming another one than
+	/// The identity the front serves from the start, for requests naming another one than
 	/// the path's winner; see [`FrontKey`].
-	pin: Option<Instance>,
+	pin: Option<Identity>,
 	/// Wakes the front when a route covering its path changes.
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
@@ -4570,7 +4570,7 @@ struct Asked {
 /// machine uses.
 struct TrackIo {
 	/// Queues just this track when a resource it watches changes.
-	ready: Arc<crate::util::QueueWake<Arc<str>>>,
+	ready: Arc<crate::util::QueueWake<track::Key>>,
 	park: kio::Park,
 	logical: Logical,
 	/// Whether anyone reads the logical track.
@@ -4683,7 +4683,7 @@ struct FrontListing {
 	/// Every track the front lists, by kind and name.
 	listed: HashSet<(broadcast::Kind, Arc<str>)>,
 	/// Tracks an earlier source listed that the current one has yet to list. A source of the
-	/// same instance lists the same tracks, so its readers see no churn: what it still lacks
+	/// same identity lists the same tracks, so its readers see no churn: what it still lacks
 	/// at its SYNCED is gone.
 	stale: HashSet<(broadcast::Kind, Arc<str>)>,
 }
@@ -4865,22 +4865,22 @@ impl kio::Task for FrontServeRun {
 	}
 }
 
-/// The route a front may serve from. `resolved` is the instance the front first
+/// The route a front may serve from. `resolved` is the identity the front first
 /// resolved, once it has. Its routes serve one continuous key space, so any of them
 /// at its newest epoch may take over. The front stays until those routes go, even once
-/// another instance wins the path: its subscriptions are sticky, and new requests
+/// another identity wins the path: its subscriptions are sticky, and new requests
 /// resolve the winner on a fresh front.
 fn pick<'a>(
 	table: &'a OriginState,
 	path: &Path,
 	horizon: Horizon,
 	front: &Front,
-	resolved: Option<&Instance>,
+	resolved: Option<&Identity>,
 ) -> Option<&'a RouteEntry> {
 	let excluded = front.excluded_routes();
 	match resolved {
 		None => table.best_route(path, horizon, excluded, |_| true),
-		Some(instance) => table.best_route(path, horizon, excluded, |entry| entry.instance == *instance),
+		Some(identity) => table.best_route(path, horizon, excluded, |entry| entry.identity == *identity),
 	}
 }
 
@@ -4890,9 +4890,9 @@ enum FrontStep {
 	Assigned(Box<track::Request>),
 	Resolved(Result<broadcast::Consumer, Error>),
 	SourceClosed(u64),
-	Info(Arc<str>, u64, Result<track::Info, Error>),
-	Ended(Arc<str>, u64, Result<(), Error>, bool),
-	Demand(Arc<str>),
+	Info(track::Key, u64, Result<track::Info, Error>),
+	Ended(track::Key, u64, Result<(), Error>, bool),
+	Demand(track::Key),
 	Holders,
 	/// The broadcast closed: nobody can hold it again.
 	Closed,
@@ -4908,8 +4908,8 @@ enum FrontStep {
 /// A front's in-flight upstream request.
 struct FrontUpstream {
 	route: u64,
-	/// The route's instance and epoch when asked.
-	asked: (Instance, u64),
+	/// The route's identity and epoch when asked.
+	asked: (Identity, u64),
 	pending: kio::Consumer<PendingBroadcast>,
 	/// The queue's [`ServeState::renewals`], and its count when asked: a renewal
 	/// since released the request, whatever it resolved to and whenever.
@@ -4941,17 +4941,17 @@ struct FrontServe {
 	/// starting with the request that minted the front.
 	held: bool,
 	/// What the front first resolved; see [`pick`].
-	resolved: Option<Instance>,
+	resolved: Option<Identity>,
 	/// The watch generation the last selection saw.
 	seen: u64,
 	deadline: crate::time::Deadline,
-	ready: kio::Queue<Arc<str>>,
-	tracks: HashMap<Arc<str>, TrackIo>,
+	ready: kio::Queue<track::Key>,
+	tracks: HashMap<track::Key, TrackIo>,
 	upstream: Option<FrontUpstream>,
 	next_source: u64,
-	/// The instance and epoch each source's route served when it was asked: what its
+	/// The identity and epoch each source's route served when it was asked: what its
 	/// content is from.
-	instances: HashMap<u64, (Instance, u64)>,
+	identities: HashMap<u64, (Identity, u64)>,
 	sources: HashMap<u64, broadcast::Consumer>,
 	front: Front,
 	listing: Option<FrontListing>,
@@ -4962,11 +4962,20 @@ struct FrontServe {
 	timers: Deadlines,
 	request: kio::Producer<PendingFront>,
 	watch: Watch,
-	pin: Option<Instance>,
+	pin: Option<Identity>,
 	horizon: Horizon,
 	path: Path,
 	broadcast: broadcast::Producer,
 	shared: SendCell<kio::Shared<OriginState>>,
+}
+
+/// The copy of `key` a front's source serves: its metadata copy where it keeps one apart,
+/// and otherwise its payload copy, whose headers a metadata reader takes.
+fn source_track(source: &broadcast::Consumer, key: &track::Key) -> Result<track::Consumer, Error> {
+	match key.meta {
+		true => source.track_meta(&key.name),
+		false => source.track(&key.name),
+	}
 }
 
 impl FrontServe {
@@ -5000,7 +5009,7 @@ impl FrontServe {
 			tracks: HashMap::new(),
 			upstream: None,
 			next_source: 0,
-			instances: HashMap::new(),
+			identities: HashMap::new(),
 			sources: HashMap::new(),
 			front: Front::new(track::IDLE_LINGER),
 			listing: None,
@@ -5043,8 +5052,8 @@ impl FrontServe {
 			&& let Some(entry) = best
 			&& let Ok(mut pending) = self.request.write()
 		{
-			if pending.selected != entry.instance {
-				pending.selected = entry.instance.clone();
+			if pending.selected != entry.identity {
+				pending.selected = entry.identity.clone();
 			}
 			if pending.epoch != entry.epoch {
 				pending.epoch = entry.epoch;
@@ -5056,7 +5065,7 @@ impl FrontServe {
 		let best = best.map(|entry| Candidate {
 			route: entry.id,
 			local: entry.local,
-			carried: !entry.instance.is_minted(),
+			carried: !entry.identity.is_minted(),
 			claim: entry.node.is_some(),
 		});
 		// No candidate irreversibly ends this front, unless it waits on a claim. Leave the
@@ -5098,16 +5107,16 @@ impl FrontServe {
 		.is_some_and(|best| best.id == route)
 	}
 
-	/// Whether an answer `route` gave for `asked` (an instance and its epoch) would serve
-	/// another instance than the front's, or an epoch of it that no longer stands: the route
-	/// has since moved off it, before the front resolved another instance won the path while
+	/// Whether an answer `route` gave for `asked` (an identity and its epoch) would serve
+	/// another identity than the front's, or an epoch of it that no longer stands: the route
+	/// has since moved off it, before the front resolved another identity won the path while
 	/// the request was in flight, or a higher epoch of the route's claim did, including one
 	/// that replaced the route in the table.
-	fn stale(&self, route: u64, asked: &(Instance, u64)) -> bool {
+	fn stale(&self, route: u64, asked: &(Identity, u64)) -> bool {
 		let table = self.shared.read();
 		let entry = table.routes.covering(&self.path).find(|entry| entry.id == route);
 		if let Some(entry) = entry
-			&& (entry.instance != asked.0 || self.resolved.as_ref().is_some_and(|resolved| *resolved != asked.0))
+			&& (entry.identity != asked.0 || self.resolved.as_ref().is_some_and(|resolved| *resolved != asked.0))
 		{
 			return true;
 		}
@@ -5119,10 +5128,10 @@ impl FrontServe {
 			self.resolved.as_ref().or(self.pin.as_ref()),
 		);
 		best.is_some_and(|best| match entry {
-			Some(entry) => best.instance != asked.0 || (best.claimed() == entry.claimed() && best.epoch > entry.epoch),
-			// The route left the table: its answer still serves its instance, unless another
-			// instance or a higher epoch of it wins now.
-			None => best.instance != asked.0 || best.epoch > asked.1,
+			Some(entry) => best.identity != asked.0 || (best.claimed() == entry.claimed() && best.epoch > entry.epoch),
+			// The route left the table: its answer still serves its identity, unless another
+			// identity or a higher epoch of it wins now.
+			None => best.identity != asked.0 || best.epoch > asked.1,
 		})
 	}
 
@@ -5311,11 +5320,11 @@ impl kio::Task for FrontServe {
 									.covering(&self.path)
 									.find(|entry| entry.id == route && entry.live())
 									.map(|entry| {
-										let instance = (entry.instance.clone(), entry.epoch);
-										(entry.source.clone(), entry.server.clone(), instance)
+										let identity = (entry.identity.clone(), entry.epoch);
+										(entry.source.clone(), entry.server.clone(), identity)
 									})
 							};
-							let Some((source, server, instance)) = found else {
+							let Some((source, server, identity)) = found else {
 								self.events.push_back(Event::Resolved {
 									route,
 									result: Err(Refusal {
@@ -5329,7 +5338,7 @@ impl kio::Task for FrontServe {
 								let id = self.next_source;
 								self.next_source += 1;
 								self.sources.insert(id, source);
-								self.instances.insert(id, instance);
+								self.identities.insert(id, identity);
 								self.events.push_back(Event::Resolved { route, result: Ok(id) });
 								continue;
 							}
@@ -5373,7 +5382,7 @@ impl kio::Task for FrontServe {
 								let id = self.next_source;
 								self.next_source += 1;
 								self.sources.insert(id, source);
-								self.instances.insert(id, instance);
+								self.identities.insert(id, identity);
 								self.events.push_back(Event::Resolved { route, result: Ok(id) });
 								continue;
 							}
@@ -5409,7 +5418,7 @@ impl kio::Task for FrontServe {
 							};
 							self.upstream = Some(FrontUpstream {
 								route,
-								asked: instance,
+								asked: identity,
 								pending,
 								renewals: serve.renewals.clone(),
 								asked_renewals: serve.renewals.load(Ordering::Acquire),
@@ -5417,7 +5426,7 @@ impl kio::Task for FrontServe {
 						}
 						Action::Detach { source, drain } => {
 							self.sources.remove(&source);
-							self.instances.remove(&source);
+							self.identities.remove(&source);
 							for io in self.tracks.values_mut() {
 								if !drain && io.query.as_ref().is_some_and(|asked| asked.source == source) {
 									io.query = None;
@@ -5431,12 +5440,12 @@ impl kio::Task for FrontServe {
 							}
 						}
 						Action::Resolve => {
-							// The broadcast is whatever its first source serves, from the instance
+							// The broadcast is whatever its first source serves, from the identity
 							// its route had when asked.
 							let Some(source) = self.front.serving() else {
 								continue;
 							};
-							let Some((instance, epoch)) = self.instances.get(&source).cloned() else {
+							let Some((identity, epoch)) = self.identities.get(&source).cloned() else {
 								continue;
 							};
 							// Route datagram lookups before a requester can see the broadcast,
@@ -5445,9 +5454,9 @@ impl kio::Task for FrontServe {
 								self.datagram_source = Some(source);
 								self.broadcast.serve_datagrams_from(self.sources.get(&source).cloned());
 							}
-							self.resolved = Some(instance.clone());
+							self.resolved = Some(identity.clone());
 							if let Ok(mut pending) = self.request.write() {
-								pending.resolved.get_or_insert(Ok(instance));
+								pending.resolved.get_or_insert(Ok(identity));
 								pending.epoch = epoch;
 							}
 						}
@@ -5455,10 +5464,10 @@ impl kio::Task for FrontServe {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							io.ready.wake_by_ref();
 							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
-							match self.sources.get(&source).map(|s| s.track(&name)) {
+							match self.sources.get(&source).map(|s| source_track(s, &name)) {
 								Some(Ok(lookup)) => {
 									// Subscribe before the query exposes upstream demand, and query
-									// that same instance even if the broadcast changes meanwhile.
+									// that same identity even if the broadcast changes meanwhile.
 									let sub = io
 										.weak
 										.subscription()
@@ -5495,7 +5504,7 @@ impl kio::Task for FrontServe {
 							}
 							io.ready.wake_by_ref();
 							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
-							let lookup = match self.sources.get(&source).map(|s| s.track(&name)) {
+							let lookup = match self.sources.get(&source).map(|s| source_track(s, &name)) {
 								Some(Ok(lookup)) => lookup,
 								// Refused before any lookup, as a query would be: the front judges
 								// it the same way, so a held fetch is not left waiting on it.
@@ -5696,8 +5705,8 @@ impl kio::Task for FrontServe {
 				self.datagram_source = self.front.serving();
 				self.broadcast
 					.serve_datagrams_from(self.datagram_source.and_then(|id| self.sources.get(&id)).cloned());
-				// A switch to another epoch of the instance admits the requests that select it.
-				if let Some((_, epoch)) = self.datagram_source.and_then(|id| self.instances.get(&id))
+				// A switch to another epoch of the identity admits the requests that select it.
+				if let Some((_, epoch)) = self.datagram_source.and_then(|id| self.identities.get(&id))
 					&& let Ok(mut pending) = self.request.write()
 				{
 					pending.epoch = *epoch;
@@ -5716,7 +5725,10 @@ impl kio::Task for FrontServe {
 			let event = match step {
 				FrontStep::Assigned(request) => {
 					let request = *request;
-					let name: Arc<str> = request.name().into();
+					let name = track::Key {
+						name: request.name().into(),
+						meta: request.meta(),
+					};
 					let track_ready = crate::util::QueueWake::new(name.clone(), self.ready.clone());
 					track_ready.wake_by_ref();
 					let routes = super::resume::Producer::new();
@@ -5753,11 +5765,11 @@ impl kio::Task for FrontServe {
 					};
 					// Counted rather than read off the request, which an answer just before
 					// the change already took out of the queue, and rather than compared by
-					// instance, which may have come back since.
+					// identity, which may have come back since.
 					let released = renewals.load(Ordering::Acquire) != asked_renewals;
 					match result {
-						// An instance change released the request, the route moved to another
-						// instance, or another won the path, while the request was in flight:
+						// An identity change released the request, the route moved to another
+						// identity, or another won the path, while the request was in flight:
 						// ask again rather than resolve requesters onto a broadcast that is
 						// already replaced.
 						_ if released => Event::Resolved {
@@ -5778,7 +5790,7 @@ impl kio::Task for FrontServe {
 							let id = self.next_source;
 							self.next_source += 1;
 							self.sources.insert(id, source);
-							self.instances.insert(id, asked);
+							self.identities.insert(id, asked);
 							Event::Resolved { route, result: Ok(id) }
 						}
 						Err(err) => Event::Resolved {
@@ -6038,12 +6050,12 @@ enum WatchProducer {
 struct Selected {
 	path: Path,
 	via: Hop,
-	instance: Instance,
-	/// The selection period, closed when the peer stops selecting the instance.
+	identity: Identity,
+	/// The selection period, closed when the peer stops selecting the identity.
 	current: Option<kio::Producer<()>>,
-	/// Open until another instance of the peer takes the path, which may answer a
+	/// Open until another identity of the peer takes the path, which may answer a
 	/// request still unanswered. A withdrawal alone leaves it open, and a period the
-	/// instance wins again keeps it.
+	/// identity wins again keeps it.
 	answering: Option<kio::Producer<()>>,
 }
 
@@ -6051,9 +6063,9 @@ struct Selected {
 enum Change {
 	/// A new period: nothing refused in the last one revives.
 	Start,
-	/// The peer no longer selects the instance.
+	/// The peer no longer selects the identity.
 	End,
-	/// Another instance of the peer took the path.
+	/// Another identity of the peer took the path.
 	Replace,
 }
 
@@ -6064,11 +6076,11 @@ impl Selected {
 			self.current.as_ref()?;
 			return Some(Change::End);
 		};
-		if best.instance == self.instance {
+		if best.identity == self.identity {
 			return self.current.is_none().then_some(Change::Start);
 		}
 		if self.current.is_none() {
-			// Withdrawn earlier: the instance taking the path now may answer what is left.
+			// Withdrawn earlier: the identity taking the path now may answer what is left.
 			return self.answering.is_some().then_some(Change::Replace);
 		}
 		Some(Change::Replace)
@@ -6091,7 +6103,7 @@ impl Selected {
 	}
 }
 
-/// The lifetime of path requests while this peer still selects the held instance.
+/// The lifetime of path requests while this peer still selects the held identity.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Selection {
 	shared: SendCell<kio::Shared<OriginState>>,
@@ -6111,7 +6123,7 @@ impl Selection {
 			.unwrap_or_else(|| kio::Producer::new(()).consume())
 	}
 
-	/// Closed once another instance takes the path, for a request already sent.
+	/// Closed once another identity takes the path, for a request already sent.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn answering(&self) -> kio::Consumer<()> {
 		self.signal
@@ -6406,7 +6418,7 @@ impl RouteNode {
 		Some(result)
 	}
 
-	/// Wake route watchers, and revoke only leases whose selected instance changed.
+	/// Wake route watchers, and revoke only leases whose selected identity changed.
 	fn poke(&self, routes: Option<&RouteTable>) {
 		for (_, watch) in &self.watches {
 			match watch {
@@ -6785,7 +6797,7 @@ impl OriginState {
 	}
 
 	/// Retire every other copy at its prefix of the claim `entry` follows: the same
-	/// forwarding node, instance and showing ([`Lane::lifecycle`]), at any epoch, since a
+	/// forwarding node, identity and showing ([`Lane::lifecycle`]), at any epoch, since a
 	/// copy whose session has yet to take a newer epoch would otherwise be left as the
 	/// fallback. See [`Claim::retire`].
 	fn retire_copies(&mut self, entry: &RouteEntry) {
@@ -6794,7 +6806,7 @@ impl OriginState {
 		};
 		for other in self.routes.at_mut(&entry.prefix) {
 			if other.node == Some(node)
-				&& other.instance == entry.instance
+				&& other.identity == entry.identity
 				&& other.lane.lifecycle == entry.lane.lifecycle
 			{
 				other.retired = true;
@@ -7178,7 +7190,7 @@ impl OriginState {
 		self.routes.best_route(path, horizon, excluded, only)
 	}
 
-	/// The prefix route `server` answers through for `path`, when it lends its instance to
+	/// The prefix route `server` answers through for `path`, when it lends its identity to
 	/// the job routes answering its requests and its scope authorizes `path`.
 	fn lender(&self, path: &Path, server: &kio::Shared<ServeState>) -> Option<Lent> {
 		self.routes
@@ -7190,40 +7202,40 @@ impl OriginState {
 			.map(|entry| Lent {
 				prefix: entry.prefix.clone(),
 				id: entry.id,
-				instance: entry.instance.clone(),
+				identity: entry.identity.clone(),
 				epoch: entry.epoch,
 			})
 	}
 
-	/// A job's route carrying `spent`, the instance it took from the prefix route `id` at
-	/// `prefix`, stopped serving it: that prefix route moves to a fresh instance.
+	/// A job's route carrying `spent`, the identity it took from the prefix route `id` at
+	/// `prefix`, stopped serving it: that prefix route moves to a fresh identity.
 	///
-	/// One instance is one stream at each path, and the job's keys end with it. Were the
-	/// prefix route to keep the instance, its next answer for the path, a restarted job,
+	/// One identity is one stream at each path, and the job's keys end with it. Were the
+	/// prefix route to keep the identity, its next answer for the path, a restarted job,
 	/// would splice a new key space into everything that holds the old one, and nothing
 	/// short of remembering every path it ever answered could tell. Under the table's lock,
-	/// with the job's retraction, so no request resolves the path through the old instance
+	/// with the job's retraction, so no request resolves the path through the old identity
 	/// in between. A prefix route already past `spent` has nothing to do.
 	///
 	/// A claim filed at several prefixes is one claim, so its route at each moves to the
-	/// same fresh instance.
-	fn advance(&mut self, prefix: &Path, id: u64, spent: &Instance) {
+	/// same fresh identity.
+	fn advance(&mut self, prefix: &Path, id: u64, spent: &Identity) {
 		let Some(entry) = self.routes.entry(prefix, id) else {
 			return;
 		};
-		let Some(server) = entry.server.clone().filter(|_| entry.instance == *spent) else {
+		let Some(server) = entry.server.clone().filter(|_| entry.identity == *spent) else {
 			return;
 		};
 		let filed = entry.filed.clone();
-		let instance = Instance::random();
+		let identity = Identity::random();
 		for at in filed.iter() {
 			let mut moved = Vec::new();
 			for entry in self.routes.at_mut(at) {
 				let same = entry.lends
-					&& entry.instance == *spent
+					&& entry.identity == *spent
 					&& (entry.server.as_ref()).is_some_and(|other| other.same_channel(&server));
 				if same {
-					entry.instance = instance.clone();
+					entry.identity = identity.clone();
 					entry.epoch = 0;
 					moved.push(entry.claim.clone());
 				}
@@ -7234,28 +7246,28 @@ impl OriginState {
 		}
 	}
 
-	/// Whether `instance` still serves `path` as a request would resolve it now: the winning
+	/// Whether `identity` still serves `path` as a request would resolve it now: the winning
 	/// route carries it, or, for a request `pinned` to it, a route of its own remains. The
 	/// rule [`Consumer::lookup`] resolves by.
-	fn still_serves(&self, path: &Path, horizon: Horizon, instance: &Instance, pinned: bool) -> bool {
+	fn still_serves(&self, path: &Path, horizon: Horizon, identity: &Identity, pinned: bool) -> bool {
 		let Some(best) = self.best_route(path, horizon, &HashSet::new(), |_| true) else {
 			return false;
 		};
-		if best.instance == *instance {
+		if best.identity == *identity {
 			return true;
 		}
 		pinned
 			&& self
-				.best_route(path, horizon, &HashSet::new(), |entry| entry.instance == *instance)
+				.best_route(path, horizon, &HashSet::new(), |entry| entry.identity == *identity)
 				.is_some()
 	}
 }
 
-/// A prefix route lending its instance, as [`OriginState::lender`] found it.
+/// A prefix route lending its identity, as [`OriginState::lender`] found it.
 struct Lent {
 	prefix: Path,
 	id: u64,
-	instance: Instance,
+	identity: Identity,
 	epoch: u64,
 }
 
@@ -7270,22 +7282,22 @@ struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
 }
 
-/// A front's verdict, which its requesters wait on: the instance it resolved, or the
-/// error that ended it unresolved. A request joins the front only while that instance
-/// still wins at the epoch the front serves, or before then, while the instance it
+/// A front's verdict, which its requesters wait on: the identity it resolved, or the
+/// error that ended it unresolved. A request joins the front only while that identity
+/// still wins at the epoch the front serves, or before then, while the identity it
 /// selected does. Each requester holds the front's broadcast from the moment it joins, so
 /// this carries no handle that would keep the front held.
 struct PendingFront {
-	resolved: Option<Result<Instance, Error>>,
+	resolved: Option<Result<Identity, Error>>,
 	/// The epoch of the route the front serves from once resolved, and of the one it selected
 	/// until then. A front still serving or resolving a superseded epoch keeps its readers while
 	/// it moves to the newer one, but admits nobody: a request selecting the newer epoch must
 	/// never resolve through the older one, whose answer may already be on its way.
 	epoch: u64,
-	/// The instance the front resolves on unless the table moves first: the winner it
+	/// The identity the front resolves on unless the table moves first: the winner it
 	/// was minted for, then each one it selects. Written under the table's lock, so a
-	/// request never joins a front that picked an instance the request saw beaten.
-	selected: Instance,
+	/// request never joins a front that picked an identity the request saw beaten.
+	selected: Identity,
 	/// The selected serving handler refused, rather than the route disappearing.
 	refused: bool,
 }
@@ -7316,14 +7328,14 @@ impl Claim {
 			entry.server.as_ref().is_some_and(|entry| entry.same_channel(server))
 		})?;
 		let via = entry.via;
-		let instance = entry.instance.clone();
+		let identity = entry.identity.clone();
 		let active = table
 			.best_route(path, Horizon::default(), &HashSet::new(), |entry| entry.via == via)
-			.is_some_and(|entry| entry.instance == instance);
+			.is_some_and(|entry| entry.identity == identity);
 		let producer = kio::Producer::new(Selected {
 			path: path.clone(),
 			via,
-			instance,
+			identity,
 			current: active.then(kio::Producer::default),
 			answering: active.then(kio::Producer::default),
 		});
@@ -7407,7 +7419,7 @@ impl ServeState {
 		Some(resolved)
 	}
 
-	/// Admit an answer only while its request still belongs to this route instance.
+	/// Admit an answer only while its request still belongs to this route identity.
 	fn take(&mut self, path: &Path, producer: &kio::Producer<PendingBroadcast>) -> Option<()> {
 		if self.closed {
 			return None;
@@ -7417,9 +7429,9 @@ impl ServeState {
 	}
 
 	/// Release every request, queued or handed to a handler, and forget the answers served,
-	/// because the route now names another instance. Returns the released
+	/// because the route now names another identity. Returns the released
 	/// requests for the caller to refuse once it holds no lock, since the refusal wakes
-	/// their fronts. Those ask again under the new instance; the handler's answer to a
+	/// their fronts. Those ask again under the new identity; the handler's answer to a
 	/// released request is dropped.
 	#[must_use = "the released requests must be refused"]
 	fn renew(&mut self) -> Vec<kio::Producer<PendingBroadcast>> {
@@ -7451,8 +7463,8 @@ impl ServeState {
 ///
 /// Yielded by [`Claim::poll_requested`]. The requester is awaiting inside
 /// [`Consumer::request`]. Answer it one of three ways: [`serve`](Self::serve) a
-/// broadcast already held, under the prefix route's instance; create the path's own
-/// exact route with [`route`](Self::route), which continues the instance the prefix route
+/// broadcast already held, under the prefix route's identity; create the path's own
+/// exact route with [`route`](Self::route), which continues the identity the prefix route
 /// lends until it ends; or
 /// [`reject`](Self::reject) it with an error. Dropping it rejects it.
 ///
@@ -7479,7 +7491,7 @@ pub struct Request {
 	// can only serve its peer's already-routed broadcast.
 	publisher: Option<Producer>,
 
-	// Dropped back onto its queue rather than refused: its job read an instance the prefix
+	// Dropped back onto its queue rather than refused: its job read an identity the prefix
 	// route has since moved past, so the handler answers it again.
 	requeue: bool,
 }
@@ -7492,11 +7504,11 @@ impl Request {
 
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
-	/// Unless `options` names an instance, the route takes the one its prefix route lends
-	/// when it first announces or [`Route::instance`] first reads it, so whatever resolved the path through the prefix route
+	/// Unless `options` names an identity, the route takes the one its prefix route lends
+	/// when it first announces or [`Route::identity`] first reads it, so whatever resolved the path through the prefix route
 	/// continues on this answer; a prefix route that lends nothing has the route mint its
 	/// own. Ending the route withdraws only this path, and moves a prefix route that lent
-	/// its instance to a fresh one, so a job that ends and restarts beneath the same prefix
+	/// its identity to a fresh one, so a job that ends and restarts beneath the same prefix
 	/// is a new stream for its restarted keys. The prefix route keeps answering later
 	/// requests. Created visible, the route announces now and answers the requesters
 	/// waiting on its path. Created [`RouteOptions::hidden`], they wait until
@@ -7515,10 +7527,10 @@ impl Request {
 
 	/// Serve a held broadcast under this prefix route without announcing an exact route.
 	///
-	/// The answer belongs to the prefix route's instance at this path: every answer for
+	/// The answer belongs to the prefix route's identity at this path: every answer for
 	/// that path must continue the same key space and bytes. Start a new prefix
 	/// route to serve different content there. For a job that may restart independently,
-	/// use [`Self::route`]: its end moves the prefix route to another instance.
+	/// use [`Self::route`]: its end moves the prefix route to another identity.
 	pub fn serve(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
@@ -7570,9 +7582,9 @@ pub(crate) struct Lookup {
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
-	// The instance the requester named, if any: the front may resolve on another one
+	// The identity the requester named, if any: the front may resolve on another one
 	// when the route changes while the request is in flight.
-	instance: Option<Instance>,
+	identity: Option<Identity>,
 }
 
 enum RequestState {
@@ -7601,13 +7613,13 @@ impl Lookup {
 			inner,
 			path: Path::default(),
 			stats: stats::Scope::default(),
-			instance: None,
+			identity: None,
 		}
 	}
 
-	/// Refuse a resolution on any instance but `instance`.
-	fn with_instance(mut self, instance: Option<Instance>) -> Self {
-		self.instance = instance;
+	/// Refuse a resolution on any identity but `identity`.
+	fn with_identity(mut self, identity: Option<Identity>) -> Self {
+		self.identity = identity;
 		self
 	}
 
@@ -7623,12 +7635,12 @@ impl Lookup {
 	}
 
 	/// Stamp a resolved broadcast with the path this cursor asked for, its egress scope,
-	/// and the instance of the route it resolved through.
-	fn hand_out(&self, broadcast: broadcast::Consumer, instance: Instance) -> broadcast::Consumer {
+	/// and the identity of the route it resolved through.
+	fn hand_out(&self, broadcast: broadcast::Consumer, identity: Identity) -> broadcast::Consumer {
 		broadcast
 			.with_path(self.path.clone())
 			.with_stats(self.stats.clone())
-			.with_instance(Some(instance))
+			.with_identity(Some(identity))
 	}
 
 	/// Poll for the requested broadcast without blocking.
@@ -7640,11 +7652,11 @@ impl Lookup {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				})) {
-					// Another instance than the one named: never hand it out.
-					Ok(Ok(instance)) if self.instance.as_ref().is_some_and(|named| *named != instance) => {
+					// Another identity than the one named: never hand it out.
+					Ok(Ok(identity)) if self.identity.as_ref().is_some_and(|named| *named != identity) => {
 						Err(Error::Unroutable)
 					}
-					Ok(Ok(instance)) => Ok(self.hand_out(broadcast.clone(), instance)),
+					Ok(Ok(identity)) => Ok(self.hand_out(broadcast.clone(), identity)),
 					Ok(Err(err)) => Err(err),
 					// The front's driver went away without a verdict: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
@@ -7672,15 +7684,15 @@ pub struct Requesting {
 	watch: Option<(Watch, u64)>,
 	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
 	request: Option<Lookup>,
-	// The instance every ask is pinned to, if any.
-	instance: Option<Instance>,
+	// The identity every ask is pinned to, if any.
+	identity: Option<Identity>,
 	// A finite request owns discovery and can conclude absence once its initial set lands.
 	discovery: Option<Follow>,
 	routed: bool,
 }
 
 impl Requesting {
-	/// Poll for the requested instance, retrying only after its covering routes change.
+	/// Poll for the requested identity, retrying only after its covering routes change.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
 			if let Some(discovery) = &mut self.discovery {
@@ -7703,9 +7715,9 @@ impl Requesting {
 						Poll::Pending => break,
 					}
 				}
-				// The winner says nothing of a pinned instance, which follows its own routes: a pinned
+				// The winner says nothing of a pinned identity, which follows its own routes: a pinned
 				// request concludes only from a lookup the routes have not moved since.
-				let absent = self.instance.is_none() && !self.routed;
+				let absent = self.identity.is_none() && !self.routed;
 				if self.request.is_none()
 					&& synced && (absent || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
 				{
@@ -7765,7 +7777,7 @@ impl Requesting {
 					self.watch = Some((watch, seen));
 					self.request = Some(
 						self.consumer
-							.lookup(self.path.clone(), self.instance.as_ref())
+							.lookup(self.path.clone(), self.identity.as_ref())
 							.into_inner(),
 					);
 				}
@@ -7782,20 +7794,20 @@ impl kio::Task for Requesting {
 	}
 }
 
-/// Waits for an instance to stop serving a path, watching the routes covering it. Unlike
+/// Waits for an identity to stop serving a path, watching the routes covering it. Unlike
 /// the broadcast a request resolved, which also closes once its last holder lets it go, this
-/// ends only when the routes move to another instance or away. Created by [`Consumer::moved`].
+/// ends only when the routes move to another identity or away. Created by [`Consumer::moved`].
 pub(super) struct Moved {
 	consumer: Consumer,
 	path: Path,
-	instance: Instance,
+	identity: Identity,
 	pinned: bool,
 	// The covering routes, watched since the generation the last check saw.
 	watch: Option<(Watch, u64)>,
 }
 
 impl Moved {
-	/// Ready once `instance` no longer serves the path, or the origin closed.
+	/// Ready once `identity` no longer serves the path, or the origin closed.
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			if let Some((watch, seen)) = &self.watch {
@@ -7824,7 +7836,7 @@ impl Moved {
 				}
 			}
 			let horizon = self.consumer.horizon.effective(&state.routes, &absolute);
-			let serves = state.still_serves(&absolute, horizon, &self.instance, self.pinned);
+			let serves = state.still_serves(&absolute, horizon, &self.identity, self.pinned);
 			drop(state);
 			if !serves {
 				return Poll::Ready(());
@@ -8292,7 +8304,7 @@ impl Consumer {
 
 	/// List the paths announced in this consumer's scope, each present or absent.
 	///
-	/// A path stays present while any route covers it, whichever instance serves it:
+	/// A path stays present while any route covers it, whichever identity serves it:
 	/// hold a [`follow`](Self::follow) to see the broadcast change. Scope, hiding and
 	/// sync behave as for [`routes`](Self::routes). Drop the returned
 	/// [`announce::Consumer`](crate::announce::Consumer) to unregister.
@@ -8301,7 +8313,7 @@ impl Consumer {
 	}
 
 	/// Every change to the routes announced in this consumer's scope, for relays and
-	/// stats: route metadata and instance replacements included.
+	/// stats: route metadata and identity replacements included.
 	///
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
@@ -8452,7 +8464,7 @@ impl Consumer {
 
 	/// Follow the announcements of the routes covering `path`, reduced to the one serving it.
 	///
-	/// [`Self::follow`] resolves each instance this reports, and [`Self::request`] concludes
+	/// [`Self::follow`] resolves each identity this reports, and [`Self::request`] concludes
 	/// absence from its sync. Fails with [`Error::Unauthorized`] when this consumer's scope can
 	/// never cover the path, and with [`Error::InvalidPath`] when no pattern can spell it (a
 	/// segment containing `*`).
@@ -8501,20 +8513,20 @@ impl Consumer {
 		request
 	}
 
-	/// Wait for `instance` to stop serving `path`, as a request `pinned` to it or not would
+	/// Wait for `identity` to stop serving `path`, as a request `pinned` to it or not would
 	/// resolve it; see [`Moved`].
-	pub(super) fn moved(&self, path: Path, instance: Instance, pinned: bool) -> Moved {
+	pub(super) fn moved(&self, path: Path, identity: Identity, pinned: bool) -> Moved {
 		Moved {
 			consumer: self.clone(),
 			path,
-			instance,
+			identity,
 			pinned,
 			watch: None,
 		}
 	}
 
-	/// Resolve a routed instance, returning a selected handler's refusal directly.
-	pub(super) fn routing(&self, path: Path, instance: Option<Instance>) -> Requesting {
+	/// Resolve a routed identity, returning a selected handler's refusal directly.
+	pub(super) fn routing(&self, path: Path, identity: Option<Identity>) -> Requesting {
 		// The scope keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
 		let request = match self.root.join(&path) {
@@ -8528,34 +8540,34 @@ impl Consumer {
 			interest: None,
 			watch: None,
 			request,
-			instance,
+			identity,
 			discovery: None,
 			routed: false,
 		}
 	}
 
-	/// Follow the broadcast at `path` across the instances that serve it.
+	/// Follow the broadcast at `path` across the identities that serve it.
 	///
-	/// The first [`poll_available`](Following::poll_available) resolves the instance serving the path
+	/// The first [`poll_available`](Following::poll_available) resolves the identity serving the path
 	/// once one is announced, retrying route churn but returning a selected handler's refusal;
 	/// the call after a refusal waits for the serving route to change. Each later call returns
-	/// another instance taking over, or `None` once the path goes offline, then whatever serves
-	/// it next, even the same instance. Drop what was read from the previous broadcast then:
-	/// its tracks end with an error once its routes go. Another route of the same instance,
+	/// another identity taking over, or `None` once the path goes offline, then whatever serves
+	/// it next, even the same identity. Drop what was read from the previous broadcast then:
+	/// its tracks end with an error once its routes go. Another route of the same identity,
 	/// or another epoch of it, is not a change.
 	///
-	/// Pass an owned [`Instance`] to follow only that stream: another one taking over ends
-	/// it, and the instance is handed out again when it serves the path again. Fails with
+	/// Pass an owned [`Identity`] to follow only that stream: another one taking over ends
+	/// it, and the identity is handed out again when it serves the path again. Fails with
 	/// [`Error::Unauthorized`] when this consumer's scope can never cover the path, and with
 	/// [`Error::InvalidPath`] when no pattern can spell it.
 	pub fn follow(
 		&self,
 		path: impl TryInto<Path, Error: Into<Error>>,
-		instance: impl Into<Option<Instance>>,
+		identity: impl Into<Option<Identity>>,
 	) -> Result<Following, Error> {
 		let path = path::convert(path)?;
 		let routes = self.path_routes(&path)?;
-		Ok(Following::new(self.clone(), path, instance.into(), routes))
+		Ok(Following::new(self.clone(), path, identity.into(), routes))
 	}
 
 	/// Returns a consumer rooted at `root` and restricted to `prefixes`, each covering
@@ -8597,40 +8609,40 @@ impl Consumer {
 		Ok(Consumer { listed, ..self.clone() })
 	}
 
-	/// Resolve a broadcast by exact path, optionally pinning its [`Instance`].
+	/// Resolve a broadcast by exact path, optionally pinning its [`Identity`].
 	///
 	/// Returns a [`kio::Pending`] future, mirroring
 	/// [`track::Consumer::fetch_group`](track::Consumer::fetch_group). Every
 	/// path resolves through a front the origin's [`Driver`] runs: the request
 	/// mints one or joins the one already serving the path, and the front picks
-	/// one instance's route covering it and materializes it, from the broadcast itself
+	/// one identity's route covering it and materializes it, from the broadcast itself
 	/// or from the peer that announced the route. The order is the most specific prefix,
-	/// then, within one instance, only its highest epoch is eligible, cheaper or not.
-	/// Among instances it is the preferred link ([`Producer::with_priority`]), then
+	/// then, within one identity, only its highest epoch is eligible, cheaper or not.
+	/// Among identities it is the preferred link ([`Producer::with_priority`]), then
 	/// the cheapest, then a broadcast published on this origin, then the shortest hop
-	/// chain, then a hash of the instance and the path, which every relay agrees on and
+	/// chain, then a hash of the identity and the path, which every relay agrees on and
 	/// which spreads a pool's paths over its hosts.
 	///
-	/// When its serving source dies or a better route of the same instance appears,
+	/// When its serving source dies or a better route of the same identity appears,
 	/// including a higher epoch, the front switches to it, invisibly to subscribers: the
-	/// instance promises one continuous key space. Its routes retracting with no
+	/// identity promises one continuous key space. Its routes retracting with no
 	/// replacement ends the broadcast, and the next request re-serves the path;
 	/// tracks already in flight carry on to their own end. The broadcast also ends
 	/// once no handle holds it and none of its tracks has been read for a linger,
 	/// and the next request re-serves the path then too.
 	///
-	/// Another instance winning the path leaves the broadcast to its readers until its
+	/// Another identity winning the path leaves the broadcast to its readers until its
 	/// routes go, while the next request resolves the winner on a fresh broadcast.
 	/// [`Consumer::routes`] reports that as [`RouteKind::Restart`], and
 	/// [`Self::follow`] yields the next broadcast. A job's exact route answering a
-	/// claim's request continues the claim's instance, so it is no restart.
+	/// claim's request continues the claim's identity, so it is no restart.
 	///
-	/// Pass an owned [`Instance`] to refuse a different stream, both when requesting
+	/// Pass an owned [`Identity`] to refuse a different stream, both when requesting
 	/// and when an asynchronous answer resolves. `None` leaves lookup unpinned.
 	///
 	/// The request owns discovery for its path and retries when its covering routes change.
 	/// It reports [`Error::Unroutable`] once discovery has synced without a covering route
-	/// for the requested instance. A selected handler's explicit refusal is returned as-is.
+	/// for the requested identity. A selected handler's explicit refusal is returned as-is.
 	/// A broadcast resolved through a discovered route keeps
 	/// its path watched until dropped; no separate announcement watcher is needed.
 	/// A route claims capability, not inventory: resolving a covered path
@@ -8639,13 +8651,13 @@ impl Consumer {
 	pub fn request(
 		&self,
 		path: impl TryInto<Path, Error: Into<Error>>,
-		instance: impl Into<Option<Instance>>,
+		identity: impl Into<Option<Identity>>,
 	) -> kio::Pending<Requesting> {
 		let path = match path::convert(path) {
 			Ok(path) => path,
 			Err(err) => return kio::Pending::new(self.failed(err)),
 		};
-		let mut routing = self.routing(path.clone(), instance.into());
+		let mut routing = self.routing(path.clone(), identity.into());
 		match self.path_routes(&path) {
 			Ok(discovery) => {
 				routing.discovery = Some(discovery);
@@ -8657,7 +8669,7 @@ impl Consumer {
 					routing.watch = Some((watch, seen));
 				}
 				// A requests handler hears an already-routed request at creation time.
-				routing.request = Some(self.lookup(path, routing.instance.as_ref()).into_inner());
+				routing.request = Some(self.lookup(path, routing.identity.as_ref()).into_inner());
 			}
 			Err(err) => routing.request = Some(Lookup::failed(err)),
 		}
@@ -8666,8 +8678,8 @@ impl Consumer {
 
 	/// The routes as they stand now, without discovery or retry: what a session answers a
 	/// peer's request with. Refused with [`Error::Unroutable`] unless the winning route serves
-	/// `instance`: a peer asking for one stream must not be handed another.
-	pub(crate) fn lookup(&self, path: Path, instance: Option<&Instance>) -> kio::Pending<Lookup> {
+	/// `identity`: a peer asking for one stream must not be handed another.
+	pub(crate) fn lookup(&self, path: Path, identity: Option<&Identity>) -> kio::Pending<Lookup> {
 		// The path as this handle names it, absolute: what its scope authorizes and
 		// what its egress is counted under, so a read through a mount bills where
 		// the reader asked.
@@ -8706,16 +8718,16 @@ impl Consumer {
 		// route retracted takes no newcomers.
 		let Some((winner, winning)) = state
 			.best_route(&absolute, horizon, &HashSet::new(), |_| true)
-			.map(|best| (best.instance.clone(), best.epoch))
+			.map(|best| (best.identity.clone(), best.epoch))
 		else {
 			return kio::Pending::new(Lookup::failed(Error::Unroutable));
 		};
-		// A request naming another instance than the winner follows that instance's own
-		// routes: every hop resolves the instance the first one chose.
-		let pin = instance.filter(|instance| **instance != winner).cloned();
+		// A request naming another identity than the winner follows that identity's own
+		// routes: every hop resolves the identity the first one chose.
+		let pin = identity.filter(|identity| **identity != winner).cloned();
 		let (best, epoch) = match &pin {
 			None => (winner, winning),
-			Some(pin) => match state.best_route(&absolute, horizon, &HashSet::new(), |entry| entry.instance == *pin) {
+			Some(pin) => match state.best_route(&absolute, horizon, &HashSet::new(), |entry| entry.identity == *pin) {
 				Some(entry) => (pin.clone(), entry.epoch),
 				None => return kio::Pending::new(Lookup::failed(Error::Unroutable)),
 			},
@@ -8724,10 +8736,10 @@ impl Consumer {
 		// Join the live front for this path and horizon, if any: its watcher
 		// resolves (or already resolved) the request channel with its verdict, so
 		// repeat requests share one upstream subscription. A front resolved on
-		// another instance stays only for the subscriptions already on it, so a new
+		// another identity stays only for the subscriptions already on it, so a new
 		// request mints a fresh front for the winner rather than join the old one. So
 		// does a front still resolving one the table has since beaten: it may already
-		// hold that instance's source, and hand this request an instance it saw lose. So
+		// hold that identity's source, and hand this request an identity it saw lose. So
 		// does a front serving an older epoch of the winner: it moves its readers onto the
 		// newer one, but an older epoch never stands in for a newer one that has yet to
 		// answer. Nor does a front still resolving an older epoch: that epoch's answer may
@@ -8753,7 +8765,7 @@ impl Consumer {
 				let pending = Lookup::queued(front.request.consume(), held)
 					.with_path(requested)
 					.with_stats(scope)
-					.with_instance(instance.cloned());
+					.with_identity(identity.cloned());
 				return kio::Pending::new(pending);
 			}
 			state.fronts.remove(&key);
@@ -8767,11 +8779,14 @@ impl Consumer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
-			instance: None,
+			identity: None,
 			// A front reads its routes' copies, so it writes no frames of its own.
 			frames: Default::default(),
 			edges: Default::default(),
 		});
+		// Each route's source decides which copy a metadata reader gets; the front keeps
+		// the two apart either way.
+		broadcast.serve_meta();
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,
 			epoch,
@@ -8809,7 +8824,7 @@ impl Consumer {
 			Lookup::queued(consumer, held)
 				.with_path(requested)
 				.with_stats(scope)
-				.with_instance(instance.cloned()),
+				.with_identity(identity.cloned()),
 		)
 	}
 
@@ -9017,12 +9032,12 @@ impl Routes {
 		let quarantine = Quarantine {
 			held: Held::Anchoring(now),
 			publisher,
-			instance: (
+			identity: (
 				update
 					.route
-					.instance
+					.identity
 					.clone()
-					.expect("a delivered route has an instance"),
+					.expect("a delivered route has an identity"),
 				update.route.epoch,
 			),
 			rank: (update.route.cost, update.route.hops.len()),
@@ -9464,7 +9479,7 @@ impl TestSelection {
 		self.route = None;
 	}
 
-	/// Another instance of the peer takes the path.
+	/// Another identity of the peer takes the path.
 	pub(crate) fn replace(&mut self) {
 		let route = RouteInfo::new().with_via(Hop::new(Self::PEER).unwrap());
 		self.replacement = Some(self.origin.forward("room/a", route).unwrap());
@@ -9501,8 +9516,8 @@ mod tests {
 		Hop::new(id).unwrap()
 	}
 
-	/// One publisher instance, shared by every route in a test that resumes across them.
-	fn instance() -> crate::Instance {
+	/// One publisher identity, shared by every route in a test that resumes across them.
+	fn identity() -> crate::Identity {
 		"01900000-0000-7000-8000-000000000001".parse().unwrap()
 	}
 
@@ -10771,8 +10786,8 @@ mod tests {
 	/// Pinned so `spreadHash` in `js/net` picks the same pool member for a path.
 	#[kio::test]
 	async fn spread_hash_matches_js() {
-		assert_eq!(instance_key("pool/job-0", &"a".parse().unwrap()), 0x3df8f75a44f8eefb);
-		assert_eq!(instance_key("pool/job-0", &"b".parse().unwrap()), 0x3df8f85a44f8f0ae);
+		assert_eq!(identity_key("pool/job-0", &"a".parse().unwrap()), 0x3df8f75a44f8eefb);
+		assert_eq!(identity_key("pool/job-0", &"b".parse().unwrap()), 0x3df8f85a44f8f0ae);
 	}
 
 	/// Pinned so `js/net` breaks a tie between lite-07 claims as this does: by the
@@ -10780,14 +10795,14 @@ mod tests {
 	/// newest claim, which a re-price leaves in place.
 	#[kio::test]
 	async fn lite07_ties_match_js() {
-		let instance = |name: &str| -> Instance { name.parse().unwrap() };
-		assert_eq!(rendezvous("pool/job", &instance("a")), 0x3e128da0fff39252);
-		assert_eq!(rendezvous("pool/job", &instance("b")), 0x3e128ca0fff3909f);
+		let identity = |name: &str| -> Identity { name.parse().unwrap() };
+		assert_eq!(rendezvous("pool/job", &identity("a")), 0x3e128da0fff39252);
+		assert_eq!(rendezvous("pool/job", &identity("b")), 0x3e128ca0fff3909f);
 
 		let producer = origin(1).produce();
 		let claim = |node: u64, name: &str, cost: u64| {
 			RouteInfo::new()
-				.with_instance(name.parse().unwrap(), 0)
+				.with_identity(name.parse().unwrap(), 0)
 				.with_cost(cost)
 				.with_node(Some(node_id(node)))
 		};
@@ -10809,17 +10824,17 @@ mod tests {
 		assert_eq!(
 			best("pool/job"),
 			Some(node_id(0x8b)),
-			"the lower instance hash wins under the claims"
+			"the lower identity hash wins under the claims"
 		);
 
-		// A lite-06 route keys on its instance and chain under the older basis, a lite-07
-		// claim on its instance under the standard one, each on its own: here the claim's
+		// A lite-06 route keys on its identity and chain under the older basis, a lite-07
+		// claim on its identity under the standard one, each on its own: here the claim's
 		// is lower.
-		assert_eq!(instance_key("pool/job", &instance("b")), 0xd16a3821c67a2d25);
+		assert_eq!(identity_key("pool/job", &identity("b")), 0xd16a3821c67a2d25);
 		let producer = origin(1).produce();
 		let _claim = producer.forward("pool", claim(0x7a, "a", 1)).unwrap();
 		let legacy = RouteInfo::new()
-			.with_instance("b".parse().unwrap(), 0)
+			.with_identity("b".parse().unwrap(), 0)
 			.with_hops(hops(&[11]))
 			.with_cost(1);
 		let _legacy = producer.forward("pool", legacy).unwrap();
@@ -10854,7 +10869,7 @@ mod tests {
 						.forward(
 							"pool",
 							RouteInfo::new()
-								.with_instance(format!("worker-{id}").parse().unwrap(), 0)
+								.with_identity(format!("worker-{id}").parse().unwrap(), 0)
 								.with_hops(hops(&[id]))
 								.with_cost(3),
 						)
@@ -10895,16 +10910,16 @@ mod tests {
 	}
 
 	/// An identical route from a fresh announcement (a reconnect) wins at once. One that
-	/// mints its own instance is another stream, so consumers restart; one with the same
-	/// instance is the same stream, and nothing is delivered. Retracting the stale twin is
+	/// mints its own identity is another stream, so consumers restart; one with the same
+	/// identity is the same stream, and nothing is delivered. Retracting the stale twin is
 	/// quiet either way.
 	#[kio::test]
-	async fn identical_reannounce_restarts_under_another_instance() {
-		for named in [None, Some(instance())] {
+	async fn identical_reannounce_restarts_under_another_identity() {
+		for named in [None, Some(identity())] {
 			let producer = origin(1).produce();
 			let mut announced = producer.consume().routes();
 			let mut route = RouteInfo::new().with_hops(hops(&[10]));
-			route.instance = named.clone();
+			route.identity = named.clone();
 
 			let old = producer.announce("room", route.clone()).unwrap();
 			let first = announced.expect_next_active("room").await;
@@ -10987,14 +11002,14 @@ mod tests {
 		assert_eq!(control.options.cost, Cost::default());
 	}
 
-	/// A replacement under another instance from a cluster peer at equal cost and chain
+	/// A replacement under another identity from a cluster peer at equal cost and chain
 	/// length, whose hash loses, competes with the lingering old route: nothing restarts and
 	/// requests stay on the old route until it is withdrawn, then consumers restart and a
 	/// re-request lands on the replacement. Every node ranks peer routes alike.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_equal_cost_peer_replacement_waits_for_the_old_route() {
-		// Pinned in `spread_hash_matches_js`: instance `a` hashes below `b` for this path.
+		// Pinned in `spread_hash_matches_js`: identity `a` hashes below `b` for this path.
 		// Restarts are delivered at once: the hold is not what this checks.
 		let producer = Config {
 			update_hold: Duration::ZERO,
@@ -11008,7 +11023,7 @@ mod tests {
 			.forward(
 				"pool/job-0",
 				RouteInfo::new()
-					.with_instance("a".parse().unwrap(), 0)
+					.with_identity("a".parse().unwrap(), 0)
 					.with_hops(hops(&[11])),
 			)
 			.unwrap();
@@ -11018,7 +11033,7 @@ mod tests {
 			.forward(
 				"pool/job-0",
 				RouteInfo::new()
-					.with_instance("b".parse().unwrap(), 0)
+					.with_identity("b".parse().unwrap(), 0)
 					.with_hops(hops(&[10])),
 			)
 			.unwrap();
@@ -11043,15 +11058,15 @@ mod tests {
 	}
 
 	/// A peer route that arrives after an equally ranked one in use never displaces it,
-	/// whichever hashes lower: neither between the instances two sessions minted for one
-	/// broadcast (moq-lite-06 carries none), nor between two chains of one named instance.
+	/// whichever hashes lower: neither between the identities two sessions minted for one
+	/// broadcast (moq-lite-06 carries none), nor between two chains of one named identity.
 	/// It takes over only when the route in use leaves or ranks worse, and keeps the tie
 	/// when that one recovers.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_equal_route_keeps_the_one_in_use() {
 		for minted in [true, false] {
-			let named = instance();
+			let named = identity();
 			for job in 0..16 {
 				let path = format!("pool/job-{job}");
 				let producer = Config {
@@ -11062,13 +11077,13 @@ mod tests {
 				let consumer = producer.consume();
 				let mut announced = consumer.routes();
 				let peer = producer.clone().with_link(Link::Peer);
-				let instances = match minted {
-					true => [Instance::minted(), Instance::minted()],
+				let identities = match minted {
+					true => [Identity::minted(), Identity::minted()],
 					false => [named.clone(), named.clone()],
 				};
 				let route = |hop: u64| {
-					let instance = instances[usize::from(hop == 11)].clone();
-					RouteInfo::new().with_instance(instance, 0).with_hops(hops(&[hop]))
+					let identity = identities[usize::from(hop == 11)].clone();
+					RouteInfo::new().with_identity(identity, 0).with_hops(hops(&[hop]))
 				};
 				let resolved = || {
 					let table = producer.shared.read();
@@ -11109,10 +11124,10 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_equal_claim_filed_elsewhere_keeps_the_one_in_use() {
-		let named = instance();
+		let named = identity();
 		let route = |hop: u64, above: u8| {
 			RouteInfo::new()
-				.with_instance(named.clone(), 0)
+				.with_identity(named.clone(), 0)
 				.with_hops(hops(&[hop]))
 				.with_lane(Lane {
 					above,
@@ -11510,7 +11525,7 @@ mod tests {
 		assert!(best("src/a").is_some_and(|entry| entry.source.is_some()));
 	}
 
-	/// A broader claim shown at a prefix never supersedes the claim of that prefix: an instance's
+	/// A broader claim shown at a prefix never supersedes the claim of that prefix: an identity's
 	/// higher epoch on a claim above the prefix is another claim's, so the announce stream
 	/// advertises what a request resolves to, the broadcast here.
 	#[kio::test]
@@ -11523,9 +11538,9 @@ mod tests {
 		}
 		.produce();
 		let mut announced = producer.consume().routes();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let _exact = producer
-			.route("src/a", RouteOptions::default().with_instance(instance.clone(), 0))
+			.route("src/a", RouteOptions::default().with_identity(identity.clone(), 0))
 			.unwrap();
 		let first = announced.expect_next_active("src/a").await;
 		assert_eq!(first.epoch, 0);
@@ -11534,7 +11549,7 @@ mod tests {
 			.forward(
 				"src/a",
 				RouteInfo::new()
-					.with_instance(instance.clone(), 1)
+					.with_identity(identity.clone(), 1)
 					.with_hops(hops(&[10]))
 					.with_node(Some(node_id(10)))
 					.with_lane(Lane {
@@ -11563,15 +11578,15 @@ mod tests {
 
 	/// Claims of one prefix rank against each other wherever each is filed: a claim for `src`
 	/// filed at `src/a` (shown there, a level above) never takes `src/a/b` from a claim made
-	/// at `src` without being ranked against it. Its instance's higher epoch at `src`
-	/// supersedes it, and so does a live claim of another instance outrank it while it drains,
+	/// at `src` without being ranked against it. Its identity's higher epoch at `src`
+	/// supersedes it, and so does a live claim of another identity outrank it while it drains,
 	/// for a request and for an announce stream rooted beneath both.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_claim_filed_deeper_ranks_against_the_claim_of_its_prefix() {
-		let route = |instance: &crate::Instance, epoch, node, above, draining| {
+		let route = |identity: &crate::Identity, epoch, node, above, draining| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), epoch)
+				.with_identity(identity.clone(), epoch)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -11580,7 +11595,7 @@ mod tests {
 				})
 				.with_draining(draining)
 		};
-		let (old, other) = (crate::Instance::random(), crate::Instance::random());
+		let (old, other) = (crate::Identity::random(), crate::Identity::random());
 		for (deep, direct) in [(old.clone(), old.clone()), (old.clone(), other.clone())] {
 			// Updates are delivered at once: the hold is not what this checks.
 			let producer = Config {
@@ -11606,7 +11621,7 @@ mod tests {
 			}
 			let last = last.expect("the stream presents a claim at its root");
 			assert_eq!(
-				(last.announce.route.instance(), last.announce.route.epoch),
+				(last.announce.route.identity(), last.announce.route.epoch),
 				(&direct, 2)
 			);
 		}
@@ -11617,9 +11632,9 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_follower_takes_the_claim_a_request_resolves() {
-		let route = |instance: &crate::Instance, node, above, draining| {
+		let route = |identity: &crate::Identity, node, above, draining| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -11635,12 +11650,12 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut follow = consumer.path_routes("src/a/b").unwrap();
-		let (deep, direct) = (crate::Instance::random(), crate::Instance::random());
+		let (deep, direct) = (crate::Identity::random(), crate::Identity::random());
 
 		let _filed = producer.forward("src/a", route(&deep, 10, 1, true)).unwrap();
 		let event = follow.next().await.expect("the origin is open");
 		assert!(
-			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.instance() == &deep),
+			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.identity() == &deep),
 			"{event:?}"
 		);
 
@@ -11650,31 +11665,31 @@ mod tests {
 			.expect("the follower hears the takeover")
 			.expect("the origin is open");
 		assert!(
-			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.instance() == &direct),
+			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.identity() == &direct),
 			"{event:?}"
 		);
 		let _pending = consumer.request("src/a/b", None);
 		assert_eq!(queued(&made).await.path().as_str(), "src/a/b");
 	}
 
-	/// The instance a follower of `follow`'s path settles on, once it goes quiet.
+	/// The identity a follower of `follow`'s path settles on, once it goes quiet.
 	#[cfg(feature = "async")]
-	async fn settled_on(follow: &mut Follow) -> Option<crate::Instance> {
+	async fn settled_on(follow: &mut Follow) -> Option<crate::Identity> {
 		let mut serving = None;
 		while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), follow.next()).await {
 			let event = event.expect("the origin is open");
 			serving = match event.kind {
 				RouteKind::End | RouteKind::Offline => None,
-				_ => event.announce.route.instance.clone(),
+				_ => event.announce.route.identity.clone(),
 			};
 		}
 		serving
 	}
 
 	#[cfg(feature = "async")]
-	fn claim_route(instance: &crate::Instance, node: u64, above: u8, cost: u64) -> RouteInfo {
+	fn claim_route(identity: &crate::Identity, node: u64, above: u8, cost: u64) -> RouteInfo {
 		RouteInfo::new()
-			.with_instance(instance.clone(), 0)
+			.with_identity(identity.clone(), 0)
 			.with_hops(hops(&[node]))
 			.with_node(Some(node_id(node)))
 			.with_lane(Lane {
@@ -11696,7 +11711,7 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut follow = consumer.path_routes("src/a/b").unwrap();
-		let (cheap, allowed) = (crate::Instance::random(), crate::Instance::random());
+		let (cheap, allowed) = (crate::Identity::random(), crate::Identity::random());
 		let excluded = producer.exclude("src/a/b").unwrap();
 		let _cheap = excluded.forward("src", claim_route(&cheap, 10, 0, 1)).unwrap();
 		let filed = producer.forward("src/a", claim_route(&allowed, 11, 1, 5)).unwrap();
@@ -11717,9 +11732,9 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut follow = consumer.path_routes("src/a/b").unwrap();
-		let (published, claimed) = (crate::Instance::random(), crate::Instance::random());
+		let (published, claimed) = (crate::Identity::random(), crate::Identity::random());
 		let _broadcast = producer
-			.route("src", RouteOptions::default().with_instance(published, 0))
+			.route("src", RouteOptions::default().with_identity(published, 0))
 			.unwrap();
 		let filed = producer.forward("src/a", claim_route(&claimed, 10, 1, 0)).unwrap();
 		assert_eq!(settled_on(&mut follow).await, Some(claimed));
@@ -11727,11 +11742,11 @@ mod tests {
 		assert_eq!(queued(&filed).await.path().as_str(), "src/a/b");
 	}
 
-	/// A request pinned to an instance follows that instance's own routes, so a better claim of
-	/// another instance arriving with it, while discovery syncs, never ends the request.
+	/// A request pinned to an identity follows that identity's own routes, so a better claim of
+	/// another identity arriving with it, while discovery syncs, never ends the request.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_pinned_request_resolves_its_instance_under_a_better_claim() {
+	async fn a_pinned_request_resolves_its_identity_under_a_better_claim() {
 		let producer = Config {
 			update_hold: Duration::ZERO,
 			..Config::from(origin(1))
@@ -11739,7 +11754,7 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let snapshot = producer.snapshot("src");
-		let (pinned, other) = (crate::Instance::random(), crate::Instance::random());
+		let (pinned, other) = (crate::Identity::random(), crate::Identity::random());
 		let pending = consumer.request("src/a/b", pinned.clone());
 		let filed = producer.forward("src/a", claim_route(&pinned, 10, 1, 5)).unwrap();
 		let _made = producer.forward("src", claim_route(&other, 11, 0, 1)).unwrap();
@@ -11747,7 +11762,7 @@ mod tests {
 		let answer = async {
 			let request = kio::clock::timeout(Duration::from_secs(1), queued(&filed))
 				.await
-				.expect("the pinned instance was never asked");
+				.expect("the pinned identity was never asked");
 			assert_eq!(request.path().as_str(), "src/a/b");
 			let source = broadcast::Info::new().produce();
 			request.serve(&source);
@@ -11755,7 +11770,7 @@ mod tests {
 		};
 		let (result, _source) = futures::join!(kio::clock::timeout(Duration::from_secs(1), pending), answer);
 		let resolved = result.expect("the pinned request never resolved").expect("resolves");
-		assert_eq!(resolved.info().instance, Some(pinned));
+		assert_eq!(resolved.info().identity, Some(pinned));
 	}
 
 	/// An escaped `/` belongs to its segment, so a claim filed beneath a scope's escaped prefix
@@ -11773,12 +11788,12 @@ mod tests {
 
 	/// Claims of one tier filed at different depths that tie through every rank hash on the path
 	/// a covering stream presents them at, as a request for that path does, so the stream
-	/// advertises what the request resolves to, for every pair of instances.
+	/// advertises what the request resolves to, for every pair of identities.
 	#[test]
 	fn a_covering_root_advertises_what_a_request_for_it_resolves() {
 		let route = |name: &str, node, above| {
 			RouteInfo::new()
-				.with_instance(name.parse().unwrap(), 0)
+				.with_identity(name.parse().unwrap(), 0)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -11787,7 +11802,7 @@ mod tests {
 				})
 		};
 		// A route entered here at the path skips the hash, so the claim filed at the root wins
-		// whichever instance it carries; any other pair is settled by the hash on the root.
+		// whichever identity it carries; any other pair is settled by the hash on the root.
 		for (link, i) in [Link::Peer, Link::Local]
 			.into_iter()
 			.flat_map(|link| (0..32).map(move |i| (link, i)))
@@ -11812,11 +11827,11 @@ mod tests {
 					&HashSet::new(),
 					|_| true,
 				)
-				.map(|entry| entry.instance.clone());
+				.map(|entry| entry.identity.clone());
 			drop(table);
 			let mut advertised = None;
 			while let Some(event) = announced.try_next() {
-				advertised = Some(event.announce.route.instance().clone());
+				advertised = Some(event.announce.route.identity().clone());
 			}
 			assert_eq!(advertised, resolved, "{link:?} pair {i}");
 			if link == Link::Local {
@@ -11829,7 +11844,7 @@ mod tests {
 	/// cheaper one that cannot serve it. A broadcast published above the root serves only its own
 	/// path, so it ranks behind a tier-mate that serves. A claim whose producer excludes the root
 	/// is no candidate at all: it neither outranks a tier-mate, shadows a broader claim, nor
-	/// supersedes an older epoch of its instance.
+	/// supersedes an older epoch of its identity.
 	#[test]
 	fn a_covering_root_passes_over_a_claim_that_cannot_serve_it() {
 		#[derive(Debug, Clone, Copy)]
@@ -11839,9 +11854,9 @@ mod tests {
 			ExcludedShadow,
 			ExcludedEpoch,
 		}
-		let route = |instance: &crate::Instance, epoch, node, above, cost: u64| {
+		let route = |identity: &crate::Identity, epoch, node, above, cost: u64| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), epoch)
+				.with_identity(identity.clone(), epoch)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -11864,13 +11879,13 @@ mod tests {
 			let mut announced = (producer.consume().scope("src/a", &Prefixes::all()).unwrap())
 				.covering()
 				.routes();
-			let (cheap, serving) = (crate::Instance::random(), crate::Instance::random());
+			let (cheap, serving) = (crate::Identity::random(), crate::Identity::random());
 			let excluded = producer.exclude("src/a").unwrap();
 			let mut held = Vec::new();
 			let mut broadcast = None;
 			match case {
 				Case::Broadcast => {
-					let options = RouteOptions::default().with_instance(cheap.clone(), 0);
+					let options = RouteOptions::default().with_identity(cheap.clone(), 0);
 					broadcast = Some(producer.route("src", options).unwrap());
 					held.push(producer.forward("src/a", route(&serving, 0, 11, 1, 5)).unwrap());
 				}
@@ -11896,12 +11911,12 @@ mod tests {
 					&HashSet::new(),
 					|_| true,
 				)
-				.map(|entry| (entry.instance.clone(), entry.cost));
+				.map(|entry| (entry.identity.clone(), entry.cost));
 			drop(table);
 			assert_eq!(resolved, Some((serving.clone(), Cost::from(5u64))), "{case:?}");
 			let mut advertised = None;
 			while let Some(event) = announced.try_next() {
-				advertised = Some((event.announce.route.instance().clone(), event.announce.route.cost()));
+				advertised = Some((event.announce.route.identity().clone(), event.announce.route.cost()));
 			}
 			assert_eq!(advertised, resolved, "{case:?}");
 			drop((held, broadcast));
@@ -11919,10 +11934,10 @@ mod tests {
 		}
 		.produce();
 		let mut synced = producer.consume().routes();
-		let (advertised, serving) = (crate::Instance::random(), crate::Instance::random());
-		let route = |instance: &crate::Instance, node, cost: u64| {
+		let (advertised, serving) = (crate::Identity::random(), crate::Identity::random());
+		let route = |identity: &crate::Identity, node, cost: u64| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(hops(&[node]))
 				.with_cost(cost)
 		};
@@ -11932,7 +11947,7 @@ mod tests {
 		let last = |announced: &mut Routes| {
 			let mut last = None;
 			while let Some(event) = announced.try_next() {
-				last = Some(event.announce.route.instance().clone());
+				last = Some(event.announce.route.identity().clone());
 			}
 			last
 		};
@@ -12014,18 +12029,18 @@ mod tests {
 		assert_eq!(told(&stream), Some((-5, true)));
 	}
 
-	/// A restarted publisher's dead instance, held unavailable, never wins back the path from
+	/// A restarted publisher's dead identity, held unavailable, never wins back the path from
 	/// its live replacement while the replacement's closest way moves to another session:
 	/// the old way is demoted before the session taking over serves the new one.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_dead_instance_never_outranks_a_live_one_between_its_ways() {
+	async fn a_dead_identity_never_outranks_a_live_one_between_its_ways() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.routes();
-		let route = |instance: &crate::Instance, node, primary, available, cost| {
+		let route = |identity: &crate::Identity, node, primary, available, cost| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -12036,19 +12051,19 @@ mod tests {
 				.with_available(available)
 				.with_cost(cost)
 		};
-		let (dead, live) = (crate::Instance::random(), crate::Instance::random());
+		let (dead, live) = (crate::Identity::random(), crate::Identity::random());
 
-		// The dead instance is cheaper, and still the closest way to its own claim.
+		// The dead identity is cheaper, and still the closest way to its own claim.
 		let _dead = producer
 			.forward("room/alice", route(&dead, 10, true, false, 1))
 			.unwrap();
 		let way = producer.forward("room/alice", route(&live, 11, true, true, 5)).unwrap();
-		assert_eq!(announced.expect_next_active("room/alice").await.instance(), &live);
+		assert_eq!(announced.expect_next_active("room/alice").await.identity(), &live);
 
 		way.update(route(&live, 11, false, true, 5)).unwrap();
 		assert!(
 			announced.try_next().is_none(),
-			"the live instance's demoted way keeps the path"
+			"the live identity's demoted way keeps the path"
 		);
 		let _pending = consumer.request("room/alice", None);
 		let request = queued(&way).await;
@@ -12119,29 +12134,29 @@ mod tests {
 		assert_eq!(route.cost, Cost::new(9));
 	}
 
-	/// Re-pricing from the current route keeps the instance, so it stays one broadcast.
+	/// Re-pricing from the current route keeps the identity, so it stays one broadcast.
 	#[kio::test]
-	async fn reprice_from_the_current_route_keeps_the_instance() {
+	async fn reprice_from_the_current_route_keeps_the_identity() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
 
 		let dynamic = producer
-			.forward("room", RouteInfo::new().with_instance(instance(), 0).with_cost(5))
+			.forward("room", RouteInfo::new().with_identity(identity(), 0).with_cost(5))
 			.unwrap();
 		announced.expect_next_active("room").await;
 		dynamic.update(dynamic.route().unwrap().with_cost(1)).unwrap();
 		let route = announced.expect_next_active("room").await;
-		assert_eq!((route.instance, route.cost), (Some(instance()), Cost::new(1)));
+		assert_eq!((route.identity, route.cost), (Some(identity()), Cost::new(1)));
 		assert_eq!(dynamic.route().unwrap().cost, Cost::new(1));
 
-		let options = RouteOptions::hidden().with_instance(instance(), 0).with_cost(5);
+		let options = RouteOptions::hidden().with_identity(identity(), 0).with_cost(5);
 		let broadcast = producer.route("lobby", options).unwrap();
 		assert!(broadcast.route().is_none(), "not announced yet");
 		broadcast.announce().unwrap();
 		announced.expect_next_active("lobby").await;
 		broadcast.set_cost(1).unwrap();
 		let route = announced.expect_next_active("lobby").await;
-		assert_eq!((route.instance, route.cost), (Some(instance()), Cost::new(1)));
+		assert_eq!((route.identity, route.cost), (Some(identity()), Cost::new(1)));
 		broadcast.withdraw();
 		assert!(broadcast.route().is_none(), "withdrawn");
 	}
@@ -12267,33 +12282,33 @@ mod tests {
 
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn restart_coalesced_keeps_the_lost_instance_offline() {
+	async fn restart_coalesced_keeps_the_lost_identity_offline() {
 		let producer = origin(1).produce();
 		let lost = producer.forward("room/alice", RouteInfo::new()).unwrap();
 		let mut announced = producer.consume().routes();
 		announced.expect_next_active("room/alice").await;
 
-		// Another instance comes and is withdrawn before the next poll: the one
-		// retraction delivered is the lost instance's.
+		// Another identity comes and is withdrawn before the next poll: the one
+		// retraction delivered is the lost identity's.
 		drop(lost);
 		let other = producer.announce("room/alice", RouteInfo::new()).unwrap();
 		drop(other);
 		announced.expect_next_offline("room/alice").await;
 	}
 
-	/// A restart onto another instance and back before the next poll leaves the instance
-	/// the consumer holds: an update, never a restart to the same instance.
+	/// A restart onto another identity and back before the next poll leaves the identity
+	/// the consumer holds: an update, never a restart to the same identity.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn restart_away_and_back_is_an_update() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let held: crate::Instance = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let held: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let _held = producer
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(held.clone(), 0)
+					.with_identity(held.clone(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(3),
 			)
@@ -12304,7 +12319,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[11]))
 					.with_cost(1),
 			)
@@ -12314,7 +12329,7 @@ mod tests {
 			RouteEvent {
 				kind: RouteKind::Update,
 				announce,
-			} => assert_eq!(announce.route.instance(), &held),
+			} => assert_eq!(announce.route.identity(), &held),
 			other => panic!("should be an update: got {other:?}"),
 		}
 	}
@@ -12389,7 +12404,7 @@ mod tests {
 		let _local = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance(), 0).with_cost(5),
+				RouteOptions::default().with_identity(identity(), 0).with_cost(5),
 			)
 			.unwrap();
 		assert_eq!(announced.expect_next_active("room/alice").await.cost, Cost::new(5));
@@ -12398,7 +12413,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 			)
@@ -12415,29 +12430,29 @@ mod tests {
 		pending.await.expect("resolves through the cheaper route");
 	}
 
-	/// A resolved broadcast names the instance of the route it came through: a stable
+	/// A resolved broadcast names the identity of the route it came through: a stable
 	/// one, or the one its publication minted.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_resolved_broadcast_carries_its_route_instance() {
+	async fn a_resolved_broadcast_carries_its_route_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
 		let _stable = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let minted = producer.route("room/bob", RouteOptions::default()).unwrap();
 
 		let alice = consumer.request("room/alice", None).await.unwrap();
-		assert_eq!(alice.info().instance, Some(instance()));
+		assert_eq!(alice.info().identity, Some(identity()));
 		let bob = consumer.request("room/bob", None).await.unwrap();
-		let instance = minted.route().unwrap().instance;
-		assert!(instance.is_some());
-		assert_eq!(bob.info().instance, instance);
+		let identity = minted.route().unwrap().identity;
+		assert!(identity.is_some());
+		assert_eq!(bob.info().identity, identity);
 	}
 
 	/// A cheaper route that appears after a front was minted takes the front over: it
-	/// carries the same instance, so a newcomer joins the front.
+	/// carries the same identity, so a newcomer joins the front.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn cheaper_route_after_a_front_takes_it_over() {
@@ -12447,7 +12462,7 @@ mod tests {
 		let _local = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance(), 0).with_cost(5),
+				RouteOptions::default().with_identity(identity(), 0).with_cost(5),
 			)
 			.unwrap();
 		let first = consumer.request("room/alice", None).await.expect("resolves locally");
@@ -12456,7 +12471,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 			)
@@ -12565,7 +12580,7 @@ mod tests {
 		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
 	}
 
-	/// A same-instance route taking the front over lists the same tracks: readers see
+	/// A same-identity route taking the front over lists the same tracks: readers see
 	/// only what differs, once the new source's listing synced.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -12575,7 +12590,7 @@ mod tests {
 		let local = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance(), 0).with_cost(5),
+				RouteOptions::default().with_identity(identity(), 0).with_cost(5),
 			)
 			.unwrap();
 		let _a = local.broadcast().create_track("a", None).unwrap();
@@ -12591,7 +12606,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 			)
@@ -12709,22 +12724,22 @@ mod tests {
 		old.announce().unwrap();
 		let stream = route_stream(&producer.route_node());
 		while stream.try_wire().is_some() {}
-		let gone = old.instance();
+		let gone = old.identity();
 		let new = producer.route("room/alice", RouteOptions::hidden()).unwrap();
 		new.announce().unwrap();
 		// Nothing polls this test's driver: each `route_node` catches the feeder up.
 		producer.route_node();
 		drop(old);
 		producer.route_node();
-		let changes: Vec<(Instance, bool)> = std::iter::from_fn(|| stream.try_wire())
+		let changes: Vec<(Identity, bool)> = std::iter::from_fn(|| stream.try_wire())
 			.filter_map(|msg| match msg {
 				relay::Msg::Announce { changes } => Some(changes),
 				_ => None,
 			})
 			.flatten()
-			.map(|((_, instance), change)| (instance, matches!(change, relay::Change::Live(_))))
+			.map(|((_, identity), change)| (identity, matches!(change, relay::Change::Live(_))))
 			.collect();
-		assert_eq!(changes, [(new.instance(), true), (gone, false)]);
+		assert_eq!(changes, [(new.identity(), true), (gone, false)]);
 	}
 
 	/// Feeding the route node counts nothing against the session whose handle created it.
@@ -12818,7 +12833,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(2),
 			)
@@ -12827,7 +12842,7 @@ mod tests {
 		let _local = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance(), 0).with_cost(2),
+				RouteOptions::default().with_identity(identity(), 0).with_cost(2),
 			)
 			.unwrap();
 		assert!(announced.expect_next_active("room/alice").await.hops.is_empty());
@@ -12879,7 +12894,7 @@ mod tests {
 				let broadcast = producer
 					.route(
 						"room/alice",
-						RouteOptions::default().with_instance(crate::Instance::random(), 0),
+						RouteOptions::default().with_identity(crate::Identity::random(), 0),
 					)
 					.unwrap();
 				let mut dynamic = broadcast.broadcast().requests();
@@ -12896,7 +12911,7 @@ mod tests {
 						.forward(
 							"room/alice",
 							RouteInfo::new()
-								.with_instance(crate::Instance::random(), 0)
+								.with_identity(crate::Identity::random(), 0)
 								.with_hops(hops(&[10])),
 						)
 						.unwrap()
@@ -13195,11 +13210,11 @@ mod tests {
 			horizon: Horizon::default(),
 			pin: None,
 			watch,
-			// Nothing joins this front, and its first selection overwrites the instance.
+			// Nothing joins this front, and its first selection overwrites the identity.
 			request: kio::Producer::new(PendingFront {
 				resolved: None,
 				epoch: 0,
-				selected: instance(),
+				selected: identity(),
 				refused: false,
 			}),
 			timers: consumer.timers.clone(),
@@ -13264,7 +13279,7 @@ mod tests {
 		let incumbent = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10])),
 			)
 			.unwrap();
 		view.expect_next_active("room").await;
@@ -13278,7 +13293,7 @@ mod tests {
 		let echo = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10, 7])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10, 7])),
 			)
 			.unwrap();
 		drop(incumbent);
@@ -13311,7 +13326,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(5),
 			)
@@ -13369,7 +13384,7 @@ mod tests {
 			.forward(
 				"room/alice",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(cost),
 			)
@@ -13547,7 +13562,7 @@ mod tests {
 			let selected = state
 				.best_route(&path, Horizon::default(), &HashSet::new(), |_| true)
 				.unwrap()
-				.instance
+				.identity
 				.clone();
 			let request = kio::Producer::new(PendingFront {
 				resolved: None,
@@ -13700,7 +13715,7 @@ mod tests {
 		assert_eq!(update.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
-		// Under another instance the survivor is another source.
+		// Under another identity the survivor is another source.
 		drop(second);
 		assert_eq!(announced.expect_next_restarted("live").await.cost, Cost::new(3));
 
@@ -14141,10 +14156,10 @@ mod tests {
 		let mut announced = producer.consume().routes();
 		step(Duration::from_millis(1)).await;
 
-		// One instance, so the winner moving between routes is an update, not a restart.
+		// One identity, so the winner moving between routes is an update, not a restart.
 		let route = |chain: &[u64], via| {
 			RouteInfo::new()
-				.with_instance(instance(), 0)
+				.with_identity(identity(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
@@ -14182,10 +14197,10 @@ mod tests {
 				)
 				.unwrap();
 			let peer = producer.clone().with_link(Link::Peer);
-			// One instance, so the winner moving between routes is an update, not a restart.
+			// One identity, so the winner moving between routes is an update, not a restart.
 			let route = |chain: &[u64], via| {
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(chain))
 					.with_via(origin(via))
 			};
@@ -14229,9 +14244,9 @@ mod tests {
 	}
 
 	/// A new route and a removal are delivered at once. A change of the best route
-	/// within one instance waits out the update hold, and a newer change during the
+	/// within one identity waits out the update hold, and a newer change during the
 	/// wait replaces it. So does a switch between hop-chain routes to one publisher that
-	/// each session minted its own instance for, since the wire carries none: it is
+	/// each session minted its own identity for, since the wire carries none: it is
 	/// delivered as a restart, once. One onto another publisher goes at once.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -14243,14 +14258,14 @@ mod tests {
 			// Holds count on the driver's clock, which starts at its first poll.
 			kio::clock::sleep(Duration::from_millis(1)).await;
 
-			let named = instance();
+			let named = identity();
 			let route = |chain: &[u64], via| {
-				let instance = match minted {
-					true => Instance::minted(),
+				let identity = match minted {
+					true => Identity::minted(),
 					false => named.clone(),
 				};
 				RouteInfo::new()
-					.with_instance(instance, 0)
+					.with_identity(identity, 0)
 					.with_hops(hops(chain))
 					.with_via(origin(via))
 			};
@@ -14285,7 +14300,7 @@ mod tests {
 		kio::clock::sleep(Duration::from_millis(1)).await;
 		let route = |chain: &[u64], via| {
 			RouteInfo::new()
-				.with_instance(Instance::minted(), 0)
+				.with_identity(Identity::minted(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
@@ -14301,7 +14316,7 @@ mod tests {
 	}
 
 	/// After a retraction, a worse path to the same publisher waits out the
-	/// quarantine, under its instance or, for a hop chain, any instance a session
+	/// quarantine, under its identity or, for a hop chain, any identity a session
 	/// minted. An anonymous route names no publisher, so one after it is not held.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -14312,16 +14327,16 @@ mod tests {
 			let mut announced = producer.consume().routes();
 			kio::clock::sleep(Duration::from_millis(1)).await;
 
-			// Every path is to one publisher, so to one instance, unless each session
+			// Every path is to one publisher, so to one identity, unless each session
 			// minted its own.
-			let named = instance();
+			let named = identity();
 			let route = |chain: &[u64], via| {
-				let instance = match minted {
-					true => Instance::minted(),
+				let identity = match minted {
+					true => Identity::minted(),
 					false => named.clone(),
 				};
 				RouteInfo::new()
-					.with_instance(instance, 0)
+					.with_identity(identity, 0)
 					.with_hops(hops(chain))
 					.with_via(origin(via))
 			};
@@ -14414,9 +14429,9 @@ mod tests {
 	}
 
 	/// The route layer letting go of one copy of a lite-07 claim takes every copy of the
-	/// same node, instance and showing with it, a copy still at an older epoch too: a
+	/// same node, identity and showing with it, a copy still at an older epoch too: a
 	/// cursor sees the claim end or go offline, never a move onto another copy first.
-	/// Another node's claim of the instance stays.
+	/// Another node's claim of the identity stays.
 	#[kio::test]
 	async fn retiring_a_claim_retires_every_copy() {
 		for ended in [true, false] {
@@ -14425,7 +14440,7 @@ mod tests {
 			let mut announced = producer.consume().routes();
 			let copy = |node: u64, cost: u64| {
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[node]))
 					.with_cost(cost)
 					.with_node(Some(node_id(node)))
@@ -14442,7 +14457,7 @@ mod tests {
 			announced.assert_next_wait();
 
 			// A session that has yet to take the newer epoch still holds the older one.
-			let newer = |node: u64, cost: u64| copy(node, cost).with_instance(instance(), 1);
+			let newer = |node: u64, cost: u64| copy(node, cost).with_identity(identity(), 1);
 			let near = peer.forward("room", newer(7, 1)).unwrap();
 			let _stale = peer.forward("room", copy(7, 2)).unwrap();
 			announced.expect_next_active("room").await;
@@ -14475,7 +14490,7 @@ mod tests {
 			let mut announced = producer.consume().routes();
 			let copy = |chain: &[u64], cost: u64, lifecycle: u64| {
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(chain))
 					.with_cost(cost)
 					.with_node(Some(node_id(7)))
@@ -14495,7 +14510,7 @@ mod tests {
 		}
 	}
 
-	/// Overlapping sessions carrying one instance are independent claims, regardless of
+	/// Overlapping sessions carrying one identity are independent claims, regardless of
 	/// announcement order, and falling back from one to the other is the same stream.
 	#[kio::test]
 	async fn old_session_withdrawal_keeps_newer_route() {
@@ -14503,7 +14518,7 @@ mod tests {
 			let producer = origin(1).produce();
 			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().routes();
-			let route = RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2]));
+			let route = RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[9, 2]));
 			let first = peer.forward("room", route.clone()).unwrap();
 			let second = peer.forward("room", route.clone()).unwrap();
 			announced.expect_next_active("room").await;
@@ -14547,7 +14562,7 @@ mod tests {
 
 	/// A change of source alone is delivered: the same chain and cost arriving
 	/// from a peer instead of a client is a different fact for the consumer. Under one
-	/// instance it is an update.
+	/// identity it is an update.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn source_change_is_an_update() {
@@ -14556,7 +14571,7 @@ mod tests {
 		let mut announced = producer.consume().routes();
 
 		let route = RouteInfo::new()
-			.with_instance(instance(), 0)
+			.with_identity(identity(), 0)
 			.with_hops(hops(&[7]))
 			.with_via(origin(7));
 		let _forwarded = peer.forward("room", route.clone()).unwrap();
@@ -14704,7 +14719,7 @@ mod tests {
 
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn claim_answer_is_hidden_until_published_under_the_claims_instance() {
+	async fn claim_answer_is_hidden_until_published_under_the_claims_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
@@ -14720,16 +14735,16 @@ mod tests {
 
 		prepared.announce().unwrap();
 		let resolved = pending.await.unwrap();
-		assert_eq!(resolved.info().instance, prepared.route().unwrap().instance);
+		assert_eq!(resolved.info().identity, prepared.route().unwrap().identity);
 		assert_eq!(
-			resolved.info().instance,
-			claim.route().unwrap().instance,
+			resolved.info().identity,
+			claim.route().unwrap().identity,
 			"the job continues the claim's stream at its path"
 		);
 		assert!(resolved.track("video").is_ok());
 	}
 
-	/// A hidden job's route is listed by no cursor until it announces, under its instance.
+	/// A hidden job's route is listed by no cursor until it announces, under its identity.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_hidden_job_route_is_listed_only_once_announced() {
@@ -14743,19 +14758,19 @@ mod tests {
 		announced.assert_next_wait();
 
 		prepared.announce().unwrap();
-		let instance = prepared.route().and_then(|route| route.instance);
-		assert_eq!(instance, claim.route().unwrap().instance, "the claim's instance");
+		let identity = prepared.route().and_then(|route| route.identity);
+		assert_eq!(identity, claim.route().unwrap().identity, "the claim's identity");
 		match announced.expect_next().await {
 			RouteEvent {
 				kind: RouteKind::Start,
 				announce,
 			} => {
 				assert_eq!(announce.prefix.as_str(), "room/alice");
-				assert_eq!(announce.route.instance, instance);
+				assert_eq!(announce.route.identity, identity);
 			}
 			other => panic!("should start beneath the claim: got {other:?}"),
 		}
-		assert_eq!(pending.await.unwrap().info().instance, instance);
+		assert_eq!(pending.await.unwrap().info().identity, identity);
 	}
 
 	/// Route clones share announcement control, while a fill handle on its broadcast
@@ -14767,17 +14782,17 @@ mod tests {
 		let consumer = producer.consume();
 		let mut events = consumer.routes();
 		let publication = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let fill = publication.broadcast().clone();
 		let control = publication.clone();
 		publication.announce().unwrap();
-		assert_eq!(events.expect_next_active("room/alice").await.instance, Some(instance()));
+		assert_eq!(events.expect_next_active("room/alice").await.identity, Some(identity()));
 		control.withdraw();
 		events.expect_next_ended("room/alice").await;
 		assert!(publication.route().is_none());
 		publication.announce().unwrap();
-		assert_eq!(events.expect_next_active("room/alice").await.instance, Some(instance()));
+		assert_eq!(events.expect_next_active("room/alice").await.identity, Some(identity()));
 		drop(control);
 		events.assert_next_wait();
 		let held = consumer.request("room/alice", None).await.unwrap();
@@ -14791,33 +14806,33 @@ mod tests {
 		drop(fill);
 	}
 
-	/// A withdrawn stale publication cannot remove a replacement instance's route.
+	/// A withdrawn stale publication cannot remove a replacement identity's route.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn stale_publication_control_cannot_withdraw_a_replacement() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
-		let replacement_instance: crate::Instance = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let replacement_identity: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let replacement = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(replacement_instance.clone(), 0),
+				RouteOptions::default().with_identity(replacement_identity.clone(), 0),
 			)
 			.unwrap();
 		old.withdraw();
 		old.broadcast().close();
 		assert_eq!(
-			replacement.route().unwrap().instance,
-			Some(replacement_instance.clone())
+			replacement.route().unwrap().identity,
+			Some(replacement_identity.clone())
 		);
 		let resolved = consumer
-			.request("room/alice", replacement_instance.clone())
+			.request("room/alice", replacement_identity.clone())
 			.await
 			.unwrap();
-		assert_eq!(resolved.info().instance.as_ref(), Some(&replacement_instance));
+		assert_eq!(resolved.info().identity.as_ref(), Some(&replacement_identity));
 	}
 
 	/// A refused answer keeps its announcer withheld, so a clone cannot announce it later.
@@ -14948,7 +14963,7 @@ mod tests {
 	async fn a_request_is_unwanted_once_its_front_gives_up_the_switch() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let options = |cost: u64| RouteOptions::default().with_instance(instance(), 0).with_cost(cost);
+		let options = |cost: u64| RouteOptions::default().with_identity(identity(), 0).with_cost(cost);
 		let serving = producer.claim("room", options(5)).unwrap();
 		let pending = consumer.request("room/alice", None);
 		let source = broadcast::Info::new().produce();
@@ -15006,7 +15021,7 @@ mod tests {
 		assert_eq!(queued(&claim).await.path().as_str(), "room/bob");
 	}
 
-	/// An answer prepared before the claim changed instance is refused, never announced.
+	/// An answer prepared before the claim changed identity is refused, never announced.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_prepared_answer_for_a_released_request_is_never_announced() {
@@ -15018,7 +15033,7 @@ mod tests {
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 
 		claim
-			.update(RouteInfo::new().with_instance(crate::Instance::random(), 0))
+			.update(RouteInfo::new().with_identity(crate::Identity::random(), 0))
 			.unwrap();
 		announced.assert_next_restarted("room");
 		assert!(matches!(prepared.announce(), Err(Error::Unroutable)));
@@ -15048,18 +15063,18 @@ mod tests {
 		drop(held);
 	}
 
-	/// A job withdrawn while it carries the claim's instance ends that stream at its path, so
-	/// the claim moves to a fresh instance with it: the next job, at that path or another,
+	/// A job withdrawn while it carries the claim's identity ends that stream at its path, so
+	/// the claim moves to a fresh identity with it: the next job, at that path or another,
 	/// starts a new stream rather than splicing into the old one.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_withdrawn_job_moves_the_claim_to_a_fresh_instance() {
+	async fn a_withdrawn_job_moves_the_claim_to_a_fresh_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.routes();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
-		let first = claim.instance();
+		let first = claim.identity();
 
 		let answer = async |path: &str| {
 			let pending = consumer.request(path, None);
@@ -15069,15 +15084,15 @@ mod tests {
 		};
 
 		let alice = answer("room/alice").await;
-		assert_eq!(alice.instance(), first, "the job takes the claim's instance");
+		assert_eq!(alice.identity(), first, "the job takes the claim's identity");
 		announced.assert_next_active("room/alice");
 
 		let bob = answer("room/bob").await;
-		assert_eq!(bob.instance(), first, "jobs at sibling paths share it");
+		assert_eq!(bob.identity(), first, "jobs at sibling paths share it");
 		announced.assert_next_active("room/bob");
 
 		alice.withdraw();
-		let second = claim.instance();
+		let second = claim.identity();
 		assert_ne!(second, first, "the claim moved on");
 		match announced.expect_next().await {
 			RouteEvent {
@@ -15092,24 +15107,24 @@ mod tests {
 				announce,
 			} => {
 				assert_eq!(announce.prefix.as_str(), "room");
-				assert_eq!(announce.route.instance, Some(second.clone()));
+				assert_eq!(announce.route.identity, Some(second.clone()));
 			}
 			other => panic!("should restart the claim: got {other:?}"),
 		}
 		// The sibling keeps the stream it holds.
-		assert_eq!(bob.instance(), first);
+		assert_eq!(bob.identity(), first);
 
 		let carol = answer("room/carol").await;
-		assert_eq!(carol.instance(), second, "a later job takes the claim's new instance");
+		assert_eq!(carol.identity(), second, "a later job takes the claim's new identity");
 		// Bob ending now spends nothing the claim still lends.
 		drop(bob);
-		assert_eq!(claim.instance(), second);
+		assert_eq!(claim.identity(), second);
 		drop(carol);
-		assert_ne!(claim.instance(), second);
+		assert_ne!(claim.identity(), second);
 	}
 
 	/// A claim filed at several grant prefixes is one claim: a job withdrawn under any of them
-	/// moves every filing to the same fresh instance, which the claim reports and each later
+	/// moves every filing to the same fresh identity, which the claim reports and each later
 	/// job takes.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -15118,7 +15133,7 @@ mod tests {
 		let consumer = producer.consume();
 		let scoped = producer.scope("", &scopes(&["room/a", "room/b"])).unwrap();
 		let claim = scoped.claim("room", RouteOptions::default()).unwrap();
-		let first = claim.instance();
+		let first = claim.identity();
 
 		let answer = async |path: &str| {
 			let pending = consumer.request(path, None);
@@ -15129,30 +15144,30 @@ mod tests {
 
 		let a = answer("room/a/x").await;
 		let b = answer("room/b/x").await;
-		assert_eq!(a.instance(), first, "each filing lends the claim's instance");
-		assert_eq!(b.instance(), first, "each filing lends the claim's instance");
+		assert_eq!(a.identity(), first, "each filing lends the claim's identity");
+		assert_eq!(b.identity(), first, "each filing lends the claim's identity");
 		b.withdraw();
-		let second = claim.instance();
+		let second = claim.identity();
 		assert_ne!(second, first, "the claim moved on");
 		// Held, since a job that ends moves the claim on again.
 		let mut held = vec![a];
 		for path in ["room/a/y", "room/b/y"] {
 			let job = answer(path).await;
 			assert_eq!(
-				job.instance(),
+				job.identity(),
 				second,
-				"{path}: every filing moved to the claim's new instance"
+				"{path}: every filing moved to the claim's new identity"
 			);
 			held.push(job);
 		}
 	}
 
-	/// A job's route takes the instance its claim lends when it announces, not when it was
-	/// created: a hidden job that never read its instance outlives a sibling's end and joins
+	/// A job's route takes the identity its claim lends when it announces, not when it was
+	/// created: a hidden job that never read its identity outlives a sibling's end and joins
 	/// the claim's next stream.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_hidden_job_takes_the_claims_instance_when_it_announces() {
+	async fn a_hidden_job_takes_the_claims_identity_when_it_announces() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
@@ -15162,25 +15177,25 @@ mod tests {
 		let bob = consumer.request("room/bob", None);
 		let sibling = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		bob.await.unwrap();
-		let first = claim.instance();
-		assert_eq!(sibling.instance(), first);
+		let first = claim.identity();
+		assert_eq!(sibling.identity(), first);
 
 		drop(sibling);
-		let second = claim.instance();
+		let second = claim.identity();
 		assert_ne!(second, first);
 
 		prepared.announce().unwrap();
-		assert_eq!(prepared.instance(), second);
-		assert_eq!(alice.await.unwrap().info().instance, Some(second));
+		assert_eq!(prepared.identity(), second);
+		assert_eq!(alice.await.unwrap().info().identity, Some(second));
 	}
 
-	/// A hidden job that read its instance, as a signer does, announces under it or not at
+	/// A hidden job that read its identity, as a signer does, announces under it or not at
 	/// all: once a sibling's end moves the claim past it, the announce is refused and its
-	/// request goes back to the worker, which prepares the job under the new instance. Every
+	/// request goes back to the worker, which prepares the job under the new identity. Every
 	/// requester waits on, including one that joined after the claim moved.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_job_that_read_its_instance_is_refused_once_the_claim_moves() {
+	async fn a_job_that_read_its_identity_is_refused_once_the_claim_moves() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
@@ -15190,24 +15205,24 @@ mod tests {
 		let bob = consumer.request("room/bob", None);
 		let sibling = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		bob.await.unwrap();
-		let first = prepared.instance();
-		assert_eq!(first, claim.instance());
+		let first = prepared.identity();
+		assert_eq!(first, claim.identity());
 
 		drop(sibling);
-		let second = claim.instance();
+		let second = claim.identity();
 		assert_ne!(second, first);
-		assert_eq!(prepared.instance(), first, "a read instance moved");
+		assert_eq!(prepared.identity(), first, "a read identity moved");
 		let late = consumer.request("room/alice", None);
 		assert!(matches!(prepared.announce(), Err(Error::Unroutable)));
 
 		let again = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
-		assert_eq!(again.instance(), second);
+		assert_eq!(again.identity(), second);
 		again.announce().unwrap();
-		assert_eq!(alice.await.unwrap().info().instance, Some(second.clone()));
-		assert_eq!(late.await.unwrap().info().instance, Some(second));
+		assert_eq!(alice.await.unwrap().info().identity, Some(second.clone()));
+		assert_eq!(late.await.unwrap().info().identity, Some(second));
 	}
 
-	/// A request pinned to the claim's instance resolves through its job's route even when a
+	/// A request pinned to the claim's identity resolves through its job's route even when a
 	/// sibling job ending moved the claim on before the request looked again.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -15215,7 +15230,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
-		let lent = claim.instance();
+		let lent = claim.identity();
 
 		let reader = consumer.request("room/alice", None);
 		let alice = queued(&claim).await.route(RouteOptions::default()).unwrap();
@@ -15224,14 +15239,14 @@ mod tests {
 		let pinned = consumer.request("room/bob", lent.clone());
 		let bob = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		drop(alice);
-		assert_ne!(claim.instance(), lent);
-		assert_eq!(bob.instance(), lent);
-		let resolved = pinned.await.expect("the job still serves the pinned instance");
-		assert_eq!(resolved.info().instance, Some(lent));
+		assert_ne!(claim.identity(), lent);
+		assert_eq!(bob.identity(), lent);
+		let resolved = pinned.await.expect("the job still serves the pinned identity");
+		assert_eq!(resolved.info().identity, Some(lent));
 		drop(held);
 	}
 
-	/// Once a job ends, a request pinned to its instance is refused without asking the
+	/// Once a job ends, a request pinned to its identity is refused without asking the
 	/// claim, which serves another stream now, while an unpinned one starts the next job.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -15243,7 +15258,7 @@ mod tests {
 		let pending = consumer.request("room/alice", None);
 		let job = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		let held = pending.await.unwrap();
-		let ended = job.instance();
+		let ended = job.identity();
 		job.broadcast().close();
 		drop(job);
 
@@ -15256,7 +15271,7 @@ mod tests {
 
 		let pending = consumer.request("room/alice", None);
 		let restarted = queued(&claim).await.route(RouteOptions::default()).unwrap();
-		assert_ne!(restarted.instance(), ended);
+		assert_ne!(restarted.identity(), ended);
 		let fresh = pending.await.unwrap();
 		assert!(!fresh.is_clone(&held), "joined the ended job");
 	}
@@ -15272,68 +15287,68 @@ mod tests {
 		let pending = consumer.request("room/alice", None);
 		let job = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		let held = pending.await.unwrap();
-		let lent = claim.instance();
+		let lent = claim.identity();
 
 		drop(claim);
-		assert_eq!(job.instance(), lent);
+		assert_eq!(job.identity(), lent);
 		let again = consumer.request("room/alice", lent.clone()).await.unwrap();
 		assert!(again.is_clone(&held), "the job's stream ended with its claim");
 		drop(job);
 		assert!(consumer.request("room/alice", lent).await.is_err());
 	}
 
-	/// A claim naming a stable instance lends nothing: its answers mint their own, and their
-	/// end leaves the claim's instance as it is. A job naming its instance keeps it too.
+	/// A claim naming a stable identity lends nothing: its answers mint their own, and their
+	/// end leaves the claim's identity as it is. A job naming its identity keeps it too.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn named_instances_are_neither_lent_nor_moved() {
+	async fn named_identities_are_neither_lent_nor_moved() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let stable = instance();
+		let stable = identity();
 		let claim = producer
-			.claim("room", RouteOptions::default().with_instance(stable.clone(), 0))
+			.claim("room", RouteOptions::default().with_identity(stable.clone(), 0))
 			.unwrap();
 
 		let pending = consumer.request("room/alice", None);
 		let minted = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		pending.await.unwrap();
-		assert_ne!(minted.instance(), stable, "a stable claim lent its instance");
+		assert_ne!(minted.identity(), stable, "a stable claim lent its identity");
 		drop(minted);
-		assert_eq!(claim.instance(), stable);
+		assert_eq!(claim.identity(), stable);
 
 		let lending = producer.claim("lent", RouteOptions::default()).unwrap();
-		let lent = lending.instance();
-		let named = instance();
+		let lent = lending.identity();
+		let named = identity();
 		let pending = consumer.request("lent/bob", None);
 		let job = queued(&lending)
 			.await
-			.route(RouteOptions::default().with_instance(named.clone(), 0))
+			.route(RouteOptions::default().with_identity(named.clone(), 0))
 			.unwrap();
 		pending.await.unwrap();
-		assert_eq!(job.instance(), named);
+		assert_eq!(job.identity(), named);
 		drop(job);
-		assert_eq!(lending.instance(), lent, "a named job's end moved the claim");
+		assert_eq!(lending.identity(), lent, "a named job's end moved the claim");
 	}
 
-	/// A request pinned to an instance resolves only through the answer published under
-	/// it, never by asking the claim, which serves another instance.
+	/// A request pinned to an identity resolves only through the answer published under
+	/// it, never by asking the claim, which serves another identity.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_pinned_request_resolves_only_through_the_published_instance() {
+	async fn a_pinned_request_resolves_only_through_the_published_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let claim = producer.claim("room", RouteOptions::default()).unwrap();
-		let unknown = consumer.request("room/alice", crate::Instance::random());
+		let unknown = consumer.request("room/alice", crate::Identity::random());
 		assert!(matches!(unknown.await, Err(Error::Unroutable)));
 
 		let pending = consumer.request("room/alice", None);
 		let published = queued(&claim).await.route(RouteOptions::default()).unwrap();
-		let instance = published.route().unwrap().instance.unwrap();
+		let identity = published.route().unwrap().identity.unwrap();
 		pending.await.expect("resolves");
 
-		let pinned = consumer.request("room/alice", instance.clone()).await;
-		assert_eq!(pinned.expect("resolves").info().instance.as_ref(), Some(&instance));
-		let stale = consumer.request("room/alice", crate::Instance::random());
+		let pinned = consumer.request("room/alice", identity.clone()).await;
+		assert_eq!(pinned.expect("resolves").info().identity.as_ref(), Some(&identity));
+		let stale = consumer.request("room/alice", crate::Identity::random());
 		assert!(matches!(stale.await, Err(Error::Unroutable)));
 	}
 
@@ -15798,7 +15813,7 @@ mod tests {
 			let server = producer
 				.forward(
 					"room",
-					RouteInfo::new().with_instance(instance(), 0).with_hops(hops(first)),
+					RouteInfo::new().with_identity(identity(), 0).with_hops(hops(first)),
 				)
 				.unwrap();
 
@@ -15844,7 +15859,7 @@ mod tests {
 			self.producer
 				.forward(
 					"room",
-					RouteInfo::new().with_instance(instance(), 0).with_hops(hops(first)),
+					RouteInfo::new().with_identity(identity(), 0).with_hops(hops(first)),
 				)
 				.unwrap()
 		}
@@ -15880,9 +15895,9 @@ mod tests {
 		assert_eq!(&frame.payload[..], b"resumed");
 	}
 
-	/// Only an instance's highest epoch is eligible: a costlier route at a higher epoch
+	/// Only an identity's highest epoch is eligible: a costlier route at a higher epoch
 	/// takes the front over from the cheaper older one still standing, and the reader
-	/// continues across the epoch change without a seam, since the instance's keys
+	/// continues across the epoch change without a seam, since the identity's keys
 	/// continue. A new request joins the same broadcast.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -15893,7 +15908,7 @@ mod tests {
 			.forward(
 				"room",
 				RouteInfo::new()
-					.with_instance(instance(), 1)
+					.with_identity(identity(), 1)
 					.with_hops(hops(&[11]))
 					.with_cost(9),
 			)
@@ -15906,12 +15921,12 @@ mod tests {
 		);
 	}
 
-	/// A claim of `src`'s instance at `epoch`, through relay `node`, shown `above` levels
+	/// A claim of `src`'s identity at `epoch`, through relay `node`, shown `above` levels
 	/// beneath its prefix.
 	#[cfg(feature = "async")]
 	fn epoch_claim(epoch: u64, node: u64, above: u8) -> RouteInfo {
 		RouteInfo::new()
-			.with_instance(instance(), epoch)
+			.with_identity(identity(), epoch)
 			.with_hops(hops(&[node]))
 			.with_node(Some(node_id(node)))
 			.with_lane(Lane {
@@ -16025,7 +16040,7 @@ mod tests {
 		let fresh = consumer.lookup(Path::new("src/a/b").unwrap(), None).into_inner();
 		// The older epoch's answer lands, as the front publishes one that passed its check.
 		if let Ok(mut pending) = request.write() {
-			pending.resolved = Some(Ok(instance()));
+			pending.resolved = Some(Ok(identity()));
 			pending.epoch = 1;
 		}
 		let waiter = kio::Waiter::noop();
@@ -16074,11 +16089,11 @@ mod tests {
 		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
 	}
 
-	/// Nor when the newer epoch, superseding it, leaves another instance winning: the
-	/// request resolves on that instance, never on the older epoch's departed answer.
+	/// Nor when the newer epoch, superseding it, leaves another identity winning: the
+	/// request resolves on that identity, never on the older epoch's departed answer.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn an_older_epochs_departed_answer_never_resolves_once_another_instance_wins() {
+	async fn an_older_epochs_departed_answer_never_resolves_once_another_identity_wins() {
 		let producer = Config {
 			update_hold: Duration::ZERO,
 			..Config::from(origin(1))
@@ -16087,7 +16102,7 @@ mod tests {
 		let consumer = producer.consume();
 		let filed = producer.forward("src", epoch_claim(1, 10, 0).with_cost(1)).unwrap();
 		let other = RouteInfo::new()
-			.with_instance(crate::Instance::random(), 0)
+			.with_identity(crate::Identity::random(), 0)
 			.with_hops(hops(&[12]))
 			.with_node(Some(node_id(12)))
 			.with_cost(5);
@@ -16095,7 +16110,7 @@ mod tests {
 		let mut fresh = Box::pin(consumer.request("src/b", None));
 		let asked = queued(&filed).await;
 
-		// The newer epoch supersedes the older one, which leaves, so the other instance wins.
+		// The newer epoch supersedes the older one, which leaves, so the other identity wins.
 		let newer = producer.forward("src", epoch_claim(2, 11, 0).with_cost(9)).unwrap();
 		asked.serve(broadcast::Info::new().produce());
 		drop(filed);
@@ -16117,7 +16132,7 @@ mod tests {
 	}
 
 	/// A pool host that is full withdraws its route: a path it won moves to another host's
-	/// instance, so its broadcast ends and `follow` yields the other host's. A path the
+	/// identity, so its broadcast ends and `follow` yields the other host's. A path the
 	/// other host won stays where it is.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -16129,7 +16144,7 @@ mod tests {
 				.forward(
 					"pool",
 					RouteInfo::new()
-						.with_instance(name.parse().unwrap(), 0)
+						.with_identity(name.parse().unwrap(), 0)
 						.with_hops(hops(&[hop])),
 				)
 				.unwrap()
@@ -16143,23 +16158,23 @@ mod tests {
 			queued(&a).await.serve(broadcast::Info::new().produce());
 		});
 		let first = first.unwrap().unwrap();
-		assert_eq!(first.info().instance, Some("a".parse().unwrap()));
+		assert_eq!(first.info().identity, Some("a".parse().unwrap()));
 
 		drop(a);
 		let (second, ()) = futures::join!(follow.available(), async {
 			queued(&b).await.serve(broadcast::Info::new().produce());
 		});
 		let second = second.unwrap().unwrap();
-		assert_eq!(second.info().instance, Some("b".parse().unwrap()));
+		assert_eq!(second.info().identity, Some("b".parse().unwrap()));
 		assert!(!second.is_clone(&first));
 	}
 
 	/// Letting go of the broadcast `follow` handed out retires it, which is no change to
-	/// the path: the follower neither asks its host again nor hands the same instance out
-	/// again. Its instance withdrawing later still hands out the next one.
+	/// the path: the follower neither asks its host again nor hands the same identity out
+	/// again. Its identity withdrawing later still hands out the next one.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_follower_dropping_its_broadcast_waits_for_another_instance() {
+	async fn a_follower_dropping_its_broadcast_waits_for_another_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let host = |name: &str, hop| {
@@ -16167,7 +16182,7 @@ mod tests {
 				.forward(
 					"pool",
 					RouteInfo::new()
-						.with_instance(name.parse().unwrap(), 0)
+						.with_identity(name.parse().unwrap(), 0)
 						.with_hops(hops(&[hop])),
 				)
 				.unwrap()
@@ -16189,7 +16204,7 @@ mod tests {
 			kio::clock::sleep(Duration::from_secs(20)).await;
 			assert!(
 				follow.poll_available(&kio::Waiter::noop()).is_pending(),
-				"the same instance handed out again"
+				"the same identity handed out again"
 			);
 			kio::clock::sim::yield_now().await;
 			assert!(
@@ -16202,7 +16217,7 @@ mod tests {
 		let (second, ()) = futures::join!(follow.available(), async {
 			queued(&b).await.serve(broadcast::Info::new().produce());
 		});
-		assert_eq!(second.unwrap().unwrap().info().instance, Some("b".parse().unwrap()));
+		assert_eq!(second.unwrap().unwrap().info().identity, Some("b".parse().unwrap()));
 	}
 
 	/// Write one single-frame group and read it back through `subscription`.
@@ -16215,11 +16230,11 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], payload);
 	}
 
-	/// Another instance is another stream: a better route under one does not move the
+	/// Another identity is another stream: a better route under one does not move the
 	/// subscription, and when its own route goes it ends rather than resuming elsewhere.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn another_instance_never_resumes_the_subscription() {
+	async fn another_identity_never_resumes_the_subscription() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
@@ -16248,22 +16263,22 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		assert!(
 			second.poll_requested(&kio::Waiter::noop()).is_pending(),
-			"a route of another instance is never asked to resume"
+			"a route of another identity is never asked to resume"
 		);
 	}
 
-	/// Another instance winning the path takes new requests, while the subscriptions on
+	/// Another identity winning the path takes new requests, while the subscriptions on
 	/// the old one stay with it until its route goes.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn another_instance_leaves_the_broadcast_in_flight() {
+	async fn another_identity_leaves_the_broadcast_in_flight() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
 			.route(
 				"room/alice",
 				RouteOptions::default()
-					.with_instance(crate::Instance::random(), 0)
+					.with_identity(crate::Identity::random(), 0)
 					.with_cost(9),
 			)
 			.unwrap();
@@ -16279,7 +16294,7 @@ mod tests {
 			.route(
 				"room/alice",
 				RouteOptions::default()
-					.with_instance(crate::Instance::random(), 0)
+					.with_identity(crate::Identity::random(), 0)
 					.with_cost(1),
 			)
 			.unwrap();
@@ -16305,17 +16320,17 @@ mod tests {
 		deliver(&new_track, &mut fresh, b"after").await;
 	}
 
-	/// A request in the same tick as another instance's announcement is never handed
+	/// A request in the same tick as another identity's announcement is never handed
 	/// the old front: its watcher has not noticed the replacement yet, but the
-	/// request mints a front on the new instance instead of joining the replaced one.
+	/// request mints a front on the new identity instead of joining the replaced one.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_request_racing_a_new_instance_skips_the_old_front() {
+	async fn a_request_racing_a_new_identity_skips_the_old_front() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let first = crate::Instance::random();
+		let first = crate::Identity::random();
 		let old = producer
-			.route("room/alice", RouteOptions::default().with_instance(first.clone(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(first.clone(), 0))
 			.unwrap();
 		let _old_track = old
 			.broadcast()
@@ -16323,57 +16338,57 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		assert_eq!(
-			resolved.info().instance.as_ref(),
+			resolved.info().identity.as_ref(),
 			Some(&first),
 			"an unpinned request names what it resolved"
 		);
 
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let new = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance.clone(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity.clone(), 0))
 			.unwrap();
 		let new_track = new
 			.broadcast()
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
-		let named = consumer.request("room/alice", instance.clone());
+		let named = consumer.request("room/alice", identity.clone());
 		let bare = consumer.request("room/alice", None);
 
-		let named = named.await.expect("the new instance resolves");
-		let bare = bare.await.expect("the new instance resolves");
+		let named = named.await.expect("the new identity resolves");
+		let bare = bare.await.expect("the new identity resolves");
 		assert!(
 			!named.is_clone(&resolved),
-			"a request naming the new instance got the old one"
+			"a request naming the new identity got the old one"
 		);
 		assert!(!bare.is_clone(&resolved), "a bare request joined the replaced front");
 		assert!(named.is_clone(&bare), "both share the new front");
 		assert_eq!(
-			bare.info().instance.as_ref(),
-			Some(&instance),
-			"an unpinned request names the new instance"
+			bare.info().identity.as_ref(),
+			Some(&identity),
+			"an unpinned request names the new identity"
 		);
 		let mut subscription = named.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
 
-	/// Another instance winning while the front's first request is in flight beats that
+	/// Another identity winning while the front's first request is in flight beats that
 	/// route: its late answer is not what requesters resolve to.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn an_answer_racing_a_new_instance_resolves_the_winner() {
+	async fn an_answer_racing_a_new_identity_resolves_the_winner() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
-			.forward("room", RouteInfo::new().with_instance(crate::Instance::random(), 0))
+			.forward("room", RouteInfo::new().with_identity(crate::Identity::random(), 0))
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		let request = queued(&old).await;
 
-		// The answer and the new instance land in the same tick.
+		// The answer and the new identity land in the same tick.
 		let new = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(crate::Instance::random(), 0),
+				RouteOptions::default().with_identity(crate::Identity::random(), 0),
 			)
 			.unwrap();
 		let new_track = new
@@ -16389,18 +16404,18 @@ mod tests {
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
 
-	/// A request held when its route changes instance carries over: the handler is asked
-	/// again under the new instance rather than the requester failing. The old answer is
-	/// neither served under the new instance nor cached for the next request, and a request
-	/// pinned to the old instance is refused. `answer_first` lands the old answer just
+	/// A request held when its route changes identity carries over: the handler is asked
+	/// again under the new identity rather than the requester failing. The old answer is
+	/// neither served under the new identity nor cached for the next request, and a request
+	/// pinned to the old identity is refused. `answer_first` lands the old answer just
 	/// before the change instead of after, before the front takes it.
 	#[cfg(feature = "async")]
-	async fn held_request_across_an_instance_change(answer_first: bool) {
+	async fn held_request_across_an_identity_change(answer_first: bool) {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let old = crate::Instance::random();
+		let old = crate::Identity::random();
 		let dynamic = producer
-			.forward("room", RouteInfo::new().with_instance(old.clone(), 0))
+			.forward("room", RouteInfo::new().with_identity(old.clone(), 0))
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		let pinned = consumer.request("room/alice", old);
@@ -16408,15 +16423,15 @@ mod tests {
 
 		let stale = broadcast::Info::new().produce();
 		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		if answer_first {
 			request.serve(&stale);
 			dynamic
-				.update(dynamic.route().unwrap().with_instance(instance.clone(), 0))
+				.update(dynamic.route().unwrap().with_identity(identity.clone(), 0))
 				.unwrap();
 		} else {
 			dynamic
-				.update(dynamic.route().unwrap().with_instance(instance.clone(), 0))
+				.update(dynamic.route().unwrap().with_identity(identity.clone(), 0))
 				.unwrap();
 			request.serve(&stale);
 		}
@@ -16425,11 +16440,11 @@ mod tests {
 		let fresh = broadcast::Info::new().produce();
 		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		request.serve(&fresh);
-		let resolved = pending.await.expect("the request carries over to the new instance");
-		assert_eq!(resolved.info().instance.as_ref(), Some(&instance));
+		let resolved = pending.await.expect("the request carries over to the new identity");
+		assert_eq!(resolved.info().identity.as_ref(), Some(&identity));
 		assert!(
 			matches!(pinned.await, Err(Error::Unroutable)),
-			"a request pinned to the old instance resolved"
+			"a request pinned to the old identity resolved"
 		);
 		let cached = dynamic.server().lock().served.get(&Path::from_static("room/alice"));
 		assert!(
@@ -16442,61 +16457,61 @@ mod tests {
 
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_request_held_across_an_instance_change_is_asked_again() {
-		held_request_across_an_instance_change(false).await;
+	async fn a_request_held_across_an_identity_change_is_asked_again() {
+		held_request_across_an_identity_change(false).await;
 	}
 
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn an_answer_before_an_instance_change_is_asked_again() {
-		held_request_across_an_instance_change(true).await;
+	async fn an_answer_before_an_identity_change_is_asked_again() {
+		held_request_across_an_identity_change(true).await;
 	}
 
-	/// A refusal that lands just before an instance change, before the front takes it,
-	/// was the old instance's answer: the request is asked again, not ended.
+	/// A refusal that lands just before an identity change, before the front takes it,
+	/// was the old identity's answer: the request is asked again, not ended.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_refusal_before_an_instance_change_is_asked_again() {
+	async fn a_refusal_before_an_identity_change_is_asked_again() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let dynamic = producer
-			.forward("room", RouteInfo::new().with_instance(crate::Instance::random(), 0))
+			.forward("room", RouteInfo::new().with_identity(crate::Identity::random(), 0))
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		queued(&dynamic).await.reject(Error::NotFound);
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		dynamic
-			.update(dynamic.route().unwrap().with_instance(instance.clone(), 0))
+			.update(dynamic.route().unwrap().with_identity(identity.clone(), 0))
 			.unwrap();
 
 		let fresh = broadcast::Info::new().produce();
 		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.serve(&fresh);
 		let resolved = pending.await.expect("the request carries over");
-		assert_eq!(resolved.info().instance.as_ref(), Some(&instance));
+		assert_eq!(resolved.info().identity.as_ref(), Some(&identity));
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
-	/// A release is not undone by the instance coming back before the front looks: a
+	/// A release is not undone by the identity coming back before the front looks: a
 	/// request held across A to B to A is asked again, not refused.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_request_held_across_an_instance_round_trip_is_asked_again() {
+	async fn a_request_held_across_an_identity_round_trip_is_asked_again() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let old = crate::Instance::random();
+		let old = crate::Identity::random();
 		let dynamic = producer
-			.forward("room", RouteInfo::new().with_instance(old.clone(), 0))
+			.forward("room", RouteInfo::new().with_identity(old.clone(), 0))
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		let request = queued(&dynamic).await;
 
 		dynamic
-			.update(dynamic.route().unwrap().with_instance(crate::Instance::random(), 0))
+			.update(dynamic.route().unwrap().with_identity(crate::Identity::random(), 0))
 			.unwrap();
 		dynamic
-			.update(dynamic.route().unwrap().with_instance(old.clone(), 0))
+			.update(dynamic.route().unwrap().with_identity(old.clone(), 0))
 			.unwrap();
 		let stale = broadcast::Info::new().produce();
 		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
@@ -16506,23 +16521,23 @@ mod tests {
 		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.serve(&fresh);
 		let resolved = pending.await.expect("the request carries over");
-		assert_eq!(resolved.info().instance.as_ref(), Some(&old));
+		assert_eq!(resolved.info().identity.as_ref(), Some(&old));
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
-	/// Announce cursors follow an instance's newest epoch over a cheaper older one, and
+	/// Announce cursors follow an identity's newest epoch over a cheaper older one, and
 	/// deliver the change as an update: the same stream, continued.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn the_newest_epoch_is_announced_in_place() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let _old = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance.clone(), 1).with_cost(1),
+				RouteOptions::default().with_identity(identity.clone(), 1).with_cost(1),
 			)
 			.unwrap();
 		assert_eq!(announced.expect_next_active("room/alice").await.cost, Cost::new(1));
@@ -16530,39 +16545,39 @@ mod tests {
 		let new = producer
 			.route(
 				"room/alice",
-				RouteOptions::default().with_instance(instance.clone(), 2).with_cost(9),
+				RouteOptions::default().with_identity(identity.clone(), 2).with_cost(9),
 			)
 			.unwrap();
 		let newest = announced.expect_next_active("room/alice").await;
 		assert_eq!(
-			(newest.instance, newest.epoch, newest.cost),
-			(Some(instance.clone()), 2, Cost::new(9))
+			(newest.identity, newest.epoch, newest.cost),
+			(Some(identity.clone()), 2, Cost::new(9))
 		);
 
 		// The older one still stands, so it comes back once the newer one goes.
 		drop(new);
 		let back = announced.expect_next_active("room/alice").await;
-		assert_eq!((back.instance, back.epoch), (Some(instance), 1));
+		assert_eq!((back.identity, back.epoch), (Some(identity), 1));
 	}
 
-	/// A peer naming one publisher instance is never handed another.
+	/// A peer naming one publisher identity is never handed another.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_request_for_another_instance_is_refused() {
+	async fn a_request_for_another_identity_is_refused() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let _broadcast = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 
-		let other: crate::Instance = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let other: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let refused = consumer.request("room/alice", other).await;
 		assert!(matches!(refused, Err(Error::Unroutable)));
 		let named = consumer
-			.request("room/alice", instance())
+			.request("room/alice", identity())
 			.await
-			.expect("the named instance resolves");
-		assert_eq!(named.info().instance.as_ref(), Some(&instance()));
+			.expect("the named identity resolves");
+		assert_eq!(named.info().identity.as_ref(), Some(&identity()));
 	}
 
 	/// The driver's completion contract: it resolves once every producer handle
@@ -16620,8 +16635,8 @@ mod tests {
 		}
 	}
 
-	/// Routes with one instance serve one broadcast: when the serving route dies, the
-	/// subscription resumes through another with that instance, whatever its first hop,
+	/// Routes with one identity serve one broadcast: when the serving route dies, the
+	/// subscription resumes through another with that identity, whatever its first hop,
 	/// or with none at all.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -16716,14 +16731,14 @@ mod tests {
 			let incumbent = producer
 				.forward(
 					"room",
-					RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+					RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10])),
 				)
 				.unwrap();
 			// The same publisher, reached through the requesting peer.
 			let echo = producer
 				.forward(
 					"room",
-					RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10, 7])),
+					RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10, 7])),
 				)
 				.unwrap();
 
@@ -16921,7 +16936,7 @@ mod tests {
 		incumbent
 			.update(
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_draining(true),
 			)
@@ -16934,7 +16949,7 @@ mod tests {
 		drop(source);
 	}
 
-	/// A second broadcast at the path under another instance is another instance: new
+	/// A second broadcast at the path under another identity is another identity: new
 	/// requests resolve it on a fresh front, rather than join the first one's.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -16960,12 +16975,12 @@ mod tests {
 		assert!(consumer.get_broadcast("room/alice").is_some());
 	}
 
-	/// A front still resolving an instance that another has since beaten takes no new
-	/// requester: it may already hold the beaten instance's source, and would hand it to a
+	/// A front still resolving an identity that another has since beaten takes no new
+	/// requester: it may already hold the beaten identity's source, and would hand it to a
 	/// request that saw it lose, which no later announcement corrects.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_request_skips_a_front_resolving_a_beaten_instance() {
+	async fn a_request_skips_a_front_resolving_a_beaten_identity() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let server = producer
@@ -17385,7 +17400,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let first = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first
 			.broadcast()
@@ -17406,7 +17421,7 @@ mod tests {
 
 		// The newest source is dispatched the track, and refused for its metadata.
 		let second = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let _incompatible = second
 			.broadcast()
@@ -17437,7 +17452,7 @@ mod tests {
 		let server = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10])),
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
@@ -17463,7 +17478,7 @@ mod tests {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17489,7 +17504,7 @@ mod tests {
 		let server = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10])),
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
@@ -17523,7 +17538,7 @@ mod tests {
 		);
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let _other = newcomer
 			.broadcast()
@@ -17549,7 +17564,7 @@ mod tests {
 		// Held past the linger: a replacement is asked for the track.
 		kio::clock::sleep(Duration::from_secs(60)).await;
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17565,7 +17580,7 @@ mod tests {
 		kio::clock::sleep(Duration::from_secs(60)).await;
 		drop(newcomer);
 		let third = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = third.broadcast().requests();
 		third.announce().unwrap();
@@ -17586,7 +17601,7 @@ mod tests {
 		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17628,14 +17643,14 @@ mod tests {
 		let server = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[9, 2])),
 			)
 			.unwrap();
 		let standby = producer
 			.forward(
 				"room",
 				RouteInfo::new()
-					.with_instance(instance(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[9, 5, 3])),
 			)
 			.unwrap();
@@ -17693,7 +17708,7 @@ mod tests {
 		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17732,7 +17747,7 @@ mod tests {
 		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17782,7 +17797,7 @@ mod tests {
 			.unwrap();
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17819,7 +17834,7 @@ mod tests {
 		let (producer, _server, _upstream, _old, mut subscription) = remote_front().await;
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17854,7 +17869,7 @@ mod tests {
 		let server = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+				RouteInfo::new().with_identity(identity(), 0).with_hops(hops(&[10])),
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
@@ -17865,7 +17880,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17899,7 +17914,7 @@ mod tests {
 		}
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = newcomer.broadcast().requests();
 		newcomer.announce().unwrap();
@@ -17935,7 +17950,7 @@ mod tests {
 
 		// No handler and no track: refuses "video" with NotFound.
 		let _second = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
@@ -17954,7 +17969,7 @@ mod tests {
 			.expect("open");
 
 		let _third = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
@@ -18030,7 +18045,7 @@ mod tests {
 			.expect("open");
 
 		let newcomer = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let _video = newcomer
 			.broadcast()
@@ -18056,7 +18071,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first
 			.broadcast()
@@ -18071,7 +18086,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
 		let second = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let incompatible = second
 			.broadcast()
@@ -18100,7 +18115,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first
 			.broadcast()
@@ -18116,7 +18131,7 @@ mod tests {
 		drop(group);
 
 		let second = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let incompatible = second
 			.broadcast()
@@ -18160,7 +18175,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.route("room/alice", RouteOptions::default().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first
 			.broadcast()
@@ -18176,7 +18191,7 @@ mod tests {
 		drop(group);
 
 		let second = producer
-			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.route("room/alice", RouteOptions::hidden().with_identity(identity(), 0))
 			.unwrap();
 		let mut handler = second.broadcast().requests();
 		second.announce().unwrap();
@@ -18479,7 +18494,7 @@ mod tests {
 	}
 
 	/// The answering lease outlives a withdrawal, since the peer still answers for the
-	/// instance it retracted, and ends once another instance takes the path.
+	/// identity it retracted, and ends once another identity takes the path.
 	#[kio::test]
 	async fn source_selection_answering_ends_only_on_a_replacement() {
 		let producer = origin(1).produce();
@@ -18506,7 +18521,7 @@ mod tests {
 		assert!(selected.current().is_closed());
 		assert!(!answering.is_closed());
 
-		// Announced again, the path has a new instance: a replacement.
+		// Announced again, the path has a new identity: a replacement.
 		let _again = producer.forward("room", RouteInfo::new().with_via(origin(2))).unwrap();
 		assert!(answering.is_closed());
 	}
@@ -18753,21 +18768,21 @@ mod tests {
 		let mut selected = consumer.routes();
 		selected.assert_next_wait();
 
-		let first_instance = crate::Instance::random();
+		let first_identity = crate::Identity::random();
 		let exact = producer
-			.announce("room/alice", RouteInfo::new().with_instance(first_instance.clone(), 0))
+			.announce("room/alice", RouteInfo::new().with_identity(first_identity.clone(), 0))
 			.unwrap();
 		assert!(
 			matches!(selected.expect_next().await, RouteEvent { kind: RouteKind::Start, announce: a } if a.prefix.is_empty() && a.captures.is_some())
 		);
 		exact
-			.update(RouteInfo::new().with_instance(first_instance, 0).with_cost(2))
+			.update(RouteInfo::new().with_identity(first_identity, 0).with_cost(2))
 			.unwrap();
 		assert!(
 			matches!(selected.expect_next().await, RouteEvent { kind: RouteKind::Update, announce: a } if a.route.cost == Cost::new(2))
 		);
 		exact
-			.update(RouteInfo::new().with_instance(crate::Instance::random(), 0))
+			.update(RouteInfo::new().with_identity(crate::Identity::random(), 0))
 			.unwrap();
 		assert!(matches!(
 			selected.expect_next().await,

@@ -77,7 +77,8 @@ window.pending = () => progress.filter((received) => received.at === undefined);
 // Read every group the subscription hands out until it ends. Frames are read concurrently with
 // the next group, since a group waiting on its frames must not hold back the groups after it. A
 // group that ends early for any reason but going stale is fetched, as a reader that still wants
-// it would: the relay reset its stream to make room, and a fetch rides a stream the page opens.
+// it would: the relay reset its stream to make room. A lite-06 fetch rides a stream the page opens,
+// while a lite-07 one is a one-shot subscription whose group competes for the same cap.
 async function read(
 	track: Track,
 	consumer: Moq.Track.Consumer,
@@ -118,17 +119,22 @@ async function read(
 	return received;
 }
 
-// Every frame of group `sequence`, fetched whole, or why the fetch failed.
+// Every frame of group `sequence`, fetched whole, or why the fetch failed. A lite-07 fetch's group
+// competes for the same cap, so the relay may reset its stream to make room too (TOO_FAR_BEHIND); a
+// reader that still wants the rest of a preempted group asks again, as the draft says.
 async function fetch(consumer: Moq.Track.Consumer, sequence: bigint): Promise<string[] | string> {
-	const frames: string[] = [];
-	try {
-		const group = await consumer.fetchGroup(sequence);
-		for (;;) {
-			const frame = await group.readString();
-			if (frame === undefined) return frames;
-			frames.push(frame);
+	for (;;) {
+		const frames: string[] = [];
+		try {
+			const group = await consumer.fetchGroup(sequence);
+			for (;;) {
+				const frame = await group.readString();
+				if (frame === undefined) return frames;
+				frames.push(frame);
+			}
+		} catch (err) {
+			if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.TooFarBehind) continue;
+			return `${frames.length} frames, then ${err}`;
 		}
-	} catch (err) {
-		return `${frames.length} frames, then ${err}`;
 	}
 }

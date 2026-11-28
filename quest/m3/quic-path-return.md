@@ -31,6 +31,10 @@ Verified in `moq-quic`'s connection code:
 - Two-way outage. `RttEstimator::update` takes the first acknowledgment after
   the return as an ordinary sample, which spans the outage (about 5 s), with
   no outlier guard.
+- Additional root causes reported by `kixel-ai/kixel.ai` m1 (`quest/m1/fleet/flap-stall.md`,
+  promoted to m1 on 2026-11-26): a stretched `3 * PTO` (~29 s) idle timeout
+  after a link flap and a full congestion window holding back ACKs on path
+  return. Check both alongside the probe and RTT fixes above.
 
 Recommended fixes, to be confirmed by measurement:
 

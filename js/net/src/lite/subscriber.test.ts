@@ -23,7 +23,7 @@ import {
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
@@ -274,16 +274,16 @@ const PEER = toHop(2n);
 
 /**
  * Write a claim the way `version` carries it: before lite-07 with its hop chain, and on lite-07
- * naming its instance, at no cost.
+ * naming its identity, at no cost.
  */
 function claimer(version: Version) {
-	return async (w: Writer, suffix: Path.Valid, { instance, hops }: { instance?: Instance.Valid; hops: Hop[] }) => {
+	return async (w: Writer, suffix: Path.Valid, { identity, hops }: { identity?: Identity.Valid; hops: Hop[] }) => {
 		if (version !== Version.DRAFT_07) {
 			await encodeAnnounceBroadcast(w, { status: "active", suffix, hops }, version);
 			return;
 		}
-		if (!instance) throw new Error("a lite-07 claim names its instance");
-		await encodeAnnounceBroadcast(w, { status: "start", suffix, instance, claim: ownClaim(0n) }, version);
+		if (!identity) throw new Error("a lite-07 claim names its identity");
+		await encodeAnnounceBroadcast(w, { status: "start", suffix, identity, claim: ownClaim(0n) }, version);
 	};
 }
 
@@ -462,7 +462,7 @@ test("an update moves the route in place, even from another publisher", async ()
 	subscriber.close();
 });
 
-test("a lite-07 restart replaces the instance, and the next consume subscribes fresh", async () => {
+test("a lite-07 restart replaces the identity, and the next consume subscribes fresh", async () => {
 	const { subscriber, send, ok, settle } = announceHarness(Version.DRAFT_07);
 	const announced = subscriber.routes();
 	await settle();
@@ -470,25 +470,25 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	const v = Version.DRAFT_07;
 	await ok();
-	const first = Instance.random();
-	await send((w) => claimer(v)(w, room, { instance: first, hops: [] }));
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: first } });
+	const first = Identity.random();
+	await send((w) => claimer(v)(w, room, { identity: first, hops: [] }));
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { identity: first } });
 	const held = subscriber.consume(room);
 
-	// Another instance is another claim, started before the one it replaces ends: a restart, and
+	// Another identity is another claim, started before the one it replaces ends: a restart, and
 	// the handle already out stays.
 	let last = 0n;
-	for (const instance of [Instance.random(), Instance.random()]) {
+	for (const identity of [Identity.random(), Identity.random()]) {
 		const ended = last++;
 		await send(async (w) => {
 			const claim = { ...ownClaim(0n), cost: 3n };
-			await encodeAnnounceBroadcast(w, { status: "start", suffix: room, instance, claim }, v);
+			await encodeAnnounceBroadcast(w, { status: "start", suffix: room, identity, claim }, v);
 			await encodeAnnounceBroadcast(w, { status: "endedId", id: ended }, v);
 		});
 		const restarted = await announced.next();
 		// Priced past the claim's cost and this session's link.
 		expect(restarted).toMatchObject({ prefix: room, kind: "restart", route: { cost: 4n } });
-		expect(restarted?.route.instance).toBe(instance);
+		expect(restarted?.route.identity).toBe(identity);
 		const fresh = subscriber.consume(room);
 		expect(fresh.closed).not.toBe(held.closed);
 		expect(held.closed.peek()).toBeUndefined();
@@ -531,7 +531,7 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	// The whole tree holds `b`, which may already be in the peer's answer; `a` cannot gain from it.
 	expect(everything.synced.peek()).toBe(false);
 	expect(a.synced.peek()).toBe(true);
-	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
+	await send((w) => claimer(v)(w, Path.from("b/x"), { identity: Identity.random(), hops: [] }));
 	await ok();
 	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
 	expect(await everything.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
@@ -634,7 +634,7 @@ test("a lite-07 unresolved claim outlives another prefix's removal", async () =>
 		send((w) =>
 			encodeAnnounceBroadcast(
 				w,
-				{ status: "start", suffix, pathBase, instance: Instance.random(), claim: ownClaim(0n) },
+				{ status: "start", suffix, pathBase, identity: Identity.random(), claim: ownClaim(0n) },
 				v,
 			),
 		);
@@ -668,13 +668,13 @@ test.each([
 	const job = Path.from("pool/job");
 
 	await ok();
-	await send((w) => claimer(version)(w, pool, { instance: named(version, "a"), hops: [PUBLISHER_A] }));
+	await send((w) => claimer(version)(w, pool, { identity: named(version, "a"), hops: [PUBLISHER_A] }));
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
 	const held = subscriber.consume(job);
 
 	if (version === Version.DRAFT_07) {
 		await send(async (w) => {
-			await claimer(version)(w, pool, { instance: named(version, "b"), hops: [] });
+			await claimer(version)(w, pool, { identity: named(version, "b"), hops: [] });
 			await encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, version);
 		});
 		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "restart" });
@@ -711,7 +711,8 @@ test("an update that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "start",
-		route: { hops: [PUBLISHER_A, PEER], cost: 0n },
+		// The advertised cost plus this link's 1.
+		route: { hops: [PUBLISHER_A, PEER], cost: 1n },
 	});
 
 	await send((w) =>
@@ -720,7 +721,7 @@ test("an update that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "update",
-		route: { hops: [PUBLISHER_A, PEER], cost: 4n },
+		route: { hops: [PUBLISHER_A, PEER], cost: 5n },
 	});
 
 	announced.close();
@@ -1759,18 +1760,66 @@ test("a reset without its code ends the group", async () => {
 	}
 });
 
+// Lite-07: a fetch's Group Stream reset to make room competes for the same cap, and a reader asks
+// again only once it knows why. When Firefox drops the reset's code, the drop the publisher names
+// the group in says it, before or after the reset lands; when Chromium loses the reset itself, the
+// drop ends the stream, even one whose header the drop overtook.
+test.each(["before", "after", "without", "overtaking"] as const)(
+	"a fetch whose reset lost its code ends with the reason its drop names (drop %s the reset)",
+	async (order) => {
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, toHop(1n));
+		const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n);
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version, 1000);
+			const request = await opened(1);
+			await request.reading;
+			await respond(request, version, [{ start: answer(version, 0n) }]);
+
+			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.TooFarBehind }) };
+			if (order === "overtaking") {
+				await respond(request, version, [drop]);
+				await drainReactions();
+				const late = handStream(version);
+				late.write(await liteFrame(300, new Uint8Array([1])));
+				await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), late.reader);
+				request.inbound.close();
+				await expect(fetch).rejects.toMatchObject({ code: StreamCode.TooFarBehind });
+				return;
+			}
+			const stream = handStream(version);
+			stream.write(await liteFrame(300, new Uint8Array([1])));
+			const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), stream.reader);
+			const group = await fetch;
+			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+			if (order !== "after") await respond(request, version, [drop]);
+			if (order !== "without") stream.error(new TypeError("Error in input stream"));
+			if (order !== "without") await running;
+			if (order === "after") await respond(request, version, [drop]);
+			request.inbound.close();
+			expect(await group.closed).toMatchObject({ code: StreamCode.TooFarBehind });
+			await running;
+		} finally {
+			subscriber.close();
+		}
+	},
+);
+
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
-// leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
-// for that stream at most the grace: a stale drop before or after its header, or a final one before
-// it, even with a stale drop of the group after the final one and an update after both. A final
-// drop after it ends the read at once.
+// leaves the stream open forever. The publisher names every group whose stream it resets without a
+// reliable reset in a drop, which accounts for the group, so the stream holds the subscription's end
+// no longer, before or after its header: the end waits out no timer. A final drop ends the group
+// through the track at once; a stale one leaves it arriving, as the track's contract says, until
+// the stream's own end or the track's release.
 test.each([
 	["stale", "before"],
 	["stale", "after"],
 	["final", "before"],
-	["final then stale", "before"],
-	["final then stale", "both before"],
-] as const)("a drop lets the end give up on a stream that never ends (%s drop %s its header)", async (kind, order) => {
+	["final", "after"],
+] as const)("a drop lets go of a stream whose reset was lost (%s drop %s its header)", async (kind, order) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1786,38 +1835,37 @@ test.each([
 
 		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
 		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
-		const stale = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) };
-		if (order !== "after") {
-			await respond(request, version, order === "both before" ? [drop, stale] : [drop]);
+		if (order === "before") {
+			await respond(request, version, [drop]);
 			await drainReactions();
 		}
 		const lost = handStream(version);
 		lost.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
-		const group = await track.recvGroup();
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		if (order === "after") await respond(request, version, [drop]);
-		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
-		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
-		await drainReactions();
-		// An update reopens neither drop.
-		if (kind === "final then stale") {
-			track.update({ priority: 1 });
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
+		let group: GroupConsumer | undefined;
+		if (order === "after") {
+			group = await track.recvGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+			await respond(request, version, [drop]);
 			await drainReactions();
+			if (kind === "final") expect(await group?.closed).toMatchObject({ code: error });
+			else expect(group?.closed.peek()).toBeUndefined();
 		}
 
 		let fin = false;
 		void request.finished.then(() => {
 			fin = true;
 		});
-		await clock.advance(GRACE.div(2));
-		expect(fin).toBe(false);
-		await clock.advance(GRACE);
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
 		expect(fin).toBe(true);
-		// The publisher's FIN in reply ends the track at once, without another grace.
+
+		// The publisher's FIN in reply releases the track, which cuts a group the stale drop left
+		// arriving, and with it the read of a stream that never ends.
 		request.inbound.close();
-		expect(await track.recvGroup()).toBeUndefined();
-		expect(await track.closed).toBeNull();
+		await running;
+		if (kind === "stale" && order === "after")
+			expect(await group?.closed).toMatchObject({ code: StreamCode.Cancel });
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1826,9 +1874,9 @@ test.each([
 });
 
 // Lite-07: a Group Stream can wait unread on a copy of its group still arriving, as a recovery's does
-// on the copy its subscription shares. A final drop that lands during that wait accounts for the
-// group, so a stream whose reset the browser then loses holds the end at most the grace.
-test("a drop during a duplicate wait lets the end give up on a stream that never ends", async () => {
+// on the copy its subscription shares. A drop that lands during that wait lets go of the stream,
+// whose reset the browser may lose, so the subscription's end waits out no timer.
+test("a drop during a duplicate wait lets go of a stream whose reset was lost", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1853,24 +1901,74 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
 		await respond(request, version, [
 			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
 			{ end: new SubscribeEnd(1n) },
 		]);
 		await drainReactions();
-
-		let fin = false;
-		void request.finished.then(() => {
-			fin = true;
-		});
-		await clock.advance(GRACE.div(2));
-		expect(fin).toBe(false);
-		await clock.advance(GRACE);
 		expect(fin).toBe(true);
 	} finally {
 		track.close();
 		subscriber.close();
 		installed.close();
+	}
+});
+
+// Lite-07: a stream a drop overtook holds no end, even once it takes the group from another
+// subscription's copy that failed while it waited: the drop already named this stream's group on
+// the wire, so its reset, which a browser can lose, may be all that is left of it.
+test("a stream a drop overtook holds no end after it takes a failed copy's group", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; tail: { reading: boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+		if (!entry) throw new Error("no subscription");
+
+		// Another subscription's copy of group 0, still arriving, then a stale drop, then this
+		// subscription's stream of the group, which the drop overtook and which waits on that copy.
+		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
+		await drainReactions();
+		const lost = handStream(version);
+		lost.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
+		await drainReactions();
+
+		// That copy fails, so this stream takes the group, and still holds no end.
+		other.abort(new StreamError(StreamCode.Cancel));
+		await drainReactions();
+		expect(entry.tail.reading).toBe(false);
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
+		expect(fin).toBe(true);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
 	}
 });
 
@@ -1962,48 +2060,6 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		await running;
 		await drainReactions();
 		expect(fin).toBe(true);
-	} finally {
-		track.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// Lite-07: a stale drop is final, so a stream it excused stays excused through an update: the end
-// waits for it no longer than the grace, as a browser may have lost its reset.
-test("a stream a stale drop excused stays excused after an update", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: answer(version, 0n) }]);
-
-		const slow = handStream(version);
-		slow.write(await liteFrame(0, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), slow.reader);
-		const group = await track.recvGroup();
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
-		// SUBSCRIBE_END starts the end's grace, and the update then widens the live join's max.
-		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
-		await drainReactions();
-		track.update({
-			priority: 0,
-			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }],
-		});
-		await drainReactions();
-
-		await clock.advance(GRACE.mul(3));
-		await request.finished;
-		slow.finish();
-		await running;
 	} finally {
 		track.close();
 		subscriber.close();
@@ -2325,7 +2381,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 });
 
 // A fetch belongs to the consume that opened it. Once that consume is gone (a replaced
-// instance's is evicted), a fresh one for the path opens its own FETCH rather than reading the
+// identity's is evicted), a fresh one for the path opens its own FETCH rather than reading the
 // old one's, even while the old FETCH is still open.
 test("a fresh consume never joins a fetch an earlier one opened", async () => {
 	const { quic, streams, opened } = fakeSession();
@@ -2438,7 +2494,7 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 
 // Serve announcements and metadata on separate mock streams, with no wall-clock wait.
 test.each([Version.DRAFT_05, Version.DRAFT_06])(
-	"a retired handle on a wire without instances refuses new metadata on %s",
+	"a retired handle on a wire without identities refuses new metadata on %s",
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -2486,12 +2542,12 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	},
 );
 
-/** The instance an announcement names on a wire that carries one, `name` on lite-07. */
-function named(version: Version, name: string): Instance.Valid | undefined {
-	return version === Version.DRAFT_07 ? Instance.parse(name) : undefined;
+/** The identity an announcement names on a wire that carries one, `name` on lite-07. */
+function named(version: Version, name: string): Identity.Valid | undefined {
+	return version === Version.DRAFT_07 ? Identity.parse(name) : undefined;
 }
 
-// Announce PUBLISHER_A's `pool` on stream 0, under instance `a` where the wire carries one, and
+// Announce PUBLISHER_A's `pool` on stream 0, under identity `a` where the wire carries one, and
 // return how to withdraw it and how to announce PUBLISHER_B's, under `b`, in its place.
 async function unpinnedPool(version: Version, streams: FakeStream[], announced: { next(): Promise<unknown> }) {
 	const send = async (encode: (writer: Writer) => Promise<void>) => {
@@ -2540,9 +2596,9 @@ async function respond(stream: FakeStream, version: Version, responses: Subscrib
 	if (fin) stream.inbound.close();
 }
 
-// A SUBSCRIBE without an instance resolves whichever instance won the path when it arrived, so one
-// unanswered when another instance takes the path is refused, a withdrawal followed by a new
-// announcement included. One answered first stays on its instance, and a withdrawal alone leaves
+// A SUBSCRIBE without an identity resolves whichever identity won the path when it arrived, so one
+// unanswered when another identity takes the path is refused, a withdrawal followed by a new
+// announcement included. One answered first stays on its identity, and a withdrawal alone leaves
 // it to its answer, so a track that finished as its broadcast ended still arrives.
 test.each([
 	["unanswered on lite-05 is refused", Version.DRAFT_05, "replaced"],
@@ -2594,7 +2650,7 @@ test.each([
 
 // A TRACK answered while its SUBSCRIBE still waits for a stream belongs to the subscription, so
 // a withdrawal then closes it rather than leaving it to a create that may never open. Only a
-// minted instance ends with its route: a named one leaves the request to the peer.
+// minted identity ends with its route: a named one leaves the request to the peer.
 test("a withdrawal while the subscribe opens closes the answered track", async () => {
 	const version = Version.DRAFT_06;
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -2679,7 +2735,7 @@ test.each(["track", "fetch", "open"] as const)(
 			await answerTrackInfo(streams[0], Version.DRAFT_06);
 			await opened(1);
 		}
-		const cause = new Error("broadcast instance retired");
+		const cause = new Error("broadcast identity retired");
 		retired.abort(cause);
 		expect(await first).toBe(cause);
 		expect(await second).toBe(cause);
@@ -2712,7 +2768,7 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 	await streams[1].reading;
 	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("old!")]));
 	const first = await fetch;
-	retired.abort(new Error("broadcast instance retired"));
+	retired.abort(new Error("broadcast identity retired"));
 	const cached = await subscriber.fetchGroup(path, "video", 0n, {}, consumed);
 	expect(streams.length).toBe(2);
 	expect((await first.readFrame())?.payload).toEqual((await cached.readFrame())?.payload);
@@ -2723,12 +2779,12 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 
 // Drive discovery and inspect the TRACK request before answering it. Waiting for the
 // reader means the whole request has reached the wire, without a clock-based settle.
-test("consumes resolve the serving prefix and pin its instance", async () => {
+test("consumes resolve the serving prefix and pin its identity", async () => {
 	const { subscriber, announced, send, opened, version } = await routedStream();
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
-	const instance = Instance.random();
-	await send({ status: "start", suffix: pool, instance, claim: ownClaim(0n) });
+	const identity = Identity.random();
+	await send({ status: "start", suffix: pool, identity, claim: ownClaim(0n) });
 	await announced.next();
 	const held = subscriber.consume(job);
 	const info = held
@@ -2739,11 +2795,11 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	await first.reading;
 	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(first.written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
-	expect(await Track.decode(reader, version)).toMatchObject({ instance });
+	expect(await Track.decode(reader, version)).toMatchObject({ identity });
 
-	// The more specific source's instance shadows the covering source's.
-	const other = Instance.random();
-	await send({ status: "start", suffix: job, instance: other, claim: ownClaim(0n) });
+	// The more specific source's identity shadows the covering source's.
+	const other = Identity.random();
+	await send({ status: "start", suffix: job, identity: other, claim: ownClaim(0n) });
 	await announced.next();
 	const fresh = subscriber.consume(job);
 	expect(fresh.closed).not.toBe(held.closed);
@@ -2756,7 +2812,7 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	await second.reading;
 	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(second.written)), version);
 	await freshReader.u53();
-	expect(await Track.decode(freshReader, version)).toMatchObject({ instance: other });
+	expect(await Track.decode(freshReader, version)).toMatchObject({ identity: other });
 
 	await send({ status: "endedId", id: 1n });
 	await announced.next();
@@ -2781,10 +2837,10 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
 		const claim = claimer(version);
-		await send((w) => claim(w, pool, { instance: named(version, "a"), hops: [PUBLISHER_A] }));
+		await send((w) => claim(w, pool, { identity: named(version, "a"), hops: [PUBLISHER_A] }));
 		await announced.next();
 		const held = subscriber.consume(job);
-		await send((w) => claim(w, job, { instance: named(version, "b"), hops: [PUBLISHER_B] }));
+		await send((w) => claim(w, job, { identity: named(version, "b"), hops: [PUBLISHER_B] }));
 		await announced.next();
 		const fresh = subscriber.consume(job);
 		expect(fresh.closed).not.toBe(held.closed);
@@ -2796,7 +2852,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-// Only a wire without instances: on lite-07 the request pins its instance, which the peer
+// Only a wire without identities: on lite-07 the request pins its identity, which the peer
 // answers for whatever else is selected meanwhile.
 test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	"pending metadata cancels on selection change and a live fallback can request again on %s",
@@ -3397,6 +3453,45 @@ test("a range added past the feed start keeps it declared", async () => {
 	}
 });
 
+// A live join answered under the max it was first asked with, before the update retuning it wider
+// went out, places no reader waiting with the wider max, so that join goes out on a probe of its
+// own. Mirrors the Rust `a_join_answered_before_its_retune_is_probed`.
+test("a join answered before its retune goes out is probed", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const asked = (max: Duration) => ({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
+	const track = broadcast.track("video").subscribe(asked(Duration.ZERO));
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		// The reader waits on its join and widens its max, and the answer to the first max lands
+		// before the retune goes out.
+		const reading = track.recvGroup().catch(() => undefined);
+		track.update(asked(Duration.millis(100)));
+		await respond(request, version, [
+			{ start: answer(version, 20n, 0n, { position: { group: 20n, frame: 1 }, ended: false }) },
+		]);
+		const retune = await SubscribeUpdate.decode(sent, version);
+		expect(retune.retune).toEqual([[0n, 100]]);
+		// Without the probe nothing more goes out, and the reader waits on its join for good.
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.ranges).toEqual([{ start: { live: { min: 0, max: 100 } } }]);
+		track.close();
+		await reading;
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A placed join under a max age may be answered past groups the publisher still holds, stale for
 // it alone, so its answer places no history reader at its group; one with no max age skips nothing.
 // Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
@@ -3556,6 +3651,9 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		await stream.reading;
 		if (!entry) throw new Error("no subscription");
 		expect(entry.staleBudget).toBe(500);
+		// The copy records it too, so a group its stream resets as too old stands only for a reader
+		// no wider. Mirrors the Rust `a_copy_records_the_narrowest_budget_its_upstream_may_judge_under`.
+		expect(hooks.judgedUnder(track)).toBe(500);
 
 		// Each update is sent only once the previous write is credited, which may take tasks, so wait
 		// for it on the wire: the budget narrows before its update is written.
@@ -3563,9 +3661,11 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
 		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 5000]]);
 		expect(entry.staleBudget).toBe(500);
+		expect(hooks.judgedUnder(track)).toBe(500);
 		track.update(withMax({ delay: { max: Duration.millis(200) } }));
 		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 200]]);
 		expect(entry.staleBudget).toBe(200);
+		expect(hooks.judgedUnder(track)).toBe(200);
 	} finally {
 		responses.mockRestore();
 		track.close();
@@ -4296,14 +4396,14 @@ test("the PROBE stream sends no target to a Report peer", async () => {
 	viewers.close();
 });
 
-// Announce streams overlapping at a path share the instance minted for it, but a replacement
+// Announce streams overlapping at a path share the identity minted for it, but a replacement
 // delivered on both, interleaved, is a new stream on each: holder counts alone would hand it
-// the old instance, splicing the two.
-test("an interleaved replacement mints a fresh instance", () => {
+// the old identity, splicing the two.
+test("an interleaved replacement mints a fresh identity", () => {
 	const minted = new Minted();
 	const path = Path.from("room/host");
 	const old = minted.acquire(path);
-	expect(Instance.isMinted(old)).toBe(true);
+	expect(Identity.isMinted(old)).toBe(true);
 	expect(minted.acquire(path)).toBe(old);
 
 	// END1, START1, END2, START2.
@@ -4313,7 +4413,7 @@ test("an interleaved replacement mints a fresh instance", () => {
 	minted.release(path, old, true);
 	expect(minted.acquire(path)).toBe(replacement);
 
-	// A stream closing ends nothing: the other's advertisement keeps its instance.
+	// A stream closing ends nothing: the other's advertisement keeps its identity.
 	minted.release(path, replacement, false);
 	expect(minted.acquire(path)).toBe(replacement);
 });
@@ -4471,7 +4571,7 @@ async function routedStream(options?: RouteOptions, scope?: Path.Pattern) {
 	while (edits.length === 0) await yieldNow();
 	await settled();
 	// The TRACK request a consume of `path` opens as the session's `index`th bidirectional stream.
-	const trackRequest = async (path: Path.Valid, index: number, pin?: Instance.Valid) => {
+	const trackRequest = async (path: Path.Valid, index: number, pin?: Identity.Valid) => {
 		const consumed = subscriber.consume(path, pin);
 		const info = consumed
 			.track("video")
@@ -4492,16 +4592,16 @@ const claimOf = (extra: Partial<Claim> = {}): Claim => ({ ...ownClaim(0n), ...ex
 test("a lite-07 claim at the root updates and ends", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const root = Path.empty();
-	const i = Instance.parse("i");
+	const i = Identity.parse("i");
 
-	await send({ status: "start", suffix: root, instance: i, claim: claimOf() });
+	await send({ status: "start", suffix: root, identity: i, claim: claimOf() });
 	// Priced past this session's link.
-	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { instance: i, cost: 1n } });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { identity: i, cost: 1n } });
 
 	await send({ status: "change", id: 0n, claim: claimOf({ cost: 4n }) });
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "update", route: { cost: 5n } });
 
-	// Another epoch of the instance restarts what was read through it.
+	// Another epoch of the identity restarts what was read through it.
 	await send({ status: "change", id: 0n, claim: claimOf({ epoch: 1n, cost: 4n }) });
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "restart", route: { epoch: 1n } });
 
@@ -4509,7 +4609,7 @@ test("a lite-07 claim at the root updates and ends", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "end" });
 
 	// Its path is free again, so starting it anew is no duplicate.
-	await send({ status: "start", suffix: root, instance: i, claim: claimOf() });
+	await send({ status: "start", suffix: root, identity: i, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start" });
 
 	announced.close();
@@ -4520,7 +4620,7 @@ test("a lite-07 claim at the root updates and ends", async () => {
 test("a lite-07 claim the peer lost goes offline", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
-	await send({ status: "start", suffix: room, instance: Instance.parse("i"), claim: claimOf() });
+	await send({ status: "start", suffix: room, identity: Identity.parse("i"), claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start" });
 	await send({ status: "endedId", id: 0n, lost: true });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "offline" });
@@ -4532,7 +4632,7 @@ test("a lite-07 claim the peer lost goes offline", async () => {
 test("a lite-07 peer finishing its stream takes its claims offline", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
-	await send({ status: "start", suffix: room, instance: Instance.parse("i"), claim: claimOf() });
+	await send({ status: "start", suffix: room, identity: Identity.parse("i"), claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start" });
 	subscriber.announceFinished();
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "offline" });
@@ -4545,10 +4645,10 @@ test("a lite-07 peer finishing its stream takes its claims offline", async () =>
 test("a lite-07 claim is taken once it is told available, and held while unavailable", async () => {
 	const { subscriber, announced, send, settled } = await routedStream();
 	const [held, late] = [Path.from("held"), Path.from("late")];
-	const i = Instance.parse("i");
+	const i = Identity.parse("i");
 
-	await send({ status: "start", suffix: late, instance: i, claim: claimOf({ unavailable: true }) });
-	await send({ status: "start", suffix: held, instance: i, claim: claimOf() });
+	await send({ status: "start", suffix: late, identity: i, claim: claimOf({ unavailable: true }) });
+	await send({ status: "start", suffix: held, identity: i, claim: claimOf() });
 	// Nothing can serve the claim told unavailable first, so only the other shows.
 	expect(await announced.next()).toMatchObject({ prefix: held, kind: "start", route: { available: true } });
 
@@ -4573,24 +4673,24 @@ test("a lite-07 claim is taken once it is told available, and held while unavail
 	subscriber.close();
 });
 
-// The peer sends each instance's claim at a path, and the reader is shown the best: the cheaper
+// The peer sends each identity's claim at a path, and the reader is shown the best: the cheaper
 // one, then the other once it ends.
-test("a lite-07 path claimed by two instances fails over when the cheaper one ends", async () => {
+test("a lite-07 path claimed by two identities fails over when the cheaper one ends", async () => {
 	const { subscriber, announced, send, trackRequest } = await routedStream();
 	const room = Path.from("room");
-	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
+	const [a, b] = [Identity.parse("a"), Identity.parse("b")];
 
-	await send({ status: "start", suffix: room, instance: a, claim: claimOf({ cost: 5n }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: a } });
-	await send({ status: "start", suffix: room, instance: b, claim: claimOf() });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: b } });
+	await send({ status: "start", suffix: room, identity: a, claim: claimOf({ cost: 5n }) });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { identity: a } });
+	await send({ status: "start", suffix: room, identity: b, claim: claimOf() });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: b } });
 	const first = await trackRequest(room, 0);
-	expect(first.request).toMatchObject({ instance: b });
+	expect(first.request).toMatchObject({ identity: b });
 
 	await send({ status: "endedId", id: 1n, lost: true });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: a } });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: a } });
 	const second = await trackRequest(room, 1);
-	expect(second.request).toMatchObject({ instance: a });
+	expect(second.request).toMatchObject({ identity: a });
 
 	first.consumed.close();
 	second.consumed.close();
@@ -4604,25 +4704,25 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 	const { subscriber, announced, send, trackRequest } = await routedStream();
 	const room = Path.from("room");
 	const other = Path.from("other");
-	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
+	const [a, b] = [Identity.parse("a"), Identity.parse("b")];
 
-	await send({ status: "start", suffix: room, instance: a, claim: claimOf({ cost: 4n }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: a } });
-	await send({ status: "start", suffix: room, instance: b, claim: claimOf() });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: b } });
+	await send({ status: "start", suffix: room, identity: a, claim: claimOf({ cost: 4n }) });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { identity: a } });
+	await send({ status: "start", suffix: room, identity: b, claim: claimOf() });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: b } });
 
 	// The older claim re-prices into a tie: the newer keeps the path, so nothing is reported.
 	await send({ status: "change", id: 0n, claim: claimOf() });
-	await send({ status: "start", suffix: other, instance: b, claim: claimOf() });
+	await send({ status: "start", suffix: other, identity: b, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: other, kind: "start" });
 	const kept = await trackRequest(room, 0);
-	expect(kept.request).toMatchObject({ instance: b });
+	expect(kept.request).toMatchObject({ identity: b });
 
 	// Another epoch at the tie is the newest claim: both pick it.
 	await send({ status: "change", id: 0n, claim: claimOf({ epoch: 1n }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: a, epoch: 1n } });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: a, epoch: 1n } });
 	const restarted = await trackRequest(room, 1);
-	expect(restarted.request).toMatchObject({ instance: a });
+	expect(restarted.request).toMatchObject({ identity: a });
 
 	kept.consumed.close();
 	restarted.consumed.close();
@@ -4631,34 +4731,34 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 	await Promise.all([kept.info, restarted.info]);
 });
 
-test("a lite-07 stream reports each instance's claim with claims", async () => {
+test("a lite-07 stream reports each identity's claim with claims", async () => {
 	const { subscriber, announced, send } = await routedStream({ claims: true });
 	const pool = Path.from("pool");
-	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
-	await send({ status: "start", suffix: pool, instance: a, claim: claimOf() });
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { instance: a } });
-	await send({ status: "start", suffix: pool, instance: b, claim: claimOf() });
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { instance: b } });
+	const [a, b] = [Identity.parse("a"), Identity.parse("b")];
+	await send({ status: "start", suffix: pool, identity: a, claim: claimOf() });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { identity: a } });
+	await send({ status: "start", suffix: pool, identity: b, claim: claimOf() });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { identity: b } });
 
 	// One ending takes only its own claim.
 	await send({ status: "endedId", id: 0n, lost: true });
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "offline", route: { instance: a } });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "offline", route: { identity: a } });
 	await send({ status: "change", id: 1n, claim: claimOf({ cost: 3n }) });
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "update", route: { instance: b, cost: 4n } });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "update", route: { identity: b, cost: 4n } });
 
 	announced.close();
 	subscriber.close();
 });
 
-// An instance's newer epoch made at `x` supersedes its older one filed at `x/a` a segment above it,
-// so a reader of each instance's claim at `x/a` shows the epoch a consume pinned to it takes.
-test("a lite-07 reader of each instance's claim drops an epoch superseded across filings", async () => {
+// An identity's newer epoch made at `x` supersedes its older one filed at `x/a` a segment above it,
+// so a reader of each identity's claim at `x/a` shows the epoch a consume pinned to it takes.
+test("a lite-07 reader of each identity's claim drops an epoch superseded across filings", async () => {
 	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];
 	const narrow = await another(Path.Pattern.subtree(xa), { claims: true });
-	const i = Instance.parse("i");
-	await send({ status: "start", suffix: xa, instance: i, claim: claimOf({ above: 1n, epoch: 1n }) });
-	await send({ status: "start", suffix: x, instance: i, claim: claimOf({ epoch: 2n }) });
+	const i = Identity.parse("i");
+	await send({ status: "start", suffix: xa, identity: i, claim: claimOf({ above: 1n, epoch: 1n }) });
+	await send({ status: "start", suffix: x, identity: i, claim: claimOf({ epoch: 2n }) });
 	await settled();
 	let shown: bigint | undefined;
 	for (;;) {
@@ -4667,7 +4767,7 @@ test("a lite-07 reader of each instance's claim drops an epoch superseded across
 		shown = next.route.epoch;
 	}
 	const consumed = await trackRequest(xa, 0);
-	expect(consumed.request).toMatchObject({ instance: i });
+	expect(consumed.request).toMatchObject({ identity: i });
 	expect(shown).toBe(2n);
 
 	consumed.consumed.close();
@@ -4683,18 +4783,18 @@ test("a lite-07 reader below the request ranks a broader claim as above its pref
 	const narrow = await another(Path.Pattern.subtree(xa));
 	// The root covers the narrow reader, so its request is the root's alone.
 	expect(edits).toHaveLength(1);
-	const [broad, exact] = [Instance.parse("broad"), Instance.parse("exact")];
-	await send({ status: "start", suffix: x, instance: broad, claim: claimOf() });
-	await send({ status: "start", suffix: xa, instance: exact, claim: claimOf({ cost: 10n }) });
+	const [broad, exact] = [Identity.parse("broad"), Identity.parse("exact")];
+	await send({ status: "start", suffix: x, identity: broad, claim: claimOf() });
+	await send({ status: "start", suffix: xa, identity: exact, claim: claimOf({ cost: 10n }) });
 	await settled();
 	// The broader claim shows first, one segment above the reader's prefix, until the exact one
 	// arrives, which outranks it whatever it costs.
 	expect(await narrow.announced.next()).toMatchObject({
 		prefix: xa,
 		kind: "start",
-		route: { instance: broad, above: 1n },
+		route: { identity: broad, above: 1n },
 	});
-	expect(await narrow.announced.next()).toMatchObject({ prefix: xa, route: { instance: exact, above: 0n } });
+	expect(await narrow.announced.next()).toMatchObject({ prefix: xa, route: { identity: exact, above: 0n } });
 
 	narrow.announced.close();
 	announced.close();
@@ -4707,18 +4807,18 @@ test("a lite-07 reader below the request shows the claim a consume of its prefix
 	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];
 	const narrow = await another(Path.Pattern.subtree(xa));
-	const [made, filed] = [Instance.parse("made"), Instance.parse("filed")];
-	await send({ status: "start", suffix: x, instance: made, claim: claimOf() });
-	await send({ status: "start", suffix: xa, instance: filed, claim: claimOf({ above: 1n }) });
+	const [made, filed] = [Identity.parse("made"), Identity.parse("filed")];
+	await send({ status: "start", suffix: x, identity: made, claim: claimOf() });
+	await send({ status: "start", suffix: xa, identity: filed, claim: claimOf({ above: 1n }) });
 	await settled();
-	let shown: Instance.Valid | undefined;
+	let shown: Identity.Valid | undefined;
 	for (;;) {
 		const next = await Promise.race([narrow.announced.next(), settled().then(() => undefined)]);
 		if (!next) break;
-		shown = next.route.instance;
+		shown = next.route.identity;
 	}
 	const consumed = await trackRequest(xa, 0);
-	expect(consumed.request).toMatchObject({ instance: filed });
+	expect(consumed.request).toMatchObject({ identity: filed });
 	expect(shown).toBe(filed);
 
 	consumed.consumed.close();
@@ -4731,15 +4831,15 @@ test("a lite-07 reader below the request shows the claim a consume of its prefix
 test("a lite-07 claim ranks by its priority before its cost, and last while it drains", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
-	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
-	await send({ status: "start", suffix: room, instance: a, claim: claimOf({ priority: -10 }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: a } });
-	await send({ status: "start", suffix: room, instance: b, claim: claimOf({ cost: 5n }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: b } });
+	const [a, b] = [Identity.parse("a"), Identity.parse("b")];
+	await send({ status: "start", suffix: room, identity: a, claim: claimOf({ priority: -10 }) });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { identity: a } });
+	await send({ status: "start", suffix: room, identity: b, claim: claimOf({ cost: 5n }) });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: b } });
 
 	// A node on the way to the dearer one sent GOAWAY: it ranks last, whatever its priority.
 	await send({ status: "change", id: 1n, claim: claimOf({ cost: 5n, draining: true }) });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { instance: a } });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { identity: a } });
 
 	announced.close();
 	subscriber.close();
@@ -4751,8 +4851,8 @@ test("a lite-07 edit drops the claims within a prefix it removed", async () => {
 	const { subscriber, announced, send, edits, settled } = await routedStream(undefined, Path.Pattern.subtree("a/b"));
 	const [ab, abc] = [Path.from("a/b"), Path.from("a/b/c")];
 	expect(edits).toEqual([{ remove: [], add: [{ prefix: ab, hidden: false }] }]);
-	const i = Instance.parse("i");
-	await send({ status: "start", suffix: abc, instance: i, claim: claimOf() });
+	const i = Identity.parse("i");
+	await send({ status: "start", suffix: abc, identity: i, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: abc, kind: "start" });
 
 	// A wider reader moves the request up, which removes the narrower prefix.
@@ -4762,7 +4862,7 @@ test("a lite-07 edit drops the claims within a prefix it removed", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: abc, kind: "offline" });
 
 	// The Announce ID the dropped claim held is retired on both ends.
-	await send({ status: "start", suffix: abc, instance: i, claim: claimOf() });
+	await send({ status: "start", suffix: abc, identity: i, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: abc, kind: "start" });
 	expect(await wide.next()).toMatchObject({ prefix: abc, kind: "start" });
 	await send({ status: "endedId", id: 1n, lost: false });
@@ -4777,19 +4877,19 @@ test("a lite-07 edit drops the claims within a prefix it removed", async () => {
 test("a lite-07 claim at a path too deep to hold is refused alone", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const deep = Path.from(Array.from({ length: 32 }, () => "a").join("/"));
-	const i = Instance.parse("i");
-	await send({ status: "start", suffix: deep, instance: i, claim: claimOf() });
+	const i = Identity.parse("i");
+	await send({ status: "start", suffix: deep, identity: i, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: deep, kind: "start" });
 	// The whole of the base, and a segment more.
 	await send({
 		status: "start",
 		suffix: Path.from("b"),
 		pathBase: { distance: 1n, keep: 32 },
-		instance: i,
+		identity: i,
 		claim: claimOf(),
 	});
 	const room = Path.from("room");
-	await send({ status: "start", suffix: room, instance: i, claim: claimOf() });
+	await send({ status: "start", suffix: room, identity: i, claim: claimOf() });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start" });
 	await send({ status: "endedId", id: 1n, lost: false });
 	await send({ status: "endedId", id: 2n, lost: false });
@@ -4802,19 +4902,19 @@ test("a lite-07 claim at a path too deep to hold is refused alone", async () => 
 // Each closes the session: a violation on the peer's Announce Stream is the peer breaking it.
 test.each([
 	[
-		"one instance claiming a path twice",
+		"one identity claiming a path twice",
 		[
-			{ status: "start", suffix: Path.from("room"), instance: Instance.parse("a"), claim: ownClaim(0n) },
-			{ status: "start", suffix: Path.from("room"), instance: Instance.parse("a"), claim: ownClaim(0n) },
+			{ status: "start", suffix: Path.from("room"), identity: Identity.parse("a"), claim: ownClaim(0n) },
+			{ status: "start", suffix: Path.from("room"), identity: Identity.parse("a"), claim: ownClaim(0n) },
 		],
 	],
 	[
 		"a claim further above its path than the path is deep",
-		[{ status: "start", suffix: Path.from("room"), instance: Instance.parse("a"), claim: ownClaim(0n, 2n) }],
+		[{ status: "start", suffix: Path.from("room"), identity: Identity.parse("a"), claim: ownClaim(0n, 2n) }],
 	],
 	["an update of an unknown claim", [{ status: "change", id: 0n, claim: ownClaim(0n) }]],
 	["an end of an unknown claim", [{ status: "endedId", id: 0n, lost: false }]],
-	["a claim without an instance", [{ status: "active", suffix: Path.from("room") }]],
+	["a claim without an identity", [{ status: "active", suffix: Path.from("room") }]],
 	["a SYNCED for a Prefix ID never asked for", [{ status: "synced", prefix: 1n }]],
 	[
 		"a second SYNCED for one Prefix ID",

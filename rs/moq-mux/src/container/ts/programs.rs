@@ -29,7 +29,7 @@ use crate::catalog;
 /// The PAT is followed as it changes. A program a later PAT adds waits for its PMT as the first
 /// PAT's do, and each program follows its PMT to the PID the latest PAT names. One a later PAT
 /// drops is retired: its tracks finish and its broadcast is unannounced, while the other
-/// programs carry on. A program that returns publishes a new stream, under a new instance.
+/// programs carry on. A program that returns publishes a new stream, under a new identity.
 ///
 /// The multiplex is parsed once: framing, continuity, the PAT and the SI sections are shared,
 /// and each program reads only the packets on the PIDs its PAT entry and PMT claim. A packet on a
@@ -786,7 +786,7 @@ impl Programs {
 	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> Result<()> {
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
-		// Each program is its own publisher instance for this run, minted by its route, so a
+		// Each program is its own publisher identity for this run, minted by its route, so a
 		// restart replaces it rather than resuming into it.
 		let route = self.origin.route(&name, moq_net::origin::RouteOptions::hidden())?;
 		// TS carries undecoded elementary streams verbatim, so each catalog carries the
@@ -1045,12 +1045,12 @@ mod test {
 		two_section_pat, video_pes,
 	};
 
-	/// The instance each running program publishes under, announced yet or not.
-	fn instances(programs: &Programs) -> Vec<(u16, moq_net::Instance)> {
+	/// The identity each running program publishes under, announced yet or not.
+	fn identities(programs: &Programs) -> Vec<(u16, moq_net::Identity)> {
 		programs
 			.programs
 			.iter()
-			.map(|program| (program.number, program.route.instance()))
+			.map(|program| (program.number, program.route.identity()))
 			.collect()
 	}
 
@@ -1088,7 +1088,7 @@ mod test {
 	}
 
 	/// A program a later PAT adds publishes, one it drops retires alone, its catalog finished and
-	/// its broadcast closed, and one it restores publishes a new instance that counts on from the
+	/// its broadcast closed, and one it restores publishes a new identity that counts on from the
 	/// retired one, while the program no PAT touched runs throughout.
 	#[tokio::test]
 	async fn programs_follow_the_pat() {
@@ -1101,18 +1101,18 @@ mod test {
 		let mut steps = Steps::new();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		let one = instances(&programs);
+		let one = identities(&programs);
 		assert_eq!(one.len(), 1);
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let both = instances(&programs);
+		let both = identities(&programs);
 		assert_eq!(both[0], one[0], "program 1 carries on");
 		assert_eq!(both[1].0, 2, "the added program publishes");
 		let two = programs.programs[1].route.broadcast().consume();
 		let mut catalog = hang::catalog::Catalog::<()>::subscribe(&two).await.unwrap();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		assert_eq!(instances(&programs), one, "program 1 carries on");
+		assert_eq!(identities(&programs), one, "program 1 carries on");
 		assert!(two.is_closed(), "the dropped program is unannounced");
 		while catalog.next().await.unwrap().is_some() {}
 		let retired = &programs.stats().streams[&0x71];
@@ -1120,10 +1120,10 @@ mod test {
 		assert_eq!(retired.quiet, None, "nothing is expected on a retired PID");
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let back = instances(&programs);
+		let back = identities(&programs);
 		assert_eq!(back[0], one[0], "program 1 carries on");
 		assert_eq!(back[1].0, 2);
-		assert_ne!(back[1].1, both[1].1, "the returning program is a new instance");
+		assert_ne!(back[1].1, both[1].1, "the returning program is a new identity");
 
 		let finished = programs.finish().unwrap();
 
@@ -1151,7 +1151,7 @@ mod test {
 		for packet in std::mem::take(&mut steps.mux.out).chunks(188) {
 			programs.decode(packet).unwrap();
 		}
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2]);
 		let finished = programs.finish().unwrap();
 		let programs = &finished.programs;
@@ -1197,7 +1197,7 @@ mod test {
 			"its PIDs count as unclaimed"
 		);
 		assert_eq!(step(&mut programs, &mut mux, 1001), (2, 2), "each 0.5 s counts");
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [1], "the running program carries on");
 
 		mux.pmt(0x300, 3, 0x1ff, &[(MP2, 0x73)], 0);
@@ -1206,7 +1206,7 @@ mod test {
 			(2, 2),
 			"the late program claims its PID"
 		);
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [1, 3], "the late program starts once its PMT arrives");
 	}
 
@@ -1293,7 +1293,7 @@ mod test {
 		assert_eq!(at(500), 0, "program 1 retired before its PMT was due");
 		assert_eq!(at(550), 1, "due 0.5 s after program 1's last PMT");
 		assert_eq!(at(1000), 1, "program 2's PMT ends the wait");
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [5, 2], "program 2 starts once its PMT arrives");
 	}
 
@@ -1769,7 +1769,7 @@ mod test {
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		let finished = programs.finish().unwrap();
 		let programs = &finished.programs;
-		let running: Vec<_> = instances(programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
 		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");
@@ -2248,10 +2248,10 @@ mod test {
 		assert_eq!(programs.stats().crc_error, 1);
 	}
 
-	/// Each program announces as its own publisher instance for the run, so a restart
+	/// Each program announces as its own publisher identity for the run, so a restart
 	/// replaces it rather than resuming into it.
 	#[test]
-	fn every_program_names_its_own_instance() {
+	fn every_program_names_its_own_identity() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,
@@ -2265,13 +2265,13 @@ mod test {
 			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program announces"
 		);
-		let instances: Vec<_> = programs
+		let identities: Vec<_> = programs
 			.programs
 			.iter()
-			.map(|program| program.route.instance())
+			.map(|program| program.route.identity())
 			.collect();
-		assert_eq!(instances.len(), 2);
-		assert_ne!(instances[0], instances[1]);
+		assert_eq!(identities.len(), 2);
+		assert_ne!(identities[0], identities[1]);
 	}
 
 	/// A program is announced only once its catalog lists its tracks, never on the PAT alone,

@@ -73,7 +73,7 @@ async def main():
         audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
         audio.cut()
 
-        # Each route mints a fresh instance, so viewers see a restart as a new stream.
+        # Each route mints a fresh identity, so viewers see a restart as a new stream.
         route.announce()
 
         # Clean up
@@ -149,7 +149,7 @@ client = moq.Client(
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. Create a route owning a broadcast to fill at `.broadcast`. Create it `hidden` to fill it before `announce()` makes it discoverable and reachable; dropping or cancelling the route retracts it, and `.broadcast.close()` ends both.
+  - `.route(path, *, hidden=False, cost=0, identity=None, epoch=0) → Route`. Create a route owning a broadcast to fill at `.broadcast`. Create it `hidden` to fill it before `announce()` makes it discoverable and reachable; dropping or cancelling the route retracts it, and `.broadcast.close()` ends both.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
@@ -213,7 +213,8 @@ client = moq.Client(
   `Gap`, or `End`. An encoder end is not iterator EOF; media can resume after it.
 - `await media.GroupConsumer.fetch(broadcast, id, rendition, start, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
-- `media.GroupConsumer(group, container)` decodes a raw group, such as one from
+- `media.GroupConsumer(group, id, rendition)` decodes a raw group with a catalog rendition's
+  container and role, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 
@@ -239,6 +240,7 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
+  - `await .subscribe_meta(name, subscription=None) → MetaConsumer`. Each frame's header (declared size and timestamp) without its payload, as a subscription of its own.
 - **`TrackConsumer`**. Async iterator of raw groups, in start order.
   - `await .next_group() → GroupConsumer | None`. Start order; what the default iteration yields.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order; groups already held come in the subscription's group order, newest first unless it asks ascending. Prefer it when latency matters more than order.
@@ -248,27 +250,33 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
+- **`MetaConsumer`**. Async iterator of metadata groups, in arrival order.
+  - `await .recv_group() → MetaGroup | None`. Arrival order, as `TrackConsumer.recv_group()`; what the iteration yields.
+  - `.info() → TrackInfo`
+  - `.update(subscription)`
+- **`MetaGroup`**. Async iterator of `FrameHeader`s.
+  - `await .next_header() → FrameHeader | None` returns a frame's `size` and `timestamp`; `None` ends the group.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `MetaConsumer`, `MetaGroup`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh instance unless `instance` names an `Instance`.
-  - `.claim(prefix, *, hidden=False, cost=0, instance=None, epoch=0) → Claim`. Claim `prefix` and every path beneath it, yielding the requests there.
+  - `.route(path, *, hidden=False, cost=0, identity=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh identity unless `identity` names an `Identity`.
+  - `.claim(prefix, *, hidden=False, cost=0, identity=None, epoch=0) → Claim`. Claim `prefix` and every path beneath it, yielding the requests there.
 - **`Route`**. An exact route on an origin, owning one broadcast. Hold it: dropping or cancelling it retracts it, and so does closing its broadcast.
   - `.broadcast → BroadcastProducer`. The broadcast the route owns.
-  - `.instance → Instance | None`. The stream it serves now, kept across `withdraw()` and `announce()`, or `None` once cancelled without one. Unless one is named, a job's route takes its claim's when it first announces or when `.instance` first reads it. Read first, the job announces under it, and `announce()` fails with `Unroutable` once the claim has moved past it.
+  - `.identity → Identity | None`. The stream it serves now, kept across `withdraw()` and `announce()`, or `None` once cancelled without one. Unless one is named, a job's route takes its claim's when it first announces or when `.identity` first reads it. Read first, the job announces under it, and `announce()` fails with `Unroutable` once the claim has moved past it.
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place; `announce`, `set_cost`, and `set_auth` raise `Closed` once the broadcast closed.
 - **`Claim`**. A prefix route on an origin. Hold it: dropping or cancelling it retracts it and rejects the requests still waiting.
-  - `.instance → Instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
+  - `.identity → Identity`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place.
-  - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous group starts, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
+  - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous group starts, `.route(hidden=..., ...)` for the path's own route, which continues the claim's identity until the job ends and then moves the claim to a fresh one (unless either names an identity: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
-  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
-  - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.identity` names the stream; another identity taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.follow(path, identity=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `identity` follows only that stream)
+  - `.request(path, identity=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `identity` refuses any other stream)
 
 ### Types
 
@@ -282,7 +290,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, cache window, refresh, and timescale.
 - **`TrackRefresh`**. When a subscriber asks the publisher for a new group: a join past `ratio`, waiting out `interval`. `TrackDemand.refresh()` waits for the request.
-- **`Instance`**. Names one continuous stream at a path. `Instance.parse(text)` names one (an empty `text` raises `Error.InvalidInstance`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Instances compare and hash by text and that flag, so pass back an announced instance as is, not `Instance.parse` of its text, to pin its stream.
+- **`Identity`**. Names one continuous stream at a path. `Identity.parse(text)` names one (an empty `text`, or one longer than 256 UTF-8 bytes, raises `Error.InvalidIdentity`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Identities compare and hash by text and that flag, so pass back an announced identity as is, not `Identity.parse` of its text, to pin its stream.
 - **`media.Dimensions`**. `.width: int`, `.height: int`.
 - **`media.Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 

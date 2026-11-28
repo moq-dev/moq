@@ -16,11 +16,11 @@ before PROXY's.
 See the [epic](/quest/m3/proxy/README.md) for the decisions.
 
 - The encoding is Kixel's two-track byte stream, moved here from
-  kixel-ai/kixel.ai's `rs/kixel/src/socket/stream.rs`: one group per
+  [kixel-ai/kixel.ai's socket/stream.rs](https://github.com/kixel-ai/kixel.ai/blob/main/rs/kixel/src/socket/stream.rs): one group per
   direction, a finished group as FIN, and a reset group with an application
   code as RST. Carry over what Kixel has landed on it by then: resuming a
-  session within its track's max-age (its `quest/m0/mesh/reaccept.md`) and a
-  buffer-sized cache per hop (its `quest/m1/stream-memory.md`).
+  session within its track's max-age (finished in kixel.ai#148) and a
+  buffer-sized cache per hop (now kixel.ai's `quest/m1/proxy.md`).
 - The `.proxy/` prefix's leading `.` hides it from announce discovery.
 - Admission stays the [grants](/quest/m3/proxy/grants.md): a converting hop
   admits the `.proxy/` tracks of a dial only under `dial` on the broadcast,

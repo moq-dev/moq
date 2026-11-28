@@ -116,7 +116,8 @@ export class Source {
 	 */
 	#select(renditions: Record<string, Catalog.AudioConfig>): string | undefined {
 		const entries = Object.entries(renditions);
-		for (const kind of ["legacy", "loc", "cmaf"]) {
+		// Raw and CTS time frames by the transport alone, so they are picked only when nothing else fits.
+		for (const kind of ["legacy", "loc", "cmaf", "raw", "cts"]) {
 			const found = entries.find(([, config]) => config.container.kind === kind);
 			if (found) return found[0];
 		}

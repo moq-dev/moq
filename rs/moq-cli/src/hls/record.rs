@@ -1,6 +1,6 @@
 //! Record a broadcast's HLS playlists and segments into a directory as they complete.
 //!
-//! The layout mirrors the served one without the instance: `master.m3u8`, then
+//! The layout mirrors the served one without the identity: `master.m3u8`, then
 //! `{kind}/{rendition}/media.m3u8` with its `init.{n}.mp4` and `{segment}.m4s` files. Each
 //! rendition keeps one continuous media playlist across decoder reconfigurations, so the whole
 //! recording stays playable from its master playlist. Its segments are numbered from the first
@@ -36,26 +36,26 @@ pub struct Recording {
 	master: Option<String>,
 }
 
-/// One rendition's playlist, recorded from each catalog instance of it in turn.
+/// One rendition's playlist, recorded from each catalog identity of it in turn.
 struct Slot {
 	/// The directory holding the playlist, init, and segment files.
 	dir: PathBuf,
 	/// The playlist's URI relative to the master playlist.
 	uri: String,
-	/// The newest instance while one is recording or queued. Released once every instance has
+	/// The newest identity while one is recording or queued. Released once every identity has
 	/// drained, so a removed rendition holds no subscriptions for the rest of the recording.
 	rendition: Option<Arc<Rendition>>,
-	/// What the master playlist lists, as the newest instance last described it.
+	/// What the master playlist lists, as the newest identity last described it.
 	variant: Variant,
 	playlist: Playlist,
-	/// The instance being recorded, if its cursor is in flight.
-	recording: Option<Instance>,
-	/// Replacements whose cursors wait for the current instance to drain, oldest first, each
+	/// The identity being recorded, if its cursor is in flight.
+	recording: Option<Identity>,
+	/// Replacements whose cursors wait for the current identity to drain, oldest first, each
 	/// with the media track it reads.
 	queued: VecDeque<(Arc<str>, segments::Consumer)>,
-	/// How many instances started, which numbers their init files.
-	instances: u64,
-	/// The last segment recorded, by any instance.
+	/// How many identities started, which numbers their init files.
+	identities: u64,
+	/// The last segment recorded, by any identity.
 	last: Option<Last>,
 }
 
@@ -78,15 +78,15 @@ impl Variant {
 	}
 }
 
-/// The progress of one instance's cursor.
-struct Instance {
+/// The progress of one identity's cursor.
+struct Identity {
 	/// Numbers its init file, `init.{index}.mp4`.
 	index: u64,
 	/// The init file name, once written.
 	init: Option<String>,
 	/// The media track its segments come from.
 	track: Arc<str>,
-	/// The last segment the previous instance recorded, which this one must continue.
+	/// The last segment the previous identity recorded, which this one must continue.
 	after: Option<Last>,
 	/// It yielded the segment `after` names, so its next one directly follows.
 	overlapped: bool,
@@ -102,16 +102,16 @@ struct Last {
 	discontinuity: u64,
 }
 
-/// What a recording does with an instance's next segment.
+/// What a recording does with an identity's next segment.
 #[derive(Debug, PartialEq, Eq)]
 enum Admit {
-	/// The previous instance recorded it already.
+	/// The previous identity recorded it already.
 	Discard,
-	/// Record it, switching from the previous instance first when `transition`.
+	/// Record it, switching from the previous identity first when `transition`.
 	Record { transition: bool },
 }
 
-impl Instance {
+impl Identity {
 	/// Admit the next segment. Every track numbers its segments on the broadcast's grid, so a
 	/// replacement's numbers name the same spans as its predecessor's, and those it repeats, since
 	/// its cursor can start at the oldest row retained, are discarded. On the same track numbers
@@ -145,7 +145,7 @@ impl Instance {
 }
 
 /// A cursor read to make: the next segment of the rendition `key`, and its init with it while
-/// the instance has none written yet.
+/// the identity has none written yet.
 struct Read {
 	key: Key,
 	cursor: segments::Consumer,
@@ -203,7 +203,7 @@ impl Recording {
 			tokio::select! {
 				change = changes.next(), if listing => match change.context("recording failed")? {
 					Some(renditions::Event::Added(rendition)) => steps.extend(self.add(rendition)?.map(advance)),
-					// A removed instance's cursor drains and ends on its own.
+					// A removed identity's cursor drains and ends on its own.
 					Some(_) => {}
 					None => listing = false,
 				},
@@ -214,7 +214,7 @@ impl Recording {
 		self.finish().await
 	}
 
-	/// Start recording a new instance of a rendition, or queue it behind the one recording.
+	/// Start recording a new identity of a rendition, or queue it behind the one recording.
 	fn add(&mut self, rendition: Arc<Rendition>) -> anyhow::Result<Option<Read>> {
 		let key = (rendition.kind, rendition.name.clone());
 		// Subscribe now: the cursor starts at the oldest row retained when it is created.
@@ -238,7 +238,7 @@ impl Recording {
 					playlist: Playlist::new(rendition.target_duration()),
 					recording: None,
 					queued: VecDeque::new(),
-					instances: 0,
+					identities: 0,
 					last: None,
 				})
 			}
@@ -272,7 +272,7 @@ impl Recording {
 		let slot = self.slots.get_mut(&key).expect("a cursor's slot outlives it");
 
 		let Some((segment, init)) = read else {
-			// This instance drained: its replacement, if any, continues the playlist.
+			// This identity drained: its replacement, if any, continues the playlist.
 			slot.recording = None;
 			let next = slot.begin(key);
 			if next.is_none()
@@ -283,35 +283,35 @@ impl Recording {
 			return Ok(next);
 		};
 
-		let instance = slot.recording.as_mut().expect("a cursor in flight is recording");
-		match instance
+		let identity = slot.recording.as_mut().expect("a cursor in flight is recording");
+		match identity
 			.admit(segment.segment, segment.discontinuity)
 			.with_context(failed)?
 		{
 			Admit::Discard => {
-				let init = instance.init.is_none();
+				let init = identity.init.is_none();
 				return Ok(Some(Read { key, cursor, init }));
 			}
 			Admit::Record { transition: false } => {}
 			Admit::Record { transition: true } => slot.playlist.transition(),
 		}
 
-		let instance = slot.recording.as_mut().expect("a cursor in flight is recording");
+		let identity = slot.recording.as_mut().expect("a cursor in flight is recording");
 		let number = slot.playlist.next(segment.segment);
 		let mut map = None;
 		if let Some(media) = &segment.media {
-			if instance.init.is_none() {
+			if identity.init.is_none() {
 				let init = init.with_context(|| format!("{kind} rendition {name} has no init segment"))?;
-				let file = format!("init.{}.mp4", instance.index);
+				let file = format!("init.{}.mp4", identity.index);
 				write(&slot.dir.join(&file), &init).await?;
-				instance.init = Some(file.clone());
+				identity.init = Some(file.clone());
 				map = Some(file);
 			}
 			write(&slot.dir.join(format!("{number}.m4s")), media).await?;
 		}
-		let init = instance.init.is_none();
+		let init = identity.init.is_none();
 		slot.last = Some(Last {
-			track: instance.track.clone(),
+			track: identity.track.clone(),
 			segment: segment.segment,
 			discontinuity: segment.discontinuity,
 		});
@@ -385,19 +385,19 @@ impl Recording {
 }
 
 impl Slot {
-	/// Start recording the next queued instance of `key`, continuing after the last segment
+	/// Start recording the next queued identity of `key`, continuing after the last segment
 	/// recorded.
 	fn begin(&mut self, key: Key) -> Option<Read> {
 		let (track, cursor) = self.queued.pop_front()?;
-		self.recording = Some(Instance {
-			index: self.instances,
+		self.recording = Some(Identity {
+			index: self.identities,
 			init: None,
 			track,
 			after: self.last.clone(),
 			overlapped: false,
 			started: false,
 		});
-		self.instances += 1;
+		self.identities += 1;
 		Some(Read {
 			key,
 			cursor,
@@ -413,15 +413,15 @@ struct Playlist {
 	entries: Vec<Entry>,
 	/// The highest `EXT-X-VERSION` the entries need.
 	version: u32,
-	/// `EXT-X-TARGETDURATION`, in whole seconds: the first instance's, which the exporter serves
+	/// `EXT-X-TARGETDURATION`, in whole seconds: the first identity's, which the exporter serves
 	/// too, kept through reconfigurations so the header never changes (RFC 8216 6.2.1).
 	target: u64,
 	/// What the file holds: its header and how many entries.
 	written: Option<(Header, usize)>,
-	/// Added to each entry's source sequence, so a switch to another instance is a discontinuity
-	/// past the last entry whatever that instance's own sequence starts at.
+	/// Added to each entry's source sequence, so a switch to another identity is a discontinuity
+	/// past the last entry whatever that identity's own sequence starts at.
 	offset: u64,
-	/// The next entry comes from another instance.
+	/// The next entry comes from another identity.
 	switching: bool,
 }
 
@@ -439,9 +439,10 @@ struct Entry {
 	gap: bool,
 	/// The rendition's discontinuity sequence for the segment; the playlist adds its offset.
 	discontinuity: u64,
-	/// Written on the first entry and after each discontinuity.
+	/// Written on the first entry, after each discontinuity, and wherever the entry before's plus
+	/// its duration doesn't give it.
 	program_date_time: Option<kio::clock::Wall>,
-	/// The init file the instance's first media segment maps.
+	/// The init file the identity's first media segment maps.
 	map: Option<String>,
 }
 
@@ -475,7 +476,7 @@ impl Playlist {
 		self.entries.push(entry);
 	}
 
-	/// The next entry comes from a reconfigured instance, under a new init: a discontinuity.
+	/// The next entry comes from a reconfigured identity, under a new init: a discontinuity.
 	fn transition(&mut self) {
 		self.switching = true;
 	}
@@ -515,7 +516,11 @@ impl Playlist {
 	/// The lines of the entries from `from` on.
 	fn render(&self, from: usize) -> String {
 		let mut out = String::new();
-		let mut previous = from.checked_sub(1).map(|index| self.entries[index].discontinuity);
+		let before = from.checked_sub(1).map(|index| &self.entries[index]);
+		let mut previous = before.map(|entry| entry.discontinuity);
+		// The wall clock a player derives for the next entry, as the live playlist does: a segment
+		// whose media starts off its grid line by another amount restates it.
+		let mut derived = before.and_then(|entry| Some(entry.program_date_time? + entry.duration));
 		for entry in &self.entries[from..] {
 			let discontinuity = entry.discontinuity;
 			// A skipped discontinuity still counts, so playlists starting anywhere agree.
@@ -527,12 +532,15 @@ impl Playlist {
 			if let Some(map) = &entry.map {
 				out += &format!("#EXT-X-MAP:URI=\"{map}\"\n");
 			}
-			if restart && let Some(pdt) = entry.program_date_time {
+			if let Some(pdt) = entry.program_date_time
+				&& (restart || derived != Some(pdt))
+			{
 				out += &format!(
 					"#EXT-X-PROGRAM-DATE-TIME:{}\n",
 					humantime::format_rfc3339_millis(pdt.into())
 				);
 			}
+			derived = entry.program_date_time.map(|pdt| pdt + entry.duration);
 			if entry.gap {
 				out += "#EXT-X-GAP\n";
 			}
@@ -871,7 +879,7 @@ mod tests {
 		}
 		recorded(dir.path(), "video1").await;
 		let removed = Arc::downgrade(&broadcaster.rendition(Kind::Video, "video1").unwrap());
-		// Finishing bounds its last segment, so the removed instance's cursor drains.
+		// Finishing bounds its last segment, so the removed identity's cursor drains.
 		let _finished = publisher.video.remove(1).finish().unwrap();
 		publisher
 			.catalog
@@ -962,8 +970,8 @@ mod tests {
 		);
 	}
 
-	fn instance(after: Option<(u64, u64)>) -> Instance {
-		Instance {
+	fn identity(after: Option<(u64, u64)>) -> Identity {
+		Identity {
 			index: 1,
 			init: None,
 			track: "video".into(),
@@ -979,7 +987,7 @@ mod tests {
 
 	#[test]
 	fn a_replacement_discards_what_its_predecessor_recorded() {
-		let mut replacement = instance(Some((5, 0)));
+		let mut replacement = identity(Some((5, 0)));
 		for segment in 3..=5 {
 			assert_eq!(replacement.admit(segment, 0).unwrap(), Admit::Discard);
 		}
@@ -987,10 +995,10 @@ mod tests {
 		assert_eq!(replacement.admit(7, 1).unwrap(), Admit::Record { transition: false });
 
 		// One whose oldest row is the very next segment overlaps nothing, and needs not.
-		let mut adjacent = instance(Some((5, 0)));
+		let mut adjacent = identity(Some((5, 0)));
 		assert_eq!(adjacent.admit(6, 0).unwrap(), Admit::Record { transition: true });
 
-		let mut first = instance(None);
+		let mut first = identity(None);
 		assert_eq!(first.admit(40, 3).unwrap(), Admit::Record { transition: false });
 	}
 
@@ -998,9 +1006,9 @@ mod tests {
 	/// recorded, and may start a few slots later.
 	#[test]
 	fn a_replacement_on_another_track_continues_the_grid() {
-		let mut replacement = Instance {
+		let mut replacement = Identity {
 			track: "video-640".into(),
-			..instance(Some((5, 0)))
+			..identity(Some((5, 0)))
 		};
 		assert_eq!(replacement.admit(5, 1).unwrap(), Admit::Discard);
 		assert_eq!(replacement.admit(7, 1).unwrap(), Admit::Record { transition: true });
@@ -1018,11 +1026,11 @@ mod tests {
 	#[test]
 	fn a_replacement_refuses_a_gap_or_a_reset() {
 		// Rows evicted before the replacement subscribed are missing from both cursors.
-		let err = instance(Some((5, 0))).admit(8, 0).unwrap_err();
+		let err = identity(Some((5, 0))).admit(8, 0).unwrap_err();
 		assert!(format!("{err}").contains("missed segments 6 to 7"), "{err}");
 
 		// A reused number from a newer discontinuity is another run's content.
-		let mut reset = instance(Some((5, 0)));
+		let mut reset = identity(Some((5, 0)));
 		assert_eq!(reset.admit(4, 0).unwrap(), Admit::Discard);
 		let err = reset.admit(5, 1).unwrap_err();
 		assert!(format!("{err}").contains("restarted"), "{err}");
@@ -1065,7 +1073,37 @@ mod tests {
 		assert!(!playlist.render(3).contains("PROGRAM-DATE-TIME"));
 	}
 
-	/// A switch follows the last entry with a discontinuity even when the new instance's own
+	/// An entry whose media starts off its grid line by another amount than the one before
+	/// restates its wall clock, also when appended.
+	#[test]
+	fn a_moved_media_offset_restates_the_program_date_time() {
+		let at = |millis| Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(millis));
+		let mut playlist = Playlist::new(2);
+		for (segment, millis) in [(0, 0), (1, 2_050), (2, 4_000), (3, 6_000)] {
+			playlist.push(Entry {
+				program_date_time: at(millis),
+				..entry(segment, 0)
+			});
+		}
+		let stated = |text: String| -> Vec<String> {
+			text.lines()
+				.filter_map(|line| line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:"))
+				.map(str::to_string)
+				.collect()
+		};
+		assert_eq!(
+			stated(playlist.render(0)),
+			[
+				"1970-01-01T00:00:00.000Z",
+				"1970-01-01T00:00:02.050Z",
+				"1970-01-01T00:00:04.000Z"
+			]
+		);
+		assert_eq!(stated(playlist.render(2)), ["1970-01-01T00:00:04.000Z"]);
+		assert!(stated(playlist.render(3)).is_empty());
+	}
+
+	/// A switch follows the last entry with a discontinuity even when the new identity's own
 	/// sequence starts below the recording's.
 	#[test]
 	fn a_switch_to_a_lower_sequence_is_a_discontinuity() {
@@ -1084,7 +1122,7 @@ mod tests {
 		);
 	}
 
-	/// A switch to a reconfigured instance and the rendition's own break are each a
+	/// A switch to a reconfigured identity and the rendition's own break are each a
 	/// discontinuity, appended; only a raised header rewrites the playlist.
 	#[tokio::test]
 	async fn a_transition_appends_a_discontinuity() {

@@ -587,8 +587,9 @@ pub(crate) mod tests {
 	/// A corpus case by name, read directly from the checked-in file so neither
 	/// implementation is graded against the other.
 	pub(crate) fn case(name: &str) -> Case {
-		let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join(format!("../../doc/concept/audio-jitter/{name}.json"));
+		let path =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join(format!("../../doc/concept/audio-jitter/{name}.json"));
 		let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
 		serde_json::from_str(&json).unwrap()
 	}

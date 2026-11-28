@@ -697,14 +697,21 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			reader
 				.update(initial.clone().with_ranges([support::keys(future..)]))
 				.unwrap();
-			// Once the copy holds a group, its live SUBSCRIBE still covers the narrowing, and
-			// the publisher serves that as a live join.
+			// What the publisher holds once every update so far landed, whichever order the
+			// run took: waiting for it orders the last step's widening before this step's
+			// groups too.
 			let narrowed = match start {
 				0 => support::keys(future..),
-				_ => Range::from(Start::Live {
+				// The copy holds a group, so its live SUBSCRIBE still covers the narrowing, and
+				// the publisher serves that as a live join.
+				1 => Range::from(Start::Live {
 					min: Some(Duration::ZERO),
 					max: None,
 				}),
+				// The last widening asked from group 1. This narrowing asks from group 3, past
+				// every group written, and a time start there resolves to the newest group,
+				// which covers that time until a later one starts: still from group 1.
+				_ => support::keys(start - 1..),
 			};
 			kio::clock::timeout(
 				TIMEOUT,

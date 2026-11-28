@@ -29,8 +29,10 @@ export * as Error from "./errors.ts";
 export * as Frame from "./frame.ts";
 /** Group role handles. */
 export * as Group from "./group.ts";
-/** Stream instances: one continuous stream at a path, carried on every route. */
-export * as Instance from "./instance.ts";
+/** Stream identities: one continuous stream at a path, carried on every route. */
+export * as Identity from "./identity.ts";
+/** Metadata subscriptions: a track's groups and frame headers without the payload. */
+export * as Meta from "./meta.ts";
 /** Broadcast routing tables, independent of any connection. */
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */

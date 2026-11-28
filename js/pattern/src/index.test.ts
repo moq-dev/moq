@@ -638,7 +638,7 @@ test("ordering keeps distinct JS strings distinct", () => {
 	expect(new Patterns([a, b]).equals(new Patterns([b, a]))).toBe(true);
 });
 
-test("pattern instances cannot replace their validated representation", () => {
+test("pattern identities cannot replace their validated representation", () => {
 	const pattern = Pattern.parse("safe");
 	const union = new Patterns([pattern]);
 	expect(Reflect.set(pattern, "segments", [{ kind: "wildcard" }])).toBe(false);

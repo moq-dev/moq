@@ -36,10 +36,10 @@ import { Time } from "@moq/net";
 
 const credential = new Credential({ context, kid, secret });
 const generation = credential.produce();
-// The route's instance names the generation's epoch, so subscribers find the key.
+// The route's identity names the generation's epoch, so subscribers find the key.
 const route = origin.route(await credential.path("meeting.hang"), {
 	hidden: true,
-	instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+	identity: { id: Epoch.identity(generation.epoch), epoch: 0n },
 });
 const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", {
 	timescale: Time.Timescale.MILLI,
@@ -58,7 +58,7 @@ video.close();
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path)`. It takes each
 instance's epoch from the broadcast it resolved, `Epoch.of(broadcast)` (or from the application's
-channel on a wire without route instances), so the key always matches the instance it reads. It
+channel on a wire without route identities), so the key always matches the identity it reads. It
 binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `Broadcast.Consumer`. Its
 `subscribe(semantic)` opens the track a decrypted catalog names, and `close()` releases the

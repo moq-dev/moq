@@ -30,6 +30,17 @@ pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_follow_callback = Option<extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32)>;
 
+/// Callback for [crate::moq_consume_meta]: each frame's header, then the terminal status.
+///
+/// Each frame arrives with `header` pointing at its [crate::moq_header], valid only during the
+/// call, and `code` `0`. The terminal call passes a NULL `header` and `0` (closed cleanly) or a
+/// negative error whose reason [crate::moq_error] reports inside the callback.
+///
+/// Runs on libmoq's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+pub type moq_header_callback =
+	Option<extern "C" fn(user_data: *mut c_void, header: *const crate::moq_header, code: i32)>;
+
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -327,7 +338,7 @@ impl OnFollow {
 		})
 	}
 
-	/// Deliver a broadcast handle for an instance now serving the path.
+	/// Deliver a broadcast handle for an identity now serving the path.
 	pub fn online(&self, broadcast: crate::Id) {
 		(self.on_follow)(
 			self.user_data,
@@ -341,6 +352,45 @@ impl OnFollow {
 		(self.on_follow)(self.user_data, crate::moq_follow_event::MOQ_FOLLOW_EVENT_OFFLINE, 0);
 	}
 }
+
+/// A [moq_header_callback] and its user data.
+#[derive(Clone, Copy)]
+pub struct OnHeader {
+	user_data: *mut c_void,
+	on_header: extern "C" fn(user_data: *mut c_void, header: *const crate::moq_header, code: i32),
+}
+
+impl OnHeader {
+	/// Wrap a C header callback.
+	///
+	/// # Safety
+	/// - The caller must keep `user_data` valid until the terminal callback.
+	/// - The callback and `user_data` must be safe to use on libmoq's runtime thread.
+	pub unsafe fn new(user_data: *mut c_void, on_header: moq_header_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_header: on_header.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Deliver one frame's header, borrowed for the call.
+	pub fn header(&self, header: &crate::moq_header) {
+		(self.on_header)(self.user_data, header, 0);
+	}
+}
+
+impl crate::task::Terminal for OnHeader {
+	/// Deliver the terminal status, recording its failure first so the callback can read
+	/// `moq_error()`.
+	fn terminal(&self, res: Result<(), Error>) {
+		record_error(&res);
+		(self.on_header)(self.user_data, std::ptr::null(), res.code());
+	}
+}
+
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on libmoq's runtime thread until the terminal callback.
+unsafe impl Send for OnHeader {}
 
 impl crate::task::Terminal for OnFollow {
 	/// Deliver the terminal status, recording its failure first so the callback can read

@@ -75,9 +75,9 @@ int32_t moq_session_request_free(uint32_t request);
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
-int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, uint32_t instance, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, uint32_t identity, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, uint32_t instance, moq_follow_callback on_follow, void *user_data);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, uint32_t identity, moq_follow_callback on_follow, void *user_data);
 int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
@@ -85,18 +85,18 @@ int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
-// Instances (0 means none: unpinned, or a fresh one in route options; a route's or claim's is the caller's to free, an announcement's lives with it)
-int32_t moq_instance_parse(const char *text, uintptr_t text_len);
-int32_t moq_instance_text(uint32_t instance, moq_string *dst);
-int32_t moq_instance_minted(uint32_t instance);
-int32_t moq_instance_equal(uint32_t a, uint32_t b);
-int32_t moq_instance_free(uint32_t instance);
+// Identities (0 means none: unpinned, or a fresh one in route options; a route's or claim's is the caller's to free, an announcement's lives with it)
+int32_t moq_identity_parse(const char *text, uintptr_t text_len);
+int32_t moq_identity_text(uint32_t identity, moq_string *dst);
+int32_t moq_identity_minted(uint32_t identity);
+int32_t moq_identity_equal(uint32_t a, uint32_t b);
+int32_t moq_identity_free(uint32_t identity);
 
 // Publishing: Routes (freeing one retracts it; moq_publish_close on its broadcast ends both)
 int32_t moq_origin_route(uint32_t origin, const char *path, uintptr_t path_len, const moq_route_options *options);
-// options (NULL for the default): hidden until announced, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
+// options (NULL for the default): hidden until announced, a cost, and an optional stable identity with its epoch. Hops are the origin's to add.
 int32_t moq_route_broadcast(uint32_t route);
-int32_t moq_route_instance(uint32_t route);
+int32_t moq_route_identity(uint32_t route);
 int32_t moq_route_announce(uint32_t route);
 int32_t moq_route_withdraw(uint32_t route);
 int32_t moq_route_set_cost(uint32_t route, uint64_t cost);
@@ -105,7 +105,7 @@ int32_t moq_route_free(uint32_t route);
 
 // Publishing: Claims (a prefix answered on demand; freeing one retracts it)
 int32_t moq_origin_claim(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
-int32_t moq_claim_instance(uint32_t claim);
+int32_t moq_claim_identity(uint32_t claim);
 int32_t moq_claim_announce(uint32_t claim);
 int32_t moq_claim_withdraw(uint32_t claim);
 int32_t moq_claim_set_cost(uint32_t claim, uint64_t cost);
@@ -158,6 +158,8 @@ int32_t moq_track_request_name(uint32_t request, moq_string *dst);
 int32_t moq_track_request_accept(uint32_t request, const moq_track_info *info);
 int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);
 int32_t moq_track_request_audio(uint32_t request, const moq_audio_init *config);
+int32_t moq_track_request_encode_video(uint32_t request, const moq_video_encoder_input *input, const moq_video_encoder_output *output, const moq_video_encode_options *options);
+int32_t moq_track_request_encode_audio(uint32_t request, const moq_audio_encoder_input *input, const moq_audio_encoder_output *output, uint32_t allocator);
 int32_t moq_track_request_abort(uint32_t request, uint16_t error_code);
 int32_t moq_track_request_free(uint32_t request);
 int32_t moq_group_request_start(uint32_t request, uint64_t *dst);
@@ -198,6 +200,9 @@ int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_l
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
+int32_t moq_consume_meta(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_header_callback on_header, void *user_data);
+int32_t moq_consume_meta_update(uint32_t meta, const moq_subscription *subscription);
+int32_t moq_consume_meta_cancel(uint32_t meta);
 
 // Codecs without a broadcast: encode, then publish or store the packets yourself
 int32_t moq_audio_encoder_create(const moq_audio_encoder_output *output);
@@ -229,6 +234,11 @@ theirs to the track's timescale, a microsecond one unless
 the key a scale-less group's frames carry. `moq_consume_track_frame` points
 `moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
 is freed.
+
+`moq_consume_meta` reads a track's metadata: each frame's group, index,
+declared size, and timestamp in a `moq_header`, without its payload. Each header
+is borrowed for its callback, so there is nothing to free. It is a subscription
+of its own beside any `moq_consume_track` of the same track.
 
 A zeroed `moq_track_info`, like a NULL one, advertises a zero max age, how long
 a superseded group stays fresh, so only the live edge is served. Set

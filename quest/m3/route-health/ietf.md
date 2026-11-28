@@ -5,7 +5,7 @@
 A moq-transport hop between two of our nodes carries a metadata-only
 subscription as headers, instead of the payload subscription a relay
 otherwise opens over moq-transport and drops the payload of
-([subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)). A peer that does not
+([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)). A peer that does not
 declare the extension keeps getting that fallback, and nothing refuses.
 
 ## Plan
@@ -39,7 +39,3 @@ Add both to `just test interop --all`.
 
 Public API: none. Wire: a new moq-transport extension, opt-in by Setup
 Option.
-
-## Required
-
-- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - the mode, the relay's per-mode upstream, and the fallback this replaces on moq-transport hops

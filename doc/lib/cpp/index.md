@@ -109,9 +109,9 @@ The config is generated, so nothing names this package for you: set
 `ClientConfig::implementation` (and `ServerConfig::implementation`) to `moq::IMPLEMENTATION`,
 after any product tokens of your own, and moq-ffi appends its own.
 
-Call `available()` again to wait for the next publisher instance at that path, such as a
+Call `available()` again to wait for the next publisher identity at that path, such as a
 restarted publisher. It returns null once the path goes offline, then the next
-broadcast when something serves it again. Drop what was read from the previous instance
+broadcast when something serves it again. Drop what was read from the previous identity
 on either: its tracks end when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
@@ -121,7 +121,7 @@ A decoder reads everything the track still holds unless a live player sets `star
 the cached backlog.
 A gap breaks continuity. An encoder end is not stream EOF: following frames before its
 endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
-from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, rendition)` (the catalog rendition);
 frames carry container media time as they land.
 Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
@@ -148,7 +148,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::h264(), std::nullopt, std::nullo
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::rgba(), 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-ok(route->announce()); // each route mints a fresh instance, route->instance_id()
+ok(route->announce()); // each route mints a fresh identity, route->identity()
 ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -247,7 +247,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns false rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next false on a fresh `demand()`, since one that already returned false misses a subscriber that came and went.
+To end a track nobody wants, release its producer once `wanted_changed()` returns false; a subscriber that joined since is served by the next request for the track while a request handler is live, and reads `Dropped` without one, or once that request's producer is released too before another subscriber joins.
 
 ## Authorization
 
@@ -271,9 +271,20 @@ The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
 offline. How long to keep it up is yours to decide. A track still open at the
 close ends with `Unroutable` (`Internal` over moq-transport, which has no such
-code), and one released without a finish ends `Dropped`, which readers see as
-`Internal`. Readers follow a publisher's runs by announcement, not by that error:
-see [identity and recovery](/concept/identity).
+code), and one released without a finish ends cleanly while nobody reads it; a
+reader still reading is served by the next request for the track while a request
+handler is live. That handler must accept it with the info the track was
+published with: another info ends the track with `MalformedTrack`. Serve an
+encoder's track with `moq::VideoProducer::requested()` or
+`moq::AudioProducer::requested()`, given the request and the options the track
+was published with: `MalformedTrack` catches only a changed track info, not changed
+codec settings, which its readers decode with. With no handler, or once the
+producer serving that request is released too before another reader joins, the
+reader reads `Dropped`, seen as `Internal`. A media container
+producer, and a JSON stream or window that published a record, are the
+exceptions: finish them, since releasing one unfinished ends its tracks with
+`Dropped`. Readers follow a publisher's runs by announcement, not by that error: see
+[identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

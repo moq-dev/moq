@@ -22,7 +22,7 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS audit):
   embedders and exposing `include`/`identity` checks on `Broadcaster`).
 - ✅ Fix cold-edge segment 404s (rejected: relying on player retries).
 - ✅ Switch `WatchMedia` to metadata-only subscriptions now that
-  [subscribe-meta.md](/quest/m2/subscribe-meta.md) lands in `m2`.
+  `broadcast::Consumer::meta` ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) lands in `m2`.
 
 Scope in `rs/moq-hls`:
 
@@ -73,10 +73,5 @@ Scope in `rs/moq-hls`:
 
 Public API: additive `moq_hls::Server` eviction/hook configuration and
 request-routing entry points. Wire: none beyond
-[subscribe-meta.md](/quest/m2/subscribe-meta.md) and
-[identity-rename-and-cap.md](/quest/m2/identity-rename-and-cap.md).
-
-## Required
-
-- [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - hashed `Identity` URL tokens that `Server` routes and validates
-- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - metadata-only subscriber API used by `WatchMedia`
+metadata subscriptions and
+the Identity rename ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720)).

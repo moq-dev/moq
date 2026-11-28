@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
+import type { RelativeBroadcast } from "./path.ts";
 import {
 	checkRenditions,
 	DuplicateRendition,
@@ -59,47 +59,6 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	}
 });
 
-// Mirrors Rust's `reference_instances_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional instance", () => {
-	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
-	const catalog = (instance: string) => ({
-		include: { c: { broadcast: "./a", instance } },
-		video: {
-			renditions: {
-				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
-			},
-		},
-		audio: {
-			renditions: {
-				a: {
-					broadcast: "./a",
-					instance,
-					codec: "opus",
-					sampleRate: 48000,
-					numberOfChannels: 2,
-					container: { kind: "legacy" },
-				},
-			},
-		},
-		text: { renditions: { t: { broadcast: "./a", instance, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", instance, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", instance, mode: "snapshot" } } },
-	});
-
-	const parsed = RootSchema.parse(catalog(INSTANCE));
-	if (!parsed.video) throw new Error("missing video section");
-	if (!parsed.audio) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.instance).toBe(INSTANCE);
-	expect(parsed.audio.renditions.a?.instance).toBe(INSTANCE);
-	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
-	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
-	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
-	expect(parsed.include?.c?.instance).toBe(INSTANCE);
-
-	// An empty instance refuses the catalog, as in Rust.
-	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
-});
-
 // Mirrors Rust's `includes_roundtrip_and_refuse_malformed_entries`.
 test("an include parses beside a same-ID rendition and a malformed one is refused", () => {
 	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
@@ -112,13 +71,7 @@ test("an include parses beside a same-ID rendition and a malformed one is refuse
 	expect(() => checkRenditions(parsed)).not.toThrow();
 	expect(encode(parsed).version).toBeUndefined();
 
-	for (const include of [
-		[],
-		{ alice: null },
-		{ alice: {} },
-		{ alice: { broadcast: 42 } },
-		{ alice: { broadcast: "./alice.hang", instance: "" } },
-	]) {
+	for (const include of [[], { alice: null }, { alice: {} }, { alice: { broadcast: 42 } }]) {
 		expect(RootSchema.safeParse({ include }).success).toBe(false);
 	}
 	// The issue names an include, not a rendition.

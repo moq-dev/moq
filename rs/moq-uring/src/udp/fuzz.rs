@@ -171,7 +171,9 @@ mod tests {
 	#[test]
 	#[cfg_attr(miri, ignore = "reads the regression files, which Miri's isolation refuses")]
 	fn regressions() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/regressions");
+		let root =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("fuzz/regressions");
 
 		for (name, target) in TARGETS {
 			// Nothing has failed yet for this target; `fuzz/README.md` says what to drop in here

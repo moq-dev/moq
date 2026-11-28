@@ -210,7 +210,7 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START names its instance, epoch, cost, how far above it was claimed, flags, priority, and the relays it crossed",
+		"name": "a lite-07 ANNOUNCE_START names its identity, epoch, cost, how far above it was claimed, flags, priority, and the relays it crossed",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "000f000001780161000103000080020709",
@@ -266,7 +266,7 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START with an invalid instance is refused",
+		"name": "a lite-07 ANNOUNCE_START with an invalid identity is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "000c000001780000010300008000",
@@ -365,6 +365,20 @@
 		"message": "client_setup",
 		"server": "moq-lite-05",
 		"hex": "20001202c0000000ff0dad07c0000000ff0dad0600",
+		"expect": "refused"
+	},
+	{
+		"name": "a metadata SUBSCRIBE ends with a Meta of 1 after its ranges",
+		"version": "moq-lite-07-wip",
+		"message": "subscribe",
+		"hex": "190104726f6f6d00000005766964656f830001020700020a0001",
+		"expect": "decoded"
+	},
+	{
+		"name": "a SUBSCRIBE whose Meta is neither 0 nor 1 is malformed",
+		"version": "moq-lite-07-wip",
+		"message": "subscribe",
+		"hex": "190104726f6f6d00000005766964656f830001020700020a0002",
 		"expect": "refused"
 	}
 ]

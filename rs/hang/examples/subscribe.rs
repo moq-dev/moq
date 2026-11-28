@@ -37,7 +37,7 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	Ok(reconnect.closed().await?)
 }
 
-// List the announced broadcasts and play the first: follow it across publisher instances,
+// List the announced broadcasts and play the first: follow it across publisher identities,
 // playing afresh when another replaces it, until it goes offline.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	let mut announced = consumer.announced();
@@ -69,12 +69,12 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	anyhow::bail!("origin closed")
 }
 
-// Play each publisher instance serving `path`, starting afresh when another replaces it.
+// Play each publisher identity serving `path`, starting afresh when another replaces it.
 async fn follow(consumer: moq_net::origin::Consumer, path: moq_net::Path) -> anyhow::Result<()> {
 	let mut following = consumer.follow(&path, None)?;
 	let mut next = following.available().await?;
 	while let Some(broadcast) = next {
-		tracing::info!(%path, instance = ?broadcast.info().instance, "broadcast online");
+		tracing::info!(%path, identity = ?broadcast.info().identity, "broadcast online");
 		next = tokio::select! {
 			played = play(broadcast) => {
 				if let Err(err) = played {
@@ -88,12 +88,16 @@ async fn follow(consumer: moq_net::origin::Consumer, path: moq_net::Path) -> any
 	Ok(())
 }
 
-// Read the catalog and media frames of one publisher instance.
+// Read the catalog and media frames of one publisher identity.
 async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 	// Read the catalog to discover available tracks.
 	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(broadcast.track(hang::Catalog::DEFAULT_NAME)?);
 
-	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
+	let info = catalog
+		.next()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("no catalog"))?
+		.value;
 
 	// Find the first video track.
 	let (name, config) = info

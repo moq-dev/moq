@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import { toHop, UNKNOWN_HOP } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -351,7 +351,7 @@ async function resolveStream(data: Uint8Array) {
 		if (!msg) return out;
 		switch (msg.status) {
 			case "start":
-				out.push({ start: history.start(msg), instance: msg.instance, claim: msg.claim });
+				out.push({ start: history.start(msg), identity: msg.identity, claim: msg.claim });
 				break;
 			case "change":
 				history.get(msg.id);
@@ -366,9 +366,9 @@ async function resolveStream(data: Uint8Array) {
 	}
 }
 
-const a = Instance.parse("a");
-const b = Instance.parse("b");
-const own = { instance: a, claim: ownClaim(0n) };
+const a = Identity.parse("a");
+const b = Identity.parse("b");
+const own = { identity: a, claim: ownClaim(0n) };
 const GOLDEN_RESOLVED = [
 	{ start: Path.from("room/a/cam"), ...own },
 	{ start: Path.from("room/a/mic"), ...own },
@@ -445,10 +445,10 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 		chain: [5n, 9n],
 	};
 	const cases: [AnnounceBroadcast, number[]][] = [
-		// Path base, path keep, the suffix, instance "b", unminted, epoch, then the claim: cost,
+		// Path base, path keep, the suffix, identity "b", unminted, epoch, then the claim: cost,
 		// above, all three flags, the priority with its sign bit flipped, and the chain.
 		[
-			{ status: "start", suffix: Path.from("x"), instance: b, claim },
+			{ status: "start", suffix: Path.from("x"), identity: b, claim },
 			[0, 15, 0, 0, 1, 0x78, 1, 0x62, 0, 7, 12, 2, 7, 0x7d, 2, 5, 9],
 		],
 		[{ status: "change", id: 1n, claim }, [2, 9, 1, 7, 12, 2, 7, 0x7d, 2, 5, 9]],
@@ -462,13 +462,13 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 	// An own claim is the bytes every endpoint sends: no cost, the top priority, no chain.
 	const start = await bytes(
 		(w) =>
-			encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(0n) }, v),
+			encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), identity: b, claim: ownClaim(0n) }, v),
 		v,
 	);
 	expect([...start]).toEqual([0, 12, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0, 0xff, 0]);
 
 	// Older versions have no claims, and lite-07 has nothing else.
-	const start06: AnnounceBroadcast = { status: "start", suffix: Path.from("x"), instance: b, claim };
+	const start06: AnnounceBroadcast = { status: "start", suffix: Path.from("x"), identity: b, claim };
 	await expect(
 		bytes((w) => encodeAnnounceBroadcast(w, start06, Version.DRAFT_06), Version.DRAFT_06),
 	).rejects.toThrow();
@@ -596,14 +596,14 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const claimed: AnnounceBroadcast = {
 		status: "start",
 		suffix: Path.from("x"),
-		instance: a,
+		identity: a,
 		claim: { ...ownClaim(0n), cost: huge },
 	};
 	expect(await roundTrip(claimed, Version.DRAFT_07)).toMatchObject({ claim: { cost: ceiling } });
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("x"), hops: [], cost: huge };
 	expect(await roundTrip(active, Version.DRAFT_06)).toMatchObject({ cost: ceiling });
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", unminted, epoch 0, then a
+	// ANNOUNCE_START: path base, path keep, empty suffix, identity "a", unminted, epoch 0, then a
 	// cost of 2^64-1, which only lite-07's varints can carry, and the rest of an own claim.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
@@ -618,7 +618,7 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 
 test("a claim above its path travels only on lite-07", async () => {
 	const v = Version.DRAFT_07;
-	const start: AnnounceBroadcast = { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(1n, 3n) };
+	const start: AnnounceBroadcast = { status: "start", suffix: Path.empty(), identity: b, claim: ownClaim(1n, 3n) };
 	expect(await roundTrip(start, v)).toEqual(start);
 	const update: AnnounceBroadcast = { status: "change", id: 0n, claim: ownClaim(1n, 2n) };
 	expect(await roundTrip(update, v)).toEqual(update);

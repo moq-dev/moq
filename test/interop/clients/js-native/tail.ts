@@ -43,14 +43,27 @@ const cached = mode === "cached";
 const history = mode === "history";
 const late = mode === "late";
 const fetch = mode === "fetch";
+const meta = mode === "meta";
 if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch"].includes(mode)
+	![
+		undefined,
+		"drop",
+		"join",
+		"compress",
+		"datagram",
+		"status",
+		"cached",
+		"history",
+		"late",
+		"fetch",
+		"meta",
+	].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch|meta]]",
 	);
 }
 
@@ -240,7 +253,39 @@ try {
 				await request.active.changed();
 				broadcast = request.active.peek();
 			}
-			if (fetch) {
+			if (meta) {
+				// A metadata subscription: every group, each frame's declared size, no payload.
+				const track = broadcast.meta("tail").subscribe({ ranges: [{ start: 0n }] });
+				try {
+					const seen: number[] = [];
+					for (;;) {
+						const group = await track.recvGroup();
+						if (!group) break;
+						try {
+							assert(group.start < GROUPS, `unexpected group ${group.start}`);
+							for (const [index, want] of frames(Number(group.start)).entries()) {
+								const header = await group.nextHeader();
+								assert(header, "short group");
+								assert.equal(
+									header.size,
+									want.length,
+									`wrong size of frame ${index} in group ${group.start}`,
+								);
+							}
+							assert.equal(await group.nextHeader(), undefined, "extra frame");
+							seen.push(Number(group.start));
+						} finally {
+							group.close();
+						}
+					}
+					seen.sort((a, b) => a - b);
+					assert.deepEqual(seen, [0, 1, 2, 3]);
+					assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
+					console.error("tail meta clean end=4 groups=0,1,2,3 frames=4");
+				} finally {
+					track.close();
+				}
+			} else if (fetch) {
 				const group = await broadcast.track("tail").fetchGroup(1n);
 				try {
 					await read(group);

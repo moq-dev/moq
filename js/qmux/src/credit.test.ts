@@ -50,7 +50,7 @@ describe("Credit.claim abort", () => {
 });
 
 describe("Credit.close reason propagation", () => {
-	test("claim() after close(reason) rejects with the exact reason instance", async () => {
+	test("claim() after close(reason) rejects with the exact reason identity", async () => {
 		const credit = new Credit(0n);
 		const reason = new Error("Connection closed: 42 bye");
 		credit.close(reason);
@@ -58,7 +58,7 @@ describe("Credit.close reason propagation", () => {
 		expect(await settle(credit.claim(1n))).toBe(reason);
 	});
 
-	test("a claim() pending at close(reason) rejects with the exact reason instance", async () => {
+	test("a claim() pending at close(reason) rejects with the exact reason identity", async () => {
 		const credit = new Credit(0n); // no credit available -> claim parks on a waiter
 		const reason = new Error("Connection closed: 7 gone");
 
@@ -148,5 +148,14 @@ describe("StreamLimit", () => {
 		expect(limit.open(1n)).toBe(false);
 		expect(limit.takePending()).toBe(true);
 		expect(limit.open(1n)).toBe(true);
+	});
+
+	test("never advertises past the 2^60 MAX_STREAMS can carry", () => {
+		const max = 1n << 60n;
+		const limit = new StreamLimit(max - 1n, () => {});
+		expect(limit.open(max - 2n)).toBe(true);
+		limit.close();
+		limit.close();
+		expect(limit.max).toBe(max);
 	});
 });

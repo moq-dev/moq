@@ -167,9 +167,9 @@ export class Decoder {
 	#selection = new Signal<Selection>({ kind: "none" });
 	// The active track's arrival estimate from its container consumer.
 	#spread = new Signal<Duration | undefined>(undefined);
-	// The path of the media the last rendition read, and its instance. Every handle to one instance
-	// shares `closed`, so it identifies the instance where the handle itself does not.
-	#instance?: { path: Moq.Path.Valid; closed: unknown };
+	// The path of the media the last rendition read, and its identity. Every handle to one identity
+	// shares `closed`, so it identifies the identity where the handle itself does not.
+	#stream?: { path: Moq.Path.Valid; closed: unknown };
 	// The consumer the last released rendition read, and its path, so a rendition resumed after a pause
 	// or a hidden tab continues its arrival estimate: the viewer's stop says nothing about the path.
 	#retired?: { path: Moq.Path.Valid; consumer: Container.Consumer };
@@ -274,17 +274,17 @@ export class Decoder {
 		const enabled = effect.get(this.in.enabled);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
-		const identity = effect.get(this.#identity);
+		const playback = effect.get(this.#identity);
 		const selection = this.#selection.peek();
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast. A disabled decoder resolves it only to
 		// tell whether a failure's source is still selected.
 		const active: Moq.Broadcast.Consumer | undefined =
-			broadcast && track && identity && (enabled || selection.kind === "failed")
-				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.instance)
+			broadcast && track && playback && (enabled || selection.kind === "failed")
+				? broadcast.relativeBroadcast(effect, playback.broadcast)
 				: undefined;
-		const key = identity && JSON.stringify(identity);
+		const key = playback && JSON.stringify(playback);
 
 		// A failure belongs to its source: selecting another clears it, even while disabled. Without a
 		// latched failure, any error shown is an outgoing rendition's, which a selection change clears.
@@ -302,7 +302,7 @@ export class Decoder {
 			if (this.#selection.peek().kind === "selected") this.#selection.set({ kind: "none" });
 		};
 
-		if (!enabled || !broadcast || !track || !identity) {
+		if (!enabled || !broadcast || !track || !playback) {
 			deselect();
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
@@ -332,12 +332,12 @@ export class Decoder {
 		if (this.#selection.peek().kind === "failed") return;
 
 		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
-		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for
+		// `broadcast` override names) is another identity, whose timeline starts over. Waiting for
 		// it to catch up to the old picture would freeze video until it passed the old timestamps,
-		// so switch at once and re-anchor the clock. A rendition switch within one instance, or a
+		// so switch at once and re-anchor the clock. A rendition switch within one identity, or a
 		// switch to another path, still waits.
-		const republished = this.#instance?.path === active.path && this.#instance.closed !== active.closed;
-		this.#instance = { path: active.path, closed: active.closed };
+		const republished = this.#stream?.path === active.path && this.#stream.closed !== active.closed;
+		this.#stream = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
 		// Only a rendition read from the same path continues the outgoing arrival estimate, or the one
@@ -352,8 +352,8 @@ export class Decoder {
 			clock: this.#clock,
 			broadcast: active,
 			track,
-			name: Catalog.track(track, identity),
-			config: identity.decoder,
+			name: Catalog.track(track, playback),
+			config: playback.decoder,
 			identity: key,
 			stats: this.#out.stats,
 			tally: this.#tally,
@@ -808,7 +808,11 @@ class Rendition {
 		const format =
 			this.config.container.kind === "loc"
 				? new Container.Loc.Format("video")
-				: new Container.Legacy.Format(this.config);
+				: this.config.container.kind === "raw"
+					? new Container.Raw.Format(this.config)
+					: this.config.container.kind === "cts"
+						? new Container.Cts.Format(this.config)
+						: new Container.Legacy.Format(this.config);
 		const consumer = this.#consume(effect, sub, format);
 
 		// Combine network jitter buffer with decode buffer

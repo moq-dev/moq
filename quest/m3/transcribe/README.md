@@ -6,21 +6,26 @@ Any hang broadcast can carry a live transcript that players show as captions
 and programs read as structure. `moq-transcribe` consumes a broadcast's audio
 and publishes a derivative broadcast beside it, as `moq-transcode` does for
 video. Its catalog references a text rendition in a new structured transcript
-format, produced just in time while subscribed. The language is detected
-automatically, from the text when the backend reports none. A translator
-adds one rendition per target language, translated from the transcript's
-text.
+format, produced just in time while subscribed, with opt-in speaker
+diarization, PII redaction, entity detection, and keyterm prompting. The
+language is detected automatically, from the text when the backend reports
+none. A translator adds one rendition per target language, translated from the
+transcript's text, and an optional dubbing stage voices each translated
+rendition into a language-tagged audio rendition on demand.
 
 Captions a source carries in band reach players the same way: the importer
 takes CEA-608/708 out of the video and publishes them as text tracks, and the
 exporters write every text rendition, transcripts included, in the forms each
 container carries.
 
-Non-goals: speaker diarization, and protected media (a platform never reads
+Non-goals: pre-recorded-only Audio Intelligence (summarization, topic
+detection, sentiment analysis, intent recognition), voice cloning or
+speaker-matched dubbing voices, and protected media (a platform never reads
 its payload).
 
 This README's own work is the end-user docs, once the children land: a
-`doc/lib/rs/moq-transcribe.md` page, its row in `doc/lib/rs/index.md`, the
+`doc/lib/rs/moq-transcribe.md` page (covering transcription, opt-in STT
+features, translation, and dubbing), its row in `doc/lib/rs/index.md`, the
 transcript in the [MoQ for AI](/doc/concept/use-case/ai.md) page, and
 imported and exported captions on the import and export docs.
 
@@ -85,3 +90,22 @@ second; AWS Transcribe). Why: Deepgram streams interim and final results,
 utterance ends, word timing, and each word's language, which the format
 wants and OpenAI's live model lacks, at about a third of its price per
 minute. The translator stays on OpenAI, since it translates text.
+
+Decided 2026-11-27 (maintainer, `/quest-plan`):
+
+- ✅ Extend `moq-transcribe` and the structured transcript format with opt-in
+  Deepgram Nova-3 features: speaker diarization (reversing the 2026-11-17
+  diarization non-goal), PII redaction, entity detection, and keyterm
+  prompting ([STT features](/quest/m3/transcribe/stt-features.md); rejected:
+  dropping the extension). Pre-recorded-only Audio Intelligence
+  (summarization, topics, sentiment, intents) stays out of scope.
+- ✅ Add an on-demand dubbing TTS stage on top of translated transcripts,
+  voicing append-only translated clause deltas into voice-only,
+  language-tagged audio renditions with sequential non-overlapping placement
+  and bounded-lag skip: Deepgram Aura-2 first behind a private TTS trait
+  ([dubbing](/quest/m3/transcribe/dub.md)), followed by an OpenAI TTS
+  fallback ([OpenAI TTS](/quest/m3/transcribe/dub-openai.md)) to prove the
+  trait across two providers and cover languages outside Aura-2's set
+  (rejected: Aura-2 only; OpenAI only; ducked original audio mix;
+  time-stretching before measuring lag; truncating active clips; waiting for
+  final segments instead of streaming clause deltas).

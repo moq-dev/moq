@@ -855,7 +855,7 @@ fn a_session_floor_keeps_an_entry_per_restart_unless_filed_by_relay() {
 
 /// Every failure on every shape, per arm: what it cost and what readers saw.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_bakeoff_failures() {
 	println!(
 		"shape,relays,links,failure,rule,route_messages,claim_items,settle_ms,fed_ms,unfed,loops,offline,unavailable,false_ends,revivals,pending,lasting,hops,right"
@@ -916,7 +916,7 @@ fn benchmark_bakeoff_failures() {
 /// What a mesh costs to build and hold, and what one link closing and one relay
 /// dying cost on it, as relays, publishers, and broadcasts grow.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_bakeoff_growth() {
 	println!(
 		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_items,held_routes,heard_routes,held_claims,lasting_after_failures,close_route_messages,death_route_messages,death_claim_items,work"
@@ -974,7 +974,7 @@ fn benchmark_bakeoff_growth() {
 
 /// The cases the routes epic measured the rule it shipped on, for each arm.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_items,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;

@@ -93,8 +93,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if !served.Instance().Eq(dynamic.Instance()) {
-		t.Fatal("a job's route continues the instance its claim lends")
+	if !served.Identity().Eq(dynamic.Identity()) {
+		t.Fatal("a job's route continues the identity its claim lends")
 	}
 	broadcast := served.Broadcast()
 	track, err := broadcast.PublishTrack("status", timedInfo())
@@ -989,7 +989,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 
-	// The same group, received raw in arrival order and decoded with the container.
+	// The same group, received raw in arrival order and decoded with the rendition.
 	track, err := bc.SubscribeTrack(ctx, trackName, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1002,7 +1002,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if group == nil {
 		t.Fatal("expected a group")
 	}
-	decoded, err := moqmedia.NewGroupConsumer(group, audio.Container)
+	decoded, err := moqmedia.NewGroupConsumer(group, moqmedia.AudioRendition(trackName, audio))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1073,6 +1073,64 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	if string(frame.Payload) != "group" || !sameTime(frame.Timestamp, ts(23_456)) {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
+	}
+}
+
+func TestSubscribeMetaReadsHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("video", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := consumer.SubscribeMeta(ctx, "video", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Cancel()
+
+	group, err := track.AppendGroup(ts(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, payload := range []string{"key", ""} {
+		if err := group.WriteFrame(moq.Frame{Payload: []byte(payload), Timestamp: ts(uint64(i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := group.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	var starts []uint64
+	var headers []moq.FrameHeader
+	for group, err := range meta.GroupsAsArrived(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		starts = append(starts, group.Start())
+		for header, err := range group.All(ctx) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			headers = append(headers, *header)
+		}
+	}
+	want := []moq.FrameHeader{{Size: 3, Timestamp: ts(0)}, {Size: 0, Timestamp: ts(1)}}
+	if !slices.Equal(starts, []uint64{0}) || !reflect.DeepEqual(headers, want) {
+		t.Fatalf("starts = %v, headers = %+v, want [0] and %+v", starts, headers, want)
 	}
 }
 
@@ -1678,38 +1736,72 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 }
 
-// TestAbortUnwantedKeepsALateReader ends an idle track only once a reader that
-// joined after its demand went unwanted has left.
-func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+// TestCloseEndsAnOnDemandTrack closes an idle track, which ends, then one a reader
+// joined after its demand went unwanted, which the broadcast asks for again.
+func TestCloseEndsAnOnDemandTrack(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer broadcast.Close()
-
-	track, err := broadcast.PublishTrack("status", timedInfo())
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
-	demand, err := track.Demand()
+	defer dynamic.Cancel()
+	consumer, err := broadcast.Consume()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	if err := untilWanted(ctx, demand, false); err != nil {
-		t.Fatal(err)
-	}
 
-	late, err := track.Consume(nil)
+	idle, err := broadcast.PublishTrack("idle", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted, err := track.AbortUnwanted(7); err != nil || aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	demand, err := idle.Demand()
+	if err != nil {
+		t.Fatal(err)
 	}
-	payload := []byte("still serving")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	idle.Close()
+	if err := untilWanted(ctx, demand, true); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("untilWanted after Close = %v, want ErrClosed", err)
+	}
+
+	track, err := broadcast.PublishTrack("status", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand, err = track.Demand(); err != nil {
+		t.Fatal(err)
+	}
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	late, err := consumer.SubscribeTrack(ctx, "status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Cancel()
+	track.Close()
+
+	request, err := dynamic.RequestedTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, err := request.Name(); err != nil || name != "status" {
+		t.Fatalf("request name = %q, %v; want status", name, err)
+	}
+	next, err := request.Accept(timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("served again")
+	if err := next.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := late.ReadFrame(ctx)
@@ -1719,20 +1811,102 @@ func TestAbortUnwantedKeepsALateReader(t *testing.T) {
 	if frame == nil || string(frame.Payload) != string(payload) {
 		t.Fatalf("frame = %+v, want payload=%q", frame, payload)
 	}
+}
 
-	if err := untilWanted(ctx, demand, true); err != nil {
+// TestNativeEncodersServeARenewal serves a track asked for again after its encoder was closed
+// while read with an encoder on the request, published with the same options.
+func TestNativeEncodersServeARenewal(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
 		t.Fatal(err)
 	}
-	late.Cancel()
-	if err := untilWanted(ctx, demand, false); err != nil {
+	defer broadcast.Close()
+	dynamic, err := broadcast.Requests()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted, err := track.AbortUnwanted(7); err != nil || !aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
+	defer dynamic.Cancel()
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := track.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
+	catalog, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	// Close the producer published as name once a reader joined, returning the request for it.
+	renewal := func(name string, close func()) (*moq.TrackConsumer, *moq.TrackRequest) {
+		t.Helper()
+		late, err := consumer.SubscribeTrack(ctx, name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		close()
+		request, err := dynamic.RequestedTrack(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := request.Name(); err != nil || got != name {
+			t.Fatalf("request name = %q, %v; want %s", got, err, name)
+		}
+		return late, request
+	}
+	read := func(late *moq.TrackConsumer) {
+		t.Helper()
+		frame, err := late.ReadFrame(ctx)
+		if err != nil || frame == nil {
+			t.Fatalf("frame = %+v, %v; want one", frame, err)
+		}
+		late.Cancel()
+	}
+
+	mic := "mic"
+	audioOptions := moqaudio.ProducerOptions{
+		Input:  moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		Output: moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 20 * time.Millisecond},
+	}
+	named := audioOptions
+	named.Track = &mic
+	audio, err := moqaudio.NewProducer(catalog, named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request := renewal(mic, audio.Close)
+	if audio, err = moqaudio.NewRequestedProducer(catalog, request, audioOptions); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*960, 48_000), Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read(late)
+
+	camera := "camera"
+	videoOptions := moqvideo.ProducerOptions{
+		Input:  moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30, Denominator: 1}},
+		Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder()},
+	}
+	namedVideo := videoOptions
+	namedVideo.Track = &camera
+	video, err := moqvideo.NewProducer(catalog, namedVideo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request = renewal(camera, video.Close)
+	if video, err = moqvideo.NewRequestedProducer(catalog, request, videoOptions); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(0, 30), Data: make([]byte, 320*240*4)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	read(late)
 }
 
 // TestCancelDoesNotLeakGoroutines parks many subscribes on a dynamic producer
@@ -1850,8 +2024,8 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
-	if ann := nextAnnounced(t, ctx, announced); !ann.Route.Instance.Eq(route.Instance()) {
-		t.Fatalf("reannounce: ann=%+v, want instance %s", ann, route.Instance())
+	if ann := nextAnnounced(t, ctx, announced); !ann.Route.Identity.Eq(route.Identity()) {
+		t.Fatalf("reannounce: ann=%+v, want identity %s", ann, route.Identity())
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {
 		t.Fatal(err)
@@ -1938,7 +2112,7 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A route mints its own instance and keeps it across re-pricing. Another route
+// A route mints its own identity and keeps it across re-pricing. Another route
 // keeps the path present in the listing and reaches only followers.
 func TestNewRouteReachesFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1951,16 +2125,16 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
-	following, err := consumer.Follow("instance", nil)
+	following, err := consumer.Follow("identity", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer following.Cancel()
 
-	route, _ := newRoute(t, origin, "instance", moq.RouteOptions{})
-	fresh := nextAnnounced(t, ctx, announced).Route.Instance
-	if !fresh.Eq(route.Instance()) || fresh.IsMinted() {
-		t.Fatalf("present instance = %v, want the route's own %v", fresh, route.Instance())
+	route, _ := newRoute(t, origin, "identity", moq.RouteOptions{})
+	fresh := nextAnnounced(t, ctx, announced).Route.Identity
+	if !fresh.Eq(route.Identity()) || fresh.IsMinted() {
+		t.Fatalf("present identity = %v, want the route's own %v", fresh, route.Identity())
 	}
 	if _, err := following.Available(ctx); err != nil {
 		t.Fatal(err)
@@ -1969,10 +2143,10 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 	if err := route.SetCost(1); err != nil {
 		t.Fatal(err)
 	}
-	stable := parseInstance(t, "cam")
-	second, _ := newRoute(t, origin, "instance", moq.RouteOptions{Instance: stable, Epoch: 1})
+	stable := parseIdentity(t, "cam")
+	second, _ := newRoute(t, origin, "identity", moq.RouteOptions{Identity: stable, Epoch: 1})
 	if _, err := following.Available(ctx); err != nil {
-		t.Fatalf("follow after the instance change: %v", err)
+		t.Fatalf("follow after the identity change: %v", err)
 	}
 
 	// The listing's next event is the absence, so neither the re-price nor the new
@@ -1984,8 +2158,8 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || !absent.Announce.Route.Instance.Eq(stable) {
-		t.Fatalf("event = %+v, want absent with instance %s", event, stable)
+	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || !absent.Announce.Route.Identity.Eq(stable) {
+		t.Fatalf("event = %+v, want absent with identity %s", event, stable)
 	}
 }
 
@@ -2021,49 +2195,49 @@ func TestFollowReportsOffline(t *testing.T) {
 	}
 }
 
-// A follower pinned to an instance reports another instance taking over as nil.
+// A follower pinned to an identity reports another identity taking over as nil.
 func TestPinnedFollowReportsTakeoverOffline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	pinned := parseInstance(t, "cam")
+	pinned := parseIdentity(t, "cam")
 	following, err := origin.Consume().Follow("pinned", pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer following.Cancel()
 
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: pinned})
+	newRoute(t, origin, "pinned", moq.RouteOptions{Identity: pinned})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
 		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
 	}
 
-	other := parseInstance(t, "other")
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: other, Epoch: 1})
+	other := parseIdentity(t, "other")
+	newRoute(t, origin, "pinned", moq.RouteOptions{Identity: other, Epoch: 1})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
 		t.Fatalf("Available after takeover = %v, %v; want nil", broadcast, err)
 	}
 }
 
-// Callers only name instances: the same text names the same one, and empty text names none.
-func TestParseInstance(t *testing.T) {
-	cam := parseInstance(t, "cam")
+// Callers only name identities: the same text names the same one, and empty text names none.
+func TestParseIdentity(t *testing.T) {
+	cam := parseIdentity(t, "cam")
 	if cam.Text() != "cam" || cam.String() != "cam" || cam.IsMinted() {
 		t.Fatalf("parsed = %v (minted %v), want the named cam", cam, cam.IsMinted())
 	}
-	again := parseInstance(t, "cam")
-	if !cam.Eq(again) || cam.Hash() != again.Hash() || cam.Eq(parseInstance(t, "other")) {
-		t.Fatal("instances compare by text and the minted flag")
+	again := parseIdentity(t, "cam")
+	if !cam.Eq(again) || cam.Hash() != again.Hash() || cam.Eq(parseIdentity(t, "other")) {
+		t.Fatal("identities compare by text and the minted flag")
 	}
-	if _, err := moq.ParseInstance(""); !errors.Is(err, moq.ErrInvalidInstance) {
-		t.Fatalf("ParseInstance(empty) = %v, want ErrInvalidInstance", err)
+	if _, err := moq.ParseIdentity(""); !errors.Is(err, moq.ErrInvalidIdentity) {
+		t.Fatalf("ParseIdentity(empty) = %v, want ErrInvalidIdentity", err)
 	}
 }
 
-// Over a wire that carries no instance, the session mints the announced one, and
+// Over a wire that carries no identity, the session mints the announced one, and
 // passing it back as is pins Request and Follow to that stream.
-func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
+func TestMintedIdentityPinsRequestAndFollow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -2092,9 +2266,9 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
-	minted := nextAnnounced(t, ctx, announced).Route.Instance
+	minted := nextAnnounced(t, ctx, announced).Route.Identity
 	if !minted.IsMinted() {
-		t.Fatalf("announced instance %v over %s is not minted", minted, version)
+		t.Fatalf("announced identity %v over %s is not minted", minted, version)
 	}
 
 	if _, err := client.Request(ctx, "live", minted); err != nil {
@@ -2109,8 +2283,8 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 		t.Fatalf("Available(minted) = %v, %v; want a broadcast", broadcast, err)
 	}
 
-	// The same text, named, is another instance, which nothing serves.
-	named := parseInstance(t, minted.Text())
+	// The same text, named, is another identity, which nothing serves.
+	named := parseIdentity(t, minted.Text())
 	if named.Eq(minted) || named.IsMinted() {
 		t.Fatalf("parsed %v equals the minted %v", named, minted)
 	}
@@ -2120,15 +2294,15 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 	}
 }
 
-// parseInstance names an instance, failing the test on an error.
-func parseInstance(t *testing.T, text string) *moq.Instance {
+// parseIdentity names an identity, failing the test on an error.
+func parseIdentity(t *testing.T, text string) *moq.Identity {
 	t.Helper()
 
-	instance, err := moq.ParseInstance(text)
+	identity, err := moq.ParseIdentity(text)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return instance
+	return identity
 }
 
 // nextRoute returns the next announce event.

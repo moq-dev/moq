@@ -1,14 +1,35 @@
 import { Duration } from "@moq/clock";
 import { closeReason, ProtocolViolation, StreamError } from "../error.ts";
-import { type Hop, randomHop } from "../hop.ts";
+import { Cost, type Hop, randomHop } from "../hop.ts";
 import { IetfSessionCode } from "../ietf/error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
+import type { Producer as OriginProducer } from "../origin.ts";
 import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import { wireOf } from "../wire.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
 export const DEFAULT_TIMEOUT = Duration.millis(30_000);
+
+/** The price and rank a session puts on its link: the `cost` option, and its `consume` origin's priority. */
+export interface Link {
+	cost?: Cost;
+	priority?: number;
+}
+
+/** Refuse a link price no wire carries, before anything opens. */
+export function checkCost(cost: Cost | undefined): void {
+	if (cost === undefined) return;
+	if (typeof cost !== "bigint" || cost < 0n || cost > Cost.max) {
+		throw new RangeError("link cost must be a bigint from 0 to 2^62-1");
+	}
+}
+
+/** The link a session's options price and rank. */
+export function link({ cost, consume }: { cost?: Cost; consume?: OriginProducer }): Link {
+	return { cost, priority: consume ? wireOf(consume).priority : undefined };
+}
 
 /**
  * Draft-18+ SETUP exchange. Each side opens a uni stream, writes its Setup
@@ -32,10 +53,13 @@ export async function exchangeSetup(
 	{
 		client,
 		token,
+		cost,
 		solicit = true,
 	}: {
 		client: boolean;
 		token?: Uint8Array;
+		/** Our price for this link, declared as RELAY_COST and winning over the peer's. */
+		cost?: Cost;
 		/** Declare MoQ Solicit. `false` only in a test acting as a peer without it. */
 		solicit?: boolean;
 	},
@@ -48,6 +72,7 @@ export async function exchangeSetup(
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	peerImplementation: string | undefined;
+	linkCost: Cost;
 }> {
 	const params = new Ietf.SetupOptions();
 	Ietf.implementationIntoSetup(params, implementation);
@@ -61,6 +86,7 @@ export async function exchangeSetup(
 	// between sessions, so there is nothing for a shared id to detect.
 	const self = randomHop();
 	Ietf.Cluster.intoSetup(params, self);
+	if (cost !== undefined) params.setVarint(Ietf.SetupOption.RelayCost, cost);
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -87,6 +113,8 @@ export async function exchangeSetup(
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		peerImplementation: received.implementation,
+		// RELAY_COST is directional: the peer's prices what we pull from it, unless we priced it.
+		linkCost: cost ?? received.cost ?? Cost.link,
 	};
 }
 
@@ -115,6 +143,7 @@ async function receiveSetup(
 	hidden: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
+	cost: Cost | undefined;
 	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -177,6 +206,7 @@ async function receiveSetup(
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
+		cost: setup.parameters.getVarint(Ietf.SetupOption.RelayCost),
 		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
 }

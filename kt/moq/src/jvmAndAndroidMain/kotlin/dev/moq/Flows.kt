@@ -59,6 +59,12 @@ fun Claim.requestedBroadcasts(): Flow<BroadcastRequest> = pull { requested() }
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 
+/** Stream of a metadata subscription's groups in arrival order, as `recvGroup` returns them. */
+fun MetaConsumer.groupsAsArrived(): Flow<MetaGroup> = pull({ cancel() }) { recvGroup() }
+
+/** Stream of frame headers within a metadata group. */
+fun MetaGroup.headers(): Flow<FrameHeader> = pull({ cancel() }) { nextHeader() }
+
 /**
  * Stream of announce events, as `announced(config).updates()`.
  *

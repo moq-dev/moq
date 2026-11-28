@@ -1,0 +1,11 @@
+error: #[kio::wrapper] needs a method returning `Poll<T>`
+ --> tests/ui/wrapper_output.rs:7:46
+  |
+7 |     fn poll_nothing(&self, _waiter: &kio::Waiter) {}
+  |                                                 ^
+
+error: #[kio::wrapper] needs a method returning `Poll<T>`
+  --> tests/ui/wrapper_output.rs:10:47
+   |
+10 |     fn poll_option(&self, _waiter: &kio::Waiter) -> Option<()> {
+   |                                                  ^^^^^^^^^^^^^

@@ -12,18 +12,18 @@ pub struct Route {
 	/// The broadcast path, each URL segment percent-decoded and escaped into one path segment.
 	/// An embedder that scopes its origin rewrites this relative to that scope before looking it up.
 	pub broadcast: String,
-	/// The include ID and publisher instance, when the resource belongs to one.
+	/// The include ID and publisher identity, when the resource belongs to one.
 	pub include: Option<Include>,
 	/// The resource requested under the broadcast.
 	pub resource: Resource,
 }
 
-/// The include catalog and stream named inside a broadcast's instance URL.
+/// The include catalog and stream named inside a broadcast's identity URL.
 ///
 /// An include's resource nests under the served broadcast as
-/// `{broadcast}/@{instance}/include/{id}/{kind}/{rendition}/@{include-instance}/`
+/// `{broadcast}/@{token}/include/{id}/{kind}/{rendition}/@{include-token}/`
 /// followed by the [`Resource`] file (`media.m3u8`, `init.{hash}.mp4`, or `seg/{segment}.m4s`).
-/// The broadcast's own `@{instance}` comes first, so [`Route::broadcast`] stays the parent's
+/// The broadcast's own `@{token}` comes first, so [`Route::broadcast`] stays the parent's
 /// path and a path-based policy check covers its includes. A denied include answers
 /// `403`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,34 +31,34 @@ pub struct Route {
 pub struct Include {
 	/// The include ID in the parent catalog, percent-decoded.
 	pub id: String,
-	/// The include's publisher instance, percent-decoded and without its `@`.
-	pub instance: String,
+	/// The include's identity token, percent-decoded and without its `@`.
+	pub token: String,
 }
 
 /// A resource under a broadcast.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Resource {
-	/// `master.m3u8`: the HLS multivariant playlist of the instance serving the broadcast now.
+	/// `master.m3u8`: the HLS multivariant playlist of the identity serving the broadcast now.
 	Master,
-	/// `manifest.mpd`: the DASH manifest of the instance serving the broadcast now.
+	/// `manifest.mpd`: the DASH manifest of the identity serving the broadcast now.
 	Manifest,
-	/// `@{instance}/{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
+	/// `@{token}/{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
 	#[non_exhaustive]
 	Media {
-		/// The publisher instance, percent-decoded and without its `@`.
-		instance: String,
+		/// The publisher identity's URL token, percent-decoded and without its `@`.
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
 		rendition: String,
 	},
-	/// `@{instance}/{kind}/{rendition}/init.{hash}.mp4`: a rendition's CMAF init segment,
+	/// `@{token}/{kind}/{rendition}/init.{hash}.mp4`: a rendition's CMAF init segment,
 	/// answered by [`Rendition::init`](super::Rendition::init).
 	#[non_exhaustive]
 	Init {
-		/// The publisher instance, percent-decoded and without its `@`.
-		instance: String,
+		/// The publisher identity's URL token, percent-decoded and without its `@`.
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -66,12 +66,12 @@ pub enum Resource {
 		/// The hash of the init bytes the URL names.
 		hash: String,
 	},
-	/// `@{instance}/{kind}/{rendition}/seg/{segment}.m4s`: a media segment, answered by
+	/// `@{token}/{kind}/{rendition}/seg/{segment}.m4s`: a media segment, answered by
 	/// [`Rendition::segment`](super::Rendition::segment).
 	#[non_exhaustive]
 	Segment {
-		/// The publisher instance, percent-decoded and without its `@`.
-		instance: String,
+		/// The publisher identity's URL token, percent-decoded and without its `@`.
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -82,11 +82,11 @@ pub enum Resource {
 }
 
 impl Route {
-	/// Parse a request path such as `/project/live/@{instance}/video/hd/media.m3u8`, or `None`
+	/// Parse a request path such as `/project/live/@{token}/video/hd/media.m3u8`, or `None`
 	/// when it addresses nothing.
 	///
 	/// The broadcast occupies every segment before the resource suffix, which for every
-	/// resource but the master and manifest starts with the `@{instance}` segment. Each segment is
+	/// resource but the master and manifest starts with the `@{token}` segment. Each segment is
 	/// percent-decoded. A broadcast segment's decoded bytes are one path segment's content, so an
 	/// encoded `/` is escaped into its segment rather than splitting it, and cannot smuggle a
 	/// different broadcast past a policy check on [`broadcast`](Self::broadcast).
@@ -105,9 +105,9 @@ impl Route {
 			return None;
 		}
 
-		// Put the child instance after the rendition: this suffix cannot also be an
+		// Put the child identity after the rendition: this suffix cannot also be an
 		// ordinary rendition URL for a longer broadcast path. The kind would occupy
-		// that URL's @instance slot, so the two grammars are disjoint.
+		// that URL's @identity slot, so the two grammars are disjoint.
 		let tail = match parts.as_slice() {
 			[.., directory, _] if directory == "seg" => 2,
 			[.., file] if file == "media.m3u8" || init_hash(file).is_some() => 1,
@@ -118,15 +118,15 @@ impl Route {
 			match &parts[..end] {
 				[.., parent, directory, id, kind, _, child]
 					if directory == "include"
-						&& instance_id(parent).is_some()
+						&& parse_token(parent).is_some()
 						&& Kind::parse(kind).is_some()
-						&& instance_id(child).is_some() =>
+						&& parse_token(child).is_some() =>
 				{
 					// Every slot has the include shape; otherwise the ordinary arms below
 					// parse the untouched parts as a longer broadcast path.
 					let include = Include {
 						id: id.clone(),
-						instance: instance_id(child)?,
+						token: parse_token(child)?,
 					};
 					parts.remove(end - 1);
 					parts.drain(end - 5..end - 3);
@@ -141,27 +141,27 @@ impl Route {
 		let (broadcast, resource) = match parts.as_slice() {
 			[broadcast @ .., file] if file == "master.m3u8" => (broadcast, Resource::Master),
 			[broadcast @ .., file] if file == "manifest.mpd" => (broadcast, Resource::Manifest),
-			[broadcast @ .., instance, kind, rendition, file] if file == "media.m3u8" => (
+			[broadcast @ .., identity, kind, rendition, file] if file == "media.m3u8" => (
 				broadcast,
 				Resource::Media {
-					instance: instance_id(instance)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 				},
 			),
-			[broadcast @ .., instance, kind, rendition, file] if init_hash(file).is_some() => (
+			[broadcast @ .., identity, kind, rendition, file] if init_hash(file).is_some() => (
 				broadcast,
 				Resource::Init {
-					instance: instance_id(instance)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 					hash: init_hash(file)?.to_string(),
 				},
 			),
-			[broadcast @ .., instance, kind, rendition, directory, file] if directory == "seg" => (
+			[broadcast @ .., identity, kind, rendition, directory, file] if directory == "seg" => (
 				broadcast,
 				Resource::Segment {
-					instance: instance_id(instance)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 					segment: segments::Id::parse(file.strip_suffix(".m4s")?)?,
@@ -182,10 +182,10 @@ impl Route {
 	}
 }
 
-/// The publisher instance an `@{instance}` path segment names.
-fn instance_id(part: &str) -> Option<String> {
+/// The identity token an `@{token}` path segment names.
+fn parse_token(part: &str) -> Option<String> {
 	part.strip_prefix('@')
-		.filter(|instance| !instance.is_empty())
+		.filter(|token| !token.is_empty())
 		.map(str::to_string)
 }
 
@@ -209,7 +209,7 @@ mod tests {
 				broadcast: "project/live".to_string(),
 				include: None,
 				resource: Resource::Media {
-					instance: "run".to_string(),
+					token: "run".to_string(),
 					kind: Kind::Video,
 					rendition: "cam#1/main?alt".to_string(),
 				},
@@ -231,7 +231,7 @@ mod tests {
 		};
 
 		// The manifest for broadcast `live` and rendition `video/1080p` emits these paths.
-		// Unencoded, the same name names no instance.
+		// Unencoded, the same name names no identity.
 		let cases = [
 			("/live/@run/video/video%2F1080p/init.0123abcd.mp4", "video/1080p"),
 			("/live/@run/video/video%2F1080p/seg/ab12cd34.t2000.m4s", "video/1080p"),
@@ -250,7 +250,7 @@ mod tests {
 	fn parses_all_resource_routes() {
 		let resource = |path| Route::parse(path).map(|route| route.resource);
 		let segment = |generation: Option<&str>, at| Resource::Segment {
-			instance: "run".to_string(),
+			token: "run".to_string(),
 			kind: Kind::Video,
 			rendition: "main".to_string(),
 			segment: Id {
@@ -264,7 +264,7 @@ mod tests {
 		assert_eq!(
 			resource("/project/live/@run/audio/main/init.0123abcd.mp4"),
 			Some(Resource::Init {
-				instance: "run".to_string(),
+				token: "run".to_string(),
 				kind: Kind::Audio,
 				rendition: "main".to_string(),
 				hash: "0123abcd".to_string(),
@@ -289,7 +289,7 @@ mod tests {
 		assert!(Route::parse("/master.m3u8").is_none());
 		assert!(
 			Route::parse("/project/live/video/main/media.m3u8").is_none(),
-			"a rendition URL names its instance"
+			"a rendition URL names its identity"
 		);
 		assert!(Route::parse("/project/live/@/video/main/media.m3u8").is_none());
 		assert!(Route::parse("/project/live/@run/video/main/unknown").is_none());
@@ -340,16 +340,14 @@ mod tests {
 				route.include,
 				Some(Include {
 					id: "a/b".into(),
-					instance: "child".into()
+					token: "child".into()
 				})
 			);
-			let instance = match route.resource {
-				Resource::Media { instance, .. }
-				| Resource::Init { instance, .. }
-				| Resource::Segment { instance, .. } => instance,
+			let token = match route.resource {
+				Resource::Media { token, .. } | Resource::Init { token, .. } | Resource::Segment { token, .. } => token,
 				_ => panic!("wrong resource"),
 			};
-			assert_eq!(instance, "parent");
+			assert_eq!(token, "parent");
 		}
 		let own = Route::parse("/room/@parent/include/id/@child/video/main/media.m3u8").unwrap();
 		assert_eq!(own.broadcast, "room/@parent/include/id");
@@ -361,12 +359,8 @@ mod tests {
 		assert_eq!(own.broadcast, "room/@parent/include/id/video");
 		assert!(own.include.is_none());
 		match own.resource {
-			Resource::Media {
-				instance,
-				kind,
-				rendition,
-			} => {
-				assert_eq!(instance, "run");
+			Resource::Media { token, kind, rendition } => {
+				assert_eq!(token, "run");
 				assert_eq!(kind, Kind::Audio);
 				assert_eq!(rendition, "seg");
 			}

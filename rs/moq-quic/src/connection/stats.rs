@@ -231,7 +231,8 @@ pub struct CreditStats {
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeldStats {
-	/// A reader had data it had not looked at yet, or waited behind a gap: a reader behind
+	/// A reader had data it had not looked at yet, waited behind a gap, or had a lease out, as a
+	/// dropped lease leaves its stream until stopped
 	pub readers: Duration,
 	/// An evicted reader had not stopped its stream, keeping the credit of bytes it took
 	pub evicted: Duration,

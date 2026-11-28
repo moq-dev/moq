@@ -29,11 +29,13 @@ FUZZ_CRATES = sorted(
     if package["name"].endswith("-fuzz")
 )
 FUZZ_EXCLUDES = " ".join(f"--exclude {crate}" for crate in FUZZ_CRATES)
-DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
+DEVICE_FEATURES = (
+    "moq-video/capture moq-video/openh264 moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
+)
 
 
-def target_features():
-    """Every `required-features` of a bench, example, or tested target, as `crate/feature`, for the workspace."""
+def target_features(which="tests"):
+    """Every `required-features` of workspace targets matching `which` (`tests` or `benches-examples`)."""
     metadata = json.loads(
         subprocess.run(
             ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
@@ -49,7 +51,7 @@ def target_features():
             for package in metadata["packages"]
             if not package["name"].endswith("-fuzz")
             for target in package["targets"]
-            if {"bench", "example"} & set(target["kind"]) or target["test"]
+            if (target["test"] if which == "tests" else bool({"bench", "example"} & set(target["kind"])))
             for feature in target.get("required-features", [])
         }
     )
@@ -112,19 +114,23 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = DEVICE_FEATURES.split()
-        features += [feature for feature in target_features() if feature not in features]
+        features = [*DEVICE_FEATURES.split(), "moq-relay/test-support"]
+        features += [feature for feature in target_features("tests") if feature not in features]
+        bench_features = target_features("benches-examples")
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --benches --examples --features {' '.join(features)}" if action == "test" else ""
+                    suffix = f" --features {' '.join(features)}" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
-                    self.assertIn(
-                        f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
-                        self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
-                    )
+                    calls = self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions)
+                    self.assertIn(f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}", calls)
+                    if action in ("lint", "check-test"):
+                        self.assertIn(
+                            f"rs lint-targets --workspace {FUZZ_EXCLUDES} --features {' '.join(bench_features)}",
+                            calls,
+                        )
         selected = self.selected("sh/rs/nextest.sh")
-        # The gate's lint runs no extra target or feature builds.
+        # The gate's lint runs no extra feature builds beyond bench/example linting.
         self.assertNotIn("rs capture", selected)
 
     def test_cargo_configuration_selects_workspace(self):
@@ -152,7 +158,7 @@ class SelectTest(unittest.TestCase):
     def test_gate_runs_no_feature_matrix(self):
         # `just rs features` owns the isolated feature builds, outside the gate.
         for path in (
-            "rs/moq-pattern/src/lib.rs",
+            "rs/kio/src/lib.rs",
             "rs/moq-tokio/src/lib.rs",
             "rs/moq-quic/src/lib.rs",
             "rs/moq-video/src/lib.rs",
@@ -170,16 +176,17 @@ class SelectTest(unittest.TestCase):
     def test_gate_proves_send_depth_for_net(self):
         # moq-net and its dependencies can deepen the session driver's Send proof.
         # send-depth runs in parallel with the stable lint steps in its own target dir.
-        for path in ("rs/moq-net/src/lib.rs", "rs/moq-pattern/src/lib.rs", "Cargo.lock"):
+        for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(calls.count("rs send-depth"), 1, calls)
                 stable = [call for call in calls if call != "rs send-depth"]
-                self.assertEqual(len(stable), 4, stable)
+                self.assertEqual(len(stable), 5, stable)
                 self.assertTrue(stable[0].startswith("rs lint "), stable)
-                self.assertEqual(stable[1], "rs media-defaults", stable)
-                self.assertEqual(stable[2], "rs no-async", stable)
-                self.assertEqual(stable[3], "rs net-fuzz", stable)
+                self.assertTrue(stable[1].startswith("rs lint-targets "), stable)
+                self.assertEqual(stable[2], "rs media-defaults", stable)
+                self.assertEqual(stable[3], "rs no-async", stable)
+                self.assertEqual(stable[4], "rs net-fuzz", stable)
         # The script that runs the proof selects moq-net, so an edit to it is proved too.
         self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
@@ -193,7 +200,7 @@ class SelectTest(unittest.TestCase):
         for path in (
             "rs/libmoq/src/lib.rs",
             "rs/libmoq/build.rs",
-            "rs/libmoq/c-tests/abort-unwanted.c",
+            "rs/libmoq/c-tests/on-demand-free.c",
             "sh/rs/c-tests.sh",
             "doc/lib/c/index.md",
             "doc/lib/samples.sh",
@@ -227,7 +234,7 @@ class SelectTest(unittest.TestCase):
         # Every other build unifies `async` and `test-support` back in, so the
         # gate compiles moq-net without them, for moq-net and its dependencies.
         for recipe in ("rs no-async", "rs net-fuzz"):
-            for path in ("rs/moq-net/src/lib.rs", "rs/moq-pattern/src/lib.rs", "Cargo.lock"):
+            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
                 for action in ("check", "check-test", "lint"):
                     with self.subTest(recipe=recipe, path=path, action=action):
                         calls = self.selected(path, action=action)
@@ -243,6 +250,7 @@ class SelectTest(unittest.TestCase):
         for path, features in (
             ("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
             ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264"),
+            ("rs/moq-relay/tests/integration/cluster_drain.rs", "moq-relay/test-support"),
         ):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
@@ -252,6 +260,72 @@ class SelectTest(unittest.TestCase):
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
+
+    def test_a_local_cross_lint_keeps_the_crates_that_name_a_platform(self):
+        def cross(strict):
+            with tempfile.TemporaryDirectory() as directory:
+                scratch = Path(directory)
+                # sh/rs/cross-lint.sh asks Nix for its toolchain first; stop there.
+                nix = scratch / "nix"
+                nix.write_text("#!/bin/sh\nexit 1\n")
+                nix.chmod(0o755)
+                changed = scratch / "changed"
+                changed.write_text("rs/hang/src/lib.rs\n")
+                env = dict(
+                    os.environ,
+                    LOCAL_SUPERVISED="1",
+                    PATH=f"{scratch}:{os.environ['PATH']}",
+                    BASH_ENV=os.devnull,
+                    GITHUB_ACTIONS="false",
+                    CI_STRICT="1" if strict else "",
+                )
+                result = subprocess.run(
+                    ["bash", "sh/rs/select.sh", "cross", str(changed)],
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                return re.search(r"^rs: cross-linting the crates that name a platform: (.*)$", result.stdout, re.M)
+
+        # hang names no platform, while moq-mux (a dependent) has macOS tests.
+        kept = cross(strict=False).group(1).split()
+        self.assertIn("moq-mux", kept)
+        self.assertNotIn("hang", kept)
+        self.assertIsNone(cross(strict=True))
+
+    def test_platform_crates_finds_each_platform_guard(self):
+        script = (ROOT / "sh/rs/select.sh").read_text()
+        function = re.search(r"^platform_crates\(\) \{\n.*?^\}\n", script, re.M | re.S).group(0)
+        crates = {
+            "bare": ("src/lib.rs", "#[cfg(windows)]\nfn f() {}\n"),
+            "nested": ("src/lib.rs", "#[cfg(not(unix))]\nfn f() {}\n"),
+            "attr": ("src/lib.rs", '#[cfg_attr(target_os = "macos", allow(dead_code))]\nfn f() {}\n'),
+            "macro": ("src/lib.rs", "const A: bool = cfg!(unix);\n"),
+            "split": ("src/lib.rs", '#[cfg(any(\n\tunix,\n\tfeature = "x",\n))]\nfn f() {}\n'),
+            "os": ("src/lib.rs", "use std::os::unix::fs::PermissionsExt;\n"),
+            "build": ("build.rs", 'fn main() { std::env::var("CARGO_CFG_TARGET_OS").unwrap(); }\n'),
+            "manifest": ("Cargo.toml", "[target.'cfg(unix)'.dependencies]\nlibc = \"1\"\n"),
+            "triple": ("Cargo.toml", '[target.x86_64-pc-windows-msvc.dependencies]\nwindows = "1"\n'),
+            "plain": ("src/lib.rs", "// Credit windows in unix time.\n#[cfg(test)]\nmod tests {}\n"),
+            "width": ("src/lib.rs", '#[cfg(target_pointer_width = "64")]\nfn f() {}\n'),
+            "codspeed": ("Cargo.toml", "[target.'cfg(codspeed)'.dependencies]\nx = \"1\"\n"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            for crate, (path, text) in crates.items():
+                file = repo / "rs" / crate / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(text)
+            found = subprocess.run(
+                ["bash", "-c", f"set -euo pipefail\n{function}platform_crates"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+        self.assertEqual(found, ["attr", "bare", "build", "macro", "manifest", "nested", "os", "split", "triple"])
 
     def test_io_uring_changes_test_the_relay(self):
         for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs"):
@@ -433,7 +507,8 @@ class SelectTest(unittest.TestCase):
 
     def test_a_bench_alone_enables_its_required_features(self):
         # Alone in the selection, no dependent turns these on, and cargo would
-        # skip the targets without a word.
+        # skip the targets without a word. Benches are linted in check mode
+        # during `lint`, not linked during `test`.
         for bench, feature in (
             ("rs/moq-stats/benches/producer_tick.rs", "moq-stats/bench"),
             ("rs/moq-net/benches/codec.rs", "moq-net/fuzz"),
@@ -441,9 +516,11 @@ class SelectTest(unittest.TestCase):
             ("rs/moq-quic/benches/wire.rs", "moq-quic/fuzz"),
         ):
             with self.subTest(bench=bench):
-                (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
-                self.assertIn(" --benches --examples ", call)
+                (call,) = [call for call in self.selected(bench, action="lint") if call.startswith("rs lint-targets ")]
                 self.assertIn(feature, call.split(" --features ", 1)[1].split())
+                (test_call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
+                self.assertNotIn("--benches", test_call)
+                self.assertNotIn("--examples", test_call)
 
     def test_a_binary_alone_enables_its_required_features(self):
         # moq-boy's only target is its binary, so without openh264 the build
@@ -520,10 +597,7 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             self.calls.read_text().splitlines(),
-            [
-                "rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0"
-                " --no-tests=pass --benches --examples"
-            ],
+            ["rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0 --no-tests=pass"],
         )
 
     def test_malformed_metadata_stops_before_running_tests(self):

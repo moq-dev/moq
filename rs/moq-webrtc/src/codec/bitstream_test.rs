@@ -116,7 +116,8 @@ async fn idle_video_bridges_do_not_gate_audio_catalog() {
 		.await
 		.expect("idle video must not gate active audio")
 		.expect("catalog update")
-		.expect("catalog snapshot");
+		.expect("catalog snapshot")
+		.value;
 	assert_eq!(snapshot.audio.renditions.len(), 1);
 	assert!(snapshot.video.renditions.is_empty());
 }

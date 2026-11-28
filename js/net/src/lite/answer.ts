@@ -14,10 +14,10 @@
 import { type GetPromise, type Getter, race } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { ProtocolViolation } from "../error.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import { coveringPrefixes, hiddenBelow, presented, within } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Advertised, type Advertisements, type OriginConsumer, sameInstance } from "../wire.ts";
+import { type Advertised, type Advertisements, type OriginConsumer, sameIdentity } from "../wire.ts";
 import { type Add, type AnnounceBroadcast, type Claim, claimsEqual, ownClaim, requestFits } from "./announce.ts";
 import type { AnnounceStream } from "./announce_stream.ts";
 import type { Version } from "./version.ts";
@@ -239,21 +239,21 @@ export class Answer {
 		};
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
-		// never withdrew it. Another path's advertisement of the same instance proves nothing.
+		// never withdrew it. Another path's advertisement of the same identity proves nothing.
 		// Indexed once per diff, and only when a claim leaves.
-		let advertisements: Map<object, Set<Instance.Valid | undefined>> | undefined;
+		let advertisements: Map<object, Set<Identity.Valid | undefined>> | undefined;
 		const stillAdvertised = (sent: Sent) => {
 			if (!advertisements) {
 				advertisements = new Map();
 				for (const candidates of table?.values() ?? []) {
 					for (const snap of candidates) {
-						const instances = advertisements.get(snap.identity) ?? new Set();
-						instances.add(snap.route.instance);
-						advertisements.set(snap.identity, instances);
+						const identities = advertisements.get(snap.ref) ?? new Set();
+						identities.add(snap.route.identity);
+						advertisements.set(snap.ref, identities);
 					}
 				}
 			}
-			return advertisements.get(sent.snap.identity)?.has(sent.snap.route.instance) ?? false;
+			return advertisements.get(sent.snap.ref)?.has(sent.snap.route.identity) ?? false;
 		};
 		const ids = [...this.#prefixes.keys()].sort((a, b) => (a < b ? -1 : 1));
 		for (const id of table ? ids : []) {
@@ -283,8 +283,8 @@ export class Answer {
 			if (!latest.has(path)) end(path, sent, !shows(sent.snap, path) || stillAdvertised(sent));
 		}
 		for (const [path, snap] of latest) {
-			const { instance, epoch, cost } = snap.route;
-			if (instance === undefined) continue;
+			const { identity, epoch, cost } = snap.route;
+			if (identity === undefined) continue;
 			// A claim above the session's root covers all of what the peer sees, so it is no more
 			// above the path than the path is deep.
 			const depth = BigInt(Path.parts(path).length);
@@ -292,12 +292,12 @@ export class Answer {
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
 			const claim = { ...ownClaim(epoch ?? 0n, above < depth ? above : depth), cost };
 			const sent = this.#live.get(path);
-			if (!sent || !sameInstance(sent.snap, snap)) {
+			if (!sent || !sameIdentity(sent.snap, snap)) {
 				this.#live.set(path, { id: this.#nextAnnounce++, snap, claim });
-				console.debug(`announce: broadcast=${path} active=true instance=${instance}`);
+				console.debug(`announce: broadcast=${path} active=true identity=${identity}`);
 				// Every claim's path is relative to the session, whichever prefix it answers.
-				msgs.push({ status: "start", suffix: path, instance, claim });
-				// Another instance is another claim, started before the one it replaces ends, so
+				msgs.push({ status: "start", suffix: path, identity, claim });
+				// Another identity is another claim, started before the one it replaces ends, so
 				// the peer sees the broadcast restart rather than go.
 				if (sent) msgs.push({ status: "endedId", id: sent.id, lost: false });
 			} else if (!claimsEqual(sent.claim, claim)) {

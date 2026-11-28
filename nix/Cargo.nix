@@ -60,6 +60,26 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "kio" = rec {
+      packageId = "kio";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "kio";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "kio-macros" = rec {
+      packageId = "kio-macros";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "kio-macros";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "libmoq" = rec {
       packageId = "libmoq";
       build = internal.buildRustCrateWithFeatures {
@@ -16165,11 +16185,9 @@ rec {
         crateName = "kio";
         version = "0.6.2";
         edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/kixel-ai/kio";
-          rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671";
-          sha256 = "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/kio;
         };
         authors = [
           "Luke Curley"
@@ -16183,6 +16201,8 @@ rec {
             name = "futures";
             packageId = "futures";
             optional = true;
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "kio-macros";
@@ -16232,8 +16252,31 @@ rec {
         ];
         devDependencies = [
           {
+            name = "bench-harness";
+            packageId = "bench-harness";
+            rename = "criterion";
+          }
+          {
             name = "futures";
             packageId = "futures";
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [
+              "async"
+              "manual"
+              "sim"
+              "serde"
+            ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
           }
           {
             name = "tokio";
@@ -16245,6 +16288,10 @@ rec {
               "test-util"
               "time"
             ];
+          }
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
           }
         ];
         features = {
@@ -16266,6 +16313,7 @@ rec {
           "default"
           "macros"
           "manual"
+          "model"
           "runtime"
           "serde"
           "sim"
@@ -16275,11 +16323,9 @@ rec {
         crateName = "kio-macros";
         version = "0.1.0";
         edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/kixel-ai/kio";
-          rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671";
-          sha256 = "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/kio/macros;
         };
         procMacro = true;
         libName = "kio_macros";
@@ -16297,11 +16343,26 @@ rec {
           }
           {
             name = "syn";
-            packageId = "syn 2.0.119";
+            packageId = "syn 3.0.6";
             features = [
               "full"
               "visit-mut"
             ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "macros" ];
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
+          }
+          {
+            name = "trybuild";
+            packageId = "trybuild";
           }
         ];
 
@@ -20580,6 +20641,10 @@ rec {
             name = "num-traits";
             packageId = "num-traits";
           }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
         ];
         devDependencies = [
           {
@@ -22355,6 +22420,10 @@ rec {
             name = "kio";
             packageId = "kio";
             features = [ "async" ];
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
           }
           {
             name = "moq-mux";
@@ -40012,8 +40081,8 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
+            name = "rustls-platform-verifier";
+            packageId = "rustls-platform-verifier";
           }
           {
             name = "thiserror";
@@ -40036,7 +40105,7 @@ rec {
             features = [
               "connect"
               "handshake"
-              "rustls-tls-native-roots"
+              "__rustls-tls"
             ];
           }
           {
@@ -48642,6 +48711,17 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
+      "target-tuple" = rec {
+        crateName = "target-tuple";
+        version = "1.0.2";
+        edition = "2021";
+        sha256 = "0zqys0p3nrq9dickhrp82kiijrdqqy9bmfswmk4dvjyvgqafyvw7";
+        libName = "target_tuple";
+        authors = [
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+
+      };
       "tempfile" = rec {
         crateName = "tempfile";
         version = "3.27.0";
@@ -49776,11 +49856,6 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
-            optional = true;
-          }
-          {
             name = "rustls-pki-types";
             packageId = "rustls-pki-types";
             optional = true;
@@ -49871,9 +49946,7 @@ rec {
           "default"
           "handshake"
           "rustls"
-          "rustls-native-certs"
           "rustls-pki-types"
-          "rustls-tls-native-roots"
           "stream"
           "tokio-rustls"
         ];
@@ -51686,6 +51759,48 @@ rec {
           "Sean McArthur <sean@seanmonstar.com>"
         ];
 
+      };
+      "trybuild" = rec {
+        crateName = "trybuild";
+        version = "1.0.125";
+        edition = "2024";
+        sha256 = "0ic282cy8pb39f3vrm3isdnzlj02y7sfi454xqg8zlhlxsab8f4q";
+        authors = [
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "glob";
+            packageId = "glob";
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+          }
+          {
+            name = "serde_derive";
+            packageId = "serde_derive";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "target-tuple";
+            packageId = "target-tuple";
+          }
+          {
+            name = "termcolor";
+            packageId = "termcolor";
+          }
+          {
+            name = "toml";
+            packageId = "toml 1.2.1+spec-1.1.0";
+          }
+        ];
+        features = {
+          "diff" = [ "dep:dissimilar" ];
+        };
       };
       "ttf-parser" = rec {
         crateName = "ttf-parser";
@@ -59575,6 +59690,10 @@ rec {
             features = [ "tokio" ];
           }
           {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
             name = "futures-channel";
             packageId = "futures-channel";
             features = [ "sink" ];
@@ -59778,15 +59897,6 @@ rec {
             name = "itertools";
             packageId = "itertools 0.13.0";
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            features = [
-              "manual"
-              "serde"
-              "sim"
-            ];
           }
           {
             name = "libc";
@@ -60222,11 +60332,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -60385,7 +60490,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
@@ -60688,13 +60793,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"
@@ -60762,6 +60864,10 @@ rec {
             features = [ "backtrace" ];
           }
           {
+            name = "base64";
+            packageId = "base64 0.23.1";
+          }
+          {
             name = "bitflags";
             packageId = "bitflags 2.13.2";
             usesDefaultFeatures = false;
@@ -60781,6 +60887,35 @@ rec {
             usesDefaultFeatures = false;
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [ "std" ];
+          }
+          {
+            name = "block2";
+            packageId = "block2 0.6.2";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "bytemuck";
+            packageId = "bytemuck";
+            usesDefaultFeatures = false;
+            features = [
+              "derive"
+              "extern_crate_alloc"
+              "min_const_generics"
+            ];
+          }
+          {
+            name = "bytemuck";
+            packageId = "bytemuck";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "aarch64_simd" ];
+          }
+          {
+            name = "bytemuck";
+            packageId = "bytemuck";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "aarch64_simd" ];
           }
           {
             name = "bytes";
@@ -60826,6 +60961,88 @@ rec {
             ];
           }
           {
+            name = "const-oid";
+            packageId = "const-oid 0.10.2";
+            usesDefaultFeatures = false;
+            features = [ "db" ];
+          }
+          {
+            name = "crossbeam-epoch";
+            packageId = "crossbeam-epoch";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "crossbeam-epoch";
+            packageId = "crossbeam-epoch";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "crossbeam-epoch";
+            packageId = "crossbeam-epoch";
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+          }
+          {
+            name = "crossbeam-epoch";
+            packageId = "crossbeam-epoch";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "crossbeam-utils";
+            packageId = "crossbeam-utils";
+          }
+          {
+            name = "crypto-common";
+            packageId = "crypto-common 0.1.7";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
+            name = "cudarc";
+            packageId = "cudarc";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "cuda-12020"
+              "driver"
+              "fallback-dynamic-loading"
+              "nvrtc"
+            ];
+          }
+          {
+            name = "cudarc";
+            packageId = "cudarc";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "cuda-12020"
+              "driver"
+              "fallback-dynamic-loading"
+              "nvrtc"
+            ];
+          }
+          {
+            name = "der";
+            packageId = "der 0.8.3";
+            usesDefaultFeatures = false;
+            features = [
+              "derive"
+              "flagset"
+              "oid"
+              "pem"
+              "std"
+            ];
+          }
+          {
+            name = "derive_more";
+            packageId = "derive_more 2.1.1";
+            features = [
+              "debug"
+              "display"
+              "error"
+              "from"
+            ];
+          }
+          {
             name = "derive_more-impl";
             packageId = "derive_more-impl";
             features = [
@@ -60836,19 +61053,36 @@ rec {
             ];
           }
           {
+            name = "digest";
+            packageId = "digest 0.10.7";
+            rename = "digest-93f6ce9d446188ac";
+            features = [
+              "mac"
+              "std"
+            ];
+          }
+          {
+            name = "digest";
+            packageId = "digest 0.11.3";
+            rename = "digest-a6292c17cd707f01";
+            features = [
+              "alloc"
+              "mac"
+              "oid"
+            ];
+          }
+          {
+            name = "dispatch2";
+            packageId = "dispatch2";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
             name = "displaydoc";
             packageId = "displaydoc";
           }
           {
             name = "either";
             packageId = "either";
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [ "use_std" ];
-          }
-          {
-            name = "either";
-            packageId = "either";
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [ "use_std" ];
           }
           {
@@ -60857,9 +61091,57 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
             name = "fastrand";
             packageId = "fastrand";
             features = [ "js" ];
+          }
+          {
+            name = "flate2";
+            packageId = "flate2";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "zlib-rs" ];
+          }
+          {
+            name = "flate2";
+            packageId = "flate2";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "zlib-rs" ];
+          }
+          {
+            name = "flate2";
+            packageId = "flate2";
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [ "zlib-rs" ];
+          }
+          {
+            name = "flate2";
+            packageId = "flate2";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "zlib-rs" ];
+          }
+          {
+            name = "flume";
+            packageId = "flume";
           }
           {
             name = "foldhash";
@@ -60876,44 +61158,87 @@ rec {
             features = [ "tokio" ];
           }
           {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            features = [ "sink" ];
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+          }
+          {
+            name = "futures-executor";
+            packageId = "futures-executor";
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "futures-sink";
+            packageId = "futures-sink";
+          }
+          {
+            name = "futures-task";
+            packageId = "futures-task";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
+            name = "futures-util";
+            packageId = "futures-util";
+            features = [
+              "channel"
+              "io"
+              "sink"
+            ];
+          }
+          {
             name = "getrandom";
             packageId = "getrandom 0.4.3";
+            usesDefaultFeatures = false;
+            features = [
+              "std"
+              "sys_rng"
+            ];
+          }
+          {
+            name = "half";
+            packageId = "half";
             usesDefaultFeatures = false;
             target = { target, features }: (target.name == "aarch64-apple-darwin");
-            features = [
-              "std"
-              "sys_rng"
-            ];
+            features = [ "num-traits" ];
           }
           {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
+            name = "half";
+            packageId = "half";
             usesDefaultFeatures = false;
             target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
+            features = [ "num-traits" ];
           }
           {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
+            name = "half";
+            packageId = "half";
             usesDefaultFeatures = false;
             target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
-            features = [
-              "std"
-              "sys_rng"
-            ];
+            features = [ "num-traits" ];
           }
           {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
+            name = "half";
+            packageId = "half";
             usesDefaultFeatures = false;
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
+            features = [ "num-traits" ];
           }
           {
             name = "hashbrown";
@@ -60922,6 +61247,108 @@ rec {
             features = [
               "default-hasher"
               "inline-more"
+            ];
+          }
+          {
+            name = "hex";
+            packageId = "hex";
+          }
+          {
+            name = "hyper";
+            packageId = "hyper";
+            features = [ "full" ];
+          }
+          {
+            name = "hyper-rustls";
+            packageId = "hyper-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "http1"
+              "http2"
+              "tls12"
+            ];
+          }
+          {
+            name = "hyper-rustls";
+            packageId = "hyper-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "http1"
+              "http2"
+              "tls12"
+            ];
+          }
+          {
+            name = "hyper-rustls";
+            packageId = "hyper-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "http1"
+              "http2"
+              "tls12"
+            ];
+          }
+          {
+            name = "hyper-rustls";
+            packageId = "hyper-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "http1"
+              "http2"
+              "tls12"
+            ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            features = [
+              "server-auto"
+              "service"
+              "tokio"
+            ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "client-legacy"
+              "client-proxy"
+            ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "client-legacy"
+              "client-proxy"
+            ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "client-legacy"
+              "client-proxy"
+            ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "client-legacy"
+              "client-proxy"
             ];
           }
           {
@@ -60998,6 +61425,10 @@ rec {
             features = [ "std" ];
           }
           {
+            name = "md-5";
+            packageId = "md-5 0.11.0";
+          }
+          {
             name = "memchr";
             packageId = "memchr";
           }
@@ -61007,6 +61438,33 @@ rec {
             features = [
               "net"
               "os-ext"
+            ];
+          }
+          {
+            name = "nix";
+            packageId = "nix";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "net"
+              "uio"
+            ];
+          }
+          {
+            name = "nix";
+            packageId = "nix";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "net"
+              "uio"
+            ];
+          }
+          {
+            name = "nix";
+            packageId = "nix";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "net"
+              "uio"
             ];
           }
           {
@@ -61020,6 +61478,33 @@ rec {
             packageId = "nom 7.1.3";
             rename = "nom-15128469a54ed75a";
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "nom";
+            packageId = "nom 8.0.0";
+            rename = "nom-181b0d20215bb231";
+          }
+          {
+            name = "num-bigint";
+            packageId = "num-bigint";
+          }
+          {
+            name = "num-complex";
+            packageId = "num-complex";
+          }
+          {
+            name = "num-integer";
+            packageId = "num-integer";
+            features = [ "i128" ];
+          }
+          {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [
+              "num-bigint-std"
+              "std"
+            ];
           }
           {
             name = "num-traits";
@@ -61055,6 +61540,94 @@ rec {
             features = [ "libm" ];
           }
           {
+            name = "objc2";
+            packageId = "objc2 0.6.5";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "objc2-core-media" ];
+          }
+          {
+            name = "objc2-core-audio";
+            packageId = "objc2-core-audio";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "AudioHardware"
+              "AudioHardwareDeprecated"
+              "objc2"
+              "objc2-core-audio-types"
+              "objc2-foundation"
+              "std"
+            ];
+          }
+          {
+            name = "objc2-core-audio-types";
+            packageId = "objc2-core-audio-types";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-foundation";
+            packageId = "objc2-core-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "CFBase" ];
+          }
+          {
+            name = "objc2-core-graphics";
+            packageId = "objc2-core-graphics";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-video";
+            packageId = "objc2-core-video";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-foundation";
+            packageId = "objc2-foundation 0.3.2";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-metal";
+            packageId = "objc2-metal 0.3.2";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-quartz-core";
+            packageId = "objc2-quartz-core 0.3.2";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "CALayer"
+              "CAMediaTiming"
+              "CAMetalLayer"
+              "objc2-core-foundation"
+              "objc2-core-graphics"
+              "objc2-metal"
+              "std"
+            ];
+          }
+          {
+            name = "object_store";
+            packageId = "object_store";
+            usesDefaultFeatures = false;
+            features = [
+              "aws-base"
+              "azure-base"
+              "fs"
+              "gcp-base"
+              "reqwest"
+            ];
+          }
+          {
             name = "once_cell";
             packageId = "once_cell";
           }
@@ -61063,8 +61636,24 @@ rec {
             packageId = "percent-encoding";
           }
           {
+            name = "pkcs8";
+            packageId = "pkcs8 0.11.0";
+            usesDefaultFeatures = false;
+            features = [ "pem" ];
+          }
+          {
+            name = "portable-atomic";
+            packageId = "portable-atomic";
+          }
+          {
             name = "proc-macro2";
             packageId = "proc-macro2";
+          }
+          {
+            name = "proptest";
+            packageId = "proptest";
+            usesDefaultFeatures = false;
+            features = [ "handle-panics" ];
           }
           {
             name = "quick-xml";
@@ -61087,6 +61676,12 @@ rec {
           {
             name = "quote";
             packageId = "quote";
+          }
+          {
+            name = "rcgen";
+            packageId = "rcgen";
+            usesDefaultFeatures = false;
+            features = [ "pem" ];
           }
           {
             name = "regex";
@@ -61127,6 +61722,18 @@ rec {
           {
             name = "regex-syntax";
             packageId = "regex-syntax";
+          }
+          {
+            name = "reqwest";
+            packageId = "reqwest";
+            usesDefaultFeatures = false;
+            features = [
+              "gzip"
+              "http2"
+              "json"
+              "rustls-no-provider"
+              "stream"
+            ];
           }
           {
             name = "rustix";
@@ -61172,6 +61779,15 @@ rec {
             ];
           }
           {
+            name = "rustls";
+            packageId = "rustls";
+            usesDefaultFeatures = false;
+            features = [
+              "std"
+              "tls12"
+            ];
+          }
+          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -61213,8 +61829,21 @@ rec {
             ];
           }
           {
+            name = "serde_with";
+            packageId = "serde_with";
+            features = [
+              "base64"
+              "hex"
+              "json"
+            ];
+          }
+          {
             name = "siphasher";
             packageId = "siphasher";
+          }
+          {
+            name = "slab";
+            packageId = "slab";
           }
           {
             name = "smallvec";
@@ -61225,6 +61854,22 @@ rec {
               "union"
               "write"
             ];
+          }
+          {
+            name = "socket2";
+            packageId = "socket2 0.6.5";
+            usesDefaultFeatures = false;
+            features = [ "all" ];
+          }
+          {
+            name = "spki";
+            packageId = "spki 0.8.1";
+            usesDefaultFeatures = false;
+            features = [ "pem" ];
+          }
+          {
+            name = "subtle";
+            packageId = "subtle";
           }
           {
             name = "syn";
@@ -61269,6 +61914,47 @@ rec {
             ];
           }
           {
+            name = "tokio-rustls";
+            packageId = "tokio-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "tls12" ];
+          }
+          {
+            name = "tokio-rustls";
+            packageId = "tokio-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "tls12" ];
+          }
+          {
+            name = "tokio-rustls";
+            packageId = "tokio-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [ "tls12" ];
+          }
+          {
+            name = "tokio-rustls";
+            packageId = "tokio-rustls";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "tls12" ];
+          }
+          {
+            name = "tokio-tungstenite";
+            packageId = "tokio-tungstenite";
+            features = [ "__rustls-tls" ];
+          }
+          {
+            name = "tokio-util";
+            packageId = "tokio-util";
+            features = [
+              "codec"
+              "io"
+            ];
+          }
+          {
             name = "toml";
             packageId = "toml 1.2.1+spec-1.1.0";
           }
@@ -61280,6 +61966,95 @@ rec {
           {
             name = "toml_parser";
             packageId = "toml_parser";
+          }
+          {
+            name = "tower";
+            packageId = "tower";
+            usesDefaultFeatures = false;
+            features = [
+              "make"
+              "util"
+            ];
+          }
+          {
+            name = "tower";
+            packageId = "tower";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "retry"
+              "timeout"
+            ];
+          }
+          {
+            name = "tower";
+            packageId = "tower";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "retry"
+              "timeout"
+            ];
+          }
+          {
+            name = "tower";
+            packageId = "tower";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "retry"
+              "timeout"
+            ];
+          }
+          {
+            name = "tower";
+            packageId = "tower";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "retry"
+              "timeout"
+            ];
+          }
+          {
+            name = "tower-http";
+            packageId = "tower-http 0.6.11";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "decompression-gzip"
+              "follow-redirect"
+            ];
+          }
+          {
+            name = "tower-http";
+            packageId = "tower-http 0.6.11";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "decompression-gzip"
+              "follow-redirect"
+            ];
+          }
+          {
+            name = "tower-http";
+            packageId = "tower-http 0.6.11";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "decompression-gzip"
+              "follow-redirect"
+            ];
+          }
+          {
+            name = "tower-http";
+            packageId = "tower-http 0.6.11";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "decompression-gzip"
+              "follow-redirect"
+            ];
           }
           {
             name = "tracing";
@@ -61298,9 +62073,167 @@ rec {
             ];
           }
           {
+            name = "typenum";
+            packageId = "typenum";
+            usesDefaultFeatures = false;
+            features = [ "const-generics" ];
+          }
+          {
             name = "url";
             packageId = "url";
             features = [ "serde" ];
+          }
+          {
+            name = "usage-argv";
+            packageId = "usage-argv";
+            usesDefaultFeatures = false;
+            features = [
+              "complete"
+              "diagnostics"
+              "help-advanced"
+            ];
+          }
+          {
+            name = "usage-rs";
+            packageId = "usage-rs";
+            features = [
+              "completions"
+              "config"
+            ];
+          }
+          {
+            name = "uuid";
+            packageId = "uuid";
+            features = [
+              "v4"
+              "v7"
+            ];
+          }
+          {
+            name = "uuid";
+            packageId = "uuid";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "serde" ];
+          }
+          {
+            name = "uuid";
+            packageId = "uuid";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "serde" ];
+          }
+          {
+            name = "winapi";
+            packageId = "winapi";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "cfg"
+              "evntrace"
+              "in6addr"
+              "inaddr"
+              "minwinbase"
+              "minwindef"
+              "ntsecapi"
+              "processthreadsapi"
+              "sysinfoapi"
+              "winbase"
+              "windef"
+              "winioctl"
+            ];
+          }
+          {
+            name = "windows";
+            packageId = "windows";
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "Foundation_Metadata"
+              "Graphics_Capture"
+              "Graphics_DirectX_Direct3D11"
+              "Security_Authorization_AppCapabilityAccess"
+              "Wdk_System_SystemInformation"
+              "Wdk_System_SystemServices"
+              "Wdk_System_Threading"
+              "Win32_Devices_DeviceAndDriverInstallation"
+              "Win32_Devices_Display"
+              "Win32_Devices_Properties"
+              "Win32_Graphics_Direct3D10"
+              "Win32_Graphics_Direct3D11"
+              "Win32_Graphics_Direct3D12"
+              "Win32_Graphics_Direct3D_Dxc"
+              "Win32_Graphics_Direct3D_Fxc"
+              "Win32_Graphics_DirectComposition"
+              "Win32_Graphics_Dwm"
+              "Win32_Graphics_Dxgi_Common"
+              "Win32_Graphics_Gdi"
+              "Win32_Graphics_OpenGL"
+              "Win32_Media_Audio"
+              "Win32_Media_KernelStreaming"
+              "Win32_Media_MediaFoundation"
+              "Win32_Media_Multimedia"
+              "Win32_Security_Authorization"
+              "Win32_System_Com_StructuredStorage"
+              "Win32_System_Diagnostics_Debug"
+              "Win32_System_Diagnostics_ToolHelp"
+              "Win32_System_Kernel"
+              "Win32_System_LibraryLoader"
+              "Win32_System_Memory"
+              "Win32_System_Ole"
+              "Win32_System_Performance"
+              "Win32_System_Power"
+              "Win32_System_ProcessStatus"
+              "Win32_System_Registry"
+              "Win32_System_RemoteDesktop"
+              "Win32_System_SystemInformation"
+              "Win32_System_SystemServices"
+              "Win32_System_Threading"
+              "Win32_System_Variant"
+              "Win32_System_WinRT_Direct3D11"
+              "Win32_System_WinRT_Graphics_Capture"
+              "Win32_UI_HiDpi"
+              "Win32_UI_Shell_PropertiesSystem"
+              "Win32_UI_WindowsAndMessaging"
+            ];
+          }
+          {
+            name = "windows-core";
+            packageId = "windows-core";
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys 0.52.0";
+            rename = "windows-sys-b21d60becc0929df";
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "Win32_Devices_HumanInterfaceDevice"
+              "Win32_Foundation"
+              "Win32_Globalization"
+              "Win32_Graphics_Dwm"
+              "Win32_Graphics_Gdi"
+              "Win32_Media"
+              "Win32_Networking_WinSock"
+              "Win32_Security"
+              "Win32_System_Com_StructuredStorage"
+              "Win32_System_IO"
+              "Win32_System_LibraryLoader"
+              "Win32_System_Ole"
+              "Win32_System_SystemInformation"
+              "Win32_System_SystemServices"
+              "Win32_System_Threading"
+              "Win32_System_WindowsProgramming"
+              "Win32_UI_Accessibility"
+              "Win32_UI_Controls"
+              "Win32_UI_HiDpi"
+              "Win32_UI_Input_Ime"
+              "Win32_UI_Input_KeyboardAndMouse"
+              "Win32_UI_Input_Pointer"
+              "Win32_UI_Input_Touch"
+              "Win32_UI_Shell"
+              "Win32_UI_TextServices"
+              "Win32_UI_WindowsAndMessaging"
+            ];
           }
           {
             name = "windows-sys";
@@ -61314,13 +62247,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"
@@ -61339,6 +62269,51 @@ rec {
             packageId = "winnow 1.0.4";
             rename = "winnow-dff4ba8e3ae991db";
             features = [ "simd" ];
+          }
+          {
+            name = "zerocopy";
+            packageId = "zerocopy";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [
+              "derive"
+              "simd"
+            ];
+          }
+          {
+            name = "zerocopy";
+            packageId = "zerocopy";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [
+              "derive"
+              "simd"
+            ];
+          }
+          {
+            name = "zerocopy";
+            packageId = "zerocopy";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
+            features = [
+              "derive"
+              "simd"
+            ];
+          }
+          {
+            name = "zerocopy";
+            packageId = "zerocopy";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [
+              "derive"
+              "simd"
+            ];
+          }
+          {
+            name = "zeroize";
+            packageId = "zeroize";
+            features = [ "derive" ];
           }
         ];
 

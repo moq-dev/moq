@@ -164,7 +164,7 @@ where
 	caught_up: Option<kio::clock::Instant>,
 }
 
-/// Input and mux state belonging to one publisher instance. The release clock
+/// Input and mux state belonging to one publisher identity. The release clock
 /// stays on the export so a replacement cannot discard the program still playing.
 struct Program<S: Stream>
 where
@@ -180,15 +180,15 @@ where
 	/// A snapshot arrived on `catalog` since it was subscribed.
 	cataloged: bool,
 	feed: Feed,
-	/// The instance of the broadcast being exported, `None` for one not resolved through an
+	/// The identity of the broadcast being exported, `None` for one not resolved through an
 	/// origin.
-	instance: Option<moq_net::Instance>,
+	identity: Option<moq_net::Identity>,
 	/// The PMT `version_number` the program's first tables go out at, advanced by each switch to
-	/// another instance so a demux that caches tables by version reads the new ones.
+	/// another identity so a demux that caches tables by version reads the new ones.
 	version: VersionNumber,
 	/// The PAT's, advanced by each switch alike.
 	pat_version: VersionNumber,
-	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
+	/// After a switch to another identity, the PIDs whose first packet is queued flagging the
 	/// break. `None` for an export that never switched.
 	flagged: Option<HashSet<u16>>,
 	/// How long after its decode time each frame goes out.
@@ -1624,7 +1624,7 @@ where
 		source.isolate();
 		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
 		source.bill();
-		let instance = source.broadcast().info().instance.clone();
+		let identity = source.broadcast().info().identity.clone();
 		Self {
 			id: 0,
 			expected: Vec::new(),
@@ -1633,7 +1633,7 @@ where
 			catalog: Some(catalog),
 			cataloged: false,
 			feed: Feed::Live,
-			instance,
+			identity,
 			version: VersionNumber::default(),
 			pat_version: VersionNumber::default(),
 			flagged: None,
@@ -2321,7 +2321,7 @@ where
 	/// The program playing failed with `err`. Only a publisher that left is survivable: its
 	/// input stops at once, as a follow that runs out stops it, but what it already buffered
 	/// goes out on schedule. Without a replacement, the export then reports `err`. A
-	/// [`Follower`](super::Follower) carries on into the same instance returning meanwhile
+	/// [`Follower`](super::Follower) carries on into the same identity returning meanwhile
 	/// ([`Self::departed`]), whose tracks read on from where they stopped while that output
 	/// plays out, and otherwise waits for a return only after the old output has ended.
 	///
@@ -2831,7 +2831,7 @@ where
 	/// Point each stale track this snapshot lists at the returned broadcast.
 	///
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
-	/// stale, silent on its PID. The same instance carries the same content, so each track reads
+	/// stale, silent on its PID. The same identity carries the same content, so each track reads
 	/// on right after the last frame it read ([`ExportSource::resuming`]): nothing is replayed,
 	/// and a frame that comes too late drops as any other does. A track that read nothing starts
 	/// at the live edge instead, its playhead jumping from wherever the old subscription stopped,
@@ -3060,20 +3060,20 @@ where
 		&self.selected().source
 	}
 
-	/// The instance of the broadcast being exported, `None` for one not resolved through an
+	/// The identity of the broadcast being exported, `None` for one not resolved through an
 	/// origin.
-	pub(super) fn instance(&self) -> Option<&moq_net::Instance> {
-		self.selected().instance.as_ref()
+	pub(super) fn identity(&self) -> Option<&moq_net::Identity> {
+		self.selected().identity.as_ref()
 	}
 
 	/// Carry on into `broadcast`, using the caller's replacement `catalog` stream.
 	///
-	/// The same stream (an equal instance) continues: the program and
+	/// The same stream (an equal identity) continues: the program and
 	/// its PSI carry on, and its catalog resubscribes each track as it lists it, so a gap is a
 	/// skip like any other. A track it adds or drops revises the PMT, as any catalog update
 	/// does.
 	///
-	/// Another instance, or a broadcast without one, opens a fresh jitter generation.
+	/// Another identity, or a broadcast without one, opens a fresh jitter generation.
 	/// [`Follower`](super::Follower) keeps feeding the old program until the new clock and
 	/// first media are usable, bounded by its follow window. Then what the old program
 	/// already released goes out before the new PMT, and what it still buffers is dropped,
@@ -3094,7 +3094,7 @@ where
 		}
 	}
 
-	/// Leave the instance carried on into while what it buffered went out, which went before
+	/// Leave the identity carried on into while what it buffered went out, which went before
 	/// serving its catalog: as if its publisher left with `err` ([`Self::leave`]).
 	pub(super) fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
 		self.leave(err)
@@ -3112,17 +3112,17 @@ where
 		catalog: S,
 		follow: Duration,
 	) -> Result<(), crate::Error> {
-		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow", now = ?kio::clock::now(), program = self.program.id, pending = ?self.pending.as_ref().map(|pending| pending.id), old_instance = ?self.program.instance, new_instance = ?broadcast.info().instance, ?follow);
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow", now = ?kio::clock::now(), program = self.program.id, pending = ?self.pending.as_ref().map(|pending| pending.id), old_identity = ?self.program.identity, new_identity = ?broadcast.info().identity, ?follow);
 		if self.pending.is_some()
-			&& self.program.instance.is_some()
-			&& broadcast.info().instance == self.program.instance
+			&& self.program.identity.is_some()
+			&& broadcast.info().identity == self.program.identity
 		{
 			self.cancel_pending();
 			self.program.source.priority(0)?;
 			self.follow_until = None;
 			self.follow_timer = None;
 		}
-		let same = self.selected().instance.is_some() && broadcast.info().instance == self.selected().instance;
+		let same = self.selected().identity.is_some() && broadcast.info().identity == self.selected().identity;
 		if !same {
 			self.cancel_pending();
 			let next = self.replacement(self.program.source.switched(broadcast), catalog);
@@ -3321,7 +3321,7 @@ where
 			.reduce(crate::container::earlier)
 	}
 
-	/// Whether `pid`'s next packet is its first since a switch to another instance, so it has
+	/// Whether `pid`'s next packet is its first since a switch to another identity, so it has
 	/// to flag the break. The PCR PID's first packet always opens a slot with its PCR, flagged
 	/// on its own ([`Self::lay`]).
 	fn breaks(&mut self, pid: u16) -> bool {
@@ -3611,7 +3611,7 @@ where
 			if track.read == Read::Live {
 				track.release(holder, &mut self.jitter, true)?;
 			}
-			// Replaced, so neither a return of its name nor a same-instance return reads it on.
+			// Replaced, so neither a return of its name nor a same-identity return reads it on.
 			track.read = Read::Ended;
 			return Ok(false);
 		}
@@ -3632,7 +3632,7 @@ where
 			.tracks
 			.iter()
 			.filter(|(_, track)| {
-				// A track the same instance's return has yet to resubscribe stays, silent on its PID.
+				// A track the same identity's return has yet to resubscribe stays, silent on its PID.
 				!track.cataloged
 					&& matches!(track.read, Read::Ended | Read::Withdrawn)
 					&& track.pack.is_none()
@@ -3753,7 +3753,7 @@ where
 	/// Set the program tables as they stand on the schedule, which every copy of them still to
 	/// begin lays. A NIT acquired or lost after the tables went out revises the PAT's network
 	/// entry, at the PAT's next version. The first copy after a switch to another
-	/// instance flags the break on each table PID that owes one ([`Self::breaks`]).
+	/// identity flags the break on each table PID that owes one ([`Self::breaks`]).
 	fn restate(&mut self) -> Result<()> {
 		let network = self.carries_nit();
 		let psi = self.program.psi.as_ref().context("PSI not built")?;
@@ -5324,8 +5324,8 @@ fn is_complete_section(section: &[u8]) -> bool {
 
 fn ensure_raw(container: &Container, kind: &str, name: &str) -> Result<()> {
 	match container {
-		// TS carries raw codec payloads, like the Legacy varint and LOC formats.
-		Container::Legacy | Container::Loc => Ok(()),
+		// TS carries raw codec payloads, like Legacy, LOC, Raw, and CTS formats.
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => bail_unsupported!("TS export does not support CMAF {kind} track '{name}'"),
 		Container::Unknown(unknown) => bail_unsupported!(
 			"TS export does not support container '{}' on {kind} track '{name}'",

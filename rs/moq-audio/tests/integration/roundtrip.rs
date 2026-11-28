@@ -81,7 +81,7 @@ async fn opus_roundtrip(case: Case) {
 			))
 			.unwrap();
 	}
-	let snapshot = snapshots.next().await.unwrap().unwrap();
+	let snapshot = snapshots.next().await.unwrap().unwrap().value;
 	let rendition = &snapshot.audio.renditions["audio"];
 	assert_eq!(rendition.sample_rate, 48_000);
 	assert_eq!(rendition.channel_count, channels);
@@ -162,7 +162,7 @@ async fn pcm_round_trip_is_lossless() {
 		))
 		.unwrap();
 
-	let snapshot = catalog_consumer.next().await.unwrap().unwrap();
+	let snapshot = catalog_consumer.next().await.unwrap().unwrap().value;
 	let catalog = snapshot.audio.renditions.get("pcm").unwrap();
 	assert_eq!(catalog.codec, hang::catalog::AudioCodec::Pcm);
 	assert_eq!(catalog.bitrate, Some(3_072_000));
@@ -213,7 +213,7 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 		))
 		.unwrap();
 
-	let snapshot = catalog_consumer.next().await.unwrap().unwrap();
+	let snapshot = catalog_consumer.next().await.unwrap().unwrap().value;
 	let rendition = snapshot.audio.renditions.get("pcm").unwrap();
 	assert_eq!(rendition.channel_count, 6);
 
@@ -259,7 +259,7 @@ async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio:
 	loop {
 		match consumer.read().await? {
 			Some(decode::Read::Frame(frame)) => return Ok(Some(frame)),
-			Some(decode::Read::Gap { .. } | decode::Read::End { .. }) => {}
+			Some(_) => {}
 			None => return Ok(None),
 		}
 	}

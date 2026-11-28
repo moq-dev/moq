@@ -93,6 +93,32 @@ mod test {
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
 
+	/// A reader of a log dropped unfinished reads `Dropped`, not a second log from the next producer.
+	#[test]
+	fn a_dropped_log_ends_rather_than_restarting() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _requests = broadcast.requests();
+		let track = broadcast.create_track("log", moq_net::track::Info::default()).unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.append(&json!({ "n": 1 }), key()).unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the log's group");
+		};
+		drop(producer);
+		let ended = loop {
+			match group.poll_read_frame(&waiter) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				other => break other,
+			}
+		};
+		assert!(matches!(ended, Poll::Ready(Err(moq_net::Error::Dropped))), "{ended:?}");
+		let next = groups.poll_recv_group(&waiter);
+		assert!(matches!(next, Poll::Ready(Err(moq_net::Error::Dropped))));
+	}
+
 	#[test]
 	fn a_bare_publish_stays_untimed() {
 		let track = moq_net::broadcast::Info::new()

@@ -18,10 +18,10 @@
 //!
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`); parse announce paths back with
-//! [`parse_node_path`]. Each announcement carries a fresh [`Instance`](moq_net::Instance) on its
+//! [`parse_node_path`]. Each announcement carries a fresh [`Identity`](moq_net::Identity) on its
 //! route, so a restarted node is a new broadcast at the same path; a reader
-//! tells them apart by the announced route's instance. The broadcast carries a
-//! `totals.json` track of each [`Tier`](moq_net::stats::Tier)'s [`Totals`] for the instance, and a
+//! tells them apart by the announced route's identity. The broadcast carries a
+//! `totals.json` track of each [`Tier`](moq_net::stats::Tier)'s [`Totals`] for the identity, and a
 //! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Each
 //! is a compressed [`moq_json::snapshot`] track; compute names with

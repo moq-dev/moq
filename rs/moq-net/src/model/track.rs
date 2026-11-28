@@ -106,6 +106,46 @@ pub(super) struct ExpiryScan {
 /// viewer.
 pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 
+/// What a broadcast holds a track under: its name, and whether the entry is the metadata
+/// copy, each frame's header alone, kept apart from the payload copy so no payload reader
+/// is ever handed it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Key {
+	pub name: Arc<str>,
+	pub meta: bool,
+}
+
+impl Key {
+	/// The payload copy of `name`.
+	pub fn payload(name: impl Into<Arc<str>>) -> Self {
+		Self {
+			name: name.into(),
+			meta: false,
+		}
+	}
+}
+
+impl From<&str> for Key {
+	fn from(name: &str) -> Self {
+		Self::payload(name)
+	}
+}
+
+impl From<Arc<str>> for Key {
+	fn from(name: Arc<str>) -> Self {
+		Self::payload(name)
+	}
+}
+
+impl std::fmt::Display for Key {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.meta {
+			true => write!(f, "{} (metadata)", self.name),
+			false => self.name.fmt(f),
+		}
+	}
+}
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -712,6 +752,9 @@ impl TimeStart {
 
 #[derive(Default)]
 pub(crate) struct TrackState {
+	// Whether this is a metadata copy, holding each frame's header alone: a broadcast entry
+	// apart from the payload copy, which no payload reader is ever handed.
+	meta: bool,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`] or [`Request`].
 	// Every group written into the track meters against it, whether the publisher wrote
 	// it live or it answers a fill. Empty (no-op) for an untagged broadcast.
@@ -722,6 +765,14 @@ pub(crate) struct TrackState {
 	// How far the track got toward a live Producer. A reverse fetch may install `info`
 	// before acceptance, so the two are deliberately separate.
 	publication: Publication,
+	// Where the last producer stopped when the track was asked for again because it dropped
+	// while read, found before the groups it left open went: `resume_position` never reports
+	// less, so a renewal refused or abandoned later still resumes there.
+	handoff: Option<Position>,
+	// The renewal budget: a reader joining refills it to one renewal, and a renewal spends it.
+	// So a handler failing every time is asked again at most once per reader join, whatever
+	// the cache holds. Atomic so a join refills it under the read lock it already takes.
+	renewal_spent: AtomicBool,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -734,6 +785,10 @@ pub(crate) struct TrackState {
 	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
 	// track's largest position once it was reported: anything received past that outdates it.
 	object_edge: Option<((u64, u64), Position)>,
+	// The narrowest budget any upstream subscription feeding this copy asked, `None` while none
+	// asked a live join: a group whose stream that upstream reset as too old may have been
+	// judged under it, so the verdict stands only for a reader no wider.
+	judging: Option<Duration>,
 
 	// Cached groups by key: the single source of truth for what is cached. The
 	// two orderings below hold bare keys and validate against this map, so a
@@ -945,9 +1000,6 @@ pub(crate) struct TrackState {
 	// Bumped whenever an eviction lands in an inbox, so a reader with nothing new skips
 	// its own lock.
 	evictions: u64,
-	// Bumped as each cached group is evicted, landed in an inbox or not; see
-	// [`Consumer::evicted`].
-	evicted_groups: u64,
 	// Bumped as each group is cached, stamped on its slot: a reader judged a slot cached
 	// only if it was cached by the count the reader last judged at.
 	cached: u64,
@@ -1934,7 +1986,6 @@ impl TrackState {
 			self.skip_groups(from..end);
 		}
 		slot.abort(abort);
-		self.evicted_groups += 1;
 		let landed = self
 			.inboxes
 			.get_mut()
@@ -2504,7 +2555,8 @@ impl TrackState {
 	}
 
 	/// Take in the live groups that arrived at or after `index`, for a reader reading `window`
-	/// from `min_key` to pick from in its Group Order: their keys, in arrival order.
+	/// from `min_key` to pick from in its Group Order: their keys, in arrival order, appended
+	/// to `arrived`, which the reader keeps so a group arriving allocates nothing.
 	///
 	/// Moves `index` past every entry it looks at, the dead ones and those below `min_key`
 	/// included, which a lower floor re-offers from the cache instead. It stays only on a
@@ -2512,9 +2564,15 @@ impl TrackState {
 	/// only that trailing run and what arrived since, however many stale entries did. The run
 	/// holds only groups that arrived cut short after the last readable one.
 	///
-	/// Ready with nothing once the track completed, or with its abort.
-	fn poll_arrivals(&self, index: &Cell<usize>, min_key: u64, window: &Window) -> Poll<Result<Option<Vec<u64>>>> {
-		let mut arrived = Vec::new();
+	/// Ready with `true` once it took some in, `false` once the track completed, or with its abort.
+	fn poll_arrivals(
+		&self,
+		index: &Cell<usize>,
+		min_key: u64,
+		window: &Window,
+		arrived: &mut Vec<u64>,
+	) -> Poll<Result<bool>> {
+		let taken = arrived.len();
 		if self.serves_bounded(window) {
 			let mut stop = None;
 			let mut past = index.get();
@@ -2534,13 +2592,13 @@ impl TrackState {
 			}
 			index.set(stop.unwrap_or(past));
 		}
-		if !arrived.is_empty() {
-			return Poll::Ready(Ok(Some(arrived)));
+		if arrived.len() > taken {
+			return Poll::Ready(Ok(true));
 		}
 
 		// TODO once we have drop notifications, check if index == final_key.
 		if self.is_complete() {
-			Poll::Ready(Ok(None))
+			Poll::Ready(Ok(false))
 		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -3655,9 +3713,10 @@ impl TrackState {
 	/// The account holds a [`kio::Weak`] back to this state: a group must be able to
 	/// settle the track's eviction debt as it writes, but the track owns its cached
 	/// groups, so anything stronger would make the pair immortal.
-	fn spawn(broadcast: Arc<broadcast::Info>) -> kio::Producer<Self> {
+	fn spawn(broadcast: Arc<broadcast::Info>, meta: bool) -> kio::Producer<Self> {
 		let state = kio::Producer::new(Self {
 			broadcast: broadcast.clone(),
+			meta,
 			..Default::default()
 		});
 		let cache = cache::Track::new(
@@ -3674,6 +3733,16 @@ impl TrackState {
 		new.cache = cache;
 		drop(new);
 		state
+	}
+
+	/// A new group of this track, charged to its cache and metered as ingress: a metadata
+	/// copy's holds each frame's header alone.
+	fn new_group(&self, info: group::Info, track: Info) -> group::Producer {
+		let group = match self.meta {
+			true => group::Producer::new_meta(info, track, self.cache.clone()),
+			false => group::Producer::new(info, track, self.cache.clone()),
+		};
+		group.with_meter(self.ingress.meter())
 	}
 
 	/// Record a written key. It raises the largest too, so a later group below it never
@@ -4583,20 +4652,31 @@ impl TrackState {
 			return Some(resume);
 		}
 
-		let max = self.latest_group?;
-		match self.lookup.get(&max).and_then(|slot| slot.group.resume_frame()) {
+		let Some(max) = self.latest_group else {
+			return self.handoff;
+		};
+		let live = match self.lookup.get(&max) {
+			// A renewal's teardown took the group its producer left open, and nothing since
+			// went past it.
+			None if self.handoff.is_some_and(|handoff| max <= handoff.group) => return self.handoff,
+			slot => slot.and_then(|slot| slot.group.resume_frame()),
+		};
+		let live = match live {
 			// Still open *and* carrying frames, so the replacement continues it
 			// frame-by-frame.
-			Some(frame) => Some(Position {
+			Some(frame) => Position {
 				group: max,
 				frame: frame as u64,
-			}),
+			},
 			// A copy that wrote nothing has no frames to continue, and the reader
 			// already holds its (empty) handle. Pointing a replacement at frame 0 would
 			// hand the same key out twice, so roll to the next group exactly as a
 			// finished one does.
-			None => Some(Position::group(max.saturating_add(1))),
-		}
+			None => Position::group(max.saturating_add(1)),
+		};
+		// A renewal's producer replaying fewer frames than the last one wrote does not move
+		// the resume back.
+		Some(live).max(self.handoff)
 	}
 
 	/// The upstream subscription ended with the copy still held: what it cached may go
@@ -4928,8 +5008,7 @@ impl TrackState {
 			self.displace(key);
 		}
 
-		let mut group =
-			group::Producer::new(group::Info { start: key }, info, self.cache.clone()).with_meter(self.ingress.meter());
+		let mut group = self.new_group(group::Info { start: key }, info);
 		if let Some(content) = content {
 			group.handle().share_content(content);
 		}
@@ -5005,8 +5084,7 @@ impl TrackState {
 			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
-		let mut group = group::Producer::new(group::Info { start: key }, info.clone(), self.cache.clone())
-			.with_meter(self.ingress.meter());
+		let mut group = self.new_group(group::Info { start: key }, info.clone());
 		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
 		// its own content rather than the cached copy's, whose inflated copy is further on.
 		if !info.compressed() {
@@ -5546,9 +5624,17 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
-		let name = name.into();
-		let info = info.into().unwrap_or_default();
-		let state = TrackState::spawn(broadcast.clone());
+		Self::create(broadcast, name.into(), info.into().unwrap_or_default(), false)
+	}
+
+	/// [`Self::new`] for a metadata copy, which a test reads a metadata Group Stream into.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn new_meta(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>, info: Info) -> Self {
+		Self::create(broadcast, name.into(), info, true)
+	}
+
+	fn create(broadcast: Arc<broadcast::Info>, name: Arc<str>, info: Info, meta: bool) -> Self {
+		let state = TrackState::spawn(broadcast.clone(), meta);
 		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
@@ -5576,6 +5662,12 @@ impl Producer {
 	/// Keep the broadcast's listing of this track until it leaves the table.
 	pub(super) fn listed(self, unlist: broadcast::Unlist) -> Self {
 		self.alive.list(unlist);
+		self
+	}
+
+	/// Ask `home` for the track again if the last producer leaves while a reader wants it.
+	pub(super) fn homed(self, home: broadcast::Home) -> Self {
+		let _ = self.alive.home.set(home);
 		self
 	}
 
@@ -5719,7 +5811,7 @@ impl Producer {
 		let track = state.info.clone().unwrap();
 		// Whatever holds the key lets it go; readers draining it keep their own handle.
 		state.displace(info.start);
-		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(state.ingress.meter());
+		let mut group = state.new_group(info, track);
 		if start != 0 {
 			group.bound(group::Bounds { start, end: None })?;
 		}
@@ -5761,8 +5853,8 @@ impl Producer {
 	///
 	/// The same broadcast, track, and group start always name the same content, and nothing
 	/// checks it: the broadcast remembers nothing of an earlier producer of the name. A
-	/// recreated track, or a restarted publisher keeping its instance, keeps its starts moving
-	/// forward, as its media time does, or uses a new track name or instance. Reusing a start
+	/// recreated track, or a restarted publisher keeping its identity, keeps its starts moving
+	/// forward, as its media time does, or uses a new track name or identity. Reusing a start
 	/// only corrupts this broadcast for its readers. Datagram sequences name no cached content
 	/// and are exempt.
 	pub fn append_group(&self, start: Timestamp) -> Result<group::Producer> {
@@ -5791,8 +5883,7 @@ impl Producer {
 
 		let track = state.info.clone().unwrap();
 
-		let group =
-			group::Producer::new(group::Info { start }, track, state.cache.clone()).with_meter(state.ingress.meter());
+		let group = state.new_group(group::Info { start }, track);
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
 		state.appended(start);
@@ -6421,6 +6512,18 @@ impl Producer {
 		}
 	}
 
+	/// An upstream subscription feeding this copy asks a live join under `budget`, before it
+	/// reaches the wire: that upstream may judge a group too old under it from then on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn judge_under(&self, budget: Duration) {
+		if self.state.read().judging.is_some_and(|judging| judging <= budget) {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.judging = Some(state.judging.map_or(budget, |judging| judging.min(budget)));
+		}
+	}
+
 	/// Record the upstream Object ID separately from the frame ordinal readers count.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
@@ -6553,20 +6656,12 @@ impl Producer {
 
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
-	/// This is how an on-demand publisher ends a track once [`Demand::poll_wanted_changed`]
-	/// reports nobody wants it. Dropping the producer instead races a reader joining in
-	/// between, which then reads [`Error::Dropped`].
-	///
-	/// Consumer creation and the unwanted check share a lock, so demand returning
-	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
-	/// the track is closed, including when it was already closed; existing handles
-	/// may still observe its final state, and a later lookup requests the track afresh.
-	/// `Err(producer)` leaves the track unchanged so the caller can continue serving and
-	/// wait for `None` on a fresh clone of its [`Demand`]: one that already returned `None`
-	/// misses a reader that came and went, and waits on.
-	///
-	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
-	/// counts as a consumer until it reads the group's end.
+	/// For a session that keeps serving a reader that joined since the track went idle on the
+	/// upstream subscription it already holds, rather than dropping the producer, which asks
+	/// for the track again. Consumer creation and the unwanted check share a lock. `Ok(())`
+	/// means the track is closed, including when it was already closed. The abort is the same
+	/// as [`Self::abort`]. A reader still in a group it was handed counts as a consumer until
+	/// it reads the group's end.
 	#[cfg_attr(
 		target_pointer_width = "64",
 		expect(
@@ -6574,7 +6669,8 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
 		let wanted = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err, None).abort();
@@ -6593,8 +6689,9 @@ impl Producer {
 	}
 
 	/// Resolves once the track's outcome is final: `Ok` once its declared end is reached
-	/// (its error, if declared with one), or the abort error, or [`Error::Dropped`] once every
-	/// producer left without either.
+	/// (its error, if declared with one), or the abort error. Every producer leaving without
+	/// either ends it cleanly at its live edge while nobody wants it, and with
+	/// [`Error::Dropped`] while a reader does and no broadcast asks for it again.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
@@ -6656,10 +6753,7 @@ impl Producer {
 
 	/// Create a weak reference that doesn't prevent auto-close.
 	pub(super) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		TrackWeak::new(self.name.clone(), &self.state)
 	}
 
 	/// A handle that aborts the track without keeping it open, for an owner that hands this
@@ -6987,9 +7081,16 @@ struct Alive {
 	// `Requests` holds this guard too) isn't reported as an abandoned publisher.
 	published: AtomicBool,
 
+	// Set for a request asking again for a track whose last producer dropped while read.
+	renewal: AtomicBool,
+
 	// Ingress subscription for this track, opened by the tagged producer that claimed
 	// it and closed when this guard drops.
 	stats: OnceLock<stats::Subscription>,
+
+	// The broadcast a reader looked the track up in, which this guard asks for the track
+	// again when it drops while a reader still wants the track.
+	home: OnceLock<broadcast::Home>,
 
 	// The broadcast's listing of a track its producer created, withdrawn once the track
 	// leaves the table: on abort, or when this guard drops.
@@ -7002,7 +7103,9 @@ impl Alive {
 			name,
 			state,
 			published: Default::default(),
+			renewal: Default::default(),
 			stats: Default::default(),
+			home: OnceLock::new(),
 			listed: kio::Lock::new(None),
 		})
 	}
@@ -7012,12 +7115,14 @@ impl Alive {
 	}
 
 	/// Withdraw the track from its broadcast's listing, as one that `finished` or left
-	/// unfinished. Never under the broadcast's lock.
-	fn unlist(&self, finished: bool) {
+	/// unfinished, returning whether it was listed. Never under the broadcast's lock.
+	fn unlist(&self, finished: bool) -> bool {
 		let unlist = self.listed.lock().take();
+		let listed = unlist.is_some();
 		if let Some(unlist) = unlist {
 			unlist.unlist(finished);
 		}
+		listed
 	}
 
 	/// Note that a [`Producer`] was minted from this track, optionally under a tagged
@@ -7038,51 +7143,146 @@ impl Drop for Alive {
 		// Withdrawn before the state closes, so the track leaves the listing before a
 		// later one can take its name. It finished if its producer declared its end.
 		let finished = self.state.read().outcome.end().is_some();
-		self.unlist(finished);
+		let listed = self.unlist(finished);
 		if let Ok(mut state) = self.state.write() {
 			state.release_ingress();
 		}
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
+			// Unless it renewed a published track: end that as its producer's drop would have,
+			// so the live edge held for the next producer stops being protected. Without asking
+			// its broadcast again, whose queue may be dropping it under the broadcast's lock.
+			if self.renewal.load(Ordering::Relaxed)
+				&& let Ok(state) = self.state.write()
+				&& matches!(state.outcome, Outcome::Open)
+			{
+				Self::drop_wanted(state, &self.name);
+			}
 			return;
 		}
-		// The last producer going away ends the track: nothing protects its live edge
+		// Decided under the lock a lookup joins the track under: a reader either joins in
+		// time to be handed to the next producer, or finds the track closed and asks afresh.
+		let (mut state, home) = match self.state.write_unwanted() {
+			kio::Unwanted::Idle(state) => return Self::close_unwanted(state),
+			// Asked before the track's lock, which the broadcast's precedes: a broadcast nobody
+			// serves leaves the track to end as dropped, its budget unspent.
+			kio::Unwanted::Wanted => {
+				let home = self.home.get().filter(|home| home.serves()).cloned();
+				match self.state.write() {
+					Ok(state) => (state, home),
+					Err(_) => return,
+				}
+			}
+			kio::Unwanted::Closed => return,
+		};
+		// The last producer going away ends what it declared: nothing protects its live edge
 		// anymore, so the pool's idle expiry reclaims what a stale consumer would pin.
-		// Without a finish it is an abrupt teardown, the same as an explicit abort:
-		// the open groups go and the finished ones stay for readers still draining.
-		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
-		// leaves it open with `end` set, so inspect both outcomes.
-		match self.state.write() {
-			Ok(mut state) => match std::mem::take(&mut state.outcome) {
-				Outcome::Open => {
-					tracing::warn!(
-						track = %self.name,
-						"track::Producer dropped without finish() or abort()"
-					);
-					let (resume, open) = state.tear_down(Error::Dropped);
-					state.outcome = Outcome::Dropped { resume };
-					state.close_cache();
-					drop(state);
-					open.abort();
-				}
-				// Groups still missing below the boundary can no longer arrive, so a reader
-				// waiting on one ends cleanly instead of with `Dropped`.
-				Outcome::Ending(end) => {
-					state.outcome = Outcome::Sealed(end);
-					state.close_cache();
-				}
-				outcome => state.outcome = outcome,
-			},
-			Err(state) => {
-				if !matches!(state.outcome, Outcome::Open) {
-					return;
-				}
-				tracing::warn!(
-					track = %self.name,
-					"track::Producer dropped without finish() or abort()"
-				);
+		match std::mem::take(&mut state.outcome) {
+			Outcome::Open => {}
+			// Groups still missing below the boundary can no longer arrive, so a reader
+			// waiting on one ends cleanly instead of with `Dropped`.
+			Outcome::Ending(end) => {
+				state.outcome = Outcome::Sealed(end);
+				state.close_cache();
+				return;
+			}
+			outcome => {
+				state.outcome = outcome;
+				return;
 			}
 		}
+		// Each renewal spends the budget a reader joining refilled: a handler failing each time
+		// would otherwise loop for as long as the reader stays.
+		let Some(home) = home else {
+			return Self::drop_wanted(state, &self.name);
+		};
+		if std::mem::replace(state.renewal_spent.get_mut(), true) {
+			return Self::drop_wanted(state, &self.name);
+		}
+		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
+		// would, and the reader waits on the same state for the next producer. The groups this
+		// producer left open end as superseded: nobody can finish them, and the next producer's
+		// groups replace them, so a reader holding one moves on as past any group gone old.
+		let (resume, mut open) = state.tear_down(Error::Old);
+		state.publication = Publication::Pending;
+		state.handoff = resume;
+		drop(state);
+		// Registering the renewal's handler and queueing it wake readers, who may be polled
+		// inline and read this track or its broadcast: hold the wakes until those locks drop.
+		let _hold = kio::hold();
+		let mut request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
+		// Listed again once served, as it was before this producer left.
+		if listed {
+			request = request.listed(home.list_on_accept(self.name.clone()));
+		}
+		let Err(request) = home.request(request) else {
+			return open.abort();
+		};
+		// The broadcast stopped serving since it was asked, so nothing will serve it again: its
+		// readers, and those holding only an open group, end as at an abrupt teardown, resuming
+		// where this producer stopped, unless the broadcast's end already refused them.
+		open.err = Error::Dropped;
+		open.abort();
+		if let Ok(state) = request.state.write()
+			&& state.publication == Publication::Pending
+			&& matches!(state.outcome, Outcome::Open)
+		{
+			Self::end_dropped(state, &self.name, resume);
+		}
+	}
+}
+
+impl Alive {
+	/// End a track nobody wants, cleanly at its live edge: no reader is left to tell, and a
+	/// later lookup finds it closed and requests it afresh. Closed under the lock a lookup
+	/// joins under, so none joins in between.
+	fn close_unwanted(mut state: kio::Mut<'_, TrackState>) {
+		let open = match std::mem::take(&mut state.outcome) {
+			Outcome::Open => {
+				let (resume, open) = state.tear_down(Error::Cancel);
+				let end = Position::group(state.next_key());
+				state.outcome = match state.declare(end, None, TailState::Local, true) {
+					Ok(()) => match std::mem::take(&mut state.outcome) {
+						Outcome::Ending(end) => Outcome::Sealed(end),
+						_ => unreachable!("declare sets the end"),
+					},
+					Err(_) => Outcome::Dropped { resume },
+				};
+				Some(open)
+			}
+			Outcome::Ending(end) => {
+				state.outcome = Outcome::Sealed(end);
+				None
+			}
+			// Only an abort, which closes the channel, leaves another outcome while a producer
+			// remains, and `write_unwanted` found it open.
+			outcome => {
+				state.outcome = outcome;
+				return;
+			}
+		};
+		state.close_cache();
+		state.close();
+		if let Some(open) = open {
+			open.abort();
+		}
+	}
+
+	/// End a track a reader still wants and no broadcast will ask for again, abruptly, as an
+	/// abort with [`Error::Dropped`] does: the open groups go and the finished ones stay for
+	/// readers still draining.
+	fn drop_wanted(mut state: kio::Mut<'_, TrackState>, name: &str) {
+		let (resume, open) = state.tear_down(Error::Dropped);
+		Self::end_dropped(state, name, resume);
+		open.abort();
+	}
+
+	/// End a torn-down track with [`Error::Dropped`], at the `resume` position its teardown
+	/// found: a second teardown would find the open groups already gone.
+	fn end_dropped(mut state: kio::Mut<'_, TrackState>, name: &str, resume: Option<Position>) {
+		tracing::warn!(track = %name, "track::Producer dropped without finish() or abort()");
+		state.outcome = Outcome::Dropped { resume };
+		state.close_cache();
 	}
 }
 
@@ -7292,24 +7492,35 @@ impl AbortHandle {
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(super) struct TrackWeak {
-	name: Arc<str>,
+	key: Key,
 	state: kio::ProducerWeak<TrackState>,
 }
 
 impl TrackWeak {
+	fn new(name: Arc<str>, state: &kio::Producer<TrackState>) -> Self {
+		let meta = state.read().meta;
+		Self {
+			key: Key { name, meta },
+			state: state.weak(),
+		}
+	}
+
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
-	/// The count moves under the same lock the close takes, which is the other half
-	/// of [`Producer::abort_unwanted`]: a request either joins in time to decline the
-	/// teardown, or gets nothing and re-requests the track. It is never handed a track
-	/// that is already on its way out.
+	/// The count moves under the same lock an idle teardown closes the track under: a
+	/// request either joins in time to be served by the next producer, or gets nothing and
+	/// re-requests the track. It is never handed a track that is already on its way out.
 	pub(super) fn try_consume(
 		&self,
 		subscription: Option<&Subscription>,
 	) -> Option<(kio::Consumer<TrackState>, Option<Preferences>)> {
+		let state = self.state.read();
+		// Refilled before the join counts as demand, so a last producer dropping once it does
+		// sees the refill and asks for the track again.
+		state.renewal_spent.store(false, Ordering::Relaxed);
 		// Register before the first consumer can wake the serving session, while
 		// still refusing a copy whose idle teardown already committed.
-		let preferences = subscription.map(|value| Preferences::register(self.state.read(), value.clone()));
+		let preferences = subscription.map(|value| Preferences::register(state, value.clone()));
 		Some((self.state.try_consume()?, preferences))
 	}
 
@@ -7324,10 +7535,15 @@ impl TrackWeak {
 		self.state.consume_weak()
 	}
 
-	/// The shared name handle, for use as a broadcast lookup key (clone is a
-	/// refcount bump, and the same `Arc` is shared with the track's handles).
+	/// The broadcast lookup key (clone is a refcount bump, and the same name `Arc` is shared
+	/// with the track's handles).
+	pub(super) fn key(&self) -> &Key {
+		&self.key
+	}
+
+	/// The shared name handle.
 	pub(super) fn name(&self) -> &Arc<str> {
-		&self.name
+		&self.key.name
 	}
 
 	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
@@ -7372,7 +7588,7 @@ impl TrackWeak {
 
 	/// A [`Demand`] on the cached track, for a broadcast to watch.
 	pub(super) fn demand(&self) -> Demand {
-		Demand::new(self.name.clone(), self.state.clone())
+		Demand::new(self.key.name.clone(), self.state.clone())
 	}
 
 	/// [`Self::subscription`] without its ranges, costing none of them.
@@ -7492,7 +7708,8 @@ impl Demand {
 	///
 	/// So `while demand.wanted_changed().await? {}` runs while anyone wants the track, and
 	/// `while !demand.wanted_changed().await? {}` waits for someone to. End a track nobody
-	/// wants with [`Producer::abort_unwanted`], which keeps it for a reader that joined since.
+	/// wants by dropping its [`Producer`]: a reader that joined since is served by the next
+	/// request for it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		let active = match self.poll_state(waiter) {
@@ -7772,6 +7989,8 @@ impl ArrivalRead<'_> {
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
+	// Whether a broadcast lookup resolves the metadata copy rather than the payload one.
+	meta: bool,
 	// The broadcast this track belongs to, so a catalog track can name the path its
 	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
 	// that handle's view, which may name the broadcast differently than its producer did.
@@ -7817,9 +8036,13 @@ impl Consumer {
 	}
 
 	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
-		let broadcast = state.read().broadcast.clone();
+		let (broadcast, meta) = {
+			let state = state.read();
+			(state.broadcast.clone(), state.meta)
+		};
 		Self {
 			name,
+			meta,
 			broadcast,
 			source: Source::Track(state),
 			stats: stats::Scope::default(),
@@ -7827,17 +8050,18 @@ impl Consumer {
 		}
 	}
 
-	/// A handle resolving `name` through `broadcast` on each request. Called by
+	/// A handle resolving `key` through `broadcast` on each request. Called by
 	/// [`broadcast::Consumer::track`] with that handle's view of the broadcast, and the
-	/// track it serves under the name now, if any.
+	/// track it serves under the key now, if any.
 	pub(super) fn lookup(
-		name: Arc<str>,
+		key: Key,
 		info: Arc<broadcast::Info>,
 		broadcast: broadcast::Consumer,
 		current: Option<kio::ConsumerWeak<TrackState>>,
 	) -> Self {
 		Self {
-			name,
+			name: key.name,
+			meta: key.meta,
 			broadcast: info,
 			source: Source::Broadcast(Box::new(broadcast), current),
 			stats: stats::Scope::default(),
@@ -7850,11 +8074,11 @@ impl Consumer {
 	fn resolve(&self, subscription: Option<&Subscription>) -> (kio::Consumer<TrackState>, Option<Preferences>) {
 		let state = match &self.source {
 			Source::Track(state) => state.clone(),
-			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.name, subscription) {
+			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.key(), subscription) {
 				Ok(resolved) => return resolved,
 				Err(Error::Unroutable) if let Some(current) = current => current.clone(),
 				Err(err) => {
-					let request = Request::new(self.broadcast.clone(), self.name.clone());
+					let request = Request::new(self.broadcast.clone(), self.key());
 					let state = request.peek();
 					request.reject(err);
 					state
@@ -7870,7 +8094,15 @@ impl Consumer {
 	fn with_state<R>(&self, f: impl FnOnce(Option<&kio::ConsumerWeak<TrackState>>) -> R) -> R {
 		match &self.source {
 			Source::Track(state) => f(Some(state)),
-			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.name, current.as_ref()).as_ref()),
+			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.key(), current.as_ref()).as_ref()),
+		}
+	}
+
+	/// What a broadcast holds this track under.
+	fn key(&self) -> Key {
+		Key {
+			name: self.name.clone(),
+			meta: self.meta,
 		}
 	}
 
@@ -7939,6 +8171,12 @@ impl Consumer {
 			Ok(start) => Poll::Ready(start),
 			Err(state) => Poll::Ready(state.start.key()),
 		}
+	}
+
+	/// The narrowest budget an upstream subscription feeding this copy asked (see
+	/// [`Producer::judge_under`]), `None` while none asked one.
+	pub(crate) fn judged_under(&self) -> Option<Duration> {
+		self.with_state(|state| state?.read().judging)
 	}
 
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
@@ -8115,15 +8353,6 @@ impl Consumer {
 		})
 	}
 
-	/// How many cached groups were evicted here so far, so a reader that left a group to this
-	/// copy to read learns it may be gone.
-	pub(super) fn evicted(&self) -> u64 {
-		if let Some(serving) = self.serving() {
-			return serving.evicted();
-		}
-		self.with_state(|state| state.map_or(0, |state| state.read().evicted_groups))
-	}
-
 	/// How many groups arrived here so far; see [`Self::poll_arrived`].
 	pub(super) fn arrived(&self) -> usize {
 		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
@@ -8235,7 +8464,7 @@ impl Consumer {
 		routes.serving()
 	}
 
-	/// Ask the instance this handle reads for a new group; see [`Subscriber::ask`].
+	/// Ask the identity this handle reads for a new group; see [`Subscriber::ask`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn ask(&self, ask: Ask) {
 		if let Some(serving) = self.serving() {
@@ -8248,7 +8477,7 @@ impl Consumer {
 		});
 	}
 
-	/// Request a new group from the instance this handle reads; see [`Subscriber::refresh`].
+	/// Request a new group from the identity this handle reads; see [`Subscriber::refresh`].
 	fn request(&self) -> Refreshing {
 		self.with_state(|state| match state {
 			Some(state) if state.read().routes.is_some() => Refreshing::front(state),
@@ -8528,7 +8757,7 @@ impl Consumer {
 	}
 
 	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
-	/// front's logical track follows the route serving it. Reads the instance served now
+	/// front's logical track follows the route serving it. Reads the identity served now
 	/// without asking for it, so a broadcast serving nothing under the name ends the stream.
 	pub(super) fn poll_largest_after(
 		&self,
@@ -8572,6 +8801,15 @@ impl Consumer {
 			return serving.skipped_below(key);
 		}
 		self.with_state(|state| state.map_or(0, |state| state.read().skipped_below(key)))
+	}
+
+	/// The freshness bound this track holds every reader to, `None` when unlimited.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		if let Some(serving) = self.serving() {
+			return serving.max_age_bound();
+		}
+		self.with_state(|state| state.and_then(|state| state.read().max_age_bound()))
 	}
 
 	/// Ready once [`Self::latest_key`] is `Some`: the track holds a group. Stays pending
@@ -8622,6 +8860,12 @@ impl Consumer {
 	#[cfg(test)]
 	pub(crate) fn resume_position(&self) -> Option<Position> {
 		self.with_state(|state| state?.read().resume_position())
+	}
+
+	/// The error that aborted the track, kept even when the abort came after its declared end
+	/// settled and so ended its readers cleanly.
+	pub(super) fn aborted(&self) -> Option<Error> {
+		self.with_state(|state| state?.read().outcome.aborted().cloned())
 	}
 
 	/// Poll for the track closing: no producer is left to write it, so nothing more
@@ -8769,6 +9013,7 @@ impl Resolving {
 	pub fn track(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
+			meta: self.state.read().meta,
 			broadcast: self.broadcast.clone(),
 			source: Source::Track(self.state.weak()),
 			stats: self.stats.clone(),
@@ -9219,7 +9464,7 @@ struct Drift {
 
 /// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
 /// resolve.
-type Coverage = Option<(Cover, Option<u64>)>;
+pub(super) type Coverage = Option<(Cover, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
@@ -9230,7 +9475,7 @@ type Coverage = Option<(Cover, Option<u64>)>;
 /// that very cap, else the verdict may rest on groups above the cap it never sees. Any other
 /// reader treats the run as unknown, and fills it on a request of its own: the upstream
 /// subscription never delivers a group it dropped.
-fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
+pub(super) fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
 	let Some(stale) = hole.stale_budget() else {
 		return true;
 	};
@@ -10032,6 +10277,14 @@ impl PresentationEdge {
 	}
 }
 
+/// What a fold of a reader's handed-out record judges by: the reader's budget, and the groups
+/// its ranges hold, `None` while a range is still being placed. A gap no range holds was never
+/// judged, so a range added later owes it again (see [`Delivered::fold_below`]).
+pub(super) struct FoldTerms {
+	pub budget: Budget,
+	pub ranges: Option<Cover>,
+}
+
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
@@ -10589,6 +10842,9 @@ fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTree
 	keys.into_iter().map(|key| (key, prefs.joining(key))).collect()
 }
 
+/// The capacity, in keys, a reader keeps in [`Filter::arrived`] between arrival walks.
+const ARRIVED_KEPT: usize = 4;
+
 /// A cursor's own ranges, resolved, and what keeps them current.
 struct Filter {
 	/// Only the groups in it are read.
@@ -10611,6 +10867,10 @@ struct Filter {
 	/// budget. Scanned in the cache in the subscription's order, so each cached group in
 	/// them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// The keys the arrival walk just took in, until [`Cursor::owe_arrivals`] owes them.
+	/// Empty between reads, and kept at up to [`ARRIVED_KEPT`] keys of capacity so a wake
+	/// taking in a few groups allocates nothing.
+	arrived: Vec<u64>,
 	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
 	lookups: Vec<Lookup>,
 }
@@ -10643,6 +10903,7 @@ impl Cursor {
 				admitted: Admitted::default(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				arrived: Vec::new(),
 				lookups: Vec::new(),
 			};
 			(filter, state.cache.clone())
@@ -10926,10 +11187,18 @@ impl Cursor {
 		};
 		drop(state);
 		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 		moved
+	}
+
+	/// Take in a window that moved: what a fold counted as handed out before any range held it,
+	/// the ranges placed so far now owe, even while another still waits on its anchor, and the
+	/// reads resolve against the new ranges.
+	fn window_moved(&mut self) {
+		self.record.delivered.reopen(self.filter.window.held());
+		self.filter.revision += 1;
+		self.update_servable();
 	}
 
 	/// Settle a parked read's window on the groups that arrived since: a window waiting on a
@@ -11442,6 +11711,24 @@ impl Cursor {
 		std::mem::take(&mut self.stale)
 	}
 
+	/// The lowest group at or above `from` this read holds unread that `delivered` lacks, past
+	/// any one stale even at the track's max age bound, judged within this read's own window
+	/// and cap: no budget reads one stale there.
+	fn lowest_owed(&self, mut from: u64, delivered: &Delivered) -> Option<u64> {
+		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, &kio::Waiter::noop()) else {
+			return None;
+		};
+		let bound = drift.bound.unwrap_or(Duration::MAX);
+		let stale = |key: u64| self.state.read().is_stale(key, &drift.edge, bound);
+		while let Some(group) = self.lowest_unread(from) {
+			if !delivered.contains(group.start) && !stale(group.start) {
+				return Some(group.start);
+			}
+			from = group.start.checked_add(1)?;
+		}
+		None
+	}
+
 	/// The groups this reader reads, and its cap; see [`Coverage`].
 	fn coverage(&self) -> Coverage {
 		Some((self.filter.window.groups()?.clone(), self.end_key))
@@ -11600,15 +11887,11 @@ impl Cursor {
 		Poll::Ready(())
 	}
 
-	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
+	/// Whether the drift budget says to skip group `key`, against a [`Drift`] already resolved
 	/// for this poll.
-	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+	fn poll_stale(&self, key: u64, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		self.poll(waiter, |state| {
-			Poll::Ready(Ok(state.is_stale(
-				group.start,
-				&drift.edge,
-				drift.budget.at(group.start),
-			)))
+			Poll::Ready(Ok(state.is_stale(key, &drift.edge, drift.budget.at(key))))
 		})
 	}
 
@@ -11621,7 +11904,11 @@ impl Cursor {
 		self.prune_skipped();
 		self.record.delivered.insert(key);
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
+		let terms = FoldTerms {
+			budget: self.filter.window.budget(),
+			ranges: self.filter.window.groups().cloned(),
+		};
+		self.forget_past_budget(&mut delivered, terms, None);
 		self.record.delivered = delivered;
 		self.retire_written_off();
 	}
@@ -11629,20 +11916,22 @@ impl Cursor {
 	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
 	/// holds it or not: one landing there would be written off. A group skipped as stale is
 	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
-	/// owes, which a newest-first re-offer has yet to judge, nor a cached group no range
-	/// covers, which a range added later owes, nor any gap at or above `keep`.
+	/// owes, which a newest-first re-offer has yet to judge, nor any gap at or above `keep`.
+	/// A gap no range holds, which the budget never judged, a range added later owes again
+	/// (see [`Delivered::fold_below`]).
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
-	fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	fn forget_past_budget(&self, delivered: &mut Delivered, terms: FoldTerms, keep: Option<u64>) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let state = self.state.read();
 		let kept = (self.record.skipped.lowest().into_iter()).chain(owed).chain(keep).min();
-		let budgets = budget.clamped(state.max_age_bound());
+		let budgets = terms.budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
+		let judged = terms.ranges.as_ref();
 		while let Some(oldest) = delivered.above_gap() {
 			// The gap below takes this verdict only judged under a budget at least as wide as its own.
 			let budget = (budgets.runs(delivered.floor()..oldest + 1).into_iter())
@@ -11671,35 +11960,14 @@ impl Cursor {
 			let last = delivered
 				.last_before(shared)
 				.expect("the oldest run is below its successor");
-			// Searched only in the gaps this split retires, so a read that folds nothing never
-			// walks the runs it has piled up.
-			let outside = self.lowest_uncovered(delivered, &state, last);
-			if let Some(kept) = kept.into_iter().chain(outside).min()
+			if let Some(kept) = kept
 				&& kept < last
 			{
-				delivered.forget_below(kept);
+				delivered.fold_below(kept, judged);
 				break;
 			}
-			delivered.forget_below(last);
+			delivered.fold_below(last, judged);
 		}
-	}
-
-	/// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover:
-	/// the budget never judged it, and a range added later that covers it owes it. While a range
-	/// is still being placed, any cached group in a gap may be one.
-	fn lowest_uncovered(&self, delivered: &Delivered, state: &TrackState, end: u64) -> Option<u64> {
-		let groups = self.filter.window.groups();
-		delivered.gaps(delivered.floor()..end).into_iter().find_map(|gap| {
-			let gap = gap.start..=gap.end - 1;
-			let outside = match groups {
-				Some(groups) => minus(gap, groups),
-				None => vec![gap],
-			};
-			outside.into_iter().find_map(|run| {
-				let mut slots = state.lookup.range(run);
-				slots.find(|(_, slot)| slot.is_read()).map(|(key, _)| *key)
-			})
-		})
 	}
 
 	/// Hand `group` out whole from its first frame, expiring against its budget.
@@ -11732,8 +12000,7 @@ impl Cursor {
 		// An answer the window takes in may look its time up again from lower down.
 		while self.look_up_pass(waiter, &mut moved) {}
 		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 	}
 
@@ -12050,17 +12317,16 @@ impl Cursor {
 			// What arrived since the last look is owed too, so the pick below sees every group
 			// held unread, buffered or re-offered by a widening, and hands out the first in the
 			// subscription's order. A late lower group is owed once it arrives, never passed over.
-			let arrived = {
+			let took = {
 				let index = Cell::new(self.index);
-				let arrived = self
-					.state
-					.read()
-					.poll_arrivals(&index, self.floor(), &self.filter.window);
+				let floor = self.floor();
+				let filter = &mut *self.filter;
+				let took = (self.state.read()).poll_arrivals(&index, floor, &filter.window, &mut filter.arrived);
 				self.index = index.get();
-				arrived
+				took
 			};
-			if let Poll::Ready(Ok(Some(arrived))) = arrived
-				&& self.owe_arrivals(arrived)
+			if let Poll::Ready(Ok(true)) = took
+				&& self.owe_arrivals()
 			{
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 			}
@@ -12095,7 +12361,11 @@ impl Cursor {
 				None => {
 					let index = Cell::new(self.index);
 					let floor = self.floor();
-					let polled = self.poll(waiter, |state| state.poll_arrivals(&index, floor, &self.filter.window));
+					let arrived = std::cell::RefCell::new(std::mem::take(&mut self.filter.arrived));
+					let polled = self.poll(waiter, |state| {
+						state.poll_arrivals(&index, floor, &self.filter.window, &mut arrived.borrow_mut())
+					});
+					self.filter.arrived = arrived.into_inner();
 					self.index = index.get();
 					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time() {
@@ -12104,7 +12374,7 @@ impl Cursor {
 						self.expire_heads(&drift, waiter);
 						continue;
 					}
-					let Some(arrived) = ready!(polled)? else {
+					if !ready!(polled)? {
 						// The feed ended, but a fill still owes a group. Its answer wakes us.
 						if self.awaits_fill() {
 							return Poll::Pending;
@@ -12112,8 +12382,8 @@ impl Cursor {
 						// Nothing reads the kept-out keys now: a read polled again asks anew.
 						self.kept_out = None;
 						return Poll::Ready(Ok(None));
-					};
-					if self.owe_arrivals(arrived) {
+					}
+					if self.owe_arrivals() {
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 					}
 					continue;
@@ -12122,7 +12392,7 @@ impl Cursor {
 
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
-			if ready!(self.poll_stale(&consumer, &drift, waiter))? {
+			if ready!(self.poll_stale(consumer.start, &drift, waiter))? {
 				self.advance_arrival(consumer.start, taken);
 				self.write_off_stale(consumer.start, consumer.content(), &drift);
 				continue;
@@ -12165,27 +12435,31 @@ impl Cursor {
 				.into_iter()
 				.flatten()
 				.reduce(|first, next| if next.0 < first.0 { next } else { first });
-			let (consumer, taken) = match lowest.map(|(_, taken)| taken) {
-				Some(Taken::Owed) => (owed.expect("picked").consume(), Taken::Owed),
-				Some(Taken::Filled) => (filled.expect("picked").consume(), Taken::Filled),
-				Some(Taken::Head) => (head.expect("picked"), Taken::Head),
-				None => break,
+			let Some((key, taken)) = lowest else {
+				break;
 			};
-			if !ready!(self.poll_stale(&consumer, drift, waiter))? {
+			if !ready!(self.poll_stale(key, drift, waiter))? {
 				break;
 			}
-			self.advance_arrival(consumer.start, taken);
-			self.write_off_stale(consumer.start, consumer.content(), drift);
+			// Only a group written off is consumed, for the content it gives up: the fresh one
+			// usually goes out next, consumed by the pick.
+			let content = match taken {
+				Taken::Owed => owed.expect("picked").consume().content(),
+				Taken::Filled => filled.expect("picked").consume().content(),
+				Taken::Head => head.expect("picked").content(),
+			};
+			self.advance_arrival(key, taken);
+			self.write_off_stale(key, content, drift);
 		}
 		Poll::Ready(Ok(()))
 	}
 
-	/// Owe the `arrived` groups this cursor reads, for [`Self::next_owed`] to pick from. A
-	/// group beyond the cap or outside the ranges is passed holding nothing: a widening finds
-	/// it in the cache again. The first group to arrive places a live join, which may land
-	/// above it, and a later one may settle where a time end falls. Returns whether that
-	/// moved a placed window, and with it the servable edge a drift was judged against.
-	fn owe_arrivals(&mut self, arrived: Vec<u64>) -> bool {
+	/// Owe the [`Filter::arrived`] groups this cursor reads, for [`Self::next_owed`] to pick
+	/// from, emptying it. A group beyond the cap or outside the ranges is passed holding
+	/// nothing: a widening finds it in the cache again. The first group to arrive places a live
+	/// join, which may land above it, and a later one may settle where a time end falls. Returns
+	/// whether that moved a placed window, and with it the servable edge a drift was judged against.
+	fn owe_arrivals(&mut self) -> bool {
 		let moved = !self.filter.window.is_settled() && {
 			self.sync();
 			self.admit();
@@ -12193,11 +12467,16 @@ impl Cursor {
 			!self.filter.window.is_pending()
 		};
 		let floor = self.floor();
-		for key in arrived {
+		let mut arrived = std::mem::take(&mut self.filter.arrived);
+		for key in arrived.drain(..) {
 			if key >= floor && self.admits(key) {
 				self.filter.owed.insert(key..=key);
 			}
 		}
+		// A catch-up walk can take in a whole cache at once: keep only what a wake that takes
+		// in a few groups needs, so an idle reader holds no more than that.
+		arrived.shrink_to(ARRIVED_KEPT);
+		self.filter.arrived = arrived;
 		self.prune_owed();
 		moved
 	}
@@ -12532,7 +12811,7 @@ impl Cursor {
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
 			// walks a whole backlog off rather than handing it out group by group.
-			if ready!(self.poll_stale(&group, &drift, waiter))? {
+			if ready!(self.poll_stale(group.start, &drift, waiter))? {
 				// Not counted yet: a conviction is not permanent (the budget can widen,
 				// the edge can be evicted), so the group may still be delivered.
 				// Re-snapshot on every re-examination so the eventual count reflects the
@@ -12840,7 +13119,7 @@ impl Subscriber {
 	/// tolerates is skipped rather than handed over, so a single read walks off a whole
 	/// backlog. The default [`Start::LATEST`] takes the live edge and writes the rest off;
 	/// a history range (a time, position, or oldest start) reads every group it covers. [`Consumer::fetch_group`] is the way to ask for one old group outright.
-	/// Across same-instance route copies, the first group any copy holds in that order is
+	/// Across same-identity route copies, the first group any copy holds in that order is
 	/// delivered first.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
@@ -13180,14 +13459,14 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget the gaps in `delivered` below each group past `budget` now: one landing there
-	/// would be written off. The budget is the reader's whose `delivered` this is, which a
-	/// front's copy, its ranges raised to a resume point, cannot judge by its own. No gap at or
-	/// above `keep` is forgotten.
-	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	/// Forget the gaps in `delivered` below each group past the budget of `terms` now: one
+	/// landing there would be written off. The terms are the reader's whose `delivered` this is,
+	/// which a front's copy, its ranges raised to a resume point, cannot judge by its own. No gap
+	/// at or above `keep` is forgotten.
+	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, terms: FoldTerms, keep: Option<u64>) {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, budget, keep),
-			Inner::Resume(resume, _) => resume.forget_past(delivered, budget, keep),
+			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, terms, keep),
+			Inner::Resume(resume, _) => resume.forget_past(delivered, terms, keep),
 		}
 	}
 
@@ -13273,10 +13552,8 @@ impl Subscriber {
 	pub(crate) fn rescan_drops(&mut self) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.record.rescan = true,
-			Inner::Resume(resume, logical) => {
-				logical.record.rescan = true;
-				resume.rescan_drops();
-			}
+			// Each copy scans its own drops; the logical record holds none to rescan.
+			Inner::Resume(resume, _) => resume.rescan_drops(),
 		}
 	}
 
@@ -13489,6 +13766,16 @@ impl Subscriber {
 		}
 	}
 
+	/// The lowest group at or above `from` an arrival read holds unread that `delivered` lacks
+	/// and some budget still reads: past any one stale even at its track's max age bound,
+	/// judged by the read that holds it.
+	pub(super) fn lowest_owed(&self, from: u64, delivered: &Delivered) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.lowest_owed(from, delivered),
+			Inner::Resume(resume, _) => resume.lowest_owed(from, delivered),
+		}
+	}
+
 	/// Poll for where the source's feed starts, raised to this cursor's floor, once
 	/// resolved: the first group a publisher tells its peer it serves. A feed starting
 	/// below the floor serves the floor's group too, and a fill this cursor waits on starts it
@@ -13686,14 +13973,14 @@ impl Subscriber {
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced
 	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
-	/// arrive there: true for an empty range. Unlike [`Self::next_in_range`], this ignores the
-	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
+	/// arrive there: true for an empty range. This ignores the subscriber's ranges. A copy
+	/// knows only the skips its wire forwarded.
 	///
 	/// What tells a reader that nothing lies between two groups, or before a track's first.
 	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
 	/// still in flight reads `false`, as does one a local producer's cache expired below its
 	/// edge. A reader that asks once treats such a group as one with something before it.
-	pub(crate) fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
 		};
@@ -13716,6 +14003,16 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().span_end(end),
 			Inner::Resume(resume, _) => resume.span_end(end),
+		}
+	}
+
+	/// The freshness bound the track holds this reader to, whatever budget it asks: `None`
+	/// when unlimited. A run stale under it stays stale under any wider budget.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().max_age_bound(),
+			Inner::Resume(resume, _) => resume.max_age_bound(),
 		}
 	}
 
@@ -13980,9 +14277,11 @@ impl Subscriber {
 	/// empty range. Both bounds are assigned, in either direction: an omitted start is
 	/// group 0 and an omitted end removes the cap. Lowering the floor or raising the cap
 	/// offers the groups it newly covers that the cache still holds and this reader never
-	/// handed out, in its [`Order`]; a group is never handed out twice. Groups past the cap
-	/// stay cached, and lowering the cap below the cursor waits until it rises again or
-	/// the track finishes. [`Self::poll_largest`] reports within these bounds.
+	/// handed out, in its [`Order`]; a group is never handed out twice while the
+	/// subscription's ranges hold it (see [`Self::update`]). Groups past the cap stay cached,
+	/// and lowering the cap below the cursor waits until it rises again or the track
+	/// finishes, unless bounded subscription ranges have nothing left to deliver, which
+	/// ends the read. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
@@ -14048,9 +14347,10 @@ impl Subscriber {
 	/// here (see [`Producer::subscription`]). Replaced ranges resolve again here, a live
 	/// join placed behind the latest group now, and widening them offers
 	/// the cached groups they newly cover, even ones that arrived before the groups
-	/// already read. Returns [`Error::Closed`]
-	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored.
+	/// already read. A group read stays read while the ranges hold it; ranges replaced off it
+	/// may forget it, so ranges holding it again may hand it out again, as a new subscription
+	/// would. Returns [`Error::Closed`] if the track already ended; the update is meaningless
+	/// at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.update_stamped(subscription, [])
 	}
@@ -15037,6 +15337,9 @@ pub struct Request {
 
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
+
+	// Asked for again after its last producer dropped while read; see [`Self::renew`].
+	renewed: bool,
 }
 
 /// Whether a [`Request`] asked for its accepted track's start to be pending.
@@ -15048,9 +15351,24 @@ enum RequestedStart {
 }
 
 impl Request {
-	pub(super) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
-		let name = name.into();
-		let state = TrackState::spawn(broadcast.clone());
+	pub(super) fn new(broadcast: Arc<broadcast::Info>, key: impl Into<Key>) -> Self {
+		let key = key.into();
+		Self::with_state(key.name, TrackState::spawn(broadcast, key.meta))
+	}
+
+	/// Ask for a track again on the state its last producer left, so the readers still
+	/// waiting on it are served by the producer accepting this.
+	fn renew(name: Arc<str>, state: kio::Producer<TrackState>, home: broadcast::Home) -> Self {
+		let request = Self {
+			renewed: true,
+			..Self::with_state(name, state).homed(home)
+		};
+		request.alive.renewal.store(true, Ordering::Relaxed);
+		request
+	}
+
+	fn with_state(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
+		let broadcast = state.read().broadcast.clone();
 		let alive = Alive::new(name.clone(), state.clone());
 		let dynamic = Requests::new(name.clone(), state.clone(), alive.clone());
 		Self {
@@ -15064,12 +15382,26 @@ impl Request {
 			requested_start: RequestedStart::Unset,
 			idle: false,
 			list: None,
+			renewed: false,
 		}
 	}
 
 	/// List the track in its broadcast once accepted: the producer reserved it.
 	pub(super) fn listed(mut self, list: broadcast::ListOnAccept) -> Self {
 		self.list = Some(list);
+		self
+	}
+
+	/// Leave the listing to the caller, which lists the track under the broadcast's lock that
+	/// an accept listing it would take again.
+	pub(super) fn unlisted(mut self) -> Self {
+		self.list = None;
+		self
+	}
+
+	/// Ask `home` for the track again if its last producer leaves while a reader wants it.
+	pub(super) fn homed(self, home: broadcast::Home) -> Self {
+		let _ = self.alive.home.set(home);
 		self
 	}
 
@@ -15174,9 +15506,14 @@ impl Request {
 	/// Serve the request with the given track, resolving every waiting subscriber.
 	///
 	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
-	/// (`None` for the defaults). If the track was already aborted, the returned
-	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
-	/// aborted immediately after accepting.
+	/// (`None` for the defaults). A track asked for again because its last producer dropped
+	/// while read must be accepted with the info it was first accepted with, which its
+	/// readers already hold: a different `info` aborts the track with [`Error::MalformedTrack`],
+	/// so those readers end and a later lookup asks for the track afresh. Such a track also
+	/// keeps the groups its last producer finished, so continue past them, as
+	/// [`Producer::append_group`] does, rather than numbering from zero again. If the track was
+	/// already aborted, or is aborted that way, the returned [`Producer`] is inert: writes
+	/// fail with the abort error, as if it had been aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		self.stage(info).commit()
 	}
@@ -15189,9 +15526,18 @@ impl Request {
 	/// [`Error::Dropped`].
 	pub(crate) fn stage(self, info: impl Into<Option<Info>>) -> Staged {
 		let info = info.into().unwrap_or_default();
+		let conflicts = self.conflicts(&info);
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
+			// Its readers, and the peers they forward to, already hold the info the track was
+			// first accepted with, which nothing may change under them. Aborted as a producer
+			// would abort it: a fill answered before this accept may have opened groups. A cause
+			// every version carries as terminal, so a relay stops rather than asks again.
+			Ok(state) if conflicts => {
+				commit_abort(state, Error::MalformedTrack, None).abort();
+				false
+			}
 			Ok(mut state) => {
 				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
@@ -15222,6 +15568,11 @@ impl Request {
 			}),
 			_dynamic: self._dynamic,
 		}
+	}
+
+	/// Whether accepting with `info` would change the info a renewed track's readers hold.
+	pub(super) fn conflicts(&self, info: &Info) -> bool {
+		self.renewed && self.state.read().info.as_ref().is_some_and(|held| held != info)
 	}
 
 	/// Reject the request, waking all waiting subscribers with `err`.
@@ -15267,10 +15618,14 @@ impl Request {
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		TrackWeak::new(self.name.clone(), &self.state)
+	}
+
+	/// Whether the request is for the metadata copy, which its handler fills with each
+	/// frame's header alone: a metadata subscription where its session carries one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn meta(&self) -> bool {
+		self.state.read().meta
 	}
 }
 
@@ -18480,7 +18835,7 @@ mod test {
 	/// refuse history an unlimited publisher still serves.
 	#[test]
 	fn a_fill_before_metadata_claims_no_max_age() {
-		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()), false);
 		let _group = state
 			.write()
 			.ok()
@@ -18497,7 +18852,7 @@ mod test {
 	/// joins the eviction order, so pool pressure and idle expiry can still reclaim it.
 	#[test]
 	fn a_refusal_releases_the_live_edge_a_fill_cached() {
-		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()), false);
 		let mut guard = state.write().ok().unwrap();
 		let _group = guard
 			.insert_group_request(0, group::Bounds::default(), None)
@@ -25206,7 +25561,8 @@ mod test {
 		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
 	}
 
-	/// An abort short of the end, or the last producer leaving without one, is the outcome.
+	/// An abort short of the end is the outcome, and so is the last producer leaving a reader
+	/// nothing can ask for the track again; leaving nobody, the track ends cleanly.
 	#[test]
 	#[cfg(feature = "async")]
 	fn closed_reports_an_unfinished_end() {
@@ -25215,10 +25571,19 @@ mod test {
 		aborted.clone().abort(Error::Timeout).unwrap();
 		assert!(matches!(aborted.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
 
-		let dropped = track_producer("dropped", Info::timed());
-		let demand = dropped.demand();
-		drop(dropped);
+		let read = track_producer("read", Info::timed());
+		let demand = read.demand();
+		let reader = read.subscribe(None);
+		drop(read);
 		assert!(matches!(demand.closed().now_or_never(), Some(Err(Error::Dropped))));
+		drop(reader);
+
+		let unwanted = track_producer("unwanted", Info::timed());
+		unwanted.append_next().unwrap().finish().unwrap();
+		let _open = unwanted.append_next().unwrap();
+		let demand = unwanted.demand();
+		drop(unwanted);
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
 	}
 
 	/// An abort short of the end keeps the groups that finished for a reader that has not
@@ -25536,6 +25901,48 @@ mod test {
 			drop(third);
 			assert!(reader.read_frame().await.unwrap().is_none());
 		}
+	}
+
+	/// A header-only read, as a metadata Group Stream's, takes no payload, so a copy failing
+	/// partway through a frame it read the header of continues on a held re-offer from the next
+	/// frame, as a whole read would.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_header_read_continues_past_a_frame_its_copy_cut() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(300), &b"a"[..]).unwrap();
+		let mut reader = first.consume();
+		let handle = first.handle();
+		let mut open = first
+			.create_frame(frame::Info {
+				size: 4,
+				timestamp: at(301),
+			})
+			.unwrap();
+		open.write(&b"ab"[..]).unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 4);
+		reader.forget_payload();
+
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer waits on the copy still arriving");
+		};
+		handle.abort(Error::Cancel).unwrap();
+		drop(open);
+		let Ok(Received::Group(mut reoffer)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer takes the group");
+		};
+		drop(hold);
+		reoffer.write_frame(at(300), &b"a"[..]).unwrap();
+		reoffer.write_frame(at(301), &b"abcd"[..]).unwrap();
+		reoffer.write_frame(at(302), &b"c"[..]).unwrap();
+		reoffer.finish().unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert!(reader.next_frame().await.unwrap().is_none());
 	}
 
 	/// A failed copy's end follows its frame reads: it waits out a held re-offer rather than
@@ -26240,6 +26647,80 @@ mod test {
 		put(&producer, 2, Some(2000));
 		assert!(woken.load(Ordering::SeqCst), "the lower successor went unjudged");
 		assert_eq!(drain_ordered(&mut consumer), [2], "group 3 is still owed");
+	}
+
+	/// A track no handler can ask for again records the group its producer left open as
+	/// dropped, not superseded, for a subscriber still owed it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_nothing_serves_records_its_open_group_dropped() {
+		let producer = broadcast::Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		drop((track, open));
+		let given_up = handle.with_state(|state| state?.read().given_up(0));
+		let dropped = Some(Error::Stream(StreamError::from(&Error::Dropped)));
+		assert_eq!(format!("{given_up:?}"), format!("{dropped:?}"));
+	}
+
+	/// Once a renewal's producer goes past where its predecessor stopped, the resume follows it,
+	/// even after the group it left at the live edge is reclaimed.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_past_the_handoff_resumes_past_it() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let producer = broadcast::Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		open.write_frame(at(1), b"b".as_slice()).unwrap();
+		drop((track, open));
+
+		let next = dynamic.assert_request().accept(Info::timed());
+		next.append_next().unwrap().finish().unwrap();
+		let mut open = next.append_next().unwrap();
+		open.write_frame(at(2), b"c".as_slice()).unwrap();
+		open.abort(Error::Cancel).unwrap();
+		next.modify().unwrap().reclaim_aborted(2);
+		assert_eq!(handle.resume_position(), Some(Position::group(3)));
+	}
+
+	/// A renewal its handler drops unanswered ends the track as its producer's drop would have,
+	/// so the live edge it held for the next producer joins the eviction order.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unanswered_renewal_releases_the_live_edge() {
+		let producer = broadcast::Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_next().unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		drop(track);
+		assert_eq!(
+			handle.with_state(|state| state.map(|state| state.read().protects(0))),
+			Some(true)
+		);
+
+		drop(dynamic.assert_request());
+		assert_eq!(
+			handle.with_state(|state| state.map(|state| state.read().protects(0))),
+			Some(false)
+		);
 	}
 
 	/// The arrival ledger giving up on a gap wakes the reader, even when the owed group's
@@ -30874,11 +31355,10 @@ mod test {
 			let state = producer.state.read();
 			Window::new(&replay().ranges, None, &*state)
 		};
-		let walked = producer.state.read().poll_arrivals(&index, 0, &window);
-		assert!(
-			matches!(walked, Poll::Ready(Ok(Some(ref keys))) if keys == &[0, 2]),
-			"{walked:?}"
-		);
+		let mut keys = Vec::new();
+		let walked = producer.state.read().poll_arrivals(&index, 0, &window, &mut keys);
+		assert!(matches!(walked, Poll::Ready(Ok(true))), "{walked:?}");
+		assert_eq!(keys, [0, 2]);
 		// A reader takes it as the fill answer for the group the feed gave up, as it would
 		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());
@@ -34879,6 +35359,169 @@ mod test {
 			})
 			.unwrap();
 		assert_eq!(drain_groups(&mut subscriber), [0]);
+	}
+
+	/// A range added behind a reader caught up at the live edge of a relay's copy holding only
+	/// its newest groups hands out the older group its upstream sends after the update, though
+	/// the reader's own budget folded that gap before any range held it.
+	#[test]
+	fn a_range_added_behind_a_caught_up_relay_read_hands_out_what_arrives_later() {
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
+		producer.received();
+		producer.set_idle();
+		producer.start_at(5).unwrap();
+		producer.set_live(Some(Position::group(5)), Some(false), None).unwrap();
+		framed(&producer, 5, 1).finish().unwrap();
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+		framed(&producer, 6, 1).finish().unwrap();
+		framed(&producer, 7, 1).finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [7]);
+		assert!(subscriber.record().delivered.contains(3), "the budget folded the gap");
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(1, Range::groups(3..=3))],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing held there yet"
+		);
+		framed(&producer, 3, 1).finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+	}
+
+	/// A time range added behind a reader caught up at the live edge hands out the group its
+	/// lookup finds, though the reader's budget folded that gap before any range held it: the
+	/// window moves when the answer lands, not when the ranges change.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_range_added_behind_a_caught_up_read_hands_out_the_group_it_looks_up() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+		assert_eq!(drain_groups(&mut subscriber), [10]);
+		write_group(&producer, 11);
+		write_group(&producer, 12);
+		assert_eq!(drain_groups(&mut subscriber), [12]);
+		assert!(subscriber.record().delivered.contains(5), "the budget folded the gap");
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(
+					1,
+					Range {
+						start: Start::Time(5),
+						end: Some(5),
+					},
+				)],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing until it is found"
+		);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!(start.start().group, 5);
+		write_filled(start.accept(5, None), 5);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+	}
+
+	/// A reader at the live edge of a relay's copy, adding and retiring history ranges behind
+	/// it at random while older groups land late, hands out each group a history range holds
+	/// when it lands, and none twice while a range holds it: what its budget folded before a
+	/// range held it never stands in for a hand-out, nor makes one again.
+	#[test]
+	fn ranges_added_behind_a_live_read_hand_out_every_late_group_they_hold() {
+		use rand::{RngExt, SeedableRng};
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x666f6c64);
+		for _ in 0..50 {
+			let mut producer = track_producer("test", Info::default().with_max_age(None));
+			producer.received();
+			producer.set_idle();
+			producer.start_at(100).unwrap();
+			producer
+				.set_live(Some(Position::group(100)), Some(false), None)
+				.unwrap();
+			framed(&producer, 100, 1).finish().unwrap();
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+			let mut handed: BTreeSet<u64> = drain_groups(&mut subscriber).into_iter().collect();
+			let mut written = BTreeSet::from([100]);
+			let mut ranges: BTreeMap<u64, ops::RangeInclusive<u64>> = BTreeMap::new();
+			let mut owed = BTreeSet::new();
+			let (mut edge, mut next_key) = (100, 1);
+			for _ in 0..60 {
+				match rng.random_range(0..4) {
+					0 => {
+						edge += rng.random_range(1..4);
+						framed(&producer, edge, 1).finish().unwrap();
+						written.insert(edge);
+					}
+					1 => {
+						let start = rng.random_range(0..edge);
+						let end = rng.random_range(start..edge);
+						ranges.insert(next_key, start..=end);
+						subscriber
+							.edit(Edit {
+								placed: Default::default(),
+								retire: Vec::new(),
+								add: vec![(next_key, Range::groups(start..=end))],
+								priority: 0,
+								order: Order::default(),
+							})
+							.unwrap();
+						next_key += 1;
+					}
+					2 if !ranges.is_empty() => {
+						let key = *ranges.keys().nth(rng.random_range(0..ranges.len())).unwrap();
+						ranges.remove(&key);
+						// A record retires what its ranges left behind, so ranges holding it again
+						// may hand it out again (see `Record::retire`).
+						handed.retain(|key| *key >= 100 || ranges.values().any(|range| range.contains(key)));
+						subscriber
+							.edit(Edit {
+								placed: Default::default(),
+								retire: vec![key],
+								add: Vec::new(),
+								priority: 0,
+								order: Order::default(),
+							})
+							.unwrap();
+					}
+					_ => {
+						let key = rng.random_range(0..edge);
+						if written.insert(key) {
+							framed(&producer, key, 1).finish().unwrap();
+							if ranges.values().any(|range| range.contains(&key)) {
+								owed.insert(key);
+							}
+						}
+					}
+				}
+				for key in drain_groups(&mut subscriber) {
+					assert!(handed.insert(key), "group {key} handed out twice");
+					owed.remove(&key);
+				}
+				// A late group a range held as it landed is handed out, unless a retire since let it go.
+				owed.retain(|key| ranges.values().any(|range| range.contains(key)));
+				assert_eq!(owed, BTreeSet::new(), "late groups the ranges hold, with {ranges:?}");
+			}
+		}
 	}
 
 	/// Ranges edited one key at a time resolve and cover what the same ranges given whole do,

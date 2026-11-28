@@ -10,12 +10,12 @@
 //! `origin::run_front`.
 //!
 //! The driver only offers a front routes that serve its broadcast: those of the
-//! instance it first resolved, at its newest epoch, whose tracks resume where they
-//! stopped since the instance promises one continuous key space. An instance a
+//! identity it first resolved, at its newest epoch, whose tracks resume where they
+//! stopped since the identity promises one continuous key space. An identity a
 //! session minted, for a wire that carries none, promises nothing past its route:
 //! that route can answer a re-request with another stream, so a track whose copy
 //! fails there ends with the error instead of re-splicing. Another
-//! instance winning the path leaves the front alone: its readers stay until they
+//! identity winning the path leaves the front alone: its readers stay until they
 //! leave or its routes go, and new requests get a fresh front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
@@ -29,21 +29,20 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
-	sync::Arc,
 	time::Duration,
 };
 
 use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, whether it is a
-/// broadcast published on this origin, and whether its instance was carried rather
+/// broadcast published on this origin, and whether its identity was carried rather
 /// than minted by a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// a carried instance says the answer is the same stream. A minted one names the
+	/// a carried identity says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
 	/// Whether the route is a lite-07 claim, which the route layer keeps in the table
@@ -77,12 +76,12 @@ pub(super) enum Event {
 	SourceClosed { source: u64 },
 	/// The front's broadcast handed out a new logical track to serve. It has no
 	/// reader until [`Event::Wanted`] says so.
-	TrackAssigned { track: Arc<str>, now: Instant },
+	TrackAssigned { track: track::Key, now: Instant },
 	/// A source answered a track query: its copy's metadata, or a refusal.
 	/// `closing` is whether the source has begun closing, in which case a
 	/// refusal is not held against it: it is on its way out.
 	TrackInfo {
-		track: Arc<str>,
+		track: track::Key,
 		source: u64,
 		closing: bool,
 		result: Result<track::Info, Error>,
@@ -93,22 +92,22 @@ pub(super) enum Event {
 	/// whether it produced anything since it was spliced in; a copy that died
 	/// without delivering refused the track.
 	TrackEnded {
-		track: Arc<str>,
+		track: track::Key,
 		source: u64,
 		closing: bool,
 		result: Result<(), Error>,
 		delivered: bool,
 	},
 	/// A reader arrived on the track.
-	Wanted { track: Arc<str> },
+	Wanted { track: track::Key },
 	/// The last reader left the track. A finished track is read until nothing holds it,
 	/// such as a fetch still reading a group, which keeps moving off a dying route.
-	Unwanted { track: Arc<str>, now: Instant },
+	Unwanted { track: track::Key, now: Instant },
 	/// The armed deadline passed.
 	Deadline { now: Instant },
 	/// The driver let go of a track the machine asked it to [`Action::Forget`].
 	/// Not fed when a reader arrived first: [`Event::Wanted`] follows instead.
-	Forgotten { track: Arc<str> },
+	Forgotten { track: track::Key },
 	/// A consumer took hold of the front's broadcast: a request joined it, or the
 	/// driver declined an [`Action::Retire`] because one did.
 	Held,
@@ -136,29 +135,29 @@ pub(super) enum Action {
 	Resolve,
 	/// Ask `source` for its copy of `track`; feed the answer back as
 	/// [`Event::TrackInfo`].
-	Query { track: Arc<str>, source: u64 },
+	Query { track: track::Key, source: u64 },
 	/// Splice `source`'s copy of `track` in: each reader resumes on it where it stopped.
-	Splice { track: Arc<str>, source: u64 },
+	Splice { track: track::Key, source: u64 },
 	/// Drop the source copy of `track`: nobody reads it, and a returning reader gets a
 	/// fresh one.
-	Park { track: Arc<str> },
+	Park { track: track::Key },
 	/// Remove `track` from the broadcast and drop everything behind it, unless a reader
 	/// arrived meanwhile: it went unread for the linger, or the source is local.
 	/// Feed back [`Event::Forgotten`] once it is gone.
-	Forget { track: Arc<str> },
+	Forget { track: track::Key },
 	/// Ask `source` for its copy of the finished `track`, for the reads still holding it:
 	/// a group read on it continues from that copy if its own route dies. Nothing to do
 	/// when nothing holds the track; else feed the answer back as [`Event::TrackInfo`].
-	Reroute { track: Arc<str>, source: u64 },
+	Reroute { track: track::Key, source: u64 },
 	/// No source will replace the copy of the finished `track` any more: a group read on it
 	/// fails once its own route does, rather than wait for one.
-	Conclude { track: Arc<str> },
+	Conclude { track: track::Key },
 	/// The logical track completed.
-	Finish { track: Arc<str> },
+	Finish { track: track::Key },
 	/// The logical track failed for good, with the Retry Interval of the upstream refusal it
 	/// carries, if any.
 	Abort {
-		track: Arc<str>,
+		track: track::Key,
 		err: Error,
 		retry: Option<Duration>,
 	},
@@ -248,11 +247,11 @@ pub(super) struct Front {
 	orphans: HashSet<u64>,
 	/// Whether the parked requesters were resolved (the first source attached).
 	resolved: bool,
-	tracks: BTreeMap<Arc<str>, Track>,
-	parked: BTreeSet<(Instant, Arc<str>)>,
+	tracks: BTreeMap<track::Key, Track>,
+	parked: BTreeSet<(Instant, track::Key)>,
 	/// Immutable track metadata, fixed by the first copy of each track until it is
 	/// forgotten. Every source of the broadcast must serve the same content.
-	info: BTreeMap<Arc<str>, track::Info>,
+	info: BTreeMap<track::Key, track::Info>,
 	/// How long an unread track stays before it is forgotten.
 	linger: Duration,
 	/// The deadline last armed, so a step only re-arms on change.
@@ -324,7 +323,7 @@ impl Front {
 
 	/// Why `track`'s serving copy died, while its re-splice is still awaited. A track the
 	/// front ends meanwhile ends with this rather than the front's end.
-	pub(super) fn lost(&self, track: &str) -> Option<Error> {
+	pub(super) fn lost(&self, track: &track::Key) -> Option<Error> {
 		let track = self.tracks.get(track)?;
 		track.lost.clone().or_else(|| track.closed.clone())
 	}
@@ -584,7 +583,7 @@ impl Front {
 
 	fn track_info(
 		&mut self,
-		name: Arc<str>,
+		name: track::Key,
 		source: u64,
 		closing: bool,
 		result: Result<track::Info, (Error, Option<Duration>)>,
@@ -628,7 +627,7 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A copy of the same instance claims identical content, so any difference
+			// A copy of the same identity claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err((Error::Unsupported, None)),
@@ -658,7 +657,7 @@ impl Front {
 
 	fn track_ended(
 		&mut self,
-		name: Arc<str>,
+		name: track::Key,
 		source: u64,
 		closing: bool,
 		result: Result<(), Error>,
@@ -679,7 +678,7 @@ impl Front {
 		// one anew, since finishing lets go of a query in flight: the group reads still
 		// holding the track continue from it, as after a later source change.
 		let reroute = serving.filter(|serving| track.state != (TrackState::Spliced { source: *serving }));
-		let finish = |name: Arc<str>, actions: &mut Vec<Action>| {
+		let finish = |name: track::Key, actions: &mut Vec<Action>| {
 			actions.push(Action::Finish { track: name.clone() });
 			if let Some(source) = reroute {
 				actions.push(Action::Reroute { track: name, source });
@@ -719,11 +718,11 @@ impl Front {
 				track.ended = Some(Ended::Finished);
 				finish(name, actions);
 			}
-			// Died mid-serve after delivering from the same instance: normal failover,
+			// Died mid-serve after delivering from the same identity: normal failover,
 			// re-splice at the first missing group from the serving source, or from the
 			// route a switch already under way moves to, whatever the error, since the
 			// route it leaves may be what failed. A copy still read from a source that
-			// closed during the switch has no serving source to judge the instance by, so
+			// closed during the switch has no serving source to judge the identity by, so
 			// the route the switch asks speaks for it. What that copy died of is no
 			// serving copy's loss: the route's answer is its own verdict, as while waiting.
 			Err(err)
@@ -748,7 +747,7 @@ impl Front {
 				track.state = TrackState::Idle;
 				track.closed.get_or_insert(err);
 			}
-			// The route lost the content, which another route of the instance continues:
+			// The route lost the content, which another route of the identity continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
 			// drained from a replaced source leaves the track to the serving one.
 			Err(err) if delivered && err.unroutable() && strands => {
@@ -760,7 +759,7 @@ impl Front {
 					self.redispatch(name, actions);
 				}
 			}
-			// A content verdict survives every copy. Under a minted instance, even a route
+			// A content verdict survives every copy. Under a minted identity, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
@@ -780,7 +779,7 @@ impl Front {
 	/// source or, when the serving source itself refused, abort the track.
 	fn refuse(
 		&mut self,
-		name: Arc<str>,
+		name: track::Key,
 		source: u64,
 		closing: bool,
 		refusal: (Error, Option<Duration>),
@@ -798,7 +797,7 @@ impl Front {
 			return;
 		}
 		// A route that lost the content says nothing of the track: wait for another of its
-		// instance, keeping a draining copy meanwhile. A replaced source's loss leaves the
+		// identity, keeping a draining copy meanwhile. A replaced source's loss leaves the
 		// track to the serving one, whose own answer stands.
 		if refusal.0.unroutable() && strands {
 			if let Some(draining) = track.draining {
@@ -829,7 +828,7 @@ impl Front {
 	/// A copy of `name` failed: while a switch to another route is under way, the
 	/// track waits for it, and [`Self::attach`] asks the new source, since the failure
 	/// may be the route the switch leaves; otherwise the serving source is asked again.
-	fn fail_over(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+	fn fail_over(&mut self, name: track::Key, actions: &mut Vec<Action>) {
 		if self.upstream.is_none() {
 			self.redispatch(name, actions);
 		}
@@ -837,7 +836,7 @@ impl Front {
 
 	/// [`Self::redispatch`] every idle track.
 	fn redispatch_idle(&mut self, actions: &mut Vec<Action>) {
-		let idle: Vec<Arc<str>> = (self.tracks.iter())
+		let idle: Vec<track::Key> = (self.tracks.iter())
 			.filter(|(_, track)| track.state == TrackState::Idle)
 			.map(|(name, _)| name.clone())
 			.collect();
@@ -849,7 +848,7 @@ impl Front {
 	/// Splice `name` from the serving source if it can serve it, or abort the
 	/// track once the serving source has refused it: refusals are never
 	/// retried, and no other source will be asked while this one serves.
-	fn redispatch(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+	fn redispatch(&mut self, name: track::Key, actions: &mut Vec<Action>) {
 		let Some((source, _)) = self.serving else {
 			return;
 		};
@@ -877,7 +876,7 @@ impl Front {
 	/// Whether an unroutable end from the serving source judges its route rather than the
 	/// track, so the track waits for the table to move. Only a received route can be stale:
 	/// a local publisher's word is the track's verdict, and no news about it is in flight. A
-	/// minted instance has no other route to wait for.
+	/// minted identity has no other route to wait for.
 	fn strands(&self) -> bool {
 		self.serving
 			.is_some_and(|(_, candidate)| candidate.carried && !candidate.local)
@@ -924,7 +923,7 @@ impl Front {
 		}
 	}
 
-	fn wanted(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+	fn wanted(&mut self, name: track::Key, actions: &mut Vec<Action>) {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -935,7 +934,7 @@ impl Front {
 		self.redispatch(name, actions);
 	}
 
-	fn unwanted(&mut self, name: Arc<str>, now: Instant, actions: &mut Vec<Action>) {
+	fn unwanted(&mut self, name: track::Key, now: Instant, actions: &mut Vec<Action>) {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -986,7 +985,7 @@ impl Front {
 		}
 	}
 
-	fn parked_at(&self, name: &str) -> Option<Instant> {
+	fn parked_at(&self, name: &track::Key) -> Option<Instant> {
 		match self.tracks.get(name)?.state {
 			TrackState::Parked { since } => Some(since.saturating_add(self.linger)),
 			_ => None,
@@ -1037,8 +1036,8 @@ mod tests {
 		track::Info::timed()
 	}
 
-	fn name(s: &str) -> Arc<str> {
-		Arc::from(s)
+	fn name(s: &str) -> track::Key {
+		track::Key::from(s)
 	}
 
 	/// Actions compare by their debug form: `Error` has no equality.
@@ -1370,7 +1369,7 @@ mod tests {
 				source: 200,
 			}],
 		);
-		assert!(front.lost("video").is_none());
+		assert!(front.lost(&name("video")).is_none());
 	}
 
 	/// The session that serves the claim next frames the track differently: its verdict
@@ -1418,7 +1417,7 @@ mod tests {
 			&[Action::End { err: Error::Unroutable }],
 		);
 		assert_eq!(
-			front.lost("video").map(|err| err.to_string()),
+			front.lost(&name("video")).map(|err| err.to_string()),
 			Some(Error::Session(crate::SessionError::Cancel).to_string())
 		);
 	}
@@ -1433,7 +1432,7 @@ mod tests {
 			serving_closing: false,
 		});
 		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
-		assert!(front.lost("video").is_none());
+		assert!(front.lost(&name("video")).is_none());
 	}
 
 	/// The closed source answers a query it was asked before its close, and the copy it
@@ -1474,7 +1473,7 @@ mod tests {
 			&[],
 		);
 		assert_eq!(
-			front.lost("video").map(|err| err.to_string()),
+			front.lost(&name("video")).map(|err| err.to_string()),
 			Some(Error::Session(crate::SessionError::Cancel).to_string())
 		);
 		assert_actions(
@@ -1540,7 +1539,7 @@ mod tests {
 	fn a_late_copy_dying_while_asking_yields_to_a_broadcast_refusal() {
 		let mut front = late_copy_died_while_asking();
 		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
-		assert!(front.lost("video").is_none());
+		assert!(front.lost(&name("video")).is_none());
 	}
 
 	/// The late copy dies while the next route is asked, whose source then refuses the
@@ -1700,7 +1699,7 @@ mod tests {
 		assert!(
 			actions
 				.iter()
-				.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "audio"))
+				.any(|action| matches!(action, Action::Query { track, source: 200 } if *track.name == *"audio"))
 		);
 	}
 
@@ -1788,7 +1787,7 @@ mod tests {
 				&[Action::End { err: Error::Unroutable }],
 			);
 			assert_eq!(
-				front.lost("video").map(|err| err.to_string()),
+				front.lost(&name("video")).map(|err| err.to_string()),
 				Some(reset().to_string())
 			);
 		}
@@ -1806,14 +1805,14 @@ mod tests {
 			result: Err(Error::Dropped),
 			delivered: true,
 		});
-		assert!(matches!(front.lost("video"), Some(Error::Dropped)));
+		assert!(matches!(front.lost(&name("video")), Some(Error::Dropped)));
 		// A reader leaving abandons the recovery, so its loss is not reported later.
 		let mut parked = front.clone();
 		parked.step(Event::Unwanted {
 			track: name("video"),
 			now: Instant::now(),
 		});
-		assert!(parked.lost("video").is_none());
+		assert!(parked.lost(&name("video")).is_none());
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
@@ -1932,9 +1931,12 @@ mod tests {
 				}),
 				&[Action::End { err: Error::Unroutable }],
 			);
-			assert_eq!(front.lost("video").map(|err| err.to_string()), Some(err.to_string()));
+			assert_eq!(
+				front.lost(&name("video")).map(|err| err.to_string()),
+				Some(err.to_string())
+			);
 
-			// A minted instance has no other route, and a local publisher's word is the track's
+			// A minted identity has no other route, and a local publisher's word is the track's
 			// verdict with no news in flight to overtake it: either refusal ends the track, as
 			// does a local copy failing so.
 			for (local, carried) in [(false, false), (true, true)] {
@@ -2185,10 +2187,10 @@ mod tests {
 		);
 	}
 
-	/// Under a minted instance a re-request could reach another stream, so the track ends
+	/// Under a minted identity a re-request could reach another stream, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_copy_dying_under_a_minted_instance_ends_the_track() {
+	fn a_copy_dying_under_a_minted_identity_ends_the_track() {
 		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
@@ -2253,7 +2255,7 @@ mod tests {
 			assert!(
 				actions
 					.iter()
-					.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "video")),
+					.any(|action| matches!(action, Action::Query { track, source: 200 } if *track.name == *"video")),
 				"{err}: {actions:?}"
 			);
 			assert!(
@@ -2265,7 +2267,7 @@ mod tests {
 
 	/// A track still asking a source when it closes is spliced to that source's copy once
 	/// its info arrives, while the switch away is under way. When that copy fails, no
-	/// source serves to judge the instance by, so the route the switch asks does: the
+	/// source serves to judge the identity by, so the route the switch asks does: the
 	/// track waits for it rather than ending.
 	#[test]
 	fn a_copy_of_a_closed_source_failing_during_a_switch_waits_for_it() {
@@ -2427,7 +2429,7 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		// A copy of the same instance claims identical content, so every field counts, `refresh` too.
+		// A copy of the same identity claims identical content, so every field counts, `refresh` too.
 		let differing = [
 			track::Info {
 				max_age: Some(Duration::from_secs(1)),
@@ -2948,7 +2950,7 @@ mod tests {
 			&[Action::Forget { track: name("audio") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("audio") }), &[]);
-		assert!(front.tracks.contains_key("video"));
+		assert!(front.tracks.contains_key(&name("video")));
 	}
 
 	/// A track whose reader left before the front saw it is never spliced, and is

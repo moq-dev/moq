@@ -28,7 +28,7 @@ pub enum Error {
 
 	/// The source's clock stepped onto another timeline, or its PAT named another program, so
 	/// what follows is another broadcast. [`Republish`](super::Republish) carries on into a new
-	/// instance instead.
+	/// identity instead.
 	#[error("the source {0}; what follows is a new broadcast")]
 	Restarted(super::Step),
 

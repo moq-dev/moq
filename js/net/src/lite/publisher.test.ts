@@ -10,7 +10,7 @@ import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -194,7 +194,7 @@ test.each([Version.DRAFT_06])("a republish restarts the advertisement (version %
 	await settle();
 	const initial = written.length;
 
-	// Another broadcast at the path, without an instance: another instance.
+	// Another broadcast at the path, without an identity: another identity.
 	const republished = publish(origin, Path.from("cam"));
 	await settle();
 	const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));
@@ -850,6 +850,10 @@ async function servedSubscription(
 		// qmux one has, which `reliable` on the result controls and logs. `"plain"` is a qmux peer
 		// without RESET_STREAM_AT, whose resets may lose the prefix.
 		reliable?: boolean | "plain";
+		// Ask for each frame's header alone (lite-07 `Meta`), which `servedGroup` then reads.
+		meta?: boolean;
+		// The track's compression, none when unset.
+		compression?: "deflate";
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -881,7 +885,7 @@ async function servedSubscription(
 		broadcast = publish(origin, Path.from("test"));
 	}
 	// Unset is no publisher limit: these fixtures serve superseded groups.
-	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
+	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null, compression: options.compression };
 	let track = options.pending ? undefined : defined(broadcast.createTrack("video", info));
 	for (const key of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
@@ -926,6 +930,7 @@ async function servedSubscription(
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
 	msg.ranges = options.ranges;
+	msg.meta = options.meta ?? false;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
@@ -1016,6 +1021,8 @@ async function servedSubscription(
 			const header = await GroupMessage.decode(reader, version);
 
 			const payloads: string[] = [];
+			// A metadata subscription's frames carry their plain sizes, and no payload.
+			const sizes: number[] = [];
 			const times: bigint[] = [];
 			let end: bigint | undefined;
 			let endDelta: bigint | undefined;
@@ -1037,9 +1044,11 @@ async function servedSubscription(
 				times.push(ts);
 				if (highest === undefined || ts > highest) highest = ts;
 				const size = length ?? (await reader.u53());
-				payloads.push(new TextDecoder().decode(await reader.read(size)));
+				if (options.meta) sizes.push(size);
+				else payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			const served = { key: header.key, frameStart: header.frameStart, payloads };
+			if (options.meta) return { ...served, sizes, times, end, endDelta };
 			return lengthFirst ? { ...served, times, end, endDelta } : served;
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
@@ -1499,6 +1508,31 @@ test("lite-07 ends a finished group with GROUP_END and a closed one with a bare 
 		await sub.close();
 	}
 });
+
+// A metadata subscription's Group Stream carries each frame's header alone: its plain size plus one
+// and its timestamp delta, with no payload, so an empty frame stays apart from GROUP_END. A compressed
+// frame names its declared plain size. Mirrors the Rust `lite07_meta_serves_each_frame_header_alone`.
+for (const compression of [undefined, "deflate"] as const) {
+	test(`lite-07 serves a metadata subscription each frame's header alone (${compression ?? "plain"})`, async () => {
+		const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], meta: true, compression });
+		try {
+			const group = sub.track.createGroup(0n);
+			group.writeFrame(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
+			group.writeFrame(textFrame("", Timestamp.fromMillis(3)));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(4)));
+			group.finishAt(5n);
+			expect(await sub.servedGroup()).toMatchObject({
+				key: 0n,
+				payloads: [],
+				sizes: [300, 0, 5],
+				times: [2n, 3n, 4n],
+				end: 5n,
+			});
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // A lite-07 GROUP_END's End is a delta from the highest frame timestamp the stream carried: B-frames
 // send timestamps backwards, so the highest is not the last.
@@ -2479,6 +2513,30 @@ for (const skipped of ["failed", "stale"] as const) {
 	});
 }
 
+// A group stale under the track's own max age is named below a lite-07 START all the same: no
+// budget reaches past that bound, so a relay reading from the oldest group would otherwise wait on
+// it forever. Mirrors the Rust `lite07_names_history_stale_under_the_bound_below_the_start`.
+test("lite draft-07: a group stale under the max age is named below the start", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], maxAge: Duration.millis(0) });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 5n, requested: 5n });
+		const group = sub.track.createGroup(5n);
+		group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+		group.finish();
+		sub.serve(6n);
+		hooks.answerEdge(sub.track);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(6n);
+		const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([dropped.drop.start, dropped.drop.end]).toEqual([5n, 6n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
 test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {
@@ -3405,6 +3463,8 @@ type Served = {
 	key: bigint;
 	frameStart: number;
 	payloads: string[];
+	// A metadata subscription's plain frame sizes, in place of its payloads.
+	sizes?: number[];
 	times?: bigint[];
 	end?: bigint;
 	endDelta?: bigint;
@@ -5015,7 +5075,7 @@ test("a lite-07 answer carries this origin's claims", async () => {
 	}
 });
 
-// Another broadcast at the path, without an instance, is another instance, so another claim:
+// Another broadcast at the path, without an identity, is another identity, so another claim:
 // started before the one it replaces ends, so the peer sees the broadcast restart.
 test("a lite-07 republish starts the next claim before ending the last", async () => {
 	const origin = new OriginProducer();
@@ -5031,7 +5091,7 @@ test("a lite-07 republish starts the next claim before ending the last", async (
 		const second = await next();
 		expect(second).toMatchObject({ status: "start", suffix: "cam" });
 		if (first.status !== "start" || second.status !== "start") throw new Error("two claims");
-		expect(second.instance).not.toBe(first.instance);
+		expect(second.identity).not.toBe(first.identity);
 		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: false });
 		republished.close();
 	} finally {
@@ -5265,7 +5325,7 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 			}
 			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
 			expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual([told]);
-			expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+			expect(starts.map((msg) => msg.identity)).toEqual([narrow.identity]);
 
 			// A request there resolves through the same claim.
 			const request = origin.consume().request(Path.join(asked, Path.from("x")));
@@ -5290,11 +5350,11 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 		// Names whose hash order differs between paths.
 		const pair = [`cam${i * 7}`, `pub${i * 13}`];
 		const names = swap ? pair.toReversed() : pair;
-		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
-		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const identity = (name: string) => ({ id: Identity.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { identity: identity(names[0]) });
 		const deep = origin
 			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
-			.claim(Path.from("src"), { instance: instance(names[1]) });
+			.claim(Path.from("src"), { identity: identity(names[1]) });
 		const { next, ok, close } = routedAnswer(origin.scope(root, Path.Prefixes.parse([""])));
 		try {
 			await ok();
@@ -5304,9 +5364,9 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
 			const request = origin.consume().request(root);
-			const which = (await askedFirst(root, [shallow, deep])).instance;
+			const which = (await askedFirst(root, [shallow, deep])).identity;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5328,11 +5388,11 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 		// Names whose hash order differs between the absolute path and the path from the root.
 		const pair = [`cam${i * 7}`, `pub${i * 13}`];
 		const names = swap ? pair.toReversed() : pair;
-		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
-		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const identity = (name: string) => ({ id: Identity.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { identity: identity(names[0]) });
 		const deep = origin
 			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
-			.claim(Path.from("src"), { instance: instance(names[1]) });
+			.claim(Path.from("src"), { identity: identity(names[1]) });
 		const { next, ok, close } = routedAnswer(
 			origin.scope(root, Path.Prefixes.parse([""])),
 			undefined,
@@ -5346,9 +5406,9 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
 			const request = origin.consume().request(Path.from("src/a/x"));
-			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).instance;
+			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).identity;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5376,8 +5436,8 @@ test("a lite-07 rooted answer passes over a broadcast published above its root",
 			msgs.push(msg);
 			if (msg.status === "synced") break;
 		}
-		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
-		expect(starts).toEqual([filed.instance]);
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
+		expect(starts).toEqual([filed.identity]);
 		const request = origin.consume().request(Path.from("src/a"));
 		await askedFirst(Path.from("src/a"), [filed]);
 		request.close();
@@ -5408,7 +5468,7 @@ test("a lite-07 rooted answer shows the most specific claim filed on either side
 		}
 		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
 		expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual(["d above 1"]);
-		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+		expect(starts.map((msg) => msg.identity)).toEqual([narrow.identity]);
 
 		const request = origin.consume().request(Path.from("a/b/c/d/x"));
 		expect(await askedFirst(Path.from("a/b/c/d/x"), [narrow, broad])).toBe(narrow);
@@ -5468,12 +5528,12 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 });
 
 // A claim whose route is withdrawn ends, not lost, though another path still advertises the same
-// named instance: only the advertisement the claim came from proves it moved.
-test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {
+// named identity: only the advertisement the claim came from proves it moved.
+test("a lite-07 withdrawn claim ends though its identity lives on elsewhere", async () => {
 	const origin = new OriginProducer();
-	const instance = { id: Instance.random(), epoch: 0n };
-	const a = origin.route(Path.from("a"), { instance });
-	const b = origin.route(Path.from("b"), { instance });
+	const identity = { id: Identity.random(), epoch: 0n };
+	const a = origin.route(Path.from("a"), { identity });
+	const b = origin.route(Path.from("b"), { identity });
 	const { next, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
@@ -5677,7 +5737,7 @@ test("a lite-07 request naming a node is served here", async () => {
 	const named = await Writer.collect(version, async (w) => {
 		await w.u53(3);
 		await w.string("cam");
-		// No instance pinned, then Node ID 7, marked: a node's marked identity.
+		// No identity pinned, then Node ID 7, marked: a node's marked identity.
 		await w.u53(0);
 		await w.bool(false);
 		await w.u62(7n);
@@ -5690,7 +5750,7 @@ test("a lite-07 request naming a node is served here", async () => {
 		await w.write(named.subarray(1));
 	});
 	const msg = await TrackMessage.decode(new Reader(undefined, sized, version), version);
-	expect(msg).toMatchObject({ broadcast: "cam", track: "video", instance: undefined });
+	expect(msg).toMatchObject({ broadcast: "cam", track: "video", identity: undefined });
 });
 
 // Lite-07: Position matches exact group (including 0), never falling back to an earlier group's
@@ -5769,9 +5829,9 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 			await w.u53(2);
 			await msg.encode(w, version);
 		});
-		const writing = s.writer.write(bytes);
+		// The write may yield to the budget first, so close only once the transport took it.
+		await s.writer.write(bytes);
 		s.writer.close();
-		await writing;
 		const responses = [];
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(s.reader, version);

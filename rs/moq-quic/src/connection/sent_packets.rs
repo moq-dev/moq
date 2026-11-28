@@ -117,6 +117,7 @@ impl Bench {
 			retransmits: Default::default(),
 			stream_frames: Default::default(),
 			bandwidth_probe: false,
+			ecn: false,
 		};
 		self.packets.insert(pn, packet).is_some()
 	}
@@ -294,6 +295,7 @@ mod tests {
 			retransmits: Default::default(),
 			stream_frames: Default::default(),
 			bandwidth_probe: false,
+			ecn: false,
 		}
 	}
 

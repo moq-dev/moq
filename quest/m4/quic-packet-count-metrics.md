@@ -9,7 +9,7 @@ UDP packets sent/received, ACK and PING counts, bytes-per-packet efficiency, and
 Decided 2026-11-26 (maintainer, `/quest-plan` of the `moq-quic` audit + user packet-count tracking request):
 
 - ✅ Goal confirmed across `moq-quic` sim tests/benches, `moq-bench`, and `scale-sim` (rejected: `moq-quic` tests/benches only; drop).
-- ✅ No separate keep-alive quest: native `moq-quic` already resets `Timer::KeepAlive` on every sent/received packet (including ACK-only) and `Timer::Idle` on every received packet, and [keep-alive](/quest/m1/keep-alive.md) (PR #9698) owns `{ soft, hard }` keep-alive; add a zero-PING assertion for active one-way and bidirectional sessions here (rejected: also changing QMux's 1 s `QX_PING` probe now).
+- ✅ No separate keep-alive quest: native `moq-quic` already resets `Timer::KeepAlive` on every sent/received packet (including ACK-only) and `Timer::Idle` on every received packet, and [keep-alive](https://github.com/moq-dev/moq/pull/9698) owns `{ soft, hard }` keep-alive; add a zero-PING assertion for active one-way and bidirectional sessions here (rejected: also changing QMux's 1 s `QX_PING` probe now).
 - Joins `m4` as test, benchmark, and `moq-bench` reporting infrastructure after the 0.22 cut.
 
 Guidance:
@@ -22,6 +22,6 @@ Public API: none (`moq-bench` JSONL adds new additive fields). Wire: none.
 
 ## Related
 
-- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m1/quic-ack-packing-and-pto-duplication.md) - directly lowers ACK and total packet counts
+- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m3/quic-ack-packing-and-pto-duplication.md) - directly lowers ACK and total packet counts
+- [Audience-scale simulation](/quest/m4/scale-sim/README.md) - consumes per-viewer packet counts
 - [Cross-connection `sendmmsg` batching in `moq-tokio`](/quest/m4/tokio-sendmmsg-batch.md) - directly raises `datagrams / ios`
-- [Audience-scale simulation](/quest/m9/scale-sim/README.md) - consumes per-viewer packet counts

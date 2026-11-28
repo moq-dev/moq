@@ -23,8 +23,8 @@ const KIND_DATAGRAMS: u64 = 0x1;
 #[derive(Clone, Debug)]
 pub struct Tracks {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
-	pub instance: Option<crate::Instance>,
+	/// The identity the subscriber expects; see [`crate::origin::RouteInfo::identity`].
+	pub identity: Option<crate::Identity>,
 	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
 	pub node: Option<crate::route::NodeId>,
@@ -37,11 +37,11 @@ impl<'a> Message<'a> for Tracks {
 			return Err(DecodeError::Version);
 		}
 		let broadcast = Path::decode(r, version)?;
-		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
+		let node = super::identity::decode_node(r, version)?;
 		Ok(Self {
 			broadcast,
-			instance,
+			identity,
 			node,
 		})
 	}
@@ -51,8 +51,8 @@ impl<'a> Message<'a> for Tracks {
 			return Err(EncodeError::Version);
 		}
 		self.broadcast.encode(w, version)?;
-		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::identity::encode_node(w, version, self.node)
 	}
 }
 
@@ -104,7 +104,9 @@ pub enum TracksEvent<'a> {
 	/// TRACKS_FINISH: a track named by an earlier TRACKS_ADD is no longer listed because it
 	/// finished.
 	Finished { kind: Kind, name: Cow<'a, str> },
-	/// SYNCED: every track this hop listed when the stream opened, and still lists, was sent.
+	/// SYNCED: every track this hop listed once its listing was complete, and still lists, was
+	/// sent; a relay's listing completes on its moq-lite upstream's SYNCED, while one over a
+	/// moq-transport upstream completes at once with the tracks this hop already knows.
 	Synced,
 }
 
@@ -337,10 +339,10 @@ mod test {
 
 	#[test]
 	fn the_request_roundtrips() {
-		let instance: crate::Instance = "alice".parse().unwrap();
+		let identity: crate::Identity = "alice".parse().unwrap();
 		let msg = Tracks {
 			broadcast: Path::from_static("room/alice"),
-			instance: Some(instance.clone()),
+			identity: Some(identity.clone()),
 			node: Some(crate::route::NodeId {
 				relay: 0x7a3f,
 				marked: false,
@@ -349,7 +351,7 @@ mod test {
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(got.broadcast, Path::from_static("room/alice"));
-		assert_eq!(got.instance, Some(instance));
+		assert_eq!(got.identity, Some(identity));
 		assert_eq!(
 			got.node,
 			Some(crate::route::NodeId {
@@ -363,7 +365,7 @@ mod test {
 	fn older_versions_have_no_tracks_stream() {
 		let msg = Tracks {
 			broadcast: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 		};
 		assert!(msg.encode_bytes(Version::Lite06).is_err());

@@ -174,7 +174,7 @@ types, and the vectors regenerate once):
   Rust form, and the datagram allowance is 28 bytes, not the epic's 24.
 - Publish: remove `publish = false` and the READMEs' unpublished notes,
   give `rs/moq-e2ee` a `MIGRATE.md` for users of crates.io's 0.0.25 (the
-  entries `rs/moq-crypto/MIGRATE.md` held before the crate move, in
+  entries `moq-crypto`'s old MIGRATE.md held before the crate move, in
   `git show 6488ce6b87:rs/moq-crypto/MIGRATE.md`, with their paths back to
   `moq_e2ee::`, plus this format's breaks), and restore the doc rows
   [the crate move](https://github.com/moq-dev/moq/pull/8947) dropped, still marked

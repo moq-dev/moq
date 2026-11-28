@@ -14,7 +14,7 @@ import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -46,7 +46,6 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 	const broadcast = publication.broadcast;
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const requests = track.requests();
-	let closed = false;
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			await answered;
@@ -61,9 +60,7 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 					fill.dropGroups(key, (key / 1_000n + 1n) * 1_000n);
 					continue;
 				}
-				const group = fill.accept(key);
-				if (!group && closed) break;
-				write(defined(group), key, "old");
+				write(defined(fill.accept(key)), key, "old");
 			}
 			fill.close();
 		}
@@ -78,7 +75,6 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 		// The publisher's end of the transport, for steering delivery.
 		server: pair.server,
 		close() {
-			closed = true;
 			remote.close();
 			requests.close();
 			broadcast.close();
@@ -896,8 +892,8 @@ test.each([
 			broadcast = new BroadcastProducer();
 			const source = broadcast;
 			const upstream = new OriginProducer();
-			const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
-			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ instance, cost: 1n }));
+			const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
+			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ identity, cost: 1n }));
 			void (async () => {
 				for await (const request of received.requested()) request.serve(source.consume());
 			})();

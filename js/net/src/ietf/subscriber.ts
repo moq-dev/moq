@@ -229,7 +229,7 @@ export class Subscriber {
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Tracking each is what keeps the second from duplicating the announce and the first
-	// to end from retracting what the other still holds. A publisher replacing its instance
+	// to end from retracting what the other still holds. A publisher replacing its identity
 	// withdraws one advertisement and makes another, on separate streams that
 	// can arrive in either order, so the newest stands until it goes and an update to an
 	// older one changes nothing. Each live wire advertisement holds an announce slot,
@@ -256,6 +256,8 @@ export class Subscriber {
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
+	// What crossing this link costs and how it ranks, carried by every route through it.
+	#link: { cost: Cost; priority: number };
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -272,6 +274,7 @@ export class Subscriber {
 		grant,
 		auth,
 		limits = LIMITS,
+		link = { cost: Cost.zero, priority: 0 },
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -290,8 +293,11 @@ export class Subscriber {
 		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
 		limits?: Limits;
+		/** What crossing this link costs and how it ranks. Defaults to free and neutral. */
+		link?: { cost: Cost; priority: number };
 	}) {
 		this.#session = session;
+		this.#link = link;
 		this.#quic = quic;
 		this.#announceSlots = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.#cluster = cluster;
@@ -344,10 +350,12 @@ export class Subscriber {
 	}
 
 	/**
-	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an identity: its path, or the
+	 * anonymous mark, at its cost plus this link's, ranked at this link's priority.
 	 */
 	#route({ cluster }: AdvertParams): WireRoute {
-		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
+		const { hops, cost } = cluster ?? { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: [...hops], cost: Cost.charged(cost, this.#link.cost), priority: this.#link.priority };
 	}
 
 	/**
@@ -424,9 +432,9 @@ export class Subscriber {
 			this.#settleAnnounce(path, existing);
 			return id;
 		}
-		// moq-transport carries no instance, so each namespace the peer advertises anew is a
+		// moq-transport carries no identity, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#drained({ ...route, instance: Mint.fresh(), epoch: 0n });
+		route = this.#drained({ ...route, identity: Mint.fresh(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -459,8 +467,8 @@ export class Subscriber {
 		const newest = existing.adverts.at(-1);
 		if (newest === undefined) return;
 		// Every advertisement of a path the peer holds is the stream its first one named.
-		const { instance, epoch } = existing.route;
-		const route = this.#drained({ ...newest.route, instance, epoch });
+		const { identity, epoch } = existing.route;
+		const route = this.#drained({ ...newest.route, identity, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);
@@ -729,16 +737,16 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
+	 * Deduplicated per serving identity: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		const instance = this.#consumes.instance(path);
-		return this.#consumes.get(path, instance) ?? this.#createConsume(path, instance);
+		const identity = this.#consumes.identity(path);
+		return this.#consumes.get(path, identity) ?? this.#createConsume(path, identity);
 	}
 
-	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
+	#createConsume(path: Path.Valid, identity: ReturnType<BroadcastCache["identity"]>): broadcast.Consumer {
 		const consumer = new ConsumeBroadcast();
 		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
 		void this.#refuseListing(wireOf(consumer).lister());
@@ -747,17 +755,17 @@ export class Subscriber {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
 				this.#streamSources.set(request, consumer);
-				void this.#runSubscribe(path, request, instance.validity?.signal);
+				void this.#runSubscribe(path, request, identity.validity?.signal);
 			}
 		})();
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requestedDatagrams();
 				if (!request) return;
-				void this.#runDatagram(consumer, request, instance.validity?.signal);
+				void this.#runDatagram(consumer, request, identity.validity?.signal);
 			}
 		})();
-		return this.#consumes.insert(path, instance, consumer);
+		return this.#consumes.insert(path, identity, consumer);
 	}
 
 	// moq-transport lists no tracks here: refuse each listing until the broadcast closes, since an
