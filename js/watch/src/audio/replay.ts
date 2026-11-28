@@ -23,6 +23,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
+import { hooks } from "../../../net/src/internal.ts";
 import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Backpressure, holeWait } from "./buffer";
 import { frameDuration } from "./config";
@@ -386,7 +387,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				if (!group) {
 					const from = skipped.get(arrival.group);
 					if (from !== undefined) track.skipGroups(BigInt(from), BigInt(arrival.group));
-					group = track.createGroup(BigInt(arrival.group));
+					// The recorded key, which a publisher's API can't open apart from its first frame's
+					// time, so the replay borrows the internal hook a relay's received copy uses.
+					group = hooks.createEmpty(track, BigInt(arrival.group));
 					groups.set(arrival.group, group);
 				}
 				const timestamp = micros(arrival.timestamp);

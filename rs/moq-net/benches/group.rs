@@ -8,9 +8,8 @@
 //! cached group, swept over cache depth so a per-delivery scan shows up as a slope.
 //! It also covers the steady-state path after a subscriber has reached the edge.
 //!
-//! `track_stamp_groups` covers stamping a group's first frame, which checks it
-//! against its neighbors' starts, swept over cache depth so a scan shows as a slope:
-//! `append` among stamped groups, `sparse` among groups created but not yet stamped.
+//! `track_stamp_groups` covers appending a group opened by its first frame, which checks it
+//! against its neighbors' starts, swept over cache depth so a scan shows as a slope.
 //!
 //! `group_contended` reads one live multi-frame group from readers spread over worker
 //! threads, swept over threads, readers, and frames appended per round, so contention
@@ -101,11 +100,17 @@ struct Ctx<G = group::Producer> {
 	group: G,
 }
 
-/// Build a fresh, empty group via the public producer path.
+/// Build a fresh group via the public producer path, opened by an empty frame since a group
+/// starts at its first.
 fn fresh_group() -> Ctx {
+	seeded_group(Bytes::new())
+}
+
+/// Build a fresh group via the public producer path, opened by `first`.
+fn seeded_group(first: Bytes) -> Ctx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+	let group = track.append_group(Timestamp::ZERO, first).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,
@@ -164,8 +169,8 @@ fn filled_group(n: usize, payload: &Bytes) -> (Ctx<group::Finished>, group::Cons
 		_broadcast,
 		_track,
 		mut group,
-	} = fresh_group();
-	for _ in 0..n {
+	} = seeded_group(payload.clone());
+	for _ in 1..n {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
 	let group = group.finish().unwrap();
@@ -262,8 +267,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
 	for key in 0..n as u64 {
-		let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
-		group.write_frame(at(key), payload.clone()).unwrap();
+		let group = track.append_group(at(key), payload.clone()).unwrap();
 		group.finish().unwrap();
 	}
 	TrackCtx {
@@ -337,8 +341,7 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for key in (n..n + LIVE_BATCH).map(|key| key as u64) {
-						let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
-						group.write_frame(at(key), payload.clone()).unwrap();
+						let group = ctx.track.append_group(at(key), payload.clone()).unwrap();
 						group.finish().unwrap();
 						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 						black_box(group);
@@ -422,11 +425,11 @@ fn bench_relay_frames(c: &mut Criterion) {
 	let _ = c;
 }
 
-/// Append and stamp groups on a track already holding N cached groups.
+/// Append groups, each opened by its first frame, on a track already holding N cached groups.
 ///
-/// A group's first frame is checked against the nearest stamped starts on either side,
-/// once per group. Each fresh track takes at most N more groups, so the cache stays
-/// within 2N for the whole measurement.
+/// A group's first frame is checked against the nearest starts on either side, once per
+/// group. Each fresh track takes at most N more groups, so the cache stays within 2N for the
+/// whole measurement.
 fn bench_stamp(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("track_stamp_groups");
@@ -452,8 +455,7 @@ fn bench_stamp(c: &mut Criterion) {
 						let batch = left.min(n as u64);
 						let start = Instant::now();
 						for key in n as u64..n as u64 + batch {
-							let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
-							group.write_frame(at(key), payload.clone()).unwrap();
+							let group = ctx.track.append_group(at(key), payload.clone()).unwrap();
 							group.finish().unwrap();
 						}
 						total += start.elapsed();
@@ -463,29 +465,6 @@ fn bench_stamp(c: &mut Criterion) {
 				});
 			});
 		}
-		// N groups created before any is stamped, then stamped in order: each one's upper
-		// neighbor is a run of unstamped groups, which a slot scan walks.
-		g.bench_with_input(BenchmarkId::new("sparse", n), &n, |b, &n| {
-			b.iter_custom(|iters| {
-				let mut total = Duration::ZERO;
-				let mut left = iters;
-				while left > 0 {
-					let ctx = filled_track(0, &payload);
-					let mut groups: Vec<_> = (0..n as u64)
-						.map(|key| ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap())
-						.collect();
-					let batch = left.min(n as u64);
-					let start = Instant::now();
-					for group in groups.iter_mut().take(batch as usize) {
-						let start = at(group.start);
-						group.write_frame(start, payload.clone()).unwrap();
-					}
-					total += start.elapsed();
-					left -= batch;
-				}
-				total
-			});
-		});
 	}
 	g.finish();
 }
@@ -514,8 +493,8 @@ fn bench_inflate(c: &mut Criterion) {
 							.unwrap();
 						let consumers: Vec<group::Consumer> = (0..groups as u64)
 							.flat_map(|key| {
-								let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
-								for payload in &payloads {
+								let mut group = track.append_group(at(key), payloads[0].clone()).unwrap();
+								for payload in &payloads[1..] {
 									group.write_frame(at(key), payload.clone()).unwrap();
 								}
 								let group = group.finish().unwrap();
@@ -561,10 +540,7 @@ fn bench_compressed_updates(c: &mut Criterion) {
 										track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 									)
 									.unwrap();
-								let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
-								group
-									.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
-									.unwrap();
+								let group = track.append_group(Timestamp::unscaled(0), payload.clone()).unwrap();
 								group.finish().unwrap();
 								track
 							})
@@ -576,10 +552,7 @@ fn bench_compressed_updates(c: &mut Criterion) {
 							for track in &producers {
 								for index in 0..concurrent {
 									let key = (1 + update * concurrent + index) as u64;
-									let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
-									group
-										.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
-										.unwrap();
+									let group = track.append_group(Timestamp::unscaled(key), payload.clone()).unwrap();
 									groups.push(group);
 								}
 								for group in groups.drain(..) {
@@ -741,12 +714,13 @@ fn contended(
 		.create_track("bench", track::Info::default().with_max_age(None))
 		.unwrap();
 	let mut key = 0;
-	let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+	let mut group = track.append_group(Timestamp::unscaled(key), payload.clone()).unwrap();
 	// The group readers move to once theirs ends.
 	let next = Arc::new(Mutex::new(group.consume()));
 	let mut sets: Vec<Vec<(Option<track::Subscriber>, group::Consumer)>> = (0..threads).map(|_| Vec::new()).collect();
+	let waiter = kio::Waiter::noop();
 	for i in 0..readers {
-		let reader = match subscribed {
+		let mut reader = match subscribed {
 			true => {
 				let mut subscriber = track.subscribe(None);
 				let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
@@ -755,6 +729,8 @@ fn contended(
 			}
 			false => (None, group.consume()),
 		};
+		// Past the frame that opened the group, so each round reads only its burst.
+		assert!(matches!(reader.1.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		sets[i % threads].push(reader);
 	}
 	let work = sets
@@ -791,19 +767,22 @@ fn contended(
 		.collect();
 	let crew = Crew::new(work);
 
-	let mut written = 0;
+	let mut written = 1;
 	b.iter_custom(|iters| {
 		let start = Instant::now();
 		for _ in 0..iters {
+			// A rolled group opens with the round's first frame.
+			let mut opened = 0;
 			if written + burst > ROLL {
 				key += 1;
-				let rolled = track.append_group(Timestamp::unscaled(key)).unwrap();
+				let rolled = track.append_group(Timestamp::unscaled(key), payload.clone()).unwrap();
 				*next.lock().unwrap() = rolled.consume();
 				let done = std::mem::replace(&mut group, rolled);
 				done.finish().unwrap();
 				written = 0;
+				opened = 1;
 			}
-			for _ in 0..burst {
+			for _ in opened..burst {
 				group
 					.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
 					.unwrap();
@@ -860,12 +839,13 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 		timestamp: moq_net::Timestamp::unscaled(key),
 	};
 	let mut key = 0;
-	let group = track.append_group(Timestamp::unscaled(key)).unwrap();
+	// The group opens with the frame in flight.
+	let first = track.append_frame(info(key)).unwrap();
 	// The group readers move to once theirs ends.
-	let next = Arc::new(Mutex::new(group.consume()));
+	let next = Arc::new(Mutex::new(first.group().consume()));
 	let mut sets: Vec<Vec<(group::Consumer, Option<frame::Consumer>)>> = (0..threads).map(|_| Vec::new()).collect();
 	for i in 0..readers {
-		sets[i % threads].push((group.consume(), None));
+		sets[i % threads].push((first.group().consume(), None));
 	}
 	let work = sets
 		.into_iter()
@@ -906,7 +886,7 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 	let crew = Crew::new(work);
 
 	let mut frames = 0;
-	let mut writing = Some(group.create_frame(info(key)).unwrap());
+	let mut writing = Some(first);
 	b.iter_custom(|iters| {
 		let start = Instant::now();
 		for _ in 0..iters {
@@ -918,11 +898,11 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 					frames += 1;
 					if frames == ROLL {
 						key += 1;
-						let rolled = track.append_group(Timestamp::unscaled(key)).unwrap();
-						*next.lock().unwrap() = rolled.consume();
+						let rolled = track.append_frame(info(key)).unwrap();
+						*next.lock().unwrap() = rolled.group().consume();
 						group.finish().unwrap();
 						frames = 0;
-						rolled.create_frame(info(key)).unwrap()
+						rolled
 					} else {
 						group.create_frame(info(key)).unwrap()
 					}
@@ -939,7 +919,8 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 /// in a few hundred frames.
 const SHED_PAYLOAD: usize = 16 * 1024;
 
-/// A live group cached in a pool of `capacity` bytes, or an unbounded one.
+/// A live group cached in a pool of `capacity` bytes, or an unbounded one, opened by an empty
+/// frame.
 fn pooled_group(capacity: Option<u64>) -> Ctx {
 	let mut info = broadcast::Info::default();
 	if let Some(capacity) = capacity {
@@ -947,7 +928,7 @@ fn pooled_group(capacity: Option<u64>) -> Ctx {
 	}
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+	let group = track.append_group(Timestamp::ZERO, Bytes::new()).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,
@@ -1061,10 +1042,11 @@ fn shed_live_group(payloads: &[Bytes]) -> Flights {
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
 	let requests = track.requests();
-	let mut live = track.append_group(Timestamp::unscaled(0)).unwrap();
+	let mut live = track.append_group(Timestamp::unscaled(0), payloads[0].clone()).unwrap();
 	let mut reader = live.consume();
 	let waiter = kio::Waiter::noop();
-	for payload in payloads {
+	while let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&waiter) {}
+	for payload in &payloads[1..] {
 		live.write_frame(moq_net::Timestamp::unscaled(live.start), payload.clone())
 			.unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&waiter) {}

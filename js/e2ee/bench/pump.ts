@@ -36,17 +36,22 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 
 			const sealStart = performance.now();
 			const pending: Promise<void>[] = [];
-			let group = producer.appendGroup(Time.Timestamp.fromMillis(0));
-			for (let frame = 0; frame < frames; frame++) {
-				if (frame > 0 && frame % GROUP_FRAMES === 0) {
-					group.finish();
-					group = producer.appendGroup(Time.Timestamp.fromMillis(frame));
+			let group = producer.appendGroup({ timestamp: Time.Timestamp.fromMillis(0), plaintext: payload });
+			for (let frame = 1; frame < frames; frame++) {
+				const timestamp = Time.Timestamp.fromMillis(frame);
+				if (frame % GROUP_FRAMES === 0) {
+					const done = group;
+					void done.then((open) => open.finish());
+					group = producer.appendGroup({ timestamp, plaintext: payload });
+					pending.push(group.then(() => undefined));
+				} else {
+					const open = group;
+					pending.push(open.then((g) => g.writeFrame(timestamp, payload)));
 				}
-				pending.push(group.writeFrame(Time.Timestamp.fromMillis(frame), payload));
 				if (pending.length >= depth) await pending.shift();
 			}
 			await Promise.all(pending);
-			group.finish();
+			(await group).finish();
 			const sealed = performance.now();
 
 			let read = 0;

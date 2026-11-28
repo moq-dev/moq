@@ -548,11 +548,14 @@ impl MeasurementClock {
 	}
 }
 
-/// Append the next group on a [`timed`] track, one millisecond past its largest start or at
-/// 0 on an empty track, so groups keep the key order a counter would give them.
-fn append_next(track: &track::Producer) -> group::Producer {
+/// Append the next group on a [`timed`] track, opened by `first`, one millisecond past its
+/// largest start or at 0 on an empty track, so groups keep the key order a counter would give
+/// them.
+fn append_next(track: &track::Producer, first: &Bytes) -> group::Producer {
 	let key = track.largest().map_or(0, |largest| largest.group + 1);
-	track.append_group(Timestamp::from_millis(key).unwrap()).unwrap()
+	track
+		.append_group(Timestamp::from_millis(key).unwrap(), first.clone())
+		.unwrap()
 }
 
 /// Where a group on a [`timed`] track starts, as its frames' timestamp.
@@ -569,9 +572,9 @@ fn from(key: u64) -> track::Range {
 }
 
 fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
-	let mut group = append_next(track);
+	let mut group = append_next(track, payload);
 	let timestamp = at(&group);
-	for _ in 0..frames {
+	for _ in 1..frames {
 		group.write_frame(timestamp, payload.clone()).unwrap();
 	}
 	let group = group.finish().unwrap();
@@ -1255,8 +1258,10 @@ impl<B: Backend> Room<B> {
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
-			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
-			group.write_frame(at(group), self.payload.clone()).unwrap();
+			match writing {
+				Some(group) => group.write_frame(at(group), self.payload.clone()).unwrap(),
+				None => *writing = Some(append_next(&self.cluster.tracks[broadcast], &self.payload)),
+			}
 			if last {
 				writing.take().expect("written above").finish().unwrap();
 			}
@@ -1567,8 +1572,8 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						for track in &cluster.tracks {
 							for key in 0..shape.history as u64 {
 								let start = Timestamp::from_millis(key).unwrap();
-								let mut group = track.append_group(start).unwrap();
-								for _ in 0..shape.group_frames {
+								let mut group = track.append_group(start, payload.clone()).unwrap();
+								for _ in 1..shape.group_frames {
 									group.write_frame(start, payload.clone()).unwrap();
 								}
 								group.finish().unwrap();

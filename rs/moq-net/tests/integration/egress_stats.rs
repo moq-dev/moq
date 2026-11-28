@@ -84,8 +84,7 @@ async fn an_open_group_s_last_frame_counts_once_delivered() {
 		subscribed(&track).await;
 
 		// One frame, in a group left open.
-		let mut open = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
-		open.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+		let _open = track.append_group(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let mut group = kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await
 			.expect("group timeout")

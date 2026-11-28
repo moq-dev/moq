@@ -346,12 +346,12 @@ fn dial() -> moq_tokio::connect::Config {
 
 /// Append one finished group carrying `payload`.
 fn write_group(track: &mut moq_net::track::Producer, payload: &[u8]) {
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			payload,
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
-		.expect("write frame");
 	group.finish().expect("finish group");
 }
 
@@ -611,11 +611,12 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	// a second: the kill lands mid-group rather than in the quiet between them.
 	// Nothing more is written, so what the reader is waiting for cannot arrive
 	// ahead of the kill and turn this into a race.
-	let mut open = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let open = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"read".as_ref(),
+		)
 		.expect("append group");
-	open.write_frame(moq_net::Timestamp::from_millis(open.start).unwrap(), b"read".as_ref())
-		.expect("write frame");
 	let mut open_reader = kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
 		.expect("open group timed out")
@@ -1546,22 +1547,14 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	assert!(path.overflowed() > 0, "the finite queue did not drop overflow");
 	// 5.12Mb/s of media behind a 64kb/s link, for a second.
 	for sequence in 2..22 {
-		let mut group = track
-			.append_group(
-				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
-			)
-			.unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
+		let group = track
+			.append_group(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
 			.unwrap();
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
-	let mut newest = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
-		.unwrap();
-	newest
-		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
+	let newest = track
+		.append_group(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
 		.unwrap();
 	newest.finish().unwrap();
 	// No successor means this snapshot must survive even after its budget elapsed.
@@ -1578,7 +1571,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	})
 	.await
 	.expect("subscriber did not skip the backlog to the live edge");
-	assert_eq!(sequence, 22);
+	assert_eq!(sequence, 1100, "the snapshot group starts at its frame's millisecond");
 	println!(
 		"max age: newest group {sequence}, {} queue-overflow drops",
 		path.overflowed()

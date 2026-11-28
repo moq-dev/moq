@@ -2,6 +2,7 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
+import { hooks } from "../../../net/src/internal.ts";
 import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -64,7 +65,7 @@ function write(group: Group.Producer, timestamp: number) {
 }
 
 function group(track: Track.Producer, sequence: bigint, timestamps: number[]): Group.Producer {
-	const group = track.createGroup(sequence);
+	const group = hooks.createEmpty(track, sequence);
 	for (const timestamp of timestamps) write(group, timestamp);
 	return group;
 }

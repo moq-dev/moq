@@ -2158,7 +2158,7 @@ mod test {
 
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
-			.create_group(crate::group::Info { start: 1 })
+			.create_empty(crate::group::Info { start: 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -2177,7 +2177,7 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
+		let mut group = first.create_empty(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
 		let first = first.finish().unwrap();
@@ -3056,7 +3056,7 @@ mod test {
 		drop((track, open));
 
 		let next = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut again = next.create_group(crate::group::Info { start: 0 }).unwrap();
+		let mut again = next.create_empty(crate::group::Info { start: 0 }).unwrap();
 		again.write_frame(at(0), b"a".as_slice()).unwrap();
 		let stopped = Some(crate::track::Position { group: 0, frame: 2 });
 		assert_eq!(handle.resume_position(), stopped);

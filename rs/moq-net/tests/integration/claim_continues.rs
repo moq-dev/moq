@@ -9,7 +9,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -73,8 +72,7 @@ impl Worker {
 					)
 					.unwrap();
 				let tag = format!("{name}{}", served.borrow().len());
-				let mut group = track.append_next().unwrap();
-				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
+				let group = track.append_next(tag.into_bytes()).unwrap();
 				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
@@ -92,8 +90,7 @@ impl Worker {
 	pub(super) fn write(&self) {
 		let outputs = self.outputs.borrow();
 		let (_, track) = outputs.last().expect("an output");
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), b"next".to_vec()).unwrap();
+		let group = track.append_next(b"next".to_vec()).unwrap();
 		group.finish().unwrap();
 	}
 

@@ -14,17 +14,100 @@ use moq_net::{Timestamp, datagram, goaway, group, origin, track};
 pub trait AppendNext {
 	/// Append a group starting one past the largest start the track holds, or at 0 on an empty
 	/// track, so consecutive appends land on consecutive keys and skip nothing between them.
-	fn append_next(&self) -> moq_net::Result<group::Producer>;
+	/// Its first frame is `data` at that key.
+	fn append_next(&self, data: impl moq_net::IntoBytes) -> moq_net::Result<group::Producer>;
+
+	/// The timestamp of the key [`Self::append_next`] would take.
+	fn next_start(&self) -> Timestamp;
+
+	/// Group key `key` as a timestamp in the track's timescale, for a first frame at that key.
+	fn key_time(&self, key: u64) -> Timestamp;
 }
 
 impl AppendNext for track::Producer {
-	fn append_next(&self) -> moq_net::Result<group::Producer> {
-		let key = self.largest().map_or(0, |largest| largest.group + 1);
-		let start = match self.info().timescale {
-			Some(scale) => Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch)?,
+	fn append_next(&self, data: impl moq_net::IntoBytes) -> moq_net::Result<group::Producer> {
+		self.append_group(self.next_start(), data)
+	}
+
+	fn next_start(&self) -> Timestamp {
+		self.key_time(self.largest().map_or(0, |largest| largest.group + 1))
+	}
+
+	fn key_time(&self, key: u64) -> Timestamp {
+		match self.info().timescale {
+			Some(scale) => Timestamp::new(key, scale).expect("a key the scale holds"),
 			None => Timestamp::unscaled(key),
-		};
-		self.append_group(start)
+		}
+	}
+}
+
+/// A group opened by its first frame, for tests that write each frame of a group in one loop.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub struct LazyGroup {
+	track: track::Producer,
+	/// Where the group starts unless its first frame says otherwise.
+	start: Timestamp,
+	/// Whether the group is appended, declaring the keys below it skipped, or created.
+	append: bool,
+	group: Option<group::Producer>,
+}
+
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+impl LazyGroup {
+	/// The group [`AppendNext::append_next`] would append.
+	pub fn append(track: &track::Producer) -> Self {
+		Self {
+			start: track.next_start(),
+			track: track.clone(),
+			append: true,
+			group: None,
+		}
+	}
+
+	/// A group created at `key`, as [`track::Producer::create_group`] does.
+	pub fn create(track: &track::Producer, key: u64) -> Self {
+		Self {
+			start: track.key_time(key),
+			track: track.clone(),
+			append: false,
+			group: None,
+		}
+	}
+
+	/// Where the group starts.
+	pub fn at_start(&self) -> Timestamp {
+		self.start
+	}
+
+	/// Write a frame at `timestamp`, the first of which opens the group there.
+	pub fn write_frame(&mut self, timestamp: Timestamp, data: impl moq_net::IntoBytes) -> moq_net::Result<()> {
+		match &mut self.group {
+			Some(group) => group.write_frame(timestamp, data),
+			None => {
+				let group = match self.append {
+					true => self.track.append_group(timestamp, data)?,
+					false => self.track.create_group(timestamp, data)?,
+				};
+				self.start = self.track.key_time(group.start);
+				self.group = Some(group);
+				Ok(())
+			}
+		}
+	}
+
+	/// The open group, once a frame opened it.
+	pub fn group(&mut self) -> &mut group::Producer {
+		self.group.as_mut().expect("a frame opened the group")
+	}
+
+	/// Finish the group, which a frame opened.
+	pub fn finish(self) -> moq_net::Result<group::Finished> {
+		self.group.expect("a frame opened the group").finish()
+	}
+
+	/// Finish the group at `end`, which a frame opened.
+	pub fn finish_at(self, end: u64) -> moq_net::Result<group::Finished> {
+		self.group.expect("a frame opened the group").finish_at(end)
 	}
 }
 

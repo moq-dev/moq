@@ -494,14 +494,13 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const first = hooks.appendNext(producer);
-				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
-				first.finish();
+				producer.appendGroup(textFrame("first", Timestamp.fromMillis(0))).finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
-				const last = hooks.appendNext(producer);
-				for (const frame of frames) last.writeFrame(textFrame(frame));
+				const at = Timestamp.fromMillis(1);
+				const last = producer.appendGroup(textFrame(frames[0], at));
+				for (const frame of frames.slice(1)) last.writeFrame(textFrame(frame, at));
 				last.finish();
 				producer.finish();
 				producer.close();

@@ -48,9 +48,7 @@ const video = await new Broadcast.Producer(route.broadcast, generation).createTr
 if (!video) throw new Error("track name taken");
 route.announce();
 
-const now = Time.Timestamp.now();
-const group = video.appendGroup(now);
-await group.writeFrame(now, frame);
+const group = await video.appendGroup({ timestamp: Time.Timestamp.now(), plaintext: frame });
 group.finish();
 video.finish();
 video.close();

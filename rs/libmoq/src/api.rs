@@ -3157,21 +3157,6 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 	})
 }
 
-/// Draw a group boundary and start the next group at `start`, in the track's timescale.
-///
-/// [moq_publish_media_cut] keyed explicitly rather than at the next frame's time, which has to come
-/// after every group the track holds. Groups are keyed by their first frame's time, so two encoders
-/// of the same content align without it.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_seek(media: u32, start: u64) -> i32 {
-	ffi::enter(move || {
-		let media = ffi::parse_id(media)?;
-		State::lock().publish.media_seek(media, start)
-	})
-}
-
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
 /// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
@@ -3322,18 +3307,6 @@ pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
 	ffi::enter(move || {
 		let container = ffi::parse_id(container)?;
 		State::lock().publish.container_cut(container)
-	})
-}
-
-/// Start a new segment whose first group starts at `start`, in its track's timescale, after
-/// every group the track holds.
-///
-/// Returns zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_container_seek(container: u32, start: u64) -> i32 {
-	ffi::enter(move || {
-		let container = ffi::parse_id(container)?;
-		State::lock().publish.container_seek(container, start)
 	})
 }
 
@@ -3696,46 +3669,65 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 	}
 }
 
-/// Append the next group to a raw track, starting at `start`, returning a group producer.
+/// Append the next group to a raw track, whose first frame is `payload` at `timestamp`,
+/// returning a group producer.
 ///
-/// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. `start` is converted to the track's timescale,
-/// as a frame's timestamp is; a scale-less track takes the unscaled group key (`has_scale`
-/// false). A start at or before a group the track holds, or one that doesn't match the
-/// track, fails. Read the group's start in the track's timescale with
+/// The group starts at `timestamp`, converted to the track's timescale as a frame's is; a
+/// scale-less track takes the unscaled group key (`has_scale` false). A timestamp at or before
+/// a group the track holds, or one that doesn't match the track, fails. Write the group's later
+/// frames with [moq_publish_group_frame], and read its start in the track's timescale with
 /// [moq_publish_group_start]. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `start` must be a valid pointer to a [moq_timestamp].
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_group(track: u32, start: *const moq_timestamp) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_group(
+	track: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp: *const moq_timestamp,
+) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let start = unsafe { ffi::parse_timestamp(start)? };
-		State::lock().publish.track_group(track, start)
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.track_group(track, timestamp, payload)
 	})
 }
 
-/// Create a raw group with an explicit start.
+/// Create a raw group whose first frame is `payload` at `timestamp`, where the group starts.
 ///
-/// Unlike [moq_publish_track_group], this declares nothing below `start` skipped; settle empty
-/// gaps with [moq_publish_group_finish_at] or [moq_publish_track_skip].
+/// Unlike [moq_publish_track_group], this declares nothing below the start skipped, so groups may
+/// be created out of order; settle empty gaps with [moq_publish_group_finish_at] or
+/// [moq_publish_track_skip]. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a non-zero group handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_group_at(track: u32, start: u64) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_create_group(
+	track: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp: *const moq_timestamp,
+) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_group_at(track, start)
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.track_create_group(track, timestamp, payload)
 	})
 }
 
 /// Declare that a raw track will never produce groups `start` up to the exclusive `end`.
 ///
 /// Readers waiting on them move past without ending. The skip is final: creating a group
-/// there with [moq_publish_track_group_at] then fails, though a group already written stays.
+/// there with [moq_publish_track_create_group] then fails, though a group already written stays.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

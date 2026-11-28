@@ -59,6 +59,21 @@ function open(track: Track.Producer, delay: Signal<Delay>): Player {
 
 // Write one frame to every publisher, then wait until every player decoded it, as each arrival would
 // be decoded before the next lands. A decoded frame always changes some buffered range.
+// Open group `index` on `track` with its first frame. Groups land in key order, so a dense one is
+// appended, skipping the keys before it, as a live publisher does; a sparse one leaves them
+// unknown, as a gap.
+function create(track: Track.Producer, index: number, sparse: boolean): Group.Producer {
+	return sparse ? track.createGroup(wire(index, 0)) : track.appendGroup(wire(index, 0));
+}
+
+// Open group `index` on every track, once each player has buffered its first frame.
+async function begin(tracks: Track.Producer[], players: Player[], index: number, sparse: boolean) {
+	const changed = players.map((player) => player.consumer.buffered.changed());
+	const groups = tracks.map((track) => create(track, index, sparse));
+	await Promise.all(changed);
+	return groups;
+}
+
 async function arrive(groups: Group.Producer[], players: Player[], index: number, frame: number): Promise<void> {
 	const changed = players.map((player) => player.consumer.buffered.changed());
 	for (const group of groups) group.writeFrame(wire(index, frame));
@@ -126,10 +141,11 @@ async function measure(
 		if (scenario === "steady") {
 			// The player reads each frame as it lands, so nothing builds up behind it.
 			for (const i of order) {
-				const sources = tracks.map((track) => track.createGroup(BigInt(i)));
+				let sources: Group.Producer[] = [];
 				for (let frame = 0; frame < frames; frame++) {
 					const reads = players.map((player) => player.consumer.next());
-					for (const source of sources) source.writeFrame(wire(i, frame));
+					if (frame === 0) sources = tracks.map((track) => create(track, i, false));
+					else for (const source of sources) source.writeFrame(wire(i, frame));
 					for (const read of await Promise.all(reads))
 						if (read?.kind !== "frame" || read.frame.timestamp.asMicros() !== timestamp(i, frame))
 							throw new Error("frame missing or reordered");
@@ -141,8 +157,8 @@ async function measure(
 
 		// Everything arrives before the player reads: a stalled reader, or history after a join.
 		for (const i of order) {
-			const sources = tracks.map((track) => track.createGroup(BigInt(sequence(i))));
-			for (let frame = 0; frame < frames; frame++) await arrive(sources, players, sequence(i), frame);
+			const sources = await begin(tracks, players, sequence(i), scenario === "sparse");
+			for (let frame = 1; frame < frames; frame++) await arrive(sources, players, sequence(i), frame);
 			for (const source of sources) source.finish();
 		}
 		await Promise.resolve();
@@ -163,8 +179,7 @@ async function measure(
 			// The budget drops to nothing, so the next arrival makes every older group too stale to keep.
 			delay.set({ max: Duration.ZERO });
 			start = performance.now();
-			const sources = tracks.map((track) => track.createGroup(BigInt(groups)));
-			await arrive(sources, players, groups, 0);
+			await begin(tracks, players, groups, false);
 			const elapsed = (performance.now() - start) * 1e6;
 			const newest = timestamp(groups, 0) / 1000;
 			for (const player of players) {

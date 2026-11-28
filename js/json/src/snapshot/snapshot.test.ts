@@ -222,8 +222,7 @@ test("reads skip a group the subscription still owes", async () => {
 			const latest = new Consumer<Value>({ track });
 			const next = new Consumer<Value>({ track });
 			const put = (sequence: bigint) => {
-				const group = track.createGroup(sequence);
-				group.writeFrame({
+				const group = track.createGroup({
 					payload: new TextEncoder().encode(`{"n":${sequence}}`),
 					timestamp: Time.Timestamp.unscaled(sequence),
 				});
@@ -770,14 +769,15 @@ test("a snapshot past the budget is refused", () => {
 test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const first = track.appendGroup(Time.Timestamp.fromMillis(1));
-	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.fromMillis(1) });
+	const first = track.appendGroup({
+		payload: new TextEncoder().encode('{"v":0}'),
+		timestamp: Time.Timestamp.fromMillis(1),
+	});
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
 	first.abort(new NetError.Stream(StreamCode.Old));
-	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
-	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.fromMillis(2) });
+	track.appendGroup({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.fromMillis(2) });
 	expect((await next)?.value).toEqual({ v: 1 });
 });
 
@@ -785,8 +785,10 @@ test("snapshot consumer skips a group the publisher dropped mid-read", async () 
 test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const group = track.appendGroup(Time.Timestamp.fromMillis(1));
-	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.fromMillis(1) });
+	const group = track.appendGroup({
+		payload: new TextEncoder().encode('{"ok":true}'),
+		timestamp: Time.Timestamp.fromMillis(1),
+	});
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
@@ -795,9 +797,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 test("a value that fails the schema rejects the read", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer({ track, schema: z.object({ n: z.number() }) });
-	track
-		.appendGroup(Time.Timestamp.fromMillis(1))
-		.writeFrame({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+	track.appendGroup({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
 	await expect(consumer.latest()).rejects.toBeInstanceOf(z.core.$ZodError);
 });
 

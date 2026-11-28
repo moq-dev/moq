@@ -9,7 +9,7 @@
 
 use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support;
-use support::{AppendNext, AtStart};
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -195,8 +195,7 @@ async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 			_ => p_a = peer(version, &p, &a).await,
 		}
 		let sent = kio::clock::now();
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
+		let group = track.append_next(payload(flap, 0)).unwrap();
 		group.finish().unwrap();
 		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
 		let late = kio::clock::now().saturating_duration_since(sent);
@@ -421,8 +420,7 @@ async fn an_endpoint_closing_its_broadcast_ends_it_for_its_reader() {
 	let mut watch = record(&w, "live").await;
 	let broadcast = w.consume().request("live", None).await.unwrap();
 	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
-	let mut group = track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
+	let group = track.append_next(payload(0, 0)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
 

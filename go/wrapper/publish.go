@@ -200,20 +200,22 @@ func (t *TrackProducer) Requests() (*TrackRequests, error) {
 	return &TrackRequests{inner: inner}, nil
 }
 
-// AppendGroup starts the next group at start, converted to the track's timescale
-// (on a scale-less track, Unscaled at the group's key); write frames into it, then
-// Finish. A start at or before a group the track holds is refused.
-func (t *TrackProducer) AppendGroup(start Timestamp) (*GroupProducer, error) {
-	inner, err := t.inner.AppendGroup(start)
+// AppendGroup starts the next group with frame as its first frame, starting at the
+// frame's timestamp converted to the track's timescale (on a scale-less track, Unscaled
+// at the group's key); write more frames into it, then Finish. A start at or before a
+// group the track holds is refused.
+func (t *TrackProducer) AppendGroup(frame Frame) (*GroupProducer, error) {
+	inner, err := t.inner.AppendGroup(frame)
 	if err != nil {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
 }
 
-// CreateGroup creates a group with an explicit start.
-func (t *TrackProducer) CreateGroup(start uint64) (*GroupProducer, error) {
-	inner, err := t.inner.CreateGroup(start)
+// CreateGroup creates a group at an explicit start, its first frame's timestamp, for
+// sparse or replayed groups.
+func (t *TrackProducer) CreateGroup(frame Frame) (*GroupProducer, error) {
+	inner, err := t.inner.CreateGroup(frame)
 	if err != nil {
 		return nil, err
 	}

@@ -8,7 +8,7 @@ import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { ALPN, Version as Ietf } from "./ietf/version.ts";
-import { NO_MAX_DELAY } from "./internal.ts";
+import { hooks, NO_MAX_DELAY } from "./internal.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { decodeSubscribeResponse, Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { ALPN_05, ALPN_07_WIP, Version as Lite } from "./lite/version.ts";
@@ -41,7 +41,7 @@ for (const protocol of protocols) {
 			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
 			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge }));
 			const write = (key: bigint) => {
-				const group = track.createGroup(key);
+				const group = hooks.createEmpty(track, key);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			};
@@ -165,7 +165,7 @@ for (const protocol of protocols) {
 		// closes the stream of a group gone stale instead of resetting it.
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: bigint, frames: number) => {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({
 					payload: new Uint8Array([frame]),

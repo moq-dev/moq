@@ -126,10 +126,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::I
 	match timed {
 		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
 		false => {
-			let mut group = producer.append_group(Timestamp::unscaled(7)).unwrap();
-			group
-				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
-				.unwrap();
+			let group = producer.append_group(Timestamp::unscaled(7), &b"frame"[..]).unwrap();
 			group.finish().unwrap();
 		}
 	}
@@ -210,10 +207,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		let producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..5 {
-			let mut group = producer.append_next().unwrap();
-			group
-				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
-				.unwrap();
+			let group = producer.append_next(&b"untimed"[..]).unwrap();
 			group.finish().unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;

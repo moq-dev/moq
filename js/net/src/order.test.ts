@@ -12,7 +12,6 @@ import { defined } from "./defined.test-util.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
-import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -63,7 +62,7 @@ function noteFetchStreams(transport: MockTransport): void {
 				if (first && chunk?.[0] === FetchHeader.type) fetches.add(index);
 				first = false;
 				const bytes = written.get(index) ?? [];
-				if (chunk && bytes.length < 8) written.set(index, [...bytes, ...chunk].slice(0, 8));
+				if (chunk && bytes.length < 16) written.set(index, [...bytes, ...chunk].slice(0, 16));
 				return write(chunk);
 			};
 			return writer;
@@ -74,18 +73,22 @@ function noteFetchStreams(transport: MockTransport): void {
 
 // The send orders of a transport's group streams. Protocol streams, such as the setup stream,
 // open without one, and fetch streams are left out.
-// The send orders of a moq-lite transport's group streams by group sequence: the opens of a
+// The send orders of a moq-lite transport's group streams by group start: the opens of a
 // backlog wait together, so which stream carries which group is the line's choice. A lite
-// group stream starts with its type, the header's size, the subscription, then the sequence,
-// each a single byte at these values.
+// group stream starts with its type, the header's size, and the subscription, each a single byte
+// at these values, then the start, whose varints of one length sort as their bytes do.
 function liteSendOrders(transport: MockTransport): number[] {
 	const written = headers.get(transport);
+	const compare = (a: number[], b: number[]) => {
+		for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+		return a.length - b.length;
+	};
 	return transport.sendStreams.uni
-		.flatMap((stream, index) => {
-			const key = written?.get(index)?.[3];
+		.flatMap((stream, index): [number[], number][] => {
+			const key = written?.get(index)?.slice(3);
 			return stream.sendOrder === undefined || key === undefined ? [] : [[key, stream.sendOrder]];
 		})
-		.sort(([a], [b]) => a - b)
+		.sort(([a], [b]) => compare(a, b))
 		.map(([, order]) => order);
 }
 
@@ -102,10 +105,8 @@ let written = -1;
 
 // A group with one frame, left open.
 function writeGroup(track: TrackProducer): GroupProducer {
-	const group = hooks.appendNext(track);
 	written = Math.max(written + 1, Timestamp.now().asMillis());
-	group.writeFrame(textFrame("x", Timestamp.fromMillis(written)));
-	return group;
+	return track.appendGroup(textFrame("x", Timestamp.fromMillis(written)));
 }
 
 // Receiving a group means its stream header was written, which the publisher does only after

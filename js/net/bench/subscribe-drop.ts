@@ -2,6 +2,7 @@
 
 import { defined } from "../src/defined.test-util.ts";
 import { randomHop } from "../src/hop.ts";
+import { hooks } from "../src/internal.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
 import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
@@ -28,7 +29,7 @@ try {
 					const broadcast = broadcastRoute.broadcast;
 					const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
-						const group = track.createGroup(sequence);
+						const group = hooks.createEmpty(track, sequence);
 						// A timed group holds frames from its start up to the next group's.
 						group.writeFrame(textFrame("frame", Timestamp.fromMillis(Number(sequence))));
 						group.finish();

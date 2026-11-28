@@ -1366,21 +1366,6 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Draw a group boundary and start the next group at `start`, in the track's timescale.
-	///
-	/// [`cut`](Self::cut) keyed explicitly rather than at the next keyframe's time, which has to
-	/// come after every group the track holds. Groups are keyed by their first frame's time, so
-	/// two encoders of the same content align without it.
-	pub fn seek(&self, start: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.seek(start).map_err(|err| MoqError::Codec {
-			reason: format!("seek failed: {err}"),
-		})?;
-		Ok(())
-	}
-
 	/// Finish this track and finalize encoding.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
@@ -1434,23 +1419,6 @@ impl MoqMediaContainerProducer {
 			let container = guard.as_mut().ok_or(MoqError::Closed)?;
 			container.import.cut().map_err(|err| MoqError::Codec {
 				reason: format!("cut failed: {err}"),
-			})?;
-			Ok(())
-		})();
-		self.driver.check()?;
-		result
-	}
-
-	/// Start a new segment whose first group starts at `start`, in its track's timescale, after
-	/// every group the track holds.
-	pub fn seek(&self, start: u64) -> Result<(), MoqError> {
-		self.driver.check()?;
-		let result = (|| {
-			let _guard = crate::ffi::enter();
-			let mut guard = self.inner.lock().unwrap();
-			let container = guard.as_mut().ok_or(MoqError::Closed)?;
-			container.import.seek(start).map_err(|err| MoqError::Codec {
-				reason: format!("seek failed: {err}"),
 			})?;
 			Ok(())
 		})();
@@ -1696,8 +1664,23 @@ pub struct MoqMediaTrackConsumer {
 #[cfg(test)]
 mod read_tests {
 	use super::*;
-	use moq_mux::container::Container as _;
 	use std::time::Duration;
+
+	/// A group of `track` whose first frame is `payload` at `at`, in the hang `legacy` container.
+	fn legacy_group(
+		track: &moq_net::track::Producer,
+		at: moq_net::Timestamp,
+		payload: &[u8],
+	) -> moq_net::group::Producer {
+		let mut encoded = bytes::BytesMut::new();
+		hang::container::Frame {
+			timestamp: at,
+			payload: bytes::Bytes::copy_from_slice(payload),
+		}
+		.encode(&mut encoded)
+		.unwrap();
+		track.create_group(at, encoded.freeze()).unwrap()
+	}
 
 	const WARMUP: Duration = Duration::from_millis(300);
 	const DELAY: Duration = Duration::from_millis(200);
@@ -1765,20 +1748,8 @@ mod read_tests {
 		let (_broadcast, track, reader) = subscribe_warmup().await;
 		let mut media = reader.reads.take(|_| Ok(())).unwrap();
 		let write = |micros: u64| {
-			let mut group = track.create_group(micros.into()).unwrap();
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
-				.write(
-					&mut group,
-					&[moq_mux::container::Frame {
-						timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
-						decode: None,
-						payload: bytes::Bytes::from_static(b"media"),
-						keyframe: true,
-						duration: None,
-					}],
-				)
-				.unwrap();
-			group.finish().unwrap();
+			let at = moq_net::Timestamp::from_micros(micros).unwrap();
+			legacy_group(&track, at, b"media").finish().unwrap();
 		};
 		// Newest first, all before the first read, each group starting at its frame. The group
 		// at 4.7s covers the min delay alone, so without the warmup the start would skip the one
@@ -1802,7 +1773,6 @@ mod read_tests {
 		let track = broadcast
 			.create_track("encoded", hang::container::track_info(0))
 			.unwrap();
-		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let reader = MoqMediaTrackConsumer::subscribe(
 			&MoqBroadcastConsumer::new(broadcast.consume()),
 			MoqMediaTrackConfig {
@@ -1833,40 +1803,14 @@ mod read_tests {
 			value,
 			scale: Some(1_000_000),
 		};
-		let mut first = track.create_group(0u64.into()).unwrap();
-		format()
-			.write(
-				&mut first,
-				&[moq_mux::container::Frame {
-					timestamp: timestamp(10_000),
-					decode: None,
-					payload: bytes::Bytes::from_static(b"encoded"),
-					keyframe: true,
-					duration: None,
-				}],
-			)
-			.unwrap();
-		first.finish().unwrap();
+		legacy_group(&track, timestamp(10_000), b"encoded").finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
 		assert_eq!(frame.payload, b"encoded");
 		assert_eq!(frame.timestamp, micros(10_000));
 		assert!(frame.keyframe);
-		let mut marker = track.create_group(2u64.into()).unwrap();
-		format()
-			.write(
-				&mut marker,
-				&[moq_mux::container::Frame {
-					timestamp: timestamp(20_000),
-					decode: None,
-					payload: bytes::Bytes::new(),
-					keyframe: false,
-					duration: None,
-				}],
-			)
-			.unwrap();
-		marker.finish().unwrap();
+		legacy_group(&track, timestamp(20_000), b"").finish().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1874,20 +1818,7 @@ mod read_tests {
 			reader.next().await.unwrap(),
 			Some(MoqMediaRead::End { end }) if end == micros(20_000)
 		));
-		let mut resumed = track.create_group(3u64.into()).unwrap();
-		format()
-			.write(
-				&mut resumed,
-				&[moq_mux::container::Frame {
-					timestamp: timestamp(20_001),
-					decode: None,
-					payload: bytes::Bytes::from_static(b"resumed"),
-					keyframe: true,
-					duration: None,
-				}],
-			)
-			.unwrap();
-		resumed.finish().unwrap();
+		legacy_group(&track, timestamp(20_001), b"resumed").finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -2195,8 +2126,7 @@ mod catalog_tests {
 			.unwrap();
 			for ms in [1_000, 2_000, 3_000] {
 				let at = moq_net::Timestamp::from_millis(ms).unwrap();
-				let mut group = track.append_group(at).unwrap();
-				group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+				let group = track.append_group(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
 				group.finish().unwrap();
 			}
 			drop(track.finish().unwrap());

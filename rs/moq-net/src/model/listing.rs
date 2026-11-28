@@ -1289,7 +1289,7 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["synced"]);
 		let request = broadcast.reserve_unlisted_track("a").unwrap();
 		let a = request.accept(None);
-		let mut group = a.append_group(crate::Timestamp::unscaled(0)).unwrap();
+		let mut group = a.append_empty(crate::Timestamp::unscaled(0)).unwrap();
 		group.write_frame(crate::Timestamp::unscaled(0), vec![7]).unwrap();
 		group.finish().unwrap();
 
@@ -1321,7 +1321,7 @@ mod tests {
 		handle.abort(Error::Cancel);
 		assert!(handle.is_closed());
 		assert_eq!(drain(&mut tracks), ["-a"]);
-		assert!(a.append_group(crate::Timestamp::unscaled(0)).is_err());
+		assert!(a.append_empty(crate::Timestamp::unscaled(0)).is_err());
 		let _again = broadcast.create_track("a", None).unwrap();
 		assert_eq!(drain(&mut tracks), ["+a"]);
 	}

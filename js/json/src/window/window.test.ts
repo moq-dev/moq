@@ -416,15 +416,13 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		const encoder = new Encoder<Rec>({ ops: false });
 
 		let frame = encoder.push({ n: 0 });
-		let group = track.appendGroup(Time.Timestamp.fromMillis(1));
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(1) });
+		let group = track.appendGroup({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(1) });
 		frame.commit();
 		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
 		group.abort(error);
 
 		frame = encoder.push({ n: 1 });
-		group = track.appendGroup(Time.Timestamp.fromMillis(2));
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(2) });
+		group = track.appendGroup({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(2) });
 		frame.commit();
 		group.finish();
 		track.finish();

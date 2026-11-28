@@ -136,8 +136,8 @@ final route = moq.route('live/camera'); // visible at once, under a fresh identi
 print(route.identity());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
-final group = track.appendGroup(start: Timestamp.unscaled(0));
-group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.start())));
+// A group starts with its first frame, at that frame's timestamp.
+final group = track.appendGroup(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(0)));
 group.finish();
 track.finish();
 mine.close(); // ends the route too

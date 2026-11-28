@@ -34,10 +34,7 @@ struct Relay {
 
 /// Append the next group of an untimed track, holding one frame.
 fn write(track: &moq_net::track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_next().unwrap();
-	group
-		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
-		.unwrap();
+	let group = track.append_next(payload).unwrap();
 	group.finish().unwrap();
 }
 
@@ -162,9 +159,9 @@ async fn an_unfed_fetch_is_a_miss() {
 
 		write(&relay.track, b"1");
 		// The publisher skips group 2, so the feed goes past it.
-		let mut skipped = relay.track.create_group(moq_net::group::Info { start: 3 }).unwrap();
-		skipped
-			.write_frame(moq_net::Timestamp::unscaled(skipped.start), &b"3"[..])
+		let skipped = relay
+			.track
+			.create_group(moq_net::Timestamp::unscaled(3), &b"3"[..])
 			.unwrap();
 		skipped.finish().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))

@@ -219,10 +219,7 @@ async fn a_listed_track_serves_its_cached_group() {
 	assert_eq!(next(&mut tracks).await, "synced");
 
 	let late = broadcast.broadcast().create_track("late", None).unwrap();
-	let mut group = late.append_next().unwrap();
-	group
-		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"first"[..])
-		.unwrap();
+	let group = late.append_next(&b"first"[..]).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut tracks).await, "+late");
 

@@ -39,8 +39,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = held_track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
-	group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
+	let group = held_track.append_group(Timestamp::ZERO, b"held".as_slice()).unwrap();
 	group.finish().unwrap();
 	let handler = async {
 		if publish {
@@ -57,8 +56,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 					track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 				)
 				.unwrap();
-			let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
-			group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
+			let group = track.append_group(Timestamp::ZERO, b"held".as_slice()).unwrap();
 			group.finish().unwrap();
 			prepared.announce().unwrap();
 			Some((prepared, track))

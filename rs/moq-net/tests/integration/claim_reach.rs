@@ -6,7 +6,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::{rc::Rc, time::Duration};
 
@@ -63,8 +62,7 @@ fn claim(origin: &origin::Producer, granted: &[&str], prefix: &str) -> Rc<origin
 					track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 				)
 				.unwrap();
-			let mut group = track.append_next().unwrap();
-			group.write_frame(group.at_start(), path.into_bytes()).unwrap();
+			let group = track.append_next(path.into_bytes()).unwrap();
 			group.finish().unwrap();
 			route.announce().unwrap();
 			routes.push((route, track));

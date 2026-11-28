@@ -258,7 +258,7 @@ test("Legacy Producer skips the keys below a non-microsecond track's first group
 	const producer = new Producer(media, new Format("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(5_500), true);
 	// A group at a skipped key is refused, so the skip covered every millisecond below 5.
-	expect(() => media.appendGroup(Time.Timestamp.fromMillis(4))).toThrow();
+	expect(() => media.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMillis(4) })).toThrow();
 	expect(media.largest()?.group).toBe(5n);
 	producer.finish();
 });

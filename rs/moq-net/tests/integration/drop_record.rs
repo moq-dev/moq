@@ -32,18 +32,19 @@ fn origin(hop: u64, pool: cache::Pool) -> origin::Producer {
 	origin
 }
 
-/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+/// A track in seconds with no publisher max age, so only a reader's budget skips its groups.
 fn timed() -> Info {
-	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
+	Info::default().with_timescale(Timescale::SECOND).with_max_age(None)
 }
 
-/// Write group `key` presented at `millis`, and finish it.
-fn write(source: &track::Producer, key: u64, millis: u64) {
-	let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
-	group
-		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
-		.unwrap();
-	group.finish().unwrap();
+/// Group `key`, presented `key` seconds in.
+fn at(key: u64) -> Timestamp {
+	Timestamp::new(key, Timescale::SECOND).unwrap()
+}
+
+/// Write group `key`, and finish it.
+fn write(source: &track::Producer, key: u64) {
+	source.create_group(at(key), &b"x"[..]).unwrap().finish().unwrap();
 }
 
 /// A publisher, a relay subscribing to it, and a viewer subscribing to the relay.
@@ -97,7 +98,7 @@ impl Chain {
 	/// Groups 0 through 9, one per second.
 	fn populate(&self) {
 		for key in 0..GROUPS {
-			write(&self.source, key, key * 1000);
+			write(&self.source, key);
 		}
 	}
 
@@ -252,12 +253,12 @@ async fn a_huge_run_settles_in_one_step() {
 			let everything = || reading(None, [support::keys(0..)]);
 			let mut narrow = chain.subscribe(reading(NARROW, [support::keys(0..)])).await;
 			let mut wide = chain.subscribe(everything()).await;
-			write(&chain.source, 0, 0);
+			write(&chain.source, 0);
 			if let Huge::Skipped = huge {
 				chain.source.skip_groups(1..FAR);
 			}
 			// Presented at its key, as a lite-07 group starts at its first frame.
-			write(&chain.source, FAR, FAR);
+			write(&chain.source, FAR);
 			let _finished = chain.source.clone().finish().unwrap();
 
 			let started = kio::clock::now();
@@ -336,7 +337,7 @@ async fn reported_drop_through(versions: [&str; 2]) {
 	kio::clock::timeout(TIMEOUT * 10, async {
 		let chain = Chain::new(versions, [forever(), forever(), forever()]).await;
 		for key in (0..GROUPS).filter(|key| *key != 7) {
-			write(&chain.source, key, key * 1000);
+			write(&chain.source, key);
 		}
 		let mut first = chain.subscribe(reading(B1, [Range::ALL])).await;
 		assert_eq!(received(&mut first).await, [5, 6, 8, 9].into(), "{name}");
@@ -344,7 +345,7 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		// Group 7 lands once its successor is older than B1 by the wall clock, so the
 		// publisher reports it stale under B1.
 		kio::clock::sleep(B1 + Duration::from_secs(1)).await;
-		write(&chain.source, 7, 7000);
+		write(&chain.source, 7);
 		assert_eq!(received(&mut first).await, BTreeSet::new(), "{name}");
 
 		// Over a lite-07 viewer hop the widened reader still wants the stale group, which a
@@ -415,9 +416,9 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
-				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
-				group
-					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+				let group = chain
+					.source
+					.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
 				group.finish().unwrap();
 			};
@@ -497,9 +498,9 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 				.ordered();
 			chain.upstream.server_transport.hold_unis();
 			for key in 0..WRITTEN {
-				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
-				group
-					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+				let group = chain
+					.source
+					.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
 				group.finish().unwrap();
 				// Newest first, the origin would serve the last written: let group 0 take the
@@ -556,10 +557,10 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 	let chain = Chain::new([LITE07, LITE07], [forever(), forever(), forever()]).await;
 	let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 	for key in 0..2 {
-		let group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+		let group = chain.source.create_group(at(key), &b"x"[..]).unwrap();
 		group.abort(moq_net::Error::App(1)).unwrap();
 	}
-	write(&chain.source, 2, 2);
+	write(&chain.source, 2);
 	assert_eq!(received(&mut reader).await, [2].into());
 
 	let mut viewer = chain.subscribe(reading(None, [support::keys(0..3)])).await;
@@ -579,9 +580,10 @@ async fn relay_pool_pressure_folds_every_reported_run() {
 	/// records a debt, few enough that each reader keeps up, since a group evicted before its
 	/// reader took it is a promise no fold settles, and one hold per reader refills it.
 	const BURST: u64 = 100;
-	let budget = Duration::from_secs(2);
+	// Wider than every group written, one per second, so only the wall clock makes one stale.
+	let budget = Duration::from_secs(4 * RUNS);
 	for stale in [false, true] {
-		kio::clock::timeout(TIMEOUT * 10, async {
+		kio::clock::timeout(TIMEOUT * 10 + budget * 2, async {
 			let pool = cache::Pool::new(cache::Config::default().with_expiry(None));
 			let chain = Chain::new([LITE07, LITE07], [forever(), pool.clone(), forever()]).await;
 			let mut local = chain.subscribe_relay(reading(budget, [Range::ALL])).await;
@@ -603,7 +605,7 @@ async fn relay_pool_pressure_folds_every_reported_run() {
 			// and drop set go first, then its readers' records.
 			pool.resize(4 * 1024);
 			for key in 2 * RUNS..2 * RUNS + BURST {
-				write(&chain.source, key, key);
+				write(&chain.source, key);
 			}
 			let mut read = [0, 0];
 			let mut ended = [None, None];
@@ -638,7 +640,7 @@ async fn relay_pool_pressure_folds_every_reported_run() {
 /// clock makes one stale, and return them.
 fn write_odd(chain: &Chain, runs: u64) -> BTreeSet<u64> {
 	for run in 0..runs {
-		write(&chain.source, 2 * run + 1, 2 * run + 1);
+		write(&chain.source, 2 * run + 1);
 	}
 	(0..runs).map(|run| 2 * run + 1).collect()
 }
@@ -651,15 +653,12 @@ async fn settle_even(chain: &Chain, runs: u64, stale: Option<Duration>) {
 		Some(late) => {
 			kio::clock::sleep(late).await;
 			for run in 0..runs {
-				write(&chain.source, 2 * run, 2 * run);
+				write(&chain.source, 2 * run);
 			}
 		}
 		None => {
 			for run in 0..runs {
-				let group = chain
-					.source
-					.create_group(moq_net::group::Info { start: 2 * run })
-					.unwrap();
+				let group = chain.source.create_group(at(2 * run), &b"x"[..]).unwrap();
 				group.abort(moq_net::Error::App(1)).unwrap();
 			}
 		}

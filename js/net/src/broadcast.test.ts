@@ -69,7 +69,7 @@ test("a staged track resolves its subscribers at commit, with what was written",
 
 	const staged = hooks.stageRequest(request, { timescale: Timescale.MILLI });
 	// The staged track has no timescale until commit, so the group is created at its key.
-	const group = staged.producer.createGroup(0n);
+	const group = hooks.createEmpty(staged.producer, 0n);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 	group.finish();
 	const pending = Symbol("pending");
@@ -91,7 +91,7 @@ test("a replacement producer starts over", async () => {
 	const firstRequest = await firstPull;
 	if (!firstRequest) throw new Error("expected first request");
 	const first = firstRequest.accept({ timescale: Timescale.MILLI });
-	const group = first.createGroup(8n);
+	const group = hooks.createEmpty(first, 8n);
 	group.writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
 	group.finish();
 	firstSubscriber.close();

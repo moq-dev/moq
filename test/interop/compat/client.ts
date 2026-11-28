@@ -363,10 +363,17 @@ if (command === "sign") {
 		return value === true || typeof value === "bigint";
 	};
 	while (!wanted()) await watch.changed();
-	// The group starts at its frame's time; a released package's appendGroup takes no start.
-	const timestamp = Moq.Time.Timestamp.fromMicros(1 as TimestampMicros);
-	const group = track.appendGroup(timestamp);
-	group.writeFrame({ payload: new TextEncoder().encode("compat-fetch"), timestamp });
+	// The group opens with its frame, at the frame's time; a released package's appendGroup takes
+	// nothing and opens it empty.
+	const frame = {
+		payload: new TextEncoder().encode("compat-fetch"),
+		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
+	};
+	const released = track.appendGroup.length === 0;
+	const group = released
+		? (track as unknown as { appendGroup(): Moq.Group.Producer }).appendGroup()
+		: track.appendGroup(frame);
+	if (released) group.writeFrame(frame);
 	finishGroup.call(group);
 	await connection.closed;
 } else if (command === "subscribe") {

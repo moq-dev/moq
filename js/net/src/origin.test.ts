@@ -67,11 +67,11 @@ for (const via of ["direct", "request", "follow"] as const) {
 			const consumed = request ? request.active.peek() : broadcast.consume();
 			if (!consumed) throw new Error("expected a broadcast");
 			const sub = consumed.track("video").subscribe();
-			const history = track.createGroup(0n);
+			const history = hooks.createEmpty(track, 0n);
 			history.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(history.start) });
 			history.finish();
 			const finished = await sub.recvGroup();
-			const live = track.createGroup(1n);
+			const live = hooks.createEmpty(track, 1n);
 			live.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.unscaled(live.start) });
 			const group = await sub.recvGroup();
 			if (!finished || !group) throw new Error("expected both groups");
@@ -3345,7 +3345,7 @@ test("demand held across an identity change asks again, unless it named the old 
 	const track = defined(next.createTrack("video"));
 	(await it.next()).value.serve(next);
 	const subscription = (await unpinned)?.track("video").subscribe();
-	track.createGroup(7n);
+	hooks.createEmpty(track, 7n);
 	expect((await subscription?.recvGroup())?.start).toBe(7n);
 
 	subscription?.close();
@@ -3393,7 +3393,7 @@ test("demand held across an identity round trip still asks again", async () => {
 	const track = defined(next.createTrack("video"));
 	(await it.next()).value.serve(next);
 	const subscription = (await demanded)?.track("video").subscribe();
-	track.createGroup(7n);
+	hooks.createEmpty(track, 7n);
 	expect((await subscription?.recvGroup())?.start).toBe(7n);
 
 	subscription?.close();
@@ -3563,7 +3563,7 @@ test.each([
 	expect(fresh.active.peek()?.identity).toBe(to);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	const forwarded = (await demanded)?.track("video").subscribe();
-	nextTrack.createGroup(7n);
+	hooks.createEmpty(nextTrack, 7n);
 	expect((await subscription?.recvGroup())?.start).toBe(7n);
 	expect((await forwarded?.recvGroup())?.start).toBe(7n);
 
@@ -3658,7 +3658,7 @@ test("a session's re-request after an identity update asks the handler again", a
 	const track = defined(next.createTrack("video"));
 	(await requests.next()).value.serve(next);
 	const subscription = (await after)?.track("video").subscribe();
-	track.createGroup(7n);
+	hooks.createEmpty(track, 7n);
 	expect((await subscription?.recvGroup())?.start).toBe(7n);
 
 	subscription?.close();
@@ -3696,7 +3696,7 @@ test("an update does not override route selection: another claim at the identity
 	expect(held.active.peek()?.identity).toBe(IDENTITY);
 	expect(fresh.active.peek()?.identity).toBe(IDENTITY);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
-	track.createGroup(7n);
+	hooks.createEmpty(track, 7n);
 	expect((await subscription?.recvGroup())?.start).toBe(7n);
 
 	subscription?.close();

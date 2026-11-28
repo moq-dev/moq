@@ -94,15 +94,13 @@ fn publish(origin: &moq_net::origin::Producer, name: &str) {
 	tokio::spawn(async move {
 		let _broadcast = broadcast;
 		loop {
-			let mut group = track
+			let start = track.largest().map_or(0, |largest| largest.group + 1);
+			let group = track
 				.append_group(
-					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+					moq_net::Timestamp::from_millis(start).unwrap(),
+					start.to_string().into_bytes(),
 				)
 				.expect("append group");
-			let payload = group.start.to_string().into_bytes();
-			group
-				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
-				.expect("write frame");
 			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(20)).await;
 		}

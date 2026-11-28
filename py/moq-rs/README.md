@@ -180,7 +180,7 @@ client = moq.Client(
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp)` writes a payload with its capture time; on a scale-less track (no `timescale`) the timestamp is `Timestamp.unscaled(key)` at the frame's group key.
   - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
-  - `.create_group(start)` creates a sparse or replayed group at an explicit start.
+  - `.append_group(payload, timestamp)` (`TrackProducer`) starts the next group with its first frame, at that frame's timestamp; `.create_group(payload, timestamp)` creates a sparse or replayed group the same way at an explicit start.
   - `.skip_groups(start, end)` (`TrackProducer`) declares groups `start` up to the exclusive `end` will never be produced, so readers move past them; creating one there then fails.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_start)` declares the first group that will never be produced while leaving lower groups writable.
@@ -220,7 +220,7 @@ client = moq.Client(
 
 `media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as a
 `Timestamp`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
-subscriber waits. `.cut()` / `.seek(start)` draw group boundaries; `.finish()` ends the import.
+subscriber waits. `.cut()` draws a group boundary; `.finish()` ends the import.
 
 ### Data
 

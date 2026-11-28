@@ -416,7 +416,7 @@ export namespace Frame {
 	}
 	export class Producer {
 		abort(error: Error): void;
-		finish(): void;
+		finish(): Group.Producer;
 		get remaining(): number;
 		readonly size: number;
 		readonly timestamp: Time.Timestamp;
@@ -759,7 +759,8 @@ export namespace Track {
 		abort(error: Error): void;
 		close(): void;
 		readonly closed: Signals.GetPromise<Error | null>;
-		createGroup(key: bigint): Group.Producer;
+		createFrame(info: Frame.Info): Frame.Producer;
+		createGroup(frame: Group.Frame): Group.Producer;
 		info(): Promise<Track.Info>;
 		readonly name: string;
 		requests(): Track.Requests;
@@ -830,11 +831,14 @@ export namespace Track {
 		constructor(name: string);
 		abort(error: Error): void;
 		accept(info?: Track.InfoInit): this;
-		appendGroup(start: Time.Timestamp): Group.Producer;
+		appendFrame(info: Frame.Info): Frame.Producer;
+		appendGroup(frame: Group.Frame): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		createGroup(key: bigint): Group.Producer;
+		createFrame(info: Frame.Info): Frame.Producer;
+		createGroup(frame: Group.Frame): Group.Producer;
 		demand(): Track.Demand;
+		dropGroups(start: bigint, end: bigint, error: Error): void;
 		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;
 		finishAt(end: Track.Position): void;

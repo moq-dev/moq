@@ -8,7 +8,6 @@ use std::time::Duration;
 use moq_net::{Version, origin, track};
 
 use crate::support::AppendNext;
-use crate::support::AtStart;
 use crate::support::harness::{peer, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
@@ -66,8 +65,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = source.append_next().unwrap();
-		group.write_frame(group.at_start(), b"catalog").unwrap();
+		let group = source.append_next(b"catalog").unwrap();
 		group.finish().unwrap();
 		broadcast.announce().unwrap();
 		let consumer = viewer.consume();

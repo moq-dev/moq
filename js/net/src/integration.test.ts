@@ -626,7 +626,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	for (const key of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(key).finish();
+	for (const key of [0n, 1n, 2n, 4n, 5n]) hooks.createEmpty(producer, key).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const bounded = (end: bigint) =>
@@ -682,7 +682,7 @@ test("integration: lite-07 serves a time range", async () => {
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// Keyed by start, as the wire names a group: one per second.
 	for (let start = 0n; start < 10_000n; start += 1000n) {
-		const group = producer.createGroup(start);
+		const group = hooks.createEmpty(producer, start);
 		group.writeFrame(textFrame(`${start}`, Timestamp.fromMillis(Number(start))));
 		group.finish();
 	}
@@ -1042,18 +1042,14 @@ test("integration: lite draft-07 fetches a cached group", async () => {
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
-	const group0 = hooks.appendNext(producer);
-	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	const group0 = producer.appendGroup({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	group0.finish();
+	producer.appendGroup({ payload: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) }).finish();
 
-	const group1 = hooks.appendNext(producer);
-	group1.writeFrame({ payload: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
-	group1.finish();
-
-	// Fetch group 0 without holding a live subscription; the timestamps round-trip.
+	// Fetch the first group without holding a live subscription; the timestamps round-trip.
 	const remote = wireOf(client).consume(Path.from("test"));
-	const fetched = await remote.track("video").fetchGroup(0n);
+	const fetched = await remote.track("video").fetchGroup(10n);
 
 	const first = await fetched.readFrame();
 	expect(dec.decode(first?.payload)).toBe("alpha");
@@ -1082,7 +1078,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 	let serving: Promise<void> | undefined;
 	if (missing === "gap") {
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
-		const group = producer.createGroup(1n);
+		const group = hooks.createEmpty(producer, 1n);
 		group.finish();
 	} else {
 		serving = (async () => {
@@ -1220,11 +1216,10 @@ test("integration: lite draft-07 fetches an in-progress group", async () => {
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Open the group and write one frame, but leave it open (in-progress).
-	const group0 = hooks.appendNext(producer);
-	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	const group0 = producer.appendGroup({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const fetched = await remote.track("video").fetchGroup(0n);
+	const fetched = await remote.track("video").fetchGroup(10n);
 
 	const first = await fetched.readFrame();
 	expect(dec.decode(first?.payload)).toBe("alpha");
@@ -1346,9 +1341,7 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	const path = Path.from("test");
 	const first = publish(origin, path);
 	const firstTrack = defined(first.createTrack("video", { timescale: Timescale.MILLI }));
-	const firstGroup = hooks.appendNext(firstTrack);
-	firstGroup.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
-	firstGroup.finish();
+	firstTrack.appendGroup({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) }).finish();
 
 	// Prime the publisher's TRACK_INFO cache against the predecessor.
 	const remote = wireOf(client).consume(path);
@@ -1356,12 +1349,10 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 
 	const second = publish(origin, path);
 	const secondTrack = defined(second.createTrack("video", { timescale: Timescale.MICRO }));
-	const secondGroup = hooks.appendNext(secondTrack);
-	secondGroup.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMicros(1234) });
-	secondGroup.finish();
+	secondTrack.appendGroup({ payload: enc.encode("beta"), timestamp: Timestamp.fromMicros(1234) }).finish();
 
 	// A millisecond timescale would round this to 1000us.
-	const fetched = await remote.track("video").fetchGroup(0n);
+	const fetched = await remote.track("video").fetchGroup(1234n);
 	const frame = await fetched.readFrame();
 	expect(frame?.timestamp?.asMicros()).toBe(1234);
 
@@ -3041,8 +3032,8 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 		const serving = (async () => {
 			const request = await wireOf(broadcast).requested();
 			if (!request) return;
-			const group = hooks.appendNext(request.accept({ timescale: Timescale.MILLI }));
-			const frame = group.createFrame({ size, timestamp: Timestamp.fromMillis(5) });
+			const track = request.accept({ timescale: Timescale.MILLI });
+			const frame = track.appendFrame({ size, timestamp: Timestamp.fromMillis(5) });
 			for (let written = 0; written < size; ) {
 				const chunk = new Uint8Array(Math.min(size - written, MiB + 13));
 				for (let i = 0; i < chunk.byteLength; i++) chunk[i] = byte(written + i);
@@ -3050,7 +3041,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 				written += chunk.byteLength;
 				await yieldNow();
 			}
-			frame.finish();
+			const group = frame.finish();
 			group.writeFrame(textFrame("after"));
 			group.finish();
 		})();
@@ -3098,13 +3089,10 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 			const request = await wireOf(broadcast).requested();
 			if (!request) return;
 			const track = request.accept({ timescale: Timescale.MILLI });
-			const head = hooks.appendNext(track);
-			head.writeFrame(textFrame("head", Timestamp.fromMillis(1)));
-			head.finish();
+			track.appendGroup(textFrame("head", Timestamp.fromMillis(1))).finish();
 			await live.promise;
 			// Only the header and one chunk: the receiver must refuse before the rest arrives.
-			const group = hooks.appendNext(track);
-			const frame = group.createFrame({ size: MAX_FRAME_BYTES + 1, timestamp: Timestamp.fromMillis(5) });
+			const frame = track.appendFrame({ size: MAX_FRAME_BYTES + 1, timestamp: Timestamp.fromMillis(5) });
 			frame.write(new Uint8Array(SEGMENT_BYTES));
 		})();
 
@@ -3243,16 +3231,16 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			// Unfinished, so its stream holds the only credit.
 			// Each group stamped in sequence order, since the track checks a late group's start.
 			const at = (key: bigint) => Timestamp.fromMillis(1_000 + Number(key));
-			const held = producer.createGroup(2n);
+			const held = hooks.createEmpty(producer, 2n);
 			held.writeFrame(textFrame("held", at(2n)));
 			expect((await settled(subscriber.recvGroup(), "the held group"))?.start).toBe(2n);
 
 			// Late and below the held stream: it waits for credit it cannot make room for.
-			const late = producer.createGroup(0n);
+			const late = hooks.createEmpty(producer, 0n);
 			late.writeFrame(textFrame("late", at(0n)));
 			late.finish();
 
-			const newer = producer.createGroup(3n);
+			const newer = hooks.createEmpty(producer, 3n);
 			newer.writeFrame(textFrame("new", at(3n)));
 			newer.finish();
 			// lite-07 may fill the late group by a fetch first; only group 3 must not wait behind it.

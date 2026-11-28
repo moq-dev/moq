@@ -153,12 +153,12 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let (_client, pub_connection) =
@@ -300,15 +300,12 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		.route(".x/y", moq_net::origin::RouteOptions::default())
 		.expect("create hidden");
 	let track = hidden.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
-		.expect("append group");
-	group
-		.write_frame(
-			moq_net::Timestamp::from_millis(group.start).unwrap(),
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
 			b"hidden".as_ref(),
 		)
-		.expect("write frame");
+		.expect("append group");
 	group.finish().expect("finish group");
 	// The relay's announce request carries the opt-in only on lite-07, so the publisher
 	// must speak it too for the hidden route to reach the relay.
@@ -411,12 +408,9 @@ async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
 			.route(&path, moq_net::origin::RouteOptions::default())
 			.expect("create broadcast");
 		let track = route.broadcast().create_track("video", timed()).expect("create track");
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+		let group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"escaped".as_ref())
 			.expect("append group");
-		group
-			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"escaped".as_ref())
-			.expect("write frame");
 		group.finish().expect("finish group");
 		let (_pub_client, pub_connection) = kio::clock::timeout(
 			TIMEOUT,
@@ -609,12 +603,12 @@ async fn relay_websocket_root_path_upgrades() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let (_client, pub_connection) = kio::clock::timeout(
@@ -748,12 +742,12 @@ async fn internal_tcp_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let (_client, pub_connection) = kio::clock::timeout(
@@ -857,12 +851,12 @@ async fn internal_unix_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let (_client, pub_connection) = kio::clock::timeout(
@@ -944,12 +938,12 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.route(broadcast, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
 	let track = bc.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			b"hello".as_ref(),
+		)
 		.expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-		.expect("write frame");
 	group.finish().expect("finish group");
 
 	let pub_client = client_version(Some(version)).with_publisher(pub_origin.consume());

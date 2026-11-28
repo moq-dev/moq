@@ -147,8 +147,7 @@ void main() {
         .timeout(timeout);
     expect(meta.info().timescale, 1000000);
 
-    final group = track.appendGroup(start: Timestamp(value: 0, scale: 1000000));
-    group.writeFrame(
+    final group = track.appendGroup(
       frame: Frame(
         payload: utf8.encode('key'),
         timestamp: Timestamp(value: 0, scale: 1000000),
@@ -361,9 +360,6 @@ void main() {
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup(
-          start: Duration(milliseconds: ms).toTimestamp(),
-        );
-        group.writeFrame(
           frame: Frame(
             payload: utf8.encode('x'),
             timestamp: Duration(milliseconds: ms).toTimestamp(),
@@ -653,8 +649,7 @@ void main() {
     final demand = track.demand();
     while (!await demand.wantedChanged().timeout(timeout)) {}
 
-    final producer = track.appendGroup(start: Duration.zero.toTimestamp());
-    producer.writeFrame(
+    final producer = track.appendGroup(
       frame: MoqFrame(
         payload: utf8.encode('dart round trip'),
         timestamp: Duration.zero.toTimestamp(),

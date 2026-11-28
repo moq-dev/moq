@@ -176,21 +176,16 @@ async fn ffi_round(
 		})
 		.collect();
 	for track in tracks {
-		let group = track
-			.append_group(MoqTimestamp {
-				value: n * case.frames() as u64,
+		let frame = |f: usize| MoqFrame {
+			payload: payload.to_vec(),
+			timestamp: MoqTimestamp {
+				value: n * case.frames() as u64 + f as u64,
 				scale: Some(1_000_000),
-			})
-			.unwrap();
-		for f in 0..case.frames() {
-			let frame = MoqFrame {
-				payload: payload.to_vec(),
-				timestamp: MoqTimestamp {
-					value: n * case.frames() as u64 + f as u64,
-					scale: Some(1_000_000),
-				},
-			};
-			group.write_frame(frame).unwrap();
+			},
+		};
+		let group = track.append_group(frame(0)).unwrap();
+		for f in 1..case.frames() {
+			group.write_frame(frame(f)).unwrap();
 		}
 		group.finish().unwrap();
 	}
@@ -226,10 +221,9 @@ async fn net_round(
 		.collect();
 	for track in &mut tracks {
 		// The group starts at its first frame's time, in the track's microseconds.
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_micros(n * case.frames() as u64).unwrap())
-			.unwrap();
-		for f in 0..case.frames() {
+		let first = moq_net::Timestamp::from_micros(n * case.frames() as u64).unwrap();
+		let mut group = track.append_group(first, payload.to_vec()).unwrap();
+		for f in 1..case.frames() {
 			let timestamp = moq_net::Timestamp::from_micros(n * case.frames() as u64 + f as u64).unwrap();
 			// Copy, as a binding's write does, so the baseline does not get zero-copy for free.
 			group.write_frame(timestamp, payload.to_vec()).unwrap();
@@ -286,7 +280,10 @@ async fn rust_ffi() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("calls".into(), None).unwrap();
 	let group = track
-		.append_group(MoqTimestamp::unscaled(0))
+		.append_group(MoqFrame {
+			payload: Vec::new(),
+			timestamp: MoqTimestamp::unscaled(0),
+		})
 		.unwrap()
 		.consume()
 		.unwrap();

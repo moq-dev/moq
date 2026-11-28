@@ -132,10 +132,9 @@ function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
  * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
  * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
  * when the track is stamped, and `inflated` when the frame was decompressed. Lite-07 leads with the
- * size plus one, leaving 0 for GROUP_END, and carries a delta after the stream's `first` unsigned,
- * since a group's timestamps never decrease; the first counts from the group's start, which a
- * group's first frame may precede, so it is zigzagged as every delta is before lite-07, whose
- * header ends with the size.
+ * size plus one, leaving 0 for GROUP_END, and carries each delta unsigned, since a group's
+ * timestamps never decrease, omitting frame 0's (`implicit`): a group starts at its first frame.
+ * Before lite-07 every delta is zigzagged and the header ends with the size.
  */
 export function frameHeader(
 	version: StreamVersion,
@@ -143,15 +142,15 @@ export function frameHeader(
 	inflated: number | undefined,
 	size: number,
 	lengthFirst: boolean,
-	first: boolean,
+	implicit: boolean,
 ) {
 	const parts: Uint8Array[] = [];
 	if (lengthFirst) parts.push(encodeVarint(size + 1, version));
 	if (delta !== undefined) {
-		const unsigned = lengthFirst && !first;
-		// A lite-05/06 ingest may still carry a decreasing timestamp, which lite-07 can't encode.
-		if (unsigned && delta < 0n) throw new RangeError("timestamp below the previous frame");
-		parts.push(encodeVarint(unsigned ? delta : zigzag(delta), version));
+		// Frame 0 away from its group's start, or a lite-05/06 ingest's decreasing timestamp, is
+		// something lite-07 can't carry.
+		if (lengthFirst && (implicit ? delta !== 0n : delta < 0n)) throw new TimestampMismatch();
+		if (!(lengthFirst && implicit)) parts.push(encodeVarint(lengthFirst ? delta : zigzag(delta), version));
 	}
 	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
 	if (!lengthFirst) parts.push(encodeVarint(size, version));
@@ -3117,7 +3116,8 @@ export class Publisher {
 
 		// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
 		let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-		let first = true;
+		// Lite-07 omits frame 0's delta: the group starts at it.
+		let implicit = startFrame === 0;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
 			const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!read) break;
@@ -3136,9 +3136,9 @@ export class Publisher {
 				read.inflated,
 				readSize(read),
 				hasLengthFirst(this.version),
-				first,
+				implicit,
 			);
-			first = false;
+			implicit = false;
 			const chunks = read.chunks;
 			// One budget race covers the frame's header and payload.
 			await write(async () => {
@@ -3234,10 +3234,10 @@ export class Publisher {
 			});
 			if (hasReliableReset(this.version)) held = stream.hold();
 
-			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
-			// at, and GROUP_END from the last timestamp sent.
+			// Lite-07 omits frame 0's delta, since the group starts at it, counts a later stream's first
+			// delta from the group's start, and GROUP_END from the last timestamp sent.
 			let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-			let first = true;
+			let implicit = startFrame === 0;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
@@ -3322,16 +3322,16 @@ export class Publisher {
 				}
 
 				const header = options.meta
-					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true, first)
+					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true, implicit)
 					: frameHeader(
 							stream.version,
 							delta,
 							read.inflated,
 							readSize(read),
 							hasLengthFirst(this.version),
-							first,
+							implicit,
 						);
-				first = false;
+				implicit = false;
 				// A metadata FRAME is its header: the frame's bytes are never read, so nothing waits for them.
 				const chunks = options.meta ? undefined : read.chunks;
 				const payload = options.meta || chunks ? undefined : read.frame.payload;
@@ -3343,8 +3343,9 @@ export class Publisher {
 				});
 			}
 
-			// Lite-07 ends a finished group with GROUP_END.
-			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
+			// Lite-07 ends a finished group with GROUP_END, after one frame at least on a stream from
+			// frame 0, since a group starts at its first frame.
+			const end = hasGroupEnd(this.version) && whole && !(implicit && startFrame === 0) ? group.end : undefined;
 			if (end !== undefined) {
 				options.ended?.(end);
 				spanEnd = end;

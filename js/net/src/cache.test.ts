@@ -138,7 +138,7 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 		expect(dropsHeld(closed)).toEqual([0n]);
 
 		// The write's own expiry scan finds the skip.
-		passed.createGroup(10n).finish();
+		hooks.createEmpty(passed, 10n).finish();
 		expect(dropsHeld(passed)).toEqual([]);
 
 		closed.close();
@@ -152,8 +152,8 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 test("a final drop leaves a finished group", async () => {
 	const producer = pooled(new cache.Pool());
 	hooks.receiveTrack(producer);
-	producer.createGroup(0n).finish();
-	const open = producer.createGroup(1n);
+	hooks.createEmpty(producer, 0n).finish();
+	const open = hooks.createEmpty(producer, 1n);
 	hooks.dropTrackGroups(producer, 0n, 2n, { error: new StreamError(StreamCode.Cancel) });
 
 	expect(dropsHeld(producer)).toEqual([1n]);
@@ -183,9 +183,9 @@ test("a forgotten run is asked only by a reader that never judged it", async () 
 			}
 		};
 		const reader = patient();
-		producer.createGroup(0n).finish();
+		hooks.createEmpty(producer, 0n).finish();
 		hooks.dropTrackGroups(producer, 1n, 2n, { error: new StreamError(StreamCode.Old) });
-		producer.createGroup(2n).finish();
+		hooks.createEmpty(producer, 2n).finish();
 		expect((await reader.recvGroup())?.start).toBe(0n);
 		expect((await reader.recvGroup())?.start).toBe(2n);
 		// Waiting for more, the reader judges what it misses: the drop settles it.
@@ -257,7 +257,7 @@ test("a reached end outlives its forgotten skip", async () => {
 		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
-		producer.createGroup(0n).finish();
+		hooks.createEmpty(producer, 0n).finish();
 		hooks.skipTrackGroups(producer, 1n, 3n);
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		const done = (reader: ReturnType<TrackProducer["subscribe"]>) => {

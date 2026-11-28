@@ -94,10 +94,8 @@ test("a second group is reported while the first is still open", async () => {
 	const encode = (record: Rec) => new TextEncoder().encode(JSON.stringify(record));
 
 	// Both groups stay open, the way a publisher writing to two at once leaves them.
-	const first = track.appendGroup(Time.Timestamp.fromMillis(1));
-	first.writeFrame({ payload: encode({ n: 0 }), timestamp: Time.Timestamp.fromMillis(1) });
-	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
-	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.fromMillis(2) });
+	const first = track.appendGroup({ payload: encode({ n: 0 }), timestamp: Time.Timestamp.fromMillis(1) });
+	const second = track.appendGroup({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.fromMillis(2) });
 
 	// Read history, so the first group is delivered rather than skipped by the default live join
 	// once a newer group exists.

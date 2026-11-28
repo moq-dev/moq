@@ -256,16 +256,18 @@ public final class TrackProducer: Sendable {
         TrackRequests(try ffi.requests())
     }
 
-    /// Append the next group at `start`, returning a producer for its frames. `start` is
-    /// converted to the track's timescale; on a scale-less track it is `Timestamp.unscaled(key)`
-    /// at the group's key. A start at or before a group the track holds throws.
-    public func appendGroup(start: Timestamp) throws -> GroupProducer {
-        GroupProducer(try ffi.appendGroup(start: start))
+    /// Append the next group with its first frame, returning a producer for the rest. The group
+    /// starts at the frame's `timestamp`, converted to the track's timescale; on a scale-less
+    /// track it is `Timestamp.unscaled(key)` at the group's key. A start at or before a group
+    /// the track holds throws.
+    public func appendGroup(_ payload: Data, timestamp: Timestamp) throws -> GroupProducer {
+        GroupProducer(try ffi.appendGroup(frame: Frame(payload: payload, timestamp: timestamp)))
     }
 
-    /// Create a group with an explicit start.
-    public func createGroup(start: UInt64) throws -> GroupProducer {
-        GroupProducer(try ffi.createGroup(start: start))
+    /// Create a group at an explicit start, its first frame's `timestamp`, for sparse or
+    /// replayed groups.
+    public func createGroup(_ payload: Data, timestamp: Timestamp) throws -> GroupProducer {
+        GroupProducer(try ffi.createGroup(frame: Frame(payload: payload, timestamp: timestamp)))
     }
 
     /// Declare that groups `start` up to the exclusive `end` will never be produced.

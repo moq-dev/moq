@@ -39,13 +39,11 @@ fn track_largest_and_group_ready() {
 	);
 	assert!(!present, "an empty track has no largest position");
 
-	let first = id(moq_publish_track_group_at(track, 3));
-	for part in [b"a".as_slice(), b"b"] {
-		assert_eq!(
-			unsafe { moq_publish_group_frame(first, part.as_ptr(), part.len(), &micros(0)) },
-			0
-		);
-	}
+	let first = id(unsafe { moq_publish_track_create_group(track, b"a".as_ptr(), 1, &micros(3)) });
+	assert_eq!(
+		unsafe { moq_publish_group_frame(first, b"b".as_ptr(), 1, &micros(3)) },
+		0
+	);
 	assert_eq!(
 		unsafe { moq_publish_track_largest(track, &mut group, &mut frame, &mut present) },
 		0
@@ -128,8 +126,8 @@ fn group_ready_across_a_broadcast_close() {
 	assert_eq!(moq_publish_track_finish_at(declared, 1), 0);
 
 	let (open_group, declared_group) = (
-		id(unsafe { moq_publish_track_group(open, &micros(0)) }),
-		id(moq_publish_track_group_at(declared, 0)),
+		id(unsafe { moq_publish_track_group(open, std::ptr::null(), 0, &micros(0)) }),
+		id(unsafe { moq_publish_track_create_group(declared, std::ptr::null(), 0, &micros(0)) }),
 	);
 	// Unread, so both waits park.
 	let (mut open_wait, mut declared_wait) = (ReadyWait::park(open_group), ReadyWait::park(declared_group));

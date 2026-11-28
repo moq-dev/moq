@@ -101,7 +101,7 @@ export async function run(): Promise<void> {
 								}
 								// A frameless candidate beyond one owed group keeps the ordered
 								// cursor parked while frames advance its presentation edge.
-								track.createGroup(BigInt(retained + 2));
+								hooks.createEmpty(track, BigInt(retained + 2));
 								waiting.push(...ordered);
 							}
 							let start = 0;

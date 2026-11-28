@@ -112,14 +112,14 @@ impl Topology {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 		broadcast.announce().unwrap();
-		let group = track.append_next().unwrap();
+		let group = track.append_next(b"snapshot".as_slice()).unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;
 		let a_to_r = link(version, &relay_a, &subscriber, None).await;
 		crate::support::announced(&subscriber.consume(), "live").await;
 
-		let mut topology = Self {
+		Self {
 			version,
 			publisher,
 			relay_a,
@@ -131,10 +131,8 @@ impl Topology {
 			links: vec![p_to_b],
 			_broadcast: broadcast,
 			_track: track,
-			written: Vec::new(),
-		};
-		topology.write("snapshot");
-		topology
+			written: vec!["snapshot".to_string()],
+		}
 	}
 
 	fn write(&mut self, payload: &str) {

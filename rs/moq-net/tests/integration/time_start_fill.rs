@@ -90,7 +90,10 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 	broadcast.announce().unwrap();
 	track.start_at(4000).unwrap();
 	for key in [4000, 5000] {
-		write(track.create_group(moq_net::group::Info { start: key }).unwrap(), key);
+		let group = track
+			.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
 	}
 
 	let subscriber = produce_origin(2);

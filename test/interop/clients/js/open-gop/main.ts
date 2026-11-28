@@ -90,18 +90,27 @@ window.runRecovery = async (packets) => {
 		const demand = track.demand();
 		while (!demand.refresh.peek() && !failed) await Promise.race([demand.refresh.changed(), inputDone]);
 		// Every group is written before the decoder reads past the first, so none may go stale.
+		// A group starts at its first frame. One following the previous recorded group is appended,
+		// skipping the keys between; any other leaves them unknown, as the recorded gap does.
 		let group: Moq.Group.Producer | undefined;
+		let recorded: number | undefined;
 		for (const packet of packets) {
-			if (group?.start !== BigInt(packet.group)) {
-				group?.finish();
-				group = track.createGroup(BigInt(packet.group));
-			}
 			const timestamp = Duration.micros(packet.timestamp);
 			const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
-			group.writeFrame({
+			const frame = {
 				payload: Container.Legacy.encodeFrame(payload, timestamp),
 				timestamp: Moq.Time.Timestamp.fromMicros(packet.timestamp),
-			});
+			};
+			if (group && recorded === packet.group) {
+				group.writeFrame(frame);
+				continue;
+			}
+			group?.finish();
+			group =
+				recorded !== undefined && packet.group === recorded + 1
+					? track.appendGroup(frame)
+					: track.createGroup(frame);
+			recorded = packet.group;
 		}
 		group?.finish();
 		track.finish();

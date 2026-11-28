@@ -11,7 +11,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
@@ -78,8 +77,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut cached = track.append_next().unwrap();
-	cached.write_frame(cached.at_start(), b"cached".as_ref()).unwrap();
+	let cached = track.append_next(b"cached".as_ref()).unwrap();
 	cached.finish().unwrap();
 	broadcast.announce().unwrap();
 
@@ -125,8 +123,8 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let elapsed = kio::clock::now() - start;
 	assert_eq!(frame.payload.as_ref(), b"cached", "{label}");
 
-	let mut live = track.append_next().unwrap();
-	live.write_frame(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
+	let live = track
+		.append_group(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 		.unwrap();
 	live.finish().unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())

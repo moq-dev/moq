@@ -27,7 +27,7 @@ use std::task::Poll;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Timestamp, broadcast, group, track};
+use moq_net::{Timestamp, broadcast, track};
 
 /// Ranges in the one subscription, up to about what a lite-07 SUBSCRIBE fits.
 const RANGES: [u64; 4] = [1, 64, 1024, 16_384];
@@ -47,8 +47,7 @@ fn millis(millis: u64) -> Timestamp {
 
 /// Write a one-frame group starting at `key` milliseconds.
 fn land(track: &track::Producer, key: u64) {
-	let mut group = track.create_group(group::Info { start: key }).unwrap();
-	group.write_frame(millis(key), Bytes::from_static(b"x")).unwrap();
+	let group = track.create_group(millis(key), Bytes::from_static(b"x")).unwrap();
 	group.finish().unwrap();
 }
 
@@ -131,11 +130,12 @@ impl TimeCap {
 	}
 
 	pub(crate) fn step(&mut self) {
-		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
-		let mut handed = drain(&mut self.reader);
-		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
+		let group = self
+			.track
+			.create_group(millis(self.next), Bytes::from_static(b"x"))
+			.unwrap();
 		group.finish().unwrap();
-		handed += drain(&mut self.reader);
+		let handed = drain(&mut self.reader);
 		self.next += 1;
 		assert_eq!(handed, 1, "the group is in range");
 	}
@@ -268,11 +268,12 @@ impl TimeGaps {
 
 	pub(crate) fn step(&mut self) {
 		// Each a millisecond after the last, from where the history ended.
-		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
-		let mut handed = drain(&mut self.reader);
-		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
+		let group = self
+			.track
+			.create_group(millis(self.next), Bytes::from_static(b"x"))
+			.unwrap();
 		group.finish().unwrap();
-		handed += drain(&mut self.reader);
+		let handed = drain(&mut self.reader);
 		self.next += 1;
 		assert_eq!(handed, 1, "the live group is in range");
 	}

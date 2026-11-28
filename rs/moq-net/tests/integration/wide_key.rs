@@ -3,7 +3,6 @@
 //! Group key boundaries, directly and through a forwarding origin.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -54,13 +53,17 @@ async fn largest_quic_key_reaches_the_subscriber() {
 				.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			for key in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
-				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
+				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame, and
+				// a timed group starts at its first frame's.
+				let key = match untimed {
+					true => key,
+					false => key.min((1 << 61) - 1),
+				};
 				let timestamp = match untimed {
 					true => Timestamp::unscaled(key),
-					false => Timestamp::from_micros(key.min((1 << 61) - 1)).unwrap(),
+					false => Timestamp::from_micros(key).unwrap(),
 				};
-				let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
+				let group = track.create_group(timestamp, b"ladder".as_ref()).unwrap();
 				group.finish().unwrap();
 				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 					.await
@@ -84,12 +87,6 @@ async fn largest_quic_key_reaches_the_subscriber() {
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
-}
-
-/// The latest frame time a millisecond track can carry, short of a wide key, which no
-/// timestamp reaches.
-fn latest() -> Timestamp {
-	Timestamp::new((1 << 61) - 1, moq_net::Timescale::MILLI).unwrap()
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
@@ -121,10 +118,8 @@ async fn wide_key_fails_only_its_subscription() {
 		.unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
-	group.write_frame(Timestamp::unscaled(WIDE), b"wide".as_ref()).unwrap();
-	let mut group = narrow.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
+	let _group = wide.create_group(Timestamp::unscaled(WIDE), b"wide".as_ref()).unwrap();
+	let _group = narrow.append_group(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
@@ -187,13 +182,15 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let broadcast = publisher
 		.route("bench", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
+	// Untimed, since a timed group starts at its first frame, which no wide key can carry.
+	let wide = broadcast
+		.broadcast()
+		.create_track("wide", moq_net::track::Info::default())
+		.unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = wide.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();
-	let mut group = narrow.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
+	let _group = wide.append_group(Timestamp::unscaled(0), b"first".as_ref()).unwrap();
+	let _group = narrow.append_group(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
@@ -218,8 +215,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	assert_eq!(group.start, 0);
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"first".as_ref());
 
-	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
-	group.write_frame(latest(), b"wide".as_ref()).unwrap();
+	let _group = wide.create_group(Timestamp::unscaled(WIDE), b"wide".as_ref()).unwrap();
 
 	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 		.await

@@ -152,21 +152,18 @@ impl Feed {
 	async fn run(&mut self, count: u64) {
 		for _ in 0..count {
 			let index = self.written.len() as u64;
-			if index.is_multiple_of(FRAMES) {
-				if let Some(group) = self.group.take() {
-					group.finish().unwrap();
-				}
-				self.group = Some(
-					self.track
-						.append_group(Timestamp::from_millis(index / FRAMES).unwrap())
-						.unwrap(),
-				);
-			}
-			let group = self.group.as_mut().unwrap();
 			let timestamp = Timestamp::from_millis(index * self.step.as_millis() as u64).unwrap();
-			group
-				.write_frame(timestamp, payload(index / FRAMES, index % FRAMES))
-				.unwrap();
+			let frame = payload(index / FRAMES, index % FRAMES);
+			match self.group.as_mut() {
+				Some(group) if !index.is_multiple_of(FRAMES) => group.write_frame(timestamp, frame).unwrap(),
+				_ => {
+					if let Some(group) = self.group.take() {
+						group.finish().unwrap();
+					}
+					// Each group starts at its first frame.
+					self.group = Some(self.track.append_group(timestamp, frame).unwrap());
+				}
+			}
 			self.written
 				.push(kio::clock::now().saturating_duration_since(self.start));
 			kio::clock::sleep(self.step).await;

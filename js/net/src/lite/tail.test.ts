@@ -33,13 +33,18 @@ const GRACE = Duration.millis(100);
 
 /**
  * One lite-05+ frame: a timestamp delta of `delta` milliseconds, then the length-prefixed
- * payload. Lite-07 leads with the size plus one instead.
+ * payload. Lite-07 leads with the size plus one instead, and omits the delta of a group's first
+ * frame, which sits at the group's start.
  */
-function frame(payload: string, version: Version, delta = 0): Uint8Array {
+function frame(payload: string, version: Version, delta: number | undefined): Uint8Array {
 	const bytes = new TextEncoder().encode(payload);
 	// Every field is under 64, so each is a one-byte varint; lite-05/06 zigzag-encode the delta.
-	if (delta < 0 || delta >= 32) throw new RangeError("a one-byte delta only");
-	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta, ...bytes]);
+	if (delta !== undefined && (delta < 0 || delta >= 32)) throw new RangeError("a one-byte delta only");
+	if (hasLengthFirst(version)) {
+		const header = delta === undefined ? [bytes.byteLength + 1] : [bytes.byteLength + 1, delta];
+		return new Uint8Array([...header, ...bytes]);
+	}
+	if (delta === undefined) throw new RangeError("lite-05/06 always carry a delta");
 	return new Uint8Array([delta * 2, bytes.byteLength, ...bytes]);
 }
 
@@ -58,8 +63,8 @@ function groupStream(subscriber: Subscriber, key: bigint, subscribe = 0n) {
 	let first = true;
 	return {
 		write: (payload: string) => {
-			// Lite-07 counts the first delta from the group's start, so its first frame sits there.
-			const at = first && !hasLengthFirst(subscriber.version) ? Number(key) : 0;
+			// Lite-07 omits the first delta, its frame sitting at the group's start.
+			const at = !first ? 0 : hasLengthFirst(subscriber.version) ? undefined : Number(key);
 			controller.enqueue(frame(payload, subscriber.version, at));
 			first = false;
 		},

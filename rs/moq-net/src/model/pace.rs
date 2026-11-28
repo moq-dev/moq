@@ -458,7 +458,7 @@ mod tests {
 		);
 		let subscriber = track.subscribe(None);
 		let fill = |start| {
-			let mut group = track.create_group(group::Info { start }).unwrap();
+			let mut group = track.create_empty(group::Info { start }).unwrap();
 			for _ in 0..2 {
 				group
 					.write_frame(crate::Timestamp::unscaled(start), Bytes::from(vec![0u8; MB]))

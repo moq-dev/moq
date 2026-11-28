@@ -55,13 +55,13 @@ async fn position_zero_and_exact_group_match() {
 		broadcast.announce().unwrap();
 
 		// Group 0 covers [0, 1000); group 1000 covers [1000, 2000).
-		let mut g0 = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
-		g0.write_frame(Timestamp::from_millis(0).unwrap(), b"g0".as_slice())
+		let g0 = track
+			.append_group(Timestamp::from_millis(0).unwrap(), b"g0".as_slice())
 			.unwrap();
 		g0.finish_at(1000).unwrap();
 
-		let mut g1 = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
-		g1.write_frame(Timestamp::from_millis(1000).unwrap(), b"g1".as_slice())
+		let g1 = track
+			.append_group(Timestamp::from_millis(1000).unwrap(), b"g1".as_slice())
 			.unwrap();
 		g1.finish_at(2000).unwrap();
 
@@ -139,8 +139,8 @@ async fn standalone_fetch_uses_one_shot_subscribe_with_group_end() {
 			.unwrap();
 		broadcast.announce().unwrap();
 
-		let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-		for i in 0u64..5 {
+		let mut g0 = track.create_group(Timestamp::ZERO, b"f0".as_slice()).unwrap();
+		for i in 1u64..5 {
 			g0.write_frame(Timestamp::from_millis(i * 100).unwrap(), format!("f{i}").into_bytes())
 				.unwrap();
 		}
@@ -264,8 +264,8 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 		broadcast.announce().unwrap();
 
 		for i in 0u64..3 {
-			let mut g = track.create_group(moq_net::group::Info { start: i }).unwrap();
-			g.write_frame(Timestamp::from_millis(i * 1000).unwrap(), format!("g{i}").into_bytes())
+			let g = track
+				.create_group(Timestamp::from_millis(i * 1000).unwrap(), format!("g{i}").into_bytes())
 				.unwrap();
 			g.finish().unwrap();
 		}
@@ -311,10 +311,10 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 		assert_eq!(count_bidi(&upstream.client_transport, FETCH), 0);
 
 		// Group 3 starts streaming live (still open!) while the live SUBSCRIBE is active.
-		// A concurrent fetch_group(3) before g3 finishes deduplicates onto that active
+		// A concurrent fetch_group(3000) before g3 finishes deduplicates onto that active
 		// SUBSCRIBE (no extra upstream SUBSCRIBE, no FETCH).
-		let mut g3 = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
-		g3.write_frame(Timestamp::from_millis(3000).unwrap(), b"g3-f0".as_slice())
+		let mut g3 = track
+			.create_group(Timestamp::from_millis(3000).unwrap(), b"g3-f0".as_slice())
 			.unwrap();
 
 		let mut live3 = kio::clock::timeout(TIMEOUT, live.recv_group())
@@ -322,7 +322,7 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 			.expect("live g3 timeout")
 			.unwrap()
 			.expect("live g3");
-		assert_eq!(live3.start, 3);
+		assert_eq!(live3.start, 3000);
 		let live3_f0 = kio::clock::timeout(TIMEOUT, live3.read_frame())
 			.await
 			.expect("live g3 f0 timeout")
@@ -330,9 +330,9 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 			.expect("g3 f0");
 		assert_eq!(live3_f0.payload.as_ref(), b"g3-f0");
 
-		let mut fetched3 = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(3, None))
+		let mut fetched3 = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(3000, None))
 			.await
-			.expect("fetch_group(3) timeout")
+			.expect("fetch_group(3000) timeout")
 			.unwrap();
 		g3.write_frame(Timestamp::from_millis(3100).unwrap(), b"g3-f1".as_slice())
 			.unwrap();
@@ -408,8 +408,7 @@ async fn relay_exact_position_fetch_past_live_edge_reaches_fill_handler() {
 		broadcast.announce().unwrap();
 		let requests = track.requests();
 
-		let mut g66 = track.create_group(moq_net::group::Info { start: 66 }).unwrap();
-		g66.write_frame(Timestamp::unscaled(66), b"66".as_slice()).unwrap();
+		let g66 = track.create_group(Timestamp::unscaled(66), b"66".as_slice()).unwrap();
 		g66.finish().unwrap();
 
 		let relay = origin(2, Some(cache::Pool::unbounded()));

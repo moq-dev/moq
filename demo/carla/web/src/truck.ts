@@ -72,13 +72,13 @@ function publishControl(
 function write(track: Moq.Track.Producer, command: Command) {
 	if (track.closed.peek() !== undefined) return;
 	const message = { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps };
-	// The track is scale-less, so the frame carries its group's key.
-	const group = track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
-	group.writeFrame({
-		payload: encoder.encode(JSON.stringify(message)),
-		timestamp: Moq.Time.Timestamp.unscaled(group.start),
-	});
-	group.finish();
+	// The track is scale-less, so the frame names the key its group starts at: the next one.
+	track
+		.appendGroup({
+			payload: encoder.encode(JSON.stringify(message)),
+			timestamp: Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n),
+		})
+		.finish();
 }
 
 /**

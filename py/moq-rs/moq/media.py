@@ -230,15 +230,6 @@ class TrackProducer:
         """
         self._inner.cut()
 
-    def seek(self, start: int) -> None:
-        """Draw a group boundary and number the next group ``start``.
-
-        :meth:`cut` with an explicit start, for a publisher whose group
-        numbers have to be deterministic: two encoders aligning per GOP so a
-        consumer can fail over between them.
-        """
-        self._inner.seek(start)
-
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
@@ -266,10 +257,6 @@ class ContainerProducer:
         (MKV, TS, FLV) ignore it.
         """
         self._inner.cut()
-
-    def seek(self, start: int) -> None:
-        """Start a new segment and number its groups ``start``."""
-        self._inner.seek(start)
 
     def finish(self) -> None:
         """Finish every track this container publishes."""

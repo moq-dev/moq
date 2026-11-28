@@ -237,7 +237,7 @@ async function subscribeEnd(keys: number[], version: Version = Version.DRAFT_05,
 	// Finish the track only once it's being served, so the publisher observes a live
 	// track ending rather than resolving a subscribe against an already-closed one.
 	for (const key of keys) {
-		const group = track.createGroup(BigInt(key));
+		const group = hooks.createEmpty(track, BigInt(key));
 		group.writeFrame(textFrame("hello", Timestamp.fromMillis(key)));
 		group.finish();
 
@@ -326,7 +326,7 @@ async function groupSendOrders(options: {
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
 
-			const group = track.createGroup(BigInt(key));
+			const group = hooks.createEmpty(track, BigInt(key));
 			groups.push(group);
 			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(key))));
 
@@ -409,7 +409,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	void publisher.runSubscribe(msg, server);
 
 	// Leave the group open, so its stream is still being served when the update lands.
-	const group = track.createGroup(4n);
+	const group = hooks.createEmpty(track, 4n);
 	group.writeFrame(textFrame("hello"));
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -470,7 +470,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 	});
 	void publisher.runSubscribe(msg, server);
 
-	const group = track.createGroup(4n);
+	const group = hooks.createEmpty(track, 4n);
 	group.writeFrame(textFrame("hello"));
 
 	try {
@@ -523,7 +523,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 
 	try {
 		for (let key = 0n; key < BigInt(count); key++) {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			groups.push(group);
 			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(key))));
 			await servingNextGroup(opened);
@@ -557,7 +557,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const broadcast = publish(origin, Path.from("test"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
-	const group = track.createGroup(7n);
+	const group = hooks.createEmpty(track, 7n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 
@@ -636,7 +636,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	const broadcast = publish(origin, Path.from("test"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true }));
 
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
 	group.finish();
 
@@ -685,7 +685,7 @@ test.each(STAMPS.map((stamp) => [stamp.name, stamp] as const))("%s", async (_nam
 	);
 
 	const start = BigInt(stamp.start);
-	const group = track.createGroup(start);
+	const group = hooks.createEmpty(track, start);
 	for (const payload of stamp.payloads) group.writeFrame(textFrame(payload, Timestamp.unscaled(start)));
 	group.finish();
 	await clock.advance(Duration.ZERO);
@@ -889,7 +889,7 @@ async function servedSubscription(
 	let track = options.pending ? undefined : defined(broadcast.createTrack("video", info));
 	for (const key of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
-		const group = track.createGroup(key);
+		const group = hooks.createEmpty(track, key);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
 	}
@@ -961,7 +961,7 @@ async function servedSubscription(
 			const staged = hooks.stageRequest(pulled, info);
 			if (reported !== undefined) hooks.reportedGroup(staged.producer, reported);
 			for (const key of held) {
-				const group = staged.producer.createGroup(key);
+				const group = hooks.createEmpty(staged.producer, key);
 				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 				group.finish();
 			}
@@ -969,7 +969,7 @@ async function servedSubscription(
 		},
 		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(key: bigint) {
-			const group = resolved().createGroup(key);
+			const group = hooks.createEmpty(resolved(), key);
 			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 			group.finish();
 		},
@@ -1026,23 +1026,24 @@ async function servedSubscription(
 			const times: bigint[] = [];
 			let end: bigint | undefined;
 			let endDelta: bigint | undefined;
-			// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
+			// Lite-07 omits frame 0's delta, counts a later stream's first from the group's start, and
+			// GROUP_END from the last frame.
 			const lengthFirst = hasLengthFirst(version);
 			let ts = lengthFirst ? header.key : 0n;
-			let first = true;
+			let implicit = lengthFirst && header.frameStart === 0;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
 				// leads with the size plus one instead, where 0 is GROUP_END and its End delta, and
-				// carries the timestamp deltas after the first unsigned.
+				// carries the timestamp deltas unsigned.
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				if (length === -1) {
 					endDelta = await reader.u62();
 					end = ts + endDelta;
 					continue;
 				}
-				const raw = await reader.u62();
-				ts += lengthFirst && !first ? raw : (raw >> 1n) ^ -(raw & 1n);
-				first = false;
+				const raw = implicit ? 0n : await reader.u62();
+				ts += lengthFirst ? raw : (raw >> 1n) ^ -(raw & 1n);
+				implicit = false;
 				times.push(ts);
 				const size = length ?? (await reader.u53());
 				if (options.meta) sizes.push(size);
@@ -1134,7 +1135,7 @@ test.each([
 ])("$name drops a group reset to make room", async ({ version }) => {
 	const sub = await servedSubscription({ version, startGroup: 0n });
 	try {
-		const group = sub.track.createGroup(0n);
+		const group = hooks.createEmpty(sub.track, 0n);
 		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
 		expect(await sub.servedHeader()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
@@ -1288,7 +1289,7 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 		expect(await sub.servedSequence()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
-		const cut = sub.track.createGroup(1n);
+		const cut = hooks.createEmpty(sub.track, 1n);
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1314,7 +1315,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0n);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			const cut = sub.track.createGroup(1n);
+			const cut = hooks.createEmpty(sub.track, 1n);
 			cut.abort(new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1334,7 +1335,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		const sub = await servedSubscription({ version, startGroup: 0n });
 		try {
 			// Left open, so only the stop ends its stream.
-			const group = sub.track.createGroup(0n);
+			const group = hooks.createEmpty(sub.track, 0n);
 			group.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 			await sub.stopServed(StreamCode.Evicted);
 			for (;;) {
@@ -1498,7 +1499,7 @@ async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): 
 test("lite-07 ends a finished group with GROUP_END and a closed one with a bare FIN", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const whole = sub.track.createGroup(0n);
+		const whole = hooks.createEmpty(sub.track, 0n);
 		whole.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		whole.finishAt(500n);
 		expect(await sub.servedGroup()).toMatchObject({ key: 0n, payloads: ["x"], end: 500n });
@@ -1517,13 +1518,12 @@ for (const compression of [undefined, "deflate"] as const) {
 	test(`lite-07 serves a metadata subscription each frame's header alone (${compression ?? "plain"})`, async () => {
 		const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], meta: true, compression });
 		try {
-			const group = sub.track.createGroup(0n);
-			group.writeFrame(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
+			const group = sub.track.createGroup(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
 			group.writeFrame(textFrame("", Timestamp.fromMillis(3)));
 			group.writeFrame(textFrame("hello", Timestamp.fromMillis(4)));
 			group.finishAt(5n);
 			expect(await sub.servedGroup()).toMatchObject({
-				key: 0n,
+				key: 2n,
 				payloads: [],
 				sizes: [300, 0, 5],
 				times: [2n, 3n, 4n],
@@ -1539,7 +1539,7 @@ for (const compression of [undefined, "deflate"] as const) {
 test("lite-07 GROUP_END counts from the last frame", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const group = sub.track.createGroup(1000n);
+		const group = hooks.createEmpty(sub.track, 1000n);
 		for (const ms of [1000, 1033, 1033, 1100]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
 		group.finishAt(1133n);
 		expect(await sub.servedGroup()).toMatchObject({
@@ -1553,19 +1553,28 @@ test("lite-07 GROUP_END counts from the last frame", async () => {
 	}
 });
 
-// A group may end at its last frame (delta 0), and one with no frame at its start.
-test("lite-07 GROUP_END may end a group at its last frame or its start", async () => {
+// A group may end at its last frame (delta 0), and a stream resumed past its last frame carries
+// GROUP_END alone, counting from the group's start.
+test("lite-07 GROUP_END may end a group at its last frame or a stream at its start", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const group = sub.track.createGroup(1000n);
-		group.writeFrame(textFrame("x", Timestamp.fromMillis(1040)));
-		group.finishAt(1040n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 1000n, times: [1040n], endDelta: 0n, end: 1040n });
-		const empty = sub.track.createGroup(2000n);
-		empty.finishAt(2000n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 2000n, times: [], endDelta: 0n, end: 2000n });
+		sub.track.createGroup(textFrame("x", Timestamp.fromMillis(1040))).finishAt(1040n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1040n, times: [1040n], endDelta: 0n, end: 1040n });
 	} finally {
 		await sub.close();
+	}
+	const later = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2000n, startFrame: 1 });
+	try {
+		later.track.createGroup(textFrame("x", Timestamp.fromMillis(2000))).finishAt(2000n);
+		expect(await later.servedGroup()).toMatchObject({
+			key: 2000n,
+			frameStart: 1,
+			times: [],
+			endDelta: 0n,
+			end: 2000n,
+		});
+	} finally {
+		await later.close();
 	}
 });
 
@@ -1574,7 +1583,7 @@ test("lite-07 GROUP_END may end a group at its last frame or its start", async (
 test("lite-07 counts a resumed stream's first delta from the group's start", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 1000n, startFrame: 1 });
 	try {
-		const group = sub.track.createGroup(1000n);
+		const group = hooks.createEmpty(sub.track, 1000n);
 		for (const ms of [1000, 1033, 1066]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
 		group.finishAt(1100n);
 		expect(await sub.servedGroup()).toMatchObject({
@@ -1613,7 +1622,7 @@ test("lite-07 skips a pause and a sparse track's gaps, but nothing between conti
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		const append = (start: number, end: number) => {
-			const group = sub.track.appendGroup(Timestamp.fromMillis(start));
+			const group = hooks.appendEmpty(sub.track, Timestamp.fromMillis(start));
 			group.writeFrame(textFrame("x", Timestamp.fromMillis(start)));
 			group.finishAt(BigInt(end));
 		};
@@ -1646,7 +1655,7 @@ test("lite-07 skips a pause and a sparse track's gaps, but nothing between conti
 test("lite-07 drops a whole group's span", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const group = sub.track.createGroup(0n);
+		const group = hooks.createEmpty(sub.track, 0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		group.finishAt(500n);
 		// Lite-07 names a stopped stream only for an eviction before the header is acknowledged.
@@ -1662,7 +1671,7 @@ test("lite-07 drops a whole group's span", async () => {
 test("lite-07 names the span of a group that finished whole after its stream failed", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const group = sub.track.createGroup(0n);
+		const group = hooks.createEmpty(sub.track, 0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		await sub.stopServed(StreamCode.Evicted);
 		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 1n]]);
@@ -1686,7 +1695,7 @@ test("lite-07 sends a skip ahead of a drop of the group above it", async () => {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
 		// Left open, so only the stop ends its stream.
-		const above = sub.track.createGroup(3n);
+		const above = hooks.createEmpty(sub.track, 3n);
 		above.writeFrame(textFrame("hello", Timestamp.fromMillis(3)));
 		sub.track.skipGroups(1n, 3n);
 		await sub.stopServed(StreamCode.Evicted);
@@ -1736,7 +1745,7 @@ test("lite draft-06: a reported cut stays dropped when re-created", async () => 
 		expect(await sub.servedSequence()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
-		const cut = sub.track.createGroup(1n);
+		const cut = hooks.createEmpty(sub.track, 1n);
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1846,7 +1855,7 @@ test.each([
 		void sub.stall().then((reason) => {
 			reset = reason;
 		});
-		if (arriving) sub.track.createGroup(1n).writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
+		if (arriving) hooks.createEmpty(sub.track, 1n).writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		else sub.serve(1n);
 		expect(await sub.servedHeader()).toBe(1n);
 		await flush();
@@ -1933,7 +1942,7 @@ test("lite draft-07: a reset that cut a GROUP_END names its span's starts again"
 
 		// Its FIN, after the GROUP_END naming its span [1, 3), is never acknowledged.
 		sub.reliable.fin = false;
-		const group = sub.track.createGroup(1n);
+		const group = hooks.createEmpty(sub.track, 1n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(1)));
 		group.finishAt(3n);
 		expect(await sub.servedHeader()).toBe(1n);
@@ -1963,7 +1972,7 @@ test.each([
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({ version, startGroup: 0n, reliable });
 	try {
-		const group = sub.track.createGroup(0n);
+		const group = hooks.createEmpty(sub.track, 0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		expect(await sub.servedHeader()).toBe(0n);
 		await flush();
@@ -1998,7 +2007,7 @@ test.each([
 	try {
 		sub.reliable.acked = acked;
 		// Left open, so only the stop ends its stream.
-		const group = sub.track.createGroup(0n);
+		const group = hooks.createEmpty(sub.track, 0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		expect(await sub.stopAfterHeader(code)).toBe(0n);
 		await flush();
@@ -2031,7 +2040,7 @@ test("lite draft-07: a stream expiring mid-frame resets at once", async () => {
 		void sub.stall().then((reason) => {
 			reset = reason;
 		});
-		const group = sub.track.createGroup(1n);
+		const group = hooks.createEmpty(sub.track, 1n);
 		const frame = group.createFrame({ size: 10, timestamp: Timestamp.fromMillis(1) });
 		frame.write(new Uint8Array(5));
 		expect(await sub.servedHeader()).toBe(1n);
@@ -2486,7 +2495,7 @@ for (const skipped of ["failed", "stale"] as const) {
 		try {
 			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { start: 5n, requested: 5n });
-			const group = sub.track.createGroup(5n);
+			const group = hooks.createEmpty(sub.track, 5n);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			if (skipped === "failed") group.abort(new Error("cut"));
 			else group.finish();
@@ -2521,7 +2530,7 @@ test("lite draft-07: a group stale under the max age is named below the start", 
 	try {
 		hooks.receiveTrack(sub.track);
 		hooks.startTrack(sub.track, { start: 5n, requested: 5n });
-		const group = sub.track.createGroup(5n);
+		const group = hooks.createEmpty(sub.track, 5n);
 		group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 		group.finish();
 		sub.serve(6n);
@@ -3174,7 +3183,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	);
 
 	try {
-		const first = track.createGroup(0n);
+		const first = hooks.createEmpty(track, 0n);
 		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		track.finishAt({ group: 2n, frame: 0 });
@@ -3185,7 +3194,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 		const early = await pending;
 		expect("end" in early).toBe(true);
 
-		const second = track.createGroup(1n);
+		const second = hooks.createEmpty(track, 1n);
 		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		track.finish();
@@ -3219,7 +3228,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 	);
 
 	try {
-		const first = track.createGroup(0n);
+		const first = hooks.createEmpty(track, 0n);
 		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		// An errored end past the live edge, which only a received copy forwards: group 1 is still
@@ -3231,7 +3240,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_06);
 		expect(await settlesWithin(pending, clock, Duration.millis(20))).toBe(false);
 
-		const second = track.createGroup(1n);
+		const second = hooks.createEmpty(track, 1n);
 		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		await expect(pending).rejects.toBeDefined();
@@ -3285,7 +3294,7 @@ async function heldOpenEnd() {
 		server,
 	);
 
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 	track.finish();
@@ -3367,9 +3376,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 	);
 
 	try {
-		const group = track.createGroup(0n);
-		group.writeFrame(textFrame("hello"));
-		group.finish();
+		track.createGroup(textFrame("hello", Timestamp.fromMillis(0))).finish();
 		track.finish();
 		track.close();
 
@@ -3417,7 +3424,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 		await write(chunk);
 	});
 	const append = (key: number) => {
-		const group = track.createGroup(BigInt(key));
+		const group = hooks.createEmpty(track, BigInt(key));
 		group.writeFrame(textFrame("frame", Timestamp.fromMillis(key)));
 		group.finish();
 	};
@@ -3509,7 +3516,7 @@ async function serve(
 		const start = received[Number(key)];
 		const group =
 			start === undefined
-				? track.createGroup(BigInt(key))
+				? hooks.createEmpty(track, BigInt(key))
 				: hooks.receiveGroup(track, { start: BigInt(key), offset: start });
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
@@ -3693,7 +3700,7 @@ async function saturatedGroup() {
 	void publisher.runSubscribe(msg, server);
 
 	// A finished group still has frames to send, so its own close must not drop it.
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 
@@ -3772,12 +3779,12 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 			server,
 		);
 
-		const old = track.createGroup(0n);
+		const old = hooks.createEmpty(track, 0n);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
 		old.finish();
 		await headerStarted;
 
-		const edge = track.createGroup(1n);
+		const edge = hooks.createEmpty(track, 1n);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(1000) });
 		edge.finish();
 
@@ -3976,7 +3983,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 	// Left open: its producer never finishes it.
-	const open = track.createGroup(0n);
+	const open = hooks.createEmpty(track, 0n);
 
 	try {
 		void publisher.runSubscribe(
@@ -3995,7 +4002,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 
 		// The track runs a second past group 0's successor while group 0 waits for more.
 		for (const ms of [1000, 2000]) {
-			const group = track.createGroup(BigInt(ms / 1000));
+			const group = hooks.createEmpty(track, BigInt(ms / 1000));
 			group.writeFrame(frame(ms));
 			group.finish();
 		}
@@ -4060,7 +4067,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		);
 
 		const write = (key: bigint, ms: number) => {
-			const group = track.createGroup(key);
+			const group = hooks.createEmpty(track, key);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
@@ -4340,7 +4347,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	const broadcast = publish(origin, Path.from("live"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	// Left open, so the fetch is still serving when the grant shrinks.
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame(textFrame("first"));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
@@ -4377,7 +4384,7 @@ test("lite draft-07: a fetch whose max age gives up partway resets as too old", 
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	// Left open, so the fetch is still serving when the track runs on.
-	const open = track.createGroup(0n);
+	const open = hooks.createEmpty(track, 0n);
 	open.writeFrame(frame(0));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
@@ -4396,7 +4403,7 @@ test("lite draft-07: a fetch whose max age gives up partway resets as too old", 
 		// The first frame is on the wire before the track runs a second past its successor.
 		await client.reader.u8();
 		for (const ms of [1000, 2000]) {
-			const group = track.createGroup(BigInt(ms / 1000));
+			const group = hooks.createEmpty(track, BigInt(ms / 1000));
 			group.writeFrame(frame(ms));
 			group.finish();
 		}
@@ -4422,7 +4429,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 	const broadcast = publish(origin, Path.from("live"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
-	const whole = track.createGroup(0n);
+	const whole = hooks.createEmpty(track, 0n);
 	whole.writeFrame(frame(0));
 	whole.finish();
 
@@ -4464,7 +4471,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 
 		// Then the track runs a second past its successor, with the FIN still unacknowledged.
 		for (const ms of [1000, 2000]) {
-			const group = track.createGroup(BigInt(ms / 1000));
+			const group = hooks.createEmpty(track, BigInt(ms / 1000));
 			group.writeFrame(frame(ms));
 			group.finish();
 		}
@@ -4488,9 +4495,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	const broadcast = publish(source, Path.from("live"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
-	const whole = track.createGroup(0n);
-	whole.writeFrame(frame(0));
-	whole.finish();
+	track.createGroup(frame(0)).finish();
 	const url = new URL("https://localhost:4443/test");
 	const [session, upstreamServer] = await Promise.all([
 		connectSession({ url, transport: upstream.client }),
@@ -4542,11 +4547,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 		expect(reset).toBeUndefined();
 
 		// Then the track runs a second past its successor upstream, with the FIN still unacknowledged.
-		for (const ms of [1000, 2000]) {
-			const group = track.createGroup(BigInt(ms / 1000));
-			group.writeFrame(frame(ms));
-			group.finish();
-		}
+		for (const ms of [1000, 2000]) track.createGroup(frame(ms)).finish();
 		await serving;
 		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 	} finally {
@@ -4636,7 +4637,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("quiet"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
-	const group = track.createGroup(0n);
+	const group = hooks.createEmpty(track, 0n);
 	group.writeFrame(textFrame("cached"));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -4684,7 +4685,7 @@ test.each([false, true])(
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		// The source answered with group 4 as its largest; only group 0 has landed.
 		hooks.reportedLargest(track, { group: 4n, frame: 0 }, ended);
-		const group = track.createGroup(0n);
+		const group = hooks.createEmpty(track, 0n);
 		group.writeFrame(textFrame("oldest"));
 		group.finish();
 		const client = await Stream.open(pair.client, { version });
@@ -5762,7 +5763,7 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 	const origin = new OriginProducer();
 	const route = origin.route(Path.from("room"));
 	const track = defined(route.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	const g0 = track.createGroup(0n);
+	const g0 = hooks.createEmpty(track, 0n);
 	for (let i = 0; i < 4; i++) {
 		g0.writeFrame({ payload: new TextEncoder().encode(`f${i}`), timestamp: Timestamp.fromMillis(i * 100) });
 	}
@@ -5803,7 +5804,8 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 				break;
 			}
 			const payloadLen = encodedLen - 1;
-			await r.varint(); // zigzag timestamp delta
+			// The timestamp delta, which frame 0 omits.
+			if (header.frameStart !== 0 || frames.length > 0) await r.varint();
 			const payload = await r.read(payloadLen);
 			frames.push(new TextDecoder().decode(payload));
 		}

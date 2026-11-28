@@ -224,7 +224,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_next().ok()?;
-			let clock = lite::Clock::new(version, producer.start);
+			let clock = lite::Clock::new(version, producer.start, frame_start);
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
@@ -242,7 +242,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track.create_group(group::Info { start: header.group_id }).ok()?;
+			let producer = track.create_empty(group::Info { start: header.group_id }).ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,
@@ -363,9 +363,10 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 		})
 	};
 
-	// moq-lite: three plain frames, at every version, timed and untimed. The timing
-	// prefix is a zigzag delta, so 0x02 steps the clock forward by one; an untimed lite-07
-	// frame carries none. Lite-07 also ends the group whole with a GROUP_END.
+	// moq-lite: three plain frames, at every version, timed and untimed. Before lite-07 the
+	// timing prefix is a zigzag delta, so 0x02 steps the clock forward by one; lite-07's is
+	// unsigned, and its frame 0, at the group's start, and an untimed frame carry none.
+	// Lite-07 also ends the group whole with a GROUP_END.
 	for (index, version) in super::LITE_VERSIONS.iter().enumerate() {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
@@ -377,8 +378,11 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 				if length_first {
 					data.push(payload.len() as u8 + 1);
 				}
-				if timing {
-					data.push(if n == 0 || !timed { 0 } else { 2 });
+				match (timing, length_first, n) {
+					(false, _, _) | (true, true, 0) => {}
+					(true, true, _) => data.push(1),
+					(true, false, 0) => data.push(0),
+					(true, false, _) => data.push(if timed { 2 } else { 0 }),
 				}
 				if !length_first {
 					data.push(payload.len() as u8);
