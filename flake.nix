@@ -300,7 +300,8 @@
           # too; the x86_64-linux merge queue is what enforces it. Elsewhere the
           # check skips: nixpkgs marks the Swift compiler broken on aarch64-linux,
           # and cache.nixos.org stopped carrying a Darwin swift-format, so a Mac
-          # would compile the whole Swift toolchain for one formatter.
+          # would compile the whole Swift toolchain for one formatter; macOS uses
+          # Xcode's instead (sh/swift/format.sh).
           ++ lib.optionals (stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isx86_64) [
             swift-format
           ];
