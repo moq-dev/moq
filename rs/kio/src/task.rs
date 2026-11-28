@@ -374,11 +374,6 @@ impl<T> Tasks<T> {
 				if index.is_multiple_of(CHUNK_SLOTS) {
 					self.chunks.push(Chunk::new());
 				}
-				if index == 0 {
-					// A set's first task, which most sets never outgrow. A `Vec` would
-					// otherwise reserve four slots, each as big as the machine it holds.
-					self.children.reserve_exact(1);
-				}
 				self.children.push(None);
 				self.wakers.push(Waker::from(Arc::new(SlotWaker {
 					chunk: self.chunks[index / CHUNK_SLOTS].clone(),
