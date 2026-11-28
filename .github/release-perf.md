@@ -25,7 +25,7 @@ joined, which the generator never counted.
   for those. The relay used less CPU in those rounds (1.9 to 2.8 cores) than
   in clean ones (4.1 to 4.2), so it stops draining its one socket rather than
   running out of CPU. `main` reached the full buffer in 8 of 14 rounds,
-  `release` in 1 of 13. [Relay receive backlog](/quest/m1/relay-receive-backlog.md)
+  `release` in 1 of 13. [Relay receive backlog](/quest/m3/relay-receive-backlog.md)
   owns the cause.
 
 Alternating rounds of quic `chat` on `fedora` (32 CPUs, shared: one-minute
