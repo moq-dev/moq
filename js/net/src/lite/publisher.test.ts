@@ -2834,6 +2834,30 @@ for (const skipped of ["failed", "stale"] as const) {
 	});
 }
 
+// A group stale under the track's own max age is named below a lite-07 START all the same: no
+// budget reaches past that bound, so a relay reading from the oldest group would otherwise wait on
+// it forever. Mirrors the Rust `lite07_names_history_stale_under_the_bound_below_the_start`.
+test("lite draft-07: a group stale under the max age is named below the start", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], maxAge: Duration.millis(0) });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 5n, requested: 5n });
+		const group = sub.track.createGroup(5n);
+		group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+		group.finish();
+		sub.serve(6n);
+		hooks.answerEdge(sub.track);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(6n);
+		const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([dropped.drop.start, dropped.drop.end]).toEqual([5n, 6n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
 test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {

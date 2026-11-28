@@ -2,9 +2,9 @@
 //! carries the mode (lite-07), so no payload crosses a hop no reader needs it on, and as a
 //! payload subscription whose payloads the relay drops only where it does not.
 //!
-//! Deterministic: simulated time over the in-memory transport. Payload is measured as each
-//! publishing session bills it, which counts payload bytes and frames sent and nothing for a
-//! metadata FRAME.
+//! Read through the public [`crate::meta`] API. Deterministic: simulated time over the in-memory
+//! transport. Payload is measured as each publishing session bills it, which counts payload
+//! bytes and frames sent and nothing for a metadata FRAME.
 
 use std::time::Duration;
 
@@ -38,15 +38,19 @@ fn sent(registry: &stats::Registry) -> (u64, u64) {
 		})
 }
 
-/// The track subscriptions `registry`'s sessions served as publisher.
-fn subscriptions(registry: &stats::Registry) -> u64 {
+/// The track subscriptions `registry`'s sessions served as publisher: started, and still open.
+fn subscriptions(registry: &stats::Registry) -> (u64, u64) {
 	registry
 		.snapshot()
 		.traffic()
 		.into_iter()
 		.filter(|(_, role, _)| *role == stats::Role::Publisher)
-		.map(|(_, _, traffic)| traffic.subscriptions_started)
-		.sum()
+		.fold((0, 0), |(started, open), (_, _, traffic)| {
+			(
+				started + traffic.subscriptions_started,
+				open + traffic.subscriptions_started - traffic.subscriptions_ended,
+			)
+		})
 }
 
 /// Connect a client publishing `publish` to a server subscribing into `subscribe` over
@@ -98,9 +102,13 @@ struct Chain {
 }
 
 async fn chain(upstream: &str, downstream: &str) -> Chain {
+	chain_with(upstream, downstream, timed()).await
+}
+
+async fn chain_with(upstream: &str, downstream: &str, info: crate::track::Info) -> Chain {
 	let publisher = origin(1);
 	let broadcast = publisher.route("bcast", crate::origin::RouteOptions::hidden()).unwrap();
-	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	let track = broadcast.broadcast().create_track("video", info).unwrap();
 	broadcast.announce().unwrap();
 
 	let relay = origin(2);
@@ -147,22 +155,35 @@ fn write_group(track: &crate::track::Producer, at: u64) {
 
 /// The next group's key and each frame's declared size and timestamp in ms, read as a
 /// metadata reader reads them: headers alone.
-async fn read_headers(sub: &mut crate::track::Subscriber) -> (u64, Vec<(u64, u64)>) {
-	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
+async fn read_headers(sub: &mut crate::meta::Subscriber) -> (u64, Vec<(u64, u64)>) {
+	let mut group = recv(sub).await;
+	let mut frames = Vec::new();
+	while let Some(header) = kio::clock::timeout(TIMEOUT, group.next_header())
+		.await
+		.expect("header timeout")
+		.expect("header")
+	{
+		frames.push((header.size, header.timestamp.as_millis().unwrap() as u64));
+	}
+	(group.start, frames)
+}
+
+async fn recv(sub: &mut crate::meta::Subscriber) -> crate::meta::Group {
+	kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("recv timeout")
 		.expect("recv")
-		.expect("the track ended");
-	let mut frames = Vec::new();
-	while let Some(frame) = kio::clock::timeout(TIMEOUT, group.next_frame())
+		.expect("the track ended")
+}
+
+async fn meta(
+	broadcast: &crate::broadcast::Consumer,
+	subscription: impl Into<Option<crate::track::Subscription>>,
+) -> crate::meta::Subscriber {
+	kio::clock::timeout(TIMEOUT, broadcast.meta("video").unwrap().subscribe(subscription))
 		.await
-		.expect("frame timeout")
-		.expect("frame")
-	{
-		let size = frame.inflated.unwrap_or(frame.size);
-		frames.push((size, frame.timestamp.as_millis().unwrap() as u64));
-	}
-	(group.start, frames)
+		.expect("subscribe timeout")
+		.expect("subscribe")
 }
 
 /// Let every session settle what the last change asked of it.
@@ -176,10 +197,7 @@ async fn settle() {
 async fn metadata_crosses_lite07_hops_without_payload() {
 	let chain = chain("moq-lite-07-wip", "moq-lite-07-wip").await;
 	write_group(&chain.track, 0);
-	let mut sub = kio::clock::timeout(TIMEOUT, chain.remote.track_meta("video").unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
+	let mut sub = meta(&chain.remote, None).await;
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
 
 	write_group(&chain.track, 10);
@@ -194,10 +212,7 @@ async fn metadata_crosses_lite07_hops_without_payload() {
 async fn metadata_pulls_payload_only_across_an_older_hop() {
 	let chain = chain("moq-lite-06", "moq-lite-07-wip").await;
 	write_group(&chain.track, 0);
-	let mut sub = kio::clock::timeout(TIMEOUT, chain.remote.track_meta("video").unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
+	let mut sub = meta(&chain.remote, None).await;
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
 	assert_eq!(
 		sent(&chain.upstream),
@@ -216,10 +231,7 @@ async fn metadata_shares_the_payload_subscription_across_an_older_hop() {
 		.await
 		.expect("subscribe timeout")
 		.expect("subscribe");
-	let mut meta = kio::clock::timeout(TIMEOUT, chain.remote.track_meta("video").unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
+	let mut meta = meta(&chain.remote, None).await;
 	write_group(&chain.track, 0);
 
 	let mut group = kio::clock::timeout(TIMEOUT, payload.recv_group())
@@ -236,7 +248,7 @@ async fn metadata_shares_the_payload_subscription_across_an_older_hop() {
 	assert_eq!(read_headers(&mut meta).await, (0, vec![(BIG as u64, 0), (0, 1)]));
 	settle().await;
 	assert_eq!(
-		subscriptions(&chain.upstream),
+		subscriptions(&chain.upstream).0,
 		1,
 		"the older hop carried a second subscription"
 	);
@@ -258,10 +270,7 @@ async fn metadata_outlives_the_payload_reader_without_payload() {
 		.await
 		.expect("subscribe timeout")
 		.expect("subscribe");
-	let mut meta = kio::clock::timeout(TIMEOUT, chain.remote.track_meta("video").unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
+	let mut meta = meta(&chain.remote, None).await;
 
 	let mut group = kio::clock::timeout(TIMEOUT, payload.recv_group())
 		.await
@@ -287,5 +296,164 @@ async fn metadata_outlives_the_payload_reader_without_payload() {
 		(sent(&chain.upstream), sent(&chain.downstream)),
 		before,
 		"payload crossed with no payload reader"
+	);
+}
+
+/// An end reader whose own session is older than lite-07 asks for metadata the way a relay does
+/// over such a hop: one payload subscription, whose payload it drops. Only that hop's need pulls
+/// the payload over the hop above it.
+#[kio::test]
+async fn metadata_over_an_older_session_reads_headers() {
+	let chain = chain("moq-lite-07-wip", "moq-lite-06").await;
+	write_group(&chain.track, 0);
+	let mut sub = meta(&chain.remote, None).await;
+	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
+	settle().await;
+	assert_eq!(
+		sent(&chain.downstream),
+		(BIG as u64, 2),
+		"the older session carried the payload"
+	);
+	assert_eq!(subscriptions(&chain.downstream).0, 1);
+}
+
+/// A metadata reader that wants the payload after all opens a payload subscription at the group
+/// it reached and skips to its first missing frame, while the metadata subscription reads on.
+#[kio::test]
+async fn payload_subscription_continues_from_a_metadata_position() {
+	let chain = chain("moq-lite-07-wip", "moq-lite-07-wip").await;
+	let mut sub = meta(&chain.remote, None).await;
+	let mut group = chain.track.append_next().unwrap();
+	for at in 0..2 {
+		group
+			.write_frame(Timestamp::from_millis(at).unwrap(), vec![b'a' + at as u8; BIG])
+			.unwrap();
+	}
+
+	let mut headers = recv(&mut sub).await;
+	for _ in 0..2 {
+		kio::clock::timeout(TIMEOUT, headers.next_header())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+	}
+	let (key, next) = (headers.start, headers.index());
+	assert_eq!((key, next), (0, 2));
+	assert_eq!(sent(&chain.upstream), (0, 0), "metadata pulled payload");
+
+	let mut payload = kio::clock::timeout(
+		TIMEOUT,
+		chain.remote.track("video").unwrap().subscribe(
+			crate::track::Subscription::default()
+				.with_ranges([crate::track::Range::from(crate::track::Start::Time(key))]),
+		),
+	)
+	.await
+	.expect("subscribe timeout")
+	.expect("subscribe");
+	group
+		.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'c'; BIG])
+		.unwrap();
+	group.finish().unwrap();
+
+	let mut reading = kio::clock::timeout(TIMEOUT, payload.recv_group())
+		.await
+		.expect("recv timeout")
+		.expect("recv")
+		.expect("the track ended");
+	assert_eq!(reading.start, key);
+	reading.skip_to(next);
+	let frame = kio::clock::timeout(TIMEOUT, reading.read_frame())
+		.await
+		.expect("frame timeout")
+		.expect("frame")
+		.expect("a frame");
+	assert_eq!(
+		frame.payload,
+		vec![b'c'; BIG],
+		"the payload reader resumes at the first missing frame"
+	);
+
+	let header = kio::clock::timeout(TIMEOUT, headers.next_header())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!((header.size, header.timestamp.as_millis().unwrap()), (BIG as u64, 2));
+	assert!(
+		kio::clock::timeout(TIMEOUT, headers.next_header())
+			.await
+			.unwrap()
+			.unwrap()
+			.is_none()
+	);
+}
+
+/// A history range while only metadata demand stands fills its groups as metadata: every header
+/// arrives, oldest first, and no payload crosses either hop.
+#[kio::test]
+async fn metadata_history_fill_carries_no_payload() {
+	let info = timed().with_max_age(Duration::from_secs(60));
+	let chain = chain_with("moq-lite-07-wip", "moq-lite-07-wip", info).await;
+	for at in [0, 10, 20] {
+		write_group(&chain.track, at);
+	}
+	let mut sub = meta(
+		&chain.remote,
+		crate::track::Subscription::default()
+			.with_ranges([crate::track::Range::from(crate::track::Start::Oldest).with_order(crate::track::Order::Ascending)]),
+	)
+	.await;
+	for (key, at) in [(0, 0), (1, 10), (2, 20)] {
+		assert_eq!(read_headers(&mut sub).await, (key, vec![(BIG as u64, at), (0, at + 1)]));
+	}
+	assert_eq!(sent(&chain.upstream), (0, 0), "the publisher sent payload");
+	assert_eq!(sent(&chain.downstream), (0, 0), "the relay sent payload");
+}
+
+/// A compressed track's headers name each frame's plain size, read from a local payload copy
+/// and from a lite-07 metadata copy alike.
+#[kio::test]
+async fn metadata_names_a_compressed_frame_by_its_plain_size() {
+	let info = timed().with_compression(crate::track::Compression::Deflate);
+	let chain = chain_with("moq-lite-07-wip", "moq-lite-07-wip", info.clone()).await;
+	let local = crate::broadcast::Info::new().produce();
+	let track = local.create_track("video", info).unwrap();
+	let mut remote = meta(&chain.remote, None).await;
+	let mut near = meta(&local.consume(), None).await;
+	for producer in [&chain.track, &track] {
+		let mut group = producer.append_next().unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), vec![b'z'; BIG])
+			.unwrap();
+		group.finish().unwrap();
+	}
+	assert_eq!(read_headers(&mut remote).await, (0, vec![(BIG as u64, 0)]));
+	assert_eq!(read_headers(&mut near).await, (0, vec![(BIG as u64, 0)]));
+	drop(track.finish());
+}
+
+/// Dropping the last metadata reader ends its subscription on every hop.
+#[kio::test]
+async fn dropping_a_metadata_reader_closes_its_subscriptions() {
+	let chain = chain("moq-lite-07-wip", "moq-lite-07-wip").await;
+	write_group(&chain.track, 0);
+	let mut sub = meta(&chain.remote, None).await;
+	read_headers(&mut sub).await;
+	assert_eq!(subscriptions(&chain.upstream).1, 1);
+	assert_eq!(subscriptions(&chain.downstream).1, 1);
+
+	drop(sub);
+	settle().await;
+	assert_eq!(
+		subscriptions(&chain.downstream).1,
+		0,
+		"the relay still serves the reader"
+	);
+	assert_eq!(
+		subscriptions(&chain.upstream).1,
+		0,
+		"the publisher still serves the relay"
 	);
 }

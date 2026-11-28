@@ -104,7 +104,8 @@ pub enum TracksEvent<'a> {
 	/// TRACKS_FINISH: a track named by an earlier TRACKS_ADD is no longer listed because it
 	/// finished.
 	Finished { kind: Kind, name: Cow<'a, str> },
-	/// SYNCED: every track this hop listed when the stream opened, and still lists, was sent.
+	/// SYNCED: every track this hop listed once its listing was complete, and still lists, was
+	/// sent; a relay's listing completes on its upstream's SYNCED.
 	Synced,
 }
 

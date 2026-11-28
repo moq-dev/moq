@@ -14,11 +14,12 @@ import { Producer as GroupProducer } from "../group.ts";
 import { WireRoute } from "../hop.ts";
 import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
+import type * as Meta from "../meta.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Subscriber as TrackSubscriber } from "../track.ts";
+import type { InfoInit } from "../track.ts";
 import { trackMetaOf, wireOf } from "../wire.ts";
 import { Subscribe } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
@@ -60,7 +61,7 @@ function tap(): { heard: { version: Version; meta: boolean }[]; payloads: () => 
 // A publisher's session on `up` to a relay, and the relay's session on `down` to a viewer. By `via`,
 // the relay serves the viewer its session's broadcast itself, or the logical front a route of that
 // broadcast lands in.
-async function chain(up: Version, down: Version, via: (typeof VIA)[number]) {
+async function chain(up: Version, down: Version, via: (typeof VIA)[number], info: InfoInit = {}) {
 	const alpn = (version: Version) => (version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_06);
 	const upstream = createMockTransportPair(alpn(up));
 	const downstream = createMockTransportPair(alpn(down));
@@ -94,10 +95,11 @@ async function chain(up: Version, down: Version, via: (typeof VIA)[number]) {
 		}
 	})();
 	const broadcast = source.route(path).broadcast;
-	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null, ...info }));
 	const remote = wireOf(viewer).consume(path);
 	return {
 		remote,
+		track,
 		// A group at `at` ms of one big frame and an empty one after it.
 		write(key: bigint, at: number) {
 			const group = track.createGroup(key);
@@ -120,14 +122,13 @@ async function chain(up: Version, down: Version, via: (typeof VIA)[number]) {
 
 // The next group's key and each frame's declared size and timestamp in ms, read as a metadata
 // reader reads them: headers alone.
-async function headers(clock: Manual, reader: TrackSubscriber): Promise<[bigint, [number, number][]]> {
+async function headers(clock: Manual, reader: Meta.Subscriber): Promise<[bigint, [number, number][]]> {
 	const group = defined(await clock.drive(timeout(TIMEOUT, reader.recvGroup())));
 	const frames: [number, number][] = [];
 	for (;;) {
-		const read = await clock.drive(timeout(TIMEOUT, hooks.readGroupFrame(group, false, 0, true)));
-		if (!read) break;
-		expect(read.frame.payload.byteLength).toBe(0);
-		frames.push([defined(read.inflated), read.frame.timestamp.asMillis()]);
+		const header = await clock.drive(timeout(TIMEOUT, group.nextHeader()));
+		if (!header) break;
+		frames.push([header.size, header.timestamp.asMillis()]);
 	}
 	return [group.start, frames];
 }
@@ -140,7 +141,7 @@ test.each(VIA)("metadata crosses lite-07 hops without payload via the relay's %s
 	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, via);
 	try {
 		chained.write(0n, 0);
-		const reader = trackMetaOf("video", chained.remote).subscribe();
+		const reader = chained.remote.meta("video").subscribe();
 		expect(await headers(clock, reader)).toEqual([
 			0n,
 			[
@@ -172,7 +173,7 @@ test.each(VIA)("metadata pulls payload only across an older hop via the relay's 
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07, via);
 	try {
 		chained.write(0n, 0);
-		const reader = trackMetaOf("video", chained.remote).subscribe();
+		const reader = chained.remote.meta("video").subscribe();
 		expect(await headers(clock, reader)).toEqual([
 			0n,
 			[
@@ -200,7 +201,7 @@ test.each(VIA)("readers share the payload subscription across an older hop via t
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07, via);
 	try {
 		const payload = chained.remote.track("video").subscribe();
-		const meta = trackMetaOf("video", chained.remote).subscribe();
+		const meta = chained.remote.meta("video").subscribe();
 		chained.write(0n, 0);
 		const group = defined(await clock.drive(timeout(TIMEOUT, payload.recvGroup())));
 		const frame = defined(await clock.drive(timeout(TIMEOUT, group.readFrame())));
@@ -232,7 +233,7 @@ test.each(VIA)("a payload reader and a metadata reader each get their own via th
 	try {
 		chained.write(0n, 0);
 		const payload = chained.remote.track("video").subscribe();
-		const meta = trackMetaOf("video", chained.remote).subscribe();
+		const meta = chained.remote.meta("video").subscribe();
 		const group = defined(await clock.drive(timeout(TIMEOUT, payload.recvGroup())));
 		const frame = defined(await clock.drive(timeout(TIMEOUT, group.readFrame())));
 		expect(frame.payload.byteLength).toBe(BIG);
@@ -333,4 +334,145 @@ test("a metadata group takes headers alone", () => {
 	expect(() => hooks.writeGroupHeader(plain, Timestamp.fromMillis(0), 1)).toThrow();
 	plain.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.fromMillis(0) });
 	expect(() => hooks.metaGroup(plain)).toThrow();
+});
+
+// A viewer whose own session is older than lite-07 asks for metadata the way a relay does over such
+// a hop: one payload subscription, whose payload it drops.
+test.each(VIA)("metadata reads headers over an older session via the relay's %s", async (via) => {
+	using clock = manual();
+	const { heard } = tap();
+	const chained = await chain(Version.DRAFT_07, Version.DRAFT_06, via);
+	try {
+		chained.write(0n, 0);
+		const reader = chained.remote.meta("video").subscribe();
+		expect(await headers(clock, reader)).toEqual([
+			0n,
+			[
+				[BIG, 0],
+				[0, 1],
+			],
+		]);
+		const down = heard.filter((subscribe) => subscribe.version === Version.DRAFT_06);
+		expect(down.length).toBe(1);
+		expect(down[0]?.meta).toBe(false);
+		reader.close();
+	} finally {
+		await chained.close();
+	}
+});
+
+// A metadata reader that wants the payload after all opens a payload subscription at the group it
+// reached and reads on from its first missing frame, while the metadata subscription reads on.
+test("a payload subscription continues from a metadata position", async () => {
+	using clock = manual();
+	const { payloads } = tap();
+	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, "session");
+	try {
+		const reader = chained.remote.meta("video").subscribe();
+		const written = chained.track.createGroup(0n);
+		for (const at of [0, 1])
+			written.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(at) });
+		const group = defined(await clock.drive(timeout(TIMEOUT, reader.recvGroup())));
+		for (let i = 0; i < 2; i++) defined(await clock.drive(timeout(TIMEOUT, group.nextHeader())));
+		expect([group.start, group.index]).toEqual([0n, 2]);
+		expect(payloads()).toBe(0);
+
+		const payload = chained.remote.track("video").subscribe({ ranges: [{ start: group.start }] });
+		written.writeFrame({ payload: new Uint8Array(BIG).fill(7), timestamp: Timestamp.fromMillis(2) });
+		written.finish();
+		const reading = defined(await clock.drive(timeout(TIMEOUT, payload.recvGroup())));
+		expect(reading.start).toBe(group.start);
+		const frame = defined(await clock.drive(timeout(TIMEOUT, reading.readFrameIndex({ from: group.index }))));
+		expect([frame.index, frame.payload[0]]).toEqual([2, 7]);
+
+		const header = defined(await clock.drive(timeout(TIMEOUT, group.nextHeader())));
+		expect([header.size, header.timestamp.asMillis()]).toEqual([BIG, 2]);
+		expect(await clock.drive(timeout(TIMEOUT, group.nextHeader()))).toBeUndefined();
+		reading.close();
+		payload.close();
+		reader.close();
+	} finally {
+		await chained.close();
+	}
+});
+
+// A history range while only metadata demand stands fills its groups as metadata: every header
+// arrives, oldest first, and no payload crosses either hop.
+test.each(VIA)("a metadata history fill carries no payload via the relay's %s", async (via) => {
+	using clock = manual();
+	const { payloads } = tap();
+	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, via);
+	try {
+		chained.write(0n, 0);
+		chained.write(1n, 10);
+		chained.write(2n, 20);
+		const reader = chained.remote.meta("video").subscribe({ ranges: [{ order: "ascending" }] });
+		for (const [key, at] of [
+			[0n, 0],
+			[1n, 10],
+			[2n, 20],
+		] as const) {
+			expect(await headers(clock, reader)).toEqual([
+				key,
+				[
+					[BIG, at],
+					[0, at + 1],
+				],
+			]);
+		}
+		expect(payloads()).toBe(0);
+		reader.close();
+	} finally {
+		await chained.close();
+	}
+});
+
+// A compressed track's headers name each frame's plain size, read from a local payload copy and from
+// a lite-07 metadata copy alike.
+test("metadata names a compressed frame by its plain size", async () => {
+	using clock = manual();
+	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, "session", { compression: "deflate" });
+	const local = new BroadcastProducer();
+	try {
+		const track = defined(local.createTrack("video", { timescale: Timescale.MILLI, compression: "deflate" }));
+		const remote = chained.remote.meta("video").subscribe();
+		const near = local.consume().meta("video").subscribe();
+		for (const producer of [chained.track, track]) {
+			const group = producer.createGroup(0n);
+			group.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(0) });
+			group.finish();
+		}
+		expect(await headers(clock, remote)).toEqual([0n, [[BIG, 0]]]);
+		expect(await headers(clock, near)).toEqual([0n, [[BIG, 0]]]);
+		remote.close();
+		near.close();
+	} finally {
+		local.close();
+		await chained.close();
+	}
+});
+
+// A metadata subscription takes the track's info, an update to its ranges, and the declared end as a
+// payload subscription does.
+test("a metadata subscription updates and finishes like a payload one", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const reader = broadcast.consume().meta("video").subscribe({ ranges: [] });
+	expect((await reader.info()).timescale).toEqual(Timescale.MILLI);
+	for (const key of [0n, 1n]) {
+		const group = track.createGroup(key);
+		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.fromMillis(Number(key)) });
+		group.finish();
+	}
+	track.finishAt({ group: 2n, frame: 0 });
+	reader.update({ ranges: [{ order: "ascending" }] });
+	for (const key of [0n, 1n]) {
+		const group = defined(await reader.recvGroup());
+		expect([group.start, defined(await group.nextHeader()).size]).toEqual([key, 3]);
+		group.close();
+	}
+	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
+	expect(await reader.recvGroup()).toBeUndefined();
+	reader.close();
+	broadcast.close();
 });

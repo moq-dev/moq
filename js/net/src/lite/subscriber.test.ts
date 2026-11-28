@@ -1809,6 +1809,54 @@ test("a reset without its code ends the group", async () => {
 	}
 });
 
+// Lite-07: a fetch's Group Stream reset to make room competes for the same cap, and a reader asks
+// again only once it knows why. When Firefox drops the reset's code, the drop the publisher names
+// the group in says it, before or after the reset lands; when Chromium loses the reset itself, the
+// drop ends the stream, even one whose header the drop overtook.
+test.each(["before", "after", "without", "overtaking"] as const)(
+	"a fetch whose reset lost its code ends with the reason its drop names (drop %s the reset)",
+	async (order) => {
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, toHop(1n));
+		const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n);
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version, 1000);
+			const request = await opened(1);
+			await request.reading;
+			await respond(request, version, [{ start: answer(version, 0n) }]);
+
+			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.TooFarBehind }) };
+			if (order === "overtaking") {
+				await respond(request, version, [drop]);
+				await drainReactions();
+				const late = handStream(version);
+				late.write(await liteFrame(300, new Uint8Array([1])));
+				await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), late.reader);
+				request.inbound.close();
+				await expect(fetch).rejects.toMatchObject({ code: StreamCode.TooFarBehind });
+				return;
+			}
+			const stream = handStream(version);
+			stream.write(await liteFrame(300, new Uint8Array([1])));
+			const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), stream.reader);
+			const group = await fetch;
+			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+			if (order !== "after") await respond(request, version, [drop]);
+			if (order !== "without") stream.error(new TypeError("Error in input stream"));
+			if (order !== "without") await running;
+			if (order === "after") await respond(request, version, [drop]);
+			request.inbound.close();
+			expect(await group.closed).toMatchObject({ code: StreamCode.TooFarBehind });
+			await running;
+		} finally {
+			subscriber.close();
+		}
+	},
+);
+
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
 // leaves the stream open forever. The publisher names every group whose stream it resets without a
 // reliable reset in a drop, which accounts for the group, so the stream holds the subscription's end
@@ -3657,6 +3705,41 @@ test("a stale drop is recorded under the max age it names on lite-07", async () 
 		]);
 	} finally {
 		spy.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A lite-07 copy records the narrowest live join its subscription asked, before each SUBSCRIBE or
+// update reaches the wire, so a group its stream resets as too old stands only for a reader no wider.
+// Mirrors the Rust `a_copy_records_the_narrowest_budget_its_upstream_may_judge_under`.
+test("a copy records the narrowest budget its upstream may judge under on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		const sent = new Reader(stream.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await stream.reading;
+		expect(hooks.judgedUnder(track)).toBe(500);
+
+		// Each update is sent only once the previous write is credited, which may take tasks, so wait
+		// for it on the wire: the budget narrows before its update is written. Each retunes the live
+		// join's max in place.
+		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
+		expect((await SubscribeUpdate.decode(sent, version)).retune?.[0]?.[1].max).toBe(5000);
+		expect(hooks.judgedUnder(track)).toBe(500);
+		track.update(withMax({ delay: { max: Duration.millis(200) } }));
+		expect((await SubscribeUpdate.decode(sent, version)).retune?.[0]?.[1].max).toBe(200);
+		expect(hooks.judgedUnder(track)).toBe(200);
+	} finally {
 		track.close();
 		broadcast.close();
 		subscriber.close();

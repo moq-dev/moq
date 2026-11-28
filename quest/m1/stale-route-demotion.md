@@ -37,8 +37,10 @@ Decided 2026-11-26 (maintainer, /quest-plan via kixel-ai/kixel.ai):
   `moq-auth` changes.
 - ✅ On `lite-07` (`rs/moq-net/src/route/relay.rs`), track a per-link
   reversible `stale: bool` on `Peer` feeding `Offer.draining`
-  (`peer.draining || peer.stale`) in `Here::arrive` and claim adoption
-  (`Claim::adopted`, `restate`, and local ways), without sending
+  (`peer.draining || peer.stale`) in `Here::arrive` and dynamically during
+  route ranking and `restate` (storing only the peer-advertised draining bit on
+  `Claim::adopted` so `Live` recovery clears local staleness without waiting
+  for a re-announcement), without sending
   `Msg::Drain { node }` (rejected: emitting `Msg::Drain`, which permanently
   poisons all paths through `node` for GOAWAY).
 - ✅ On `lite-05/06` (`rs/moq-net/src/lite/subscriber.rs`) and `moq-transport`
@@ -58,16 +60,20 @@ Guidance:
 
 - `lite-07` (`rs/moq-net/src/route/relay.rs`): add a reversible `stale: bool`
   field beside `draining: bool` on `Peer`. Pass `peer.draining || peer.stale`
-  into `Here::arrive`, and apply the same combined flag when adopting or
-  restating claims given by that peer (`Claim::adopted`, `restate`, and local
-  ways). Re-select affected origins and restate affected local claims when
-  `stale` changes; keep `Msg::Drain { node }` exclusive to GOAWAY. A peer that
-  also sent GOAWAY stays draining even if its liveness returns to `Live`.
-- `lite-05/06` and `moq-transport`: drive `route.draining = going_away || stale`
-  on liveness changes in `rs/moq-net/src/lite/subscriber.rs` and
-  `rs/moq-net/src/ietf/subscriber.rs`, and mirror the reversible `draining`
-  update in `@moq/net` (`js/net/src/lite/subscriber.ts`,
-  `js/net/src/lite/routed.ts`, `js/net/src/ietf/subscriber.ts`).
+  into `Here::arrive`, and keep local staleness out of the persisted bit inside
+  `Claim::adopted`: store only the peer-advertised draining bit on the adopted
+  claim and apply the peer's current `peer.draining || peer.stale` dynamically
+  when ranking or restating (`restate` and local ways), so returning to `Live`
+  clears demotion without waiting for another announcement. Re-select affected
+  origins and restate affected local claims when `stale` changes; keep
+  `Msg::Drain { node }` exclusive to GOAWAY. A peer that also sent GOAWAY stays
+  draining even if its liveness returns to `Live`.
+- `lite-05/06`, `moq-transport`, and JS `lite-07`: drive
+  `route.draining = going_away || stale` on liveness changes in
+  `rs/moq-net/src/lite/subscriber.rs` and `rs/moq-net/src/ietf/subscriber.rs`,
+  and mirror the reversible `draining` update in `@moq/net`
+  (`js/net/src/lite/subscriber.ts`, `js/net/src/lite/routed.ts` including JS
+  `lite-07` multi-session route ranking, and `js/net/src/ietf/subscriber.ts`).
 - `RouteInfo::draining`: add `pub fn draining(&self) -> bool` on
   `moq_net::origin::RouteInfo` (`rs/moq-net/src/model/origin.rs`) and
   `readonly draining: boolean` on `RouteInfo` in `js/net/src/hop.ts` (included

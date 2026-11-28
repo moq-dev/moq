@@ -368,6 +368,27 @@ impl MoqBroadcastConsumer {
 			.await
 	}
 
+	/// Subscribe to a track's metadata by name: its groups and each frame's header, without the
+	/// payload.
+	///
+	/// A subscription of its own beside any [`Self::subscribe_track`] of the same track. Over
+	/// moq-lite-07 no payload crosses a hop for it; over an older version it rides the track's
+	/// payload subscription and drops the payload. To read the payload after all, subscribe to the
+	/// track from the group reached. `subscription` works as in [`Self::subscribe_track`].
+	pub async fn subscribe_meta(
+		&self,
+		name: String,
+		subscription: Option<MoqSubscription>,
+	) -> Result<Arc<MoqMetaConsumer>, MoqError> {
+		self.driver
+			.watch(async {
+				let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
+				let track = self.inner.meta(&name)?.subscribe(subscription).await?;
+				Ok(Arc::new(MoqMetaConsumer::new(track, self.driver.clone())))
+			})
+			.await
+	}
+
 	/// Fetch one complete group by track name and group start.
 	///
 	/// This does not create a live subscription. A retained group resolves immediately;
@@ -727,6 +748,111 @@ impl MoqGroupConsumer {
 	/// Cancel all current and future `read_frame()` calls.
 	///
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
+	pub fn cancel(&self) {
+		self.reads.cancel();
+	}
+}
+
+// ---- Metadata Consumer ----
+
+/// A metadata subscription: a track's groups, each frame as its header alone.
+#[derive(uniffi::Object)]
+pub struct MoqMetaConsumer {
+	reads: Polled<moq_net::meta::Subscriber>,
+	control: moq_net::track::Control,
+	info: moq_net::track::Info,
+	driver: Background,
+}
+
+impl MoqMetaConsumer {
+	pub(crate) fn new(track: moq_net::meta::Subscriber, driver: Background) -> Self {
+		let control = track.control();
+		let info = track.info().clone();
+		Self {
+			reads: Polled::new(track).supervised(driver.clone()),
+			control,
+			info,
+			driver,
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqMetaConsumer {
+	/// Return the next group in arrival order, as [`MoqTrackConsumer::recv_group`] does.
+	/// Returns `None` when the track ends.
+	pub async fn recv_group(&self) -> Result<Option<Arc<MoqMetaGroup>>, MoqError> {
+		let group = self
+			.reads
+			.wait(|track, waiter| Poll::Ready(Ok(ready!(track.poll_recv_group(waiter))?)))
+			.await?;
+		Ok(group.map(|group| Arc::new(MoqMetaGroup::new(group, self.driver.clone()))))
+	}
+
+	/// Return the publisher-side track properties learned during subscription.
+	pub fn info(&self) -> MoqTrackInfo {
+		MoqTrackInfo::from(&self.info)
+	}
+
+	/// Change this subscriber's delivery preferences, as [`MoqTrackConsumer::update`] does.
+	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
+		let (subscription, delay) = subscription.resolve()?;
+		let subscription = delay.update(&self.control.subscription(), subscription);
+		match self.control.update(subscription) {
+			Ok(()) | Err(moq_net::Error::Closed) => {}
+			Err(err) => return Err(err.into()),
+		}
+		Ok(())
+	}
+
+	/// Cancel all current and future reads.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
+	pub fn cancel(&self) {
+		self.reads.cancel();
+	}
+}
+
+/// One group of a metadata subscription, read header by header.
+#[derive(uniffi::Object)]
+pub struct MoqMetaGroup {
+	start: u64,
+	reads: Polled<moq_net::meta::Group>,
+}
+
+impl MoqMetaGroup {
+	fn new(group: moq_net::meta::Group, driver: Background) -> Self {
+		Self {
+			start: group.start,
+			reads: Polled::new(group).supervised(driver),
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqMetaGroup {
+	/// The start of this group, in its track's timescale, which names it within the track.
+	pub fn start(&self) -> u64 {
+		self.start
+	}
+
+	/// Read the next frame's header: its declared size and timestamp, without its payload.
+	///
+	/// Returns `None` when the group ends.
+	pub async fn next_header(&self) -> Result<Option<MoqFrameHeader>, MoqError> {
+		let header = self
+			.reads
+			.wait(|group, waiter| Poll::Ready(Ok(ready!(group.poll_next_header(waiter))?)))
+			.await?;
+		Ok(header.map(|header| MoqFrameHeader {
+			size: header.size,
+			timestamp: header.timestamp.into(),
+		}))
+	}
+
+	/// Cancel all current and future reads.
+	///
+	/// Terminal: the group is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.reads.cancel();
 	}

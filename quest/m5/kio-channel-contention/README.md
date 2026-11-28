@@ -21,17 +21,16 @@ utime+stime:
 
 The hot sites are generic channel accessors, so they don't say which channels
 are contended. On chat with 16 tokio workers, as process-lifetime totals
-across every thread (ramp included, unlike the table's steady window), before
-`kio` moved to [kixel-ai/kio](https://github.com/kixel-ai/kio):
+across every thread (ramp included, unlike the table's steady window):
 
-- `Consumer::poll` ([`src/consumer.rs` in `kixel-ai/kio`](https://github.com/kixel-ai/kio/blob/main/src/consumer.rs), then line 79): 61.4s
-- `ConsumerWeak::poll` ([`src/weak.rs` in `kixel-ai/kio`](https://github.com/kixel-ai/kio/blob/main/src/weak.rs), then line 276): 45.5s
-- `Consumer::read` ([`src/consumer.rs` in `kixel-ai/kio`](https://github.com/kixel-ai/kio/blob/main/src/consumer.rs), then line 131): 11.7s, 1,079,139 contended acquires
+- `Consumer::poll` ([`rs/kio/src/consumer.rs`](/rs/kio/src/consumer.rs), then line 79): 61.4s
+- `ConsumerWeak::poll` ([`rs/kio/src/weak.rs`](/rs/kio/src/weak.rs), then line 276): 45.5s
+- `Consumer::read` ([`rs/kio/src/consumer.rs`](/rs/kio/src/consumer.rs), then line 131): 11.7s, 1,079,139 contended acquires
 
 `kio::Lock` is a plain `std::sync::Mutex`, and every poll takes it: the
 closure check, the closed check, and the waiter registration. The cache
 pool's shared counters are not among the hot sites.
-`Shared::lock` ([`src/shared.rs` in `kixel-ai/kio`](https://github.com/kixel-ai/kio/blob/main/src/shared.rs), then line 47) shows up too, but stays flat with
+`Shared::lock` ([`rs/kio/src/shared.rs`](/rs/kio/src/shared.rs), then line 47) shows up too, but stays flat with
 the worker count.
 
 Baseline (2026-10-14), the before numbers the fix quests compare against.
@@ -40,7 +39,7 @@ Measured on a loaded 24-core Core Ultra 7 270K Plus shared with other jobs
 quest reruns its baseline on a quiet host and takes its after on that same
 host.
 
-`cargo bench --bench contended` in [kixel-ai/kio](https://github.com/kixel-ai/kio/blob/main/benches/contended.rs), one
+`cargo bench -p kio --bench contended` ([`rs/kio/benches/contended.rs`](/rs/kio/benches/contended.rs)), one
 producer and 4,096 consumers on one channel, ns per consumer:
 
 | workload | 1 thread | 4 threads | 16 threads |
@@ -108,10 +107,7 @@ Decided (maintainer, 2026-10-14):
   sides, so a reader-optimized design buys them little; they stay on the
   mutex.
 - Breaking kio's API is allowed (e.g. a read becomes a snapshot or a cursor
-  rather than a lock guard); `kio` now lives in
-  [kixel-ai/kio](https://github.com/kixel-ai/kio) (moved 2026-11-25), so `kio`
-  changes land there first and `moq` bumps its `kio` dependency and updates
-  `moq-net` in a follow-up PR.
+  rather than a lock guard), updating `moq-net` in the same PR.
 - Candidates kept: a version counter with split waiter lists (landed below) and
   an append-only log primitive with front eviction
   (Append-only log (`kio::log`)), which

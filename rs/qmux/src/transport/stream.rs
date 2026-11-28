@@ -109,7 +109,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream<T> {
 					if size > max {
 						return Err(Error::FrameTooLarge);
 					}
-					Ok((prefix + size, prefix))
+					// `max` may be `usize::MAX` on a 32-bit target, where the sum could wrap
+					let total = size.checked_add(prefix).ok_or(Error::FrameTooLarge)?;
+					Ok((total, prefix))
 				})
 				.transpose()?,
 			Framing::Frames => frame_len(&self.read)?.map(|len| (len, 0)),

@@ -69,7 +69,9 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		);
 	}
 	let mut child = if let Some(publish) = javascript {
-		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/max-age/client.ts");
+		let script =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("../../test/max-age/client.ts");
 		let mut child = tokio::process::Command::new("bun")
 			.arg(script)
 			.arg(url.as_str())

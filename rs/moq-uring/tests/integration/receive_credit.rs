@@ -268,7 +268,9 @@ fn javascript_partial_frame_gives_way() {
 		.expect("socket");
 	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), sock).expect("endpoint");
 
-	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let script =
+		std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+			.join("../../test/receive-credit/sender.ts");
 	let mut child = std::process::Command::new("bun")
 		.arg(script)
 		.arg(format!("https://{}/", endpoint.local_addr()))

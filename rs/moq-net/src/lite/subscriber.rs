@@ -10535,6 +10535,27 @@ mod tests {
 		assert!(applies(&sub), "demand returning restores the START");
 	}
 
+	/// The copy records the narrowest live join's max age its SUBSCRIBE and each update asked,
+	/// before either reaches the wire, so a group its publisher resets as too old under any of
+	/// them stands only for a reader no wider (see `resume::Recover::outgrows_judging`).
+	#[kio::test]
+	async fn a_copy_records_the_narrowest_budget_its_upstream_may_judge_under() {
+		let mut h = Harness::new(Version::Lite07);
+		let mut sub = Sub::None;
+		let live = |millis| Some(Subscription::default().with_max(Duration::from_millis(millis)));
+		for (millis, judged) in [(500, 500), (100, 100), (2000, 100)] {
+			h.serve
+				.handle_subscription(&mut h.producer, &mut sub, live(millis), true)
+				.await
+				.unwrap();
+			assert_eq!(
+				h.producer.consume().judged_under(),
+				Some(Duration::from_millis(judged)),
+				"after asking {millis} ms"
+			);
+		}
+	}
+
 	/// The permanent-miss floor follows the demand in every direction: an update
 	/// that moves the start forward retires the skipped range (the publisher
 	/// stops serving it and no fresh START says so), one that moves it backward
@@ -12916,6 +12937,18 @@ fn wire_join(range: &lite::Range) -> Option<(Option<Duration>, Option<u64>)> {
 	}
 }
 
+/// The narrowest max age among the live joins of `live`, `Duration::MAX` for none: the budget
+/// an upstream may judge a group too old under, which a stream reset as too old names nowhere.
+fn narrowest(live: &lite::LiveRanges) -> Duration {
+	(live.iter())
+		.filter_map(|(_, range)| match range.start {
+			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => Some(max.unwrap_or(Duration::MAX)),
+			_ => None,
+		})
+		.min()
+		.unwrap_or(Duration::MAX)
+}
+
 /// The exclusive group end past every range among `live`, `None` when one follows the live
 /// edge: the cap a stale drop is judged within.
 fn cap_of(live: &lite::LiveRanges) -> Option<u64> {
@@ -13512,6 +13545,8 @@ impl TrackServe {
 						// on one still owed.
 						let fills = ranges.len() - demand_ranges.len() - probes;
 						let (edit, changed) = active.edit(&ranges, (probes, fills), &reasked)?;
+						// Before the update reaches the wire, as the SUBSCRIBE did.
+						producer.judge_under(narrowest(&active.live));
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
@@ -13701,6 +13736,9 @@ impl TrackServe {
 		if demand.is_some() {
 			self.request_floor(producer, subscription.start());
 		}
+		// Before the SUBSCRIBE reaches the wire, whose publisher may judge a group too old under
+		// any live join it asks from then on.
+		producer.judge_under(narrowest(&lite::LiveRanges::new(self.subscriber.version, &ranges)));
 		let framing = lite::Framing::new(producer.info(), self.subscriber.version);
 		let request = Request {
 			subscription,
@@ -13734,8 +13772,10 @@ impl TrackServe {
 	}
 
 	/// Give a pipelined subscription its accepted copy, the target its parked group streams
-	/// resume into.
-	fn accept_pipelined(&self, id: u64, producer: &track::Producer) {
+	/// resume into, before which none of them reached a reader: its publisher may have judged
+	/// one too old under `judging`, the narrowest live join the subscription asked.
+	fn accept_pipelined(&self, id: u64, producer: &track::Producer, judging: Duration) {
+		producer.judge_under(judging);
 		let framing = lite::Framing::new(producer.info(), self.subscriber.version);
 		let mut subscribes = self.subscriber.subscribes.lock();
 		let Some(entry) = subscribes.get_mut(&id) else {
@@ -15424,7 +15464,7 @@ impl ServeLoop {
 		if let Sub::Active(active) = &mut self.sub
 			&& std::mem::take(&mut active.parked)
 		{
-			serve.accept_pipelined(active.id, &self.serving);
+			serve.accept_pipelined(active.id, &self.serving, narrowest(&active.live));
 		}
 	}
 
@@ -15925,7 +15965,7 @@ impl ServeLoop {
 					if let Sub::Active(active) = &mut self.sub
 						&& std::mem::take(&mut active.parked)
 					{
-						serve.accept_pipelined(active.id, &self.serving);
+						serve.accept_pipelined(active.id, &self.serving, narrowest(&active.live));
 					}
 					let owed = match &self.sub {
 						Sub::Active(active) => active.owed(*requested_end),

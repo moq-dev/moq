@@ -308,6 +308,16 @@ Only moq-lite 07 carries a priority and order per range. Older moq-lite and
 moq-transport carry one per subscription: the highest priority among its ranges,
 newest first if any range at that priority asks for it.
 
+A **metadata subscription** (`broadcast.meta(name)` in Rust and TypeScript) takes
+the same knobs and delivers a track's groups with each frame's timestamp and
+declared size, without the payload, to watch a track's progress cheaply. It is a
+subscription of its own beside any payload subscription, and never switches mode.
+On moq-lite 07 each relay hop forwards it as a metadata subscription, so no
+payload crosses a hop for it. Over an older version or moq-transport it rides the
+track's one payload subscription and drops the payload, so a track is never
+downloaded twice. A reader that wants the payload after all subscribes to the
+track from the group it reached and skips the frames it already saw.
+
 A live join is a range starting a lag behind the live edge: the playout buffer
 the subscriber holds. It starts at the group containing the live edge minus the
 lag, so the buffer arrives full instead of filling in real time, and no fuller;
@@ -473,9 +483,10 @@ stream flow control pushes back hop by hop to the publisher. A reader
 that keeps up loses nothing. A slower reader is never waited on: one that trails
 the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
 for a new group on tracks that opt into [refresh](#refresh) or ends with
-`Evicted`. A hop with no reader keeps receiving and shedding, so pacing never
-stalls an unwatched track, and the publisher's own writes never wait unless it
-asks to. A stopped stream keeps its receive credit, so a hop stops at most as
+`Evicted`. A group a subscriber has yet to pick up is paced from its start, where
+that reader begins. A hop with no reader keeps receiving and shedding, so pacing
+never stalls an unwatched track, and the publisher's own writes never wait unless
+it asks to. A stopped stream keeps its receive credit, so a hop stops at most as
 many streams per connection as fit in half its connection window, and the rest
 keep receiving and shedding.
 

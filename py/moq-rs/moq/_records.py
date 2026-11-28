@@ -22,6 +22,7 @@ from moq_ffi import (
     MoqDatagram,
     MoqDelay,
     MoqFrame,
+    MoqFrameHeader,
     MoqGrant,
     MoqOrder,
     MoqQuicConfig,
@@ -121,6 +122,22 @@ class Frame:
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
         return Frame(payload=frame.payload, timestamp=Timestamp._from_ffi(frame.timestamp))
+
+
+@dataclass(frozen=True)
+class FrameHeader:
+    """A frame's header without its payload, as a metadata subscription reads it.
+
+    ``size`` is the declared payload size in bytes, 0 for an empty frame. On a scale-less
+    track ``timestamp`` is :meth:`Timestamp.unscaled` at the frame's group key.
+    """
+
+    size: int
+    timestamp: Timestamp
+
+    @staticmethod
+    def _from_ffi(header: MoqFrameHeader) -> FrameHeader:
+        return FrameHeader(size=header.size, timestamp=Timestamp._from_ffi(header.timestamp))
 
 
 @dataclass(frozen=True)

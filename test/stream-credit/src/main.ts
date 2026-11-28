@@ -119,17 +119,22 @@ async function read(
 	return received;
 }
 
-// Every frame of group `sequence`, fetched whole, or why the fetch failed.
+// Every frame of group `sequence`, fetched whole, or why the fetch failed. A lite-07 fetch's group
+// competes for the same cap, so the relay may reset its stream to make room too (TOO_FAR_BEHIND); a
+// reader that still wants the rest of a preempted group asks again, as the draft says.
 async function fetch(consumer: Moq.Track.Consumer, sequence: bigint): Promise<string[] | string> {
-	const frames: string[] = [];
-	try {
-		const group = await consumer.fetchGroup(sequence);
-		for (;;) {
-			const frame = await group.readString();
-			if (frame === undefined) return frames;
-			frames.push(frame);
+	for (;;) {
+		const frames: string[] = [];
+		try {
+			const group = await consumer.fetchGroup(sequence);
+			for (;;) {
+				const frame = await group.readString();
+				if (frame === undefined) return frames;
+				frames.push(frame);
+			}
+		} catch (err) {
+			if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.TooFarBehind) continue;
+			return `${frames.length} frames, then ${err}`;
 		}
-	} catch (err) {
-		return `${frames.length} frames, then ${err}`;
 	}
 }

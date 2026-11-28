@@ -7761,19 +7761,30 @@ impl TrackRun {
 	/// reaches lower) learns nothing there exists. The rest, past a stale run, a group still held,
 	/// or a key nothing gave up, stay untold: naming them would send every gap in the track's
 	/// history, as a lite-06 track keyed by timestamp holds one per group. An update that asks
-	/// below the start names them then, and a wider budget may still serve a stale one.
+	/// below the start names them then, and a wider budget may still serve a stale one. On
+	/// lite-07, whose ranges bound what a stale verdict was judged within, a run stale under the
+	/// track's own freshness bound is final all the same, since no budget reaches past that bound:
+	/// a relay reading from the oldest group would otherwise wait on it forever. Earlier drafts
+	/// name a drop with no range, which a capped read could still serve, so they stop there.
 	fn name_skipped(
 		&mut self,
 		start: u64,
 		skipped: &RangeMap<u64, Hole>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
+		let bound = self
+			.ctx
+			.version
+			.has_ranges()
+			.then(|| self.track.max_age_bound())
+			.flatten();
+		let final_stale = |budget: Duration| bound.is_some_and(|bound| budget >= bound);
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
 				continue;
 			}
-			if range.end < reach || hole.stale_budget().is_some() {
+			if range.end < reach || hole.stale_budget().is_some_and(|budget| !final_stale(budget)) {
 				break;
 			}
 			reach = range.start;
@@ -11743,6 +11754,33 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// History stale under the track's own freshness bound is named below an oldest range's
+	/// start, as a final run is: no budget a subscriber asks reaches past that bound, so a relay
+	/// copy reading from the oldest group would otherwise wait on it forever.
+	#[kio::test]
+	async fn lite07_names_history_stale_under_the_bound_below_the_start() {
+		let info = broadcast::Info {
+			cache_duration: Some(Duration::from_secs(30)),
+			..Default::default()
+		};
+		let track = track::Producer::new(Arc::new(info), "test", crate::track::Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut old = track.append_group(at(10)).unwrap();
+		old.write_frame(at(10), b"x".as_slice()).unwrap();
+		old.finish().unwrap();
+		let mut open = track.append_group(at(1_000)).unwrap();
+		for n in 0..60 {
+			open.write_frame(at(1_000 + n * 1_000), b"x".as_slice()).unwrap();
+			kio::clock::sleep(Duration::from_secs(1)).await;
+		}
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.answer.from(), Some(1_000));
+		let named = holes(&mut writer, &log).await;
+		assert_eq!(named.first().map(|(_, run)| run.start), Some(0), "{named:?}");
+		assert_eq!(named.last().map(|(_, run)| run.end), Some(1_000), "{named:?}");
 	}
 
 	/// A copy whose feed start resolved before its upstream said where the live edge is resolves

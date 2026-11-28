@@ -32,7 +32,7 @@ Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 - ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
   five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
   and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
-  and [kio crates.io publish](/quest/m0/kio-crates-io.md) to m0 as a direct
+  and kio's crates.io publish (since dropped: kio moved back into `rs/kio`) to m0 as a direct
   `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
   in m2).
 
@@ -79,7 +79,7 @@ the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-
 256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
 keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both
 metadata mode on the lite-07 wire, served ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)),
-and [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) (reversing the
+and its subscriber API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) (reversing the
 2026-11-25 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD
 indexing is an immediate consumer and `moq_subscription` changes the C ABI;
 rejected: moving only the wire into `m2`, leaving both in `m3`).

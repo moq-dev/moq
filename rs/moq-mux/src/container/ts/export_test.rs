@@ -9581,7 +9581,7 @@ async fn the_same_identity_continues_after_a_drop() {
 /// A returning route serves the same publisher's catalog and groups keyed by their times.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
-	let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(86_400_000);
+	let wall = moq_net::time::EPOCH + Duration::from_millis(86_400_000);
 	crate::clock::fake_host_wall(wall);
 	let start = kio::clock::now();
 	let origin = crate::source::produce_origin();

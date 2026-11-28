@@ -923,7 +923,9 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	.expect("endpoint");
 	let port = endpoint.local_addr().port();
 
-	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let script =
+		std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+			.join("../../test/receive-credit/sender.ts");
 	let child = tokio::process::Command::new("bun")
 		.arg(script)
 		.arg(format!("https://127.0.0.1:{port}/"))
@@ -970,7 +972,9 @@ async fn javascript_partial_frame_gives_way_websocket(version: &str) {
 
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
 	let port = listener.local_addr().expect("addr").port();
-	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let script =
+		std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+			.join("../../test/receive-credit/sender.ts");
 	let child = tokio::process::Command::new("bun")
 		.arg(script)
 		.arg(format!("http://127.0.0.1:{port}/"))

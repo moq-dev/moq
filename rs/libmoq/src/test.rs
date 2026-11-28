@@ -2746,6 +2746,62 @@ fn raw_track_ends_on_an_aborted_group() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// What [header_callback] forwards: a header's group, frame, size, and timestamp, or the terminal code.
+type HeaderEvent = Result<(u64, u64, u64, u64), i32>;
+
+extern "C" fn header_callback(user_data: *mut c_void, header: *const moq_header, code: i32) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<HeaderEvent>) }.clone();
+	let event = match unsafe { header.as_ref() } {
+		Some(h) => Ok((h.group, h.frame, h.size, h.timestamp.value)),
+		None => Err(code),
+	};
+	let _ = tx.send(event);
+}
+
+/// A metadata subscription delivers each frame's position, declared size, and timestamp, an
+/// empty frame as size 0, then ends cleanly with the track on a NULL header.
+#[test]
+fn meta_reads_headers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"meta-reads-headers");
+	let name = b"video";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let consume = consume_local(broadcast);
+	let (tx, rx) = mpsc::channel::<HeaderEvent>();
+	let tx = Box::into_raw(Box::new(tx));
+	let meta = id(unsafe {
+		moq_consume_meta(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(header_callback),
+			tx as *mut c_void,
+		)
+	});
+
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for (payload, at) in [(&b"key"[..], 0), (b"", 1)] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(at)) },
+			0
+		);
+	}
+	assert_eq!(moq_publish_group_finish(group), 0);
+
+	let headers: Vec<_> = (0..2).map(|_| rx.recv().expect("header")).collect();
+	assert_eq!(headers, [Ok((0, 0, 3, 0)), Ok((0, 1, 0, 1))]);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(rx.recv().expect("terminal"), Err(0), "the track finished");
+	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
+	drop(unsafe { Box::from_raw(tx) });
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// The subscription's ranges filter the read, and an update replaces them on the live read.
 ///
 /// No delivery budget runs on the wall clock (the track keeps its groups and the read waits

@@ -6,8 +6,9 @@
 //! restart the deadline they exist to test, and a peer that went silent while its socket
 //! still accepts writes would never be reclaimed.
 //!
-//! Keep-alive QX_PINGs go out after a third of the idle window without sending. RTT probes
-//! go out on their own interval regardless, since an application that is busy sending is
+//! Keep-alive QX_PINGs go out after a third of the idle window without receiving, so even a
+//! one-way sender whose peer has nothing to say draws an answer before its deadline. RTT probes
+//! go out on their own interval regardless, since an application that is busy talking is
 //! when latency matters and the keep-alive never fires. While the transport refuses writes,
 //! the peer is evidently there but slow, so the idle close is deferred by at most one more
 //! window.
@@ -37,7 +38,6 @@ pub(super) struct Timer {
 	send_reset: Instant,
 	/// Whether a send may restart the deadline: a record arrived since the last one did
 	send_credit: bool,
-	last_send: Instant,
 	last_ping: Instant,
 	/// When the idle close began deferring for transport backpressure
 	deferred: Option<Instant>,
@@ -69,7 +69,6 @@ impl Timer {
 			last_recv: now,
 			send_reset: now,
 			send_credit: true,
-			last_send: now,
 			last_ping: now,
 			deferred: None,
 			backpressured: false,
@@ -98,7 +97,7 @@ impl Timer {
 		self.last_recv = now;
 		self.send_reset = now;
 		self.send_credit = true;
-		self.last_ping = self.last_send.max(now);
+		self.last_ping = now;
 	}
 
 	/// A record arrived at `now`; returns whether that ended a stale stretch
@@ -110,7 +109,6 @@ impl Timer {
 	}
 
 	pub(super) fn on_send(&mut self, now: Instant) {
-		self.last_send = now;
 		if self.send_credit {
 			self.send_reset = now;
 			self.send_credit = false;
@@ -137,7 +135,7 @@ impl Timer {
 		});
 		let keepalive = self
 			.keepalive()
-			.map(|every| self.last_send.max(self.last_ping).saturating_add(every));
+			.map(|every| self.last_recv.max(self.last_ping).saturating_add(every));
 		let rtt = self.rtt_interval.map(|every| self.last_ping.saturating_add(every));
 		let liveness = self.liveness.as_ref().map(|liveness| {
 			let probe = liveness
@@ -163,7 +161,7 @@ impl Timer {
 
 		let keepalive = self
 			.keepalive()
-			.is_some_and(|every| now >= self.last_send.max(self.last_ping).saturating_add(every));
+			.is_some_and(|every| now >= self.last_recv.max(self.last_ping).saturating_add(every));
 		let rtt = self
 			.rtt_interval
 			.is_some_and(|every| now >= self.last_ping.saturating_add(every));

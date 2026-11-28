@@ -1,0 +1,21 @@
+error[E0507]: cannot move out of value, a captured variable in an `FnMut` closure
+ --> tests/ui/wrapper_moved_argument.rs:8:44
+  |
+7 |     #[kio::wrapper]
+  |     --------------- captured by this `FnMut` closure
+8 |     fn poll_len(&self, _waiter: &kio::Waiter, name: String) -> Poll<usize> {
+  |                                               ^^^^
+  |                                               |
+  |                                               captured outer variable
+  |                                               move occurs because value has type `String`, which does not implement the `Copy` trait
+  |                                               value is moved here
+  |
+help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once
+ --> $WORKSPACE/rs/kio/src/waiter.rs
+  |
+  |     F: FnMut(&Waiter) -> Poll<R> + Unpin,
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider cloning the value if the performance cost is acceptable
+  |
+8 |     fn poll_len(&self, _waiter: &kio::Waiter, name.clone(): String) -> Poll<usize> {
+  |                                                   ++++++++

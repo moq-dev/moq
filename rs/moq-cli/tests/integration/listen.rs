@@ -20,7 +20,8 @@ struct Listening {
 async fn listen(stage: &str, flags: &[&str]) -> Listening {
 	let directory = tempfile::tempdir().unwrap();
 	let socket = directory.path().join("moq.sock");
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	let mut command =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"));
 	// The guard on host timers is for tests, not the binaries they run.
 	command.env_remove("KIO_DENY_HOST_TIMERS");
 	for (name, _) in std::env::vars_os() {

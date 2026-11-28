@@ -1192,7 +1192,7 @@ mod test {
 		assert_eq!(catalog.sync.interval, Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
-		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
+		let expected = moq_net::time::EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(2000).unwrap())
