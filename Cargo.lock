@@ -4224,6 +4224,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_json",
+ "swole",
  "tempfile",
  "terminal_size",
  "test-env",
