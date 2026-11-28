@@ -8,7 +8,7 @@ A measured answer to how much of the relay fetch benches' time goes to `kio` wak
 
 Found by the Nightly triage of run [45459585582](https://github.com/moq-dev/moq/actions/runs/45459585582). `relay_session_delivery_fetch_frames` and `fetch_range` regressed with [moq-dev/moq#9422](https://github.com/moq-dev/moq/pull/9422) (+5 to 7% locally), which spread small accounting costs with no single hotspot. `kio::WaiterList::register` takes 12.9% of self time in `fetch_frames` both before and after #9422, so it is the bigger lever on the same benches.
 
-Decided 2026-11-25 (maintainer, /quest-plan): ✅ a spike mostly into kio, in m3 (rejected: a fix quest on #9422's accounting alone; m1). Keep #9422's behavior. Profile on a pinned core with CPU-time measurement, then look at why `register` runs per fetch (re-registration on every poll, allocation, list contention) and what a cheaper shape would save. Note the repo boundary: `kio` now lives in [kixel-ai/kio](https://github.com/kixel-ai/kio), so profiling runs on `moq`'s relay fetch benches while any `kio` prototype or follow-up changes land in `kixel-ai/kio` and `moq` bumps its `kio` dependency.
+Decided 2026-11-25 (maintainer, /quest-plan): ✅ a spike mostly into kio, in m3 (rejected: a fix quest on #9422's accounting alone; m1). Keep #9422's behavior. Profile on a pinned core with CPU-time measurement, then look at why `register` runs per fetch (re-registration on every poll, allocation, list contention) and what a cheaper shape would save.
 
 ## Related
 

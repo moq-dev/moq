@@ -31,6 +31,7 @@ esac
 # CodSpeed's Criterion skips; some still read the wall clock, so their counts move with the host's
 # load (quest/m0/repeatable-instruction-counts.md). Nightly still times them all.
 targets=(
+    "kio tasks" "kio waiter"
     "moq-audio bus"
     "moq-auth jwt"
     "moq-e2ee protect"

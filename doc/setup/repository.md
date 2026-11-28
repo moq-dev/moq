@@ -32,7 +32,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Language bindings | [`rs/moq-ffi`](https://github.com/moq-dev/moq/tree/main/rs/moq-ffi), [`rs/libmoq`](https://github.com/moq-dev/moq/tree/main/rs/libmoq), then `py/`, `swift/`, `kt/`, `go/`, `dart/`, or `cpp/moq/` | [Binding layers](/lib/layers) |
 | Rooms, chat, and application data | [`js/room`](https://github.com/moq-dev/moq/tree/main/js/room), `rs/moq-json`, `js/json` | [Rooms](/lib/js/room), [JSON tracks](/lib/js/json) |
 | End-to-end encryption (unpublished, experimental) | [`rs/moq-e2ee`](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee), [`js/e2ee`](https://github.com/moq-dev/moq/tree/main/js/e2ee) | [E2EE draft](/draft/moq-e2ee) |
-| Async primitives and deterministic time | [`kixel-ai/kio`](https://github.com/kixel-ai/kio), [`js/clock`](https://github.com/moq-dev/moq/tree/main/js/clock) | [Rust conventions](/lib/rs/#conventions), [clock](/lib/js/clock) |
+| Async primitives and deterministic time | [`rs/kio`](https://github.com/moq-dev/moq/tree/main/rs/kio), [`js/clock`](https://github.com/moq-dev/moq/tree/main/js/clock) | [Rust conventions](/lib/rs/#conventions), [clock](/lib/js/clock) |
 
 ## Find the surrounding work
 

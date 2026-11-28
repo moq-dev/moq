@@ -1,10 +1,11 @@
 //! QMux transport parameters, carried in QX_TRANSPORT_PARAMETERS instead of a TLS extension
 //!
 //! The standard parameters are QUIC v1's and decode through [`TransportParameters`]. QMux adds
-//! a pass over every parameter that rejects the QUIC v1 ones it prohibits and extracts its own
-//! `max_record_size` and `application_protocols`, which the shared codec would skip as unknown.
-//! A repeat of either overwrites the earlier value; the shared codec refuses a repeated QUIC v1
-//! parameter.
+//! a pass over every parameter that rejects the QUIC v1 ones it prohibits, extracts its own
+//! `max_record_size` and `application_protocols`, which the shared codec would skip as unknown,
+//! and hands the codec only the parameters QMux uses, so a QUIC extension's checks (such as
+//! `min_ack_delay` against a `max_ack_delay` QMux has no use for) never refuse a QMux peer. A
+//! repeat of any parameter QMux reads is refused.
 
 use bytes::{Buf, BufMut, Bytes};
 
@@ -34,6 +35,22 @@ pub(super) const DEFAULT_MAX_RECORD_SIZE: u64 = 16382;
 /// initial_source_connection_id, and retry_source_connection_id
 fn is_forbidden(id: u64) -> bool {
 	matches!(id, 0x00 | 0x02 | 0x03 | 0x0a..=0x10)
+}
+
+/// The QUIC parameters QMux uses, which go on to [`TransportParameters::read`]
+fn is_used(id: u64) -> bool {
+	matches!(
+		id,
+		MAX_IDLE_TIMEOUT
+			| INITIAL_MAX_DATA
+			| INITIAL_MAX_STREAM_DATA_BIDI_LOCAL
+			| INITIAL_MAX_STREAM_DATA_BIDI_REMOTE
+			| INITIAL_MAX_STREAM_DATA_UNI
+			| INITIAL_MAX_STREAMS_BIDI
+			| INITIAL_MAX_STREAMS_UNI
+			| RESET_STREAM_AT
+			| MAX_DATAGRAM_FRAME_SIZE
+	)
 }
 
 /// The parameters one endpoint advertises
@@ -102,10 +119,13 @@ impl Params {
 
 	/// Decode a peer's parameters; `side` is the peer's
 	pub(super) fn decode(side: Side, version: Version, blob: Bytes) -> Result<Self, TransportError> {
-		let mut max_record_size = VarInt::from_u64(DEFAULT_MAX_RECORD_SIZE).unwrap();
+		let mut max_record_size = None;
 		let mut protocols = None;
+		// The parameters QMux uses, each with its id and length, for the shared codec
+		let mut used = Vec::with_capacity(blob.len());
 		let mut scan = &blob[..];
 		while scan.has_remaining() {
+			let start = blob.len() - scan.remaining();
 			let id = crate::coding::BufExt::get_var(&mut scan).map_err(|_| err("truncated parameter id"))?;
 			let len = crate::coding::BufExt::get_var(&mut scan).map_err(|_| err("truncated parameter length"))?;
 			let len = usize::try_from(len).map_err(|_| err("oversized parameter"))?;
@@ -119,15 +139,23 @@ impl Params {
 				return Err(err("prohibited QUIC v1 transport parameter"));
 			}
 			match id {
+				id if is_used(id) => used.extend_from_slice(&blob[start..blob.len() - scan.remaining()]),
 				// Draft-00 has no records, so its peer's value would only shrink our frames
 				MAX_RECORD_SIZE if version.uses_records() => {
-					max_record_size =
+					if max_record_size.is_some() {
+						return Err(err("duplicate max_record_size"));
+					}
+					let size: VarInt =
 						crate::coding::BufExt::get(&mut value).map_err(|_| err("malformed max_record_size"))?;
 					if value.has_remaining() {
 						return Err(err("malformed max_record_size"));
 					}
+					max_record_size = Some(size);
 				}
 				APPLICATION_PROTOCOLS => {
+					if protocols.is_some() {
+						return Err(err("duplicate application_protocols"));
+					}
 					let mut list = Vec::new();
 					while value.has_remaining() {
 						let len = crate::coding::BufExt::get_var(&mut value)
@@ -146,11 +174,12 @@ impl Params {
 				_ => {}
 			}
 		}
+		let max_record_size = max_record_size.unwrap_or(VarInt::from_u64(DEFAULT_MAX_RECORD_SIZE).unwrap());
 		if version.uses_records() && max_record_size.into_inner() < DEFAULT_MAX_RECORD_SIZE {
 			return Err(err("max_record_size below the minimum"));
 		}
 
-		let tp = TransportParameters::read(side, &mut &blob[..])?;
+		let tp = TransportParameters::read(side, &mut &used[..])?;
 		Ok(Self {
 			tp,
 			max_record_size,
@@ -203,11 +232,47 @@ mod tests {
 	}
 
 	#[test]
-	fn repeated_qmux_parameter_last_wins() {
+	fn rejects_repeated_qmux_parameters() {
 		let mut buf = Vec::new();
 		write_param(&mut buf, MAX_RECORD_SIZE, 20_000);
 		write_param(&mut buf, MAX_RECORD_SIZE, 30_000);
-		assert_eq!(decode(buf).unwrap().max_record_size, VarInt::from_u32(30_000));
+		assert_eq!(
+			decode(buf).unwrap_err().code,
+			crate::TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+		);
+
+		// An empty list, twice
+		let mut buf = Vec::new();
+		for _ in 0..2 {
+			buf.write_var(APPLICATION_PROTOCOLS);
+			buf.write_var(0);
+		}
+		assert_eq!(
+			decode(buf).unwrap_err().code,
+			crate::TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+		);
+
+		// The shared codec refuses a repeated QUIC parameter
+		let mut buf = Vec::new();
+		write_param(&mut buf, INITIAL_MAX_DATA, 1);
+		write_param(&mut buf, INITIAL_MAX_DATA, 2);
+		assert_eq!(
+			decode(buf).unwrap_err().code,
+			crate::TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+		);
+	}
+
+	/// QUIC extensions mean nothing on QMux, so their QUIC checks do not apply
+	#[test]
+	fn ignores_quic_only_parameters() {
+		let mut buf = Vec::new();
+		// min_ack_delay, in microseconds, above the default 25 ms max_ack_delay
+		write_param(&mut buf, 0xff04de1b, 30_000);
+		// max_receive_timestamps_per_ack, then receive_timestamps_exponent past 20
+		write_param(&mut buf, 0x4ac07, 8);
+		write_param(&mut buf, 0x4ac26, 21);
+		write_param(&mut buf, INITIAL_MAX_DATA, 42);
+		assert_eq!(decode(buf).unwrap().tp.initial_max_data, VarInt::from_u32(42));
 	}
 
 	#[test]

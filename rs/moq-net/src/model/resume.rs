@@ -1592,6 +1592,13 @@ impl Subscriber {
 		serving.map_or(end, |serving| serving.span_end(end))
 	}
 
+	/// The freshness bound the serving copy holds its readers to; see
+	/// [`track::Subscriber::max_age_bound`].
+	pub(super) fn max_age_bound(&self) -> Option<std::time::Duration> {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving.and_then(|serving| serving.max_age_bound())
+	}
+
 	/// When the latest group any copy caches at `keys` landed: a group a replaced copy
 	/// delivered landed all the same.
 	pub(super) fn landed(&self, keys: std::ops::Range<u64>) -> Option<crate::time::Instant> {
@@ -2968,6 +2975,8 @@ impl Reader {
 			logical: None,
 			fetch: None,
 			recovering: false,
+			judged: false,
+			excusing: false,
 			live: Arc::default(),
 		})
 	}
@@ -3866,6 +3875,13 @@ pub(super) struct Recover {
 	fetch: Option<(u64, Fetch)>,
 	/// A recovery started and has not ended, so its events are logged once each.
 	recovering: bool,
+	/// The group being read came from the reader's own fetch, which judged it under the reader's
+	/// own terms, or from looking past a copy's too-old verdict once already: its own too old
+	/// stands, which bounds the route to one request more per group.
+	judged: bool,
+	/// The recovery under way looks past a copy's too-old verdict, which the group it adopts
+	/// was then asked for.
+	excusing: bool,
 	/// The index of the serving copy's live groups a pending recovery's expiry searches
 	/// within the reader's window, kept across polls so each costs the groups that arrived
 	/// since; see [`Self::window`].
@@ -3893,6 +3909,8 @@ impl Clone for Recover {
 			// A clone reads in parallel, so it asks and logs for itself.
 			fetch: None,
 			recovering: false,
+			judged: self.judged,
+			excusing: false,
 			live: self.live.clone(),
 		}
 	}
@@ -3988,11 +4006,40 @@ impl Recover {
 	/// holds it. Too old and evicted judge a subscription's delivery, not whether the group
 	/// exists, so neither is a verdict on a fetch: one answered from a group still arriving
 	/// over a subscription asks the route again for the rest when that delivery gives up on it.
+	/// Nor is too old one on a reader wider than the copy's upstream may have judged it under,
+	/// once per group (see [`Self::excuses`]).
 	fn undelivered(&self, err: &Error) -> bool {
+		let code = StreamError::from(err);
 		err.retryable()
 			|| copy_failed(&self.copy)
 			|| matches!(err, Error::Lagged)
-			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
+			|| (self.reader.is_none() && matches!(code, StreamError::Old | StreamError::Evicted))
+			|| (code == StreamError::Old && self.excuses(&self.copy))
+	}
+
+	/// Whether a too-old verdict from `copy` is no verdict on the reader: the reader is wider than
+	/// the budget `copy`'s upstream may have judged it under, and the group being read is no
+	/// answer to the reader's own request already.
+	fn excuses(&self, copy: &track::Consumer) -> bool {
+		!self.judged && self.outgrows_judging(copy)
+	}
+
+	/// Whether the reader is wider than the narrowest budget `copy`'s upstream asked, which a
+	/// group it reset or dropped as too old may have been judged under: that verdict settles a
+	/// reader only as a stale drop does (see [`track::settles`]), and the route still delivers
+	/// the group to a request under the reader's own terms. A cache only makes things faster.
+	fn outgrows_judging(&self, copy: &track::Consumer) -> bool {
+		let Some(judged) = copy.judged_under() else {
+			return false;
+		};
+		let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) else {
+			return false;
+		};
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		let budget = reader.budget();
+		let cap = reader.groups.1;
+		let coverage = reader.window().groups().cloned().map(|groups| (groups, cap));
+		!track::settles(&budget, &coverage, self.key, &track::Hole::stale(judged))
 	}
 
 	/// Whether the route would answer `err`, a failure of the copy being read, with `err`
@@ -4013,6 +4060,8 @@ impl Recover {
 	/// [`Cause::Closed`], why the close stands.
 	pub(super) fn poll(&mut self, index: u64, cause: &Cause, waiter: &kio::Waiter) -> Poll<Result<Replacement>> {
 		let failed = cause.error();
+		self.excusing =
+			failed.is_some_and(|err| StreamError::from(err) == StreamError::Old && self.excuses(&self.copy));
 		// The copy being read will deliver nothing more of the group.
 		let settled = !matches!(cause, Cause::Stalled);
 		// Subscribe the reader to a new route from its newest group, which is this one or
@@ -4165,6 +4214,7 @@ impl Recover {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
+				fetched: false,
 			})
 		})
 	}
@@ -4192,16 +4242,21 @@ impl Recover {
 						group,
 						generation,
 						copy: serving.clone(),
+						fetched: false,
 					}));
 				}
 			}
 			// The serving route gave the group up, which ends a reader's group with that
 			// route's error however a fetch of the rest would answer. A drop judges that
 			// route's subscription, not whether the group exists, so it is no verdict on a
-			// fetch; nor is one a copy that failed dropped its open groups with, or a failure
-			// of the route it came through.
+			// fetch, nor on a reader wider than that subscription's budget; nor is one a copy
+			// that failed dropped its open groups with, or a failure of the route it came
+			// through.
 			Poll::Ready(Err(err)) if self.reader.is_some() && !err.retryable() && !copy_failed(serving) => {
-				return Poll::Ready(Err(err));
+				if StreamError::from(&err) != StreamError::Old || !self.excuses(serving) {
+					return Poll::Ready(Err(err));
+				}
+				self.excusing = true;
 			}
 			_ => {}
 		}
@@ -4265,6 +4320,7 @@ impl Recover {
 							group,
 							generation,
 							copy: serving.clone(),
+							fetched: true,
 						}));
 					}
 					*fetch = Fetch::Refused(Error::NotFound);
@@ -4332,6 +4388,7 @@ impl Recover {
 			);
 		}
 		self.generation = replacement.generation;
+		self.judged = replacement.fetched || std::mem::take(&mut self.excusing);
 		// The generation moved without `wants` seeing it ready, so it judges the new one.
 		self.route.reset();
 		self.copy = replacement.copy.clone();
@@ -4402,6 +4459,8 @@ pub(super) struct Replacement {
 	pub(super) group: group::Consumer,
 	pub(super) copy: track::Consumer,
 	generation: u64,
+	/// Whether the reader's own fetch delivered it.
+	fetched: bool,
 }
 
 /// A fetch of one group through whichever route serves the logical track.
@@ -4583,6 +4642,8 @@ impl kio::Task for Fetching {
 						logical: Some(self.logical.clone()),
 						fetch: None,
 						recovering: false,
+						judged: false,
+						excusing: false,
 						live: Arc::default(),
 					})))
 				}
@@ -14836,6 +14897,138 @@ mod test {
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
+	}
+
+	/// A copy's upstream resetting a group's stream as too old judged that copy's subscription,
+	/// not whether the group exists. A reader wider than the budget the copy asked, such as a
+	/// relay's one-shot SUBSCRIBE for the group or a reader with a longer budget, asks the route
+	/// for the rest, as the route would answer that reader's own request; a reader no wider
+	/// takes the verdict without asking.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_copys_stale_reset_stands_only_for_a_reader_no_wider() {
+		for (reader, dropped) in [
+			("bounded", false),
+			("longer", false),
+			("edge", false),
+			("bounded", true),
+			("longer", true),
+			("edge", true),
+		] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			// The copy's upstream subscription asked a live join at the live edge, which its
+			// publisher may judge the group under.
+			a.judge_under(Duration::ZERO);
+
+			let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+			arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut sub = match reader {
+				"bounded" => {
+					let one = Subscription::default().with_ranges([track::Range {
+						start: track::Start::Time(0),
+						end: Some(0),
+					}]);
+					logical.consume().subscribe(one).now_or_never().unwrap().unwrap()
+				}
+				"longer" => subscribe(&logical, Duration::from_secs(10)),
+				_ => subscribe(&logical, Duration::ZERO),
+			};
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()), "{reader} {dropped}");
+
+			arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+			let _next = a.create_group(group::Info { start: 1 }).unwrap();
+			// Lite-07 also names it dropped too old, which the copy records under the budget asked.
+			if dropped {
+				a.give_up(0..1, track::Hole::stale(Duration::ZERO));
+			}
+			let res = reading.read_frame().now_or_never();
+			if reader == "edge" {
+				assert!(matches!(res, Some(Err(_))), "{reader} {dropped}: {res:?}");
+				assert!(dynamic.requested_fill_group().now_or_never().is_none(), "nothing asked");
+				continue;
+			}
+			assert!(res.is_none(), "{reader} {dropped}: {res:?}");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!((request.key(), request.frame_start()), (0, 1), "{reader} {dropped}");
+			let mut rest = request.accept(None).unwrap().expect("a fresh group");
+			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+			rest.finish().unwrap();
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{reader} {dropped}");
+			assert_eq!(read(&mut reading), None, "{reader} {dropped}");
+		}
+	}
+
+	/// The reader's own fetch answers under the reader's own terms, so a group it delivered
+	/// failing too old ends the read: the route is not asked again. Mirrors "a fetched group's
+	/// stale reset stands" in `js/net/src/resume.test.ts`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_groups_stale_reset_stands() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		a.judge_under(Duration::ZERO);
+
+		let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+		let _next = a.create_group(group::Info { start: 1 }).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		rest.abort(Error::Stream(StreamError::Old)).unwrap();
+		let res = reading.read_frame().now_or_never();
+		assert!(dynamic.requested_fill_group().now_or_never().is_none(), "asked again");
+		assert!(matches!(res, Some(Err(_))), "{res:?}");
+	}
+
+	/// As [`a_fetched_groups_stale_reset_stands`], with the fetch adopted from a newer route
+	/// whose copy asked a narrower budget than the reader: its OLD still stands.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_fetched_from_another_route_stands_on_its_stale_reset() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		a.judge_under(Duration::ZERO);
+
+		let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		let dynamic = b.requests();
+		b.judge_under(Duration::ZERO);
+		routes.serve(b.consume());
+		let _next = b.create_group(group::Info { start: 1 }).unwrap();
+		arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		rest.abort(Error::Stream(StreamError::Old)).unwrap();
+		let res = reading.read_frame().now_or_never();
+		assert!(dynamic.requested_fill_group().now_or_never().is_none(), "asked again");
+		assert!(matches!(res, Some(Err(Error::Stream(StreamError::Old)))), "{res:?}");
 	}
 
 	/// Mirrors `routeFailed` in `js/net/src/resume.test.ts`: only these stream codes are a

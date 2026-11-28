@@ -679,6 +679,11 @@ The finite-tail matrix also publishes compressed tracks from Rust and native JS 
 the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
 DEFLATE window, empty frames, the plain fallback and the received track's codec flag.
 
+The same finite track also crosses the relay on lite-07 as a metadata subscription
+(`broadcast.meta`), Rust to Rust and in both directions with each native JS runtime:
+the reader checks every group arrives, with each frame's declared size and no
+payload read, and the declared end.
+
 The compressed-catalog lane then fans one Rust hang catalog out to three native JS
 readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and reading it as
 `@moq/watch` does. Only the lite-07 reader sees the flag; the other two share the relay's

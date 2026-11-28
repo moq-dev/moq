@@ -95,8 +95,11 @@ class Fanout(unittest.TestCase):
         expected = tomllib.loads(f"[dependencies]\n{fanout.kio_dependency_line(root)}\n")["dependencies"]["kio"]
         for manifest in sorted((root / "bench/fanout").glob("*/Cargo.toml")):
             with self.subTest(manifest=manifest.relative_to(root)):
-                parsed = tomllib.loads(manifest.read_text())
-                self.assertEqual(parsed["dependencies"]["kio"], expected)
+                kio = tomllib.loads(manifest.read_text())["dependencies"]["kio"]
+                # A path counts from the manifest's own directory.
+                if "path" in kio:
+                    kio = {**kio, "path": str((manifest.parent / kio["path"]).resolve())}
+                self.assertEqual(kio, expected)
 
 
 if __name__ == "__main__":

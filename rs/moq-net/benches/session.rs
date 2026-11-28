@@ -9,6 +9,7 @@ criterion_group!(
 	benches,
 	session::session::<Model>,
 	session::group_cost::<Model>,
+	session::meta::<Model>,
 	session::datagram::<Model>,
 	session::fetch_frames::<Model>,
 	session::fetch_range::<Model>,

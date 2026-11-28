@@ -135,7 +135,8 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/(nextest|hakari)\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
     tools='cargo jq cc' compiles='check fix' fix memo
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
-# fails here rather than in the nightly native lanes. The flake pins its
+# fails here rather than in the nightly native lanes. A local check narrows it
+# to the selected crates that name a platform; `just ci` lints them all. The flake pins its
 # toolchain and the zig that compiles its build scripts' C, so a change there
 # lints the whole workspace (see sh/rs/select.sh).
 module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \

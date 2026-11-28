@@ -33,7 +33,7 @@ const ME: NodeId = NodeId {
 
 /// The checked-in samples, which `ROUTE_VECTORS=write` regenerates.
 fn vectors_path(file: &str) -> PathBuf {
-	PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+	PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
 		.join("verify/route-algebra")
 		.join(file)
 }

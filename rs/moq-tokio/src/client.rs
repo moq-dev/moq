@@ -1440,9 +1440,9 @@ mod tests {
 		assert!(matches!(value, super::TransportRace::Quic("quic")));
 	}
 
-	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
-	/// gives up on its own, but the WebSocket arm has no deadline of its own, so the
-	/// race stays pending forever. Without the connect timeout this test hangs.
+	/// A peer that completes the TCP handshake and then never speaks: both arms give up
+	/// on their own handshake timeouts, but an attempt must still end at the connect
+	/// timeout when that is shorter. Without the connect timeout this test hangs.
 	///
 	/// That is what wedged a publisher against a livelocked relay: [`Connection`] only
 	/// re-arms its backoff (and checks its give-up timeout) *between* attempts, so an
@@ -1452,7 +1452,8 @@ mod tests {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 
-		let timeout = crate::connect::DEFAULT_TIMEOUT;
+		// Shorter than qmux's handshake timeout, which would otherwise end the attempt first.
+		let timeout = std::time::Duration::from_secs(5);
 		let mut config = crate::connect::Config {
 			timeout: Some((timeout).into()),
 			..Default::default()

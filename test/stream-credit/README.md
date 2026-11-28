@@ -40,7 +40,10 @@ The driver plays every other part:
   Chromium or Firefox. It dials the relay over WebTransport only and subscribes
   to every track in three tiers of subscriber priority. A group that stops
   early for any reason but going stale (`OLD`) is fetched, as a reader that
-  still wants it would:
+  still wants it would. A lite-07 fetch is a one-shot subscription whose group
+  competes for the same cap, so the relay may reset it with TOO\_FAR\_BEHIND
+  as well, and the tab asks again, as the draft tells a subscriber that still
+  wants a preempted group to:
 
   | Tier | Priority | Tracks | Delay budget |
   | --- | --- | --- | --- |
