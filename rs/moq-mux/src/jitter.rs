@@ -305,6 +305,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		if let Some(acquire) = &mut engine.acquire {
 			acquire.generation += offset;
 		}
+		// Every deadline moved later by the shift, so every frame had that much more to spare.
+		let later = shift.as_secs_f64();
+		engine.margin = engine.margin.map(|margin| margin + later);
+		if let Some((_, spare)) = &mut engine.spare {
+			*spare += later;
+		}
 		engine.horizon = engine
 			.horizon
 			.map(|horizon| horizon.checked_add(shift).ok_or(moq_net::TimeOverflow))
@@ -1842,6 +1848,30 @@ mod tests {
 		assert_eq!((next.item, next.generation), ("C", 1));
 		buffer.adopted();
 		assert_eq!(buffer.reporting().dropped(), 0);
+	}
+
+	/// A commit that moves the replacement's deadlines later to keep the output in order moves
+	/// what its frames had to spare with them.
+	#[kio::test]
+	async fn a_commit_shift_moves_the_spare_with_the_deadlines() {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		buffer.push(0, arrival(start, 100, "A1")).unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+		let before = buffer.replacement_engine().unwrap().spare_seen().unwrap();
+		assert!((before - 0.5).abs() < 1e-6, "B arrived a delay ahead: {before} s");
+		kio::clock::sleep(delay + Duration::from_millis(100)).await;
+		assert_eq!(due(&mut buffer), ["A0", "A1"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		// A1 went out 100 ms after B's first deadline, so the commit shifts B 100 ms later.
+		buffer.commit(first).unwrap();
+		let after = buffer.replacement_engine().unwrap().spare_seen().unwrap();
+		assert!((after - 0.6).abs() < 1e-6, "shifted with the deadlines: {after} s");
 	}
 
 	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames

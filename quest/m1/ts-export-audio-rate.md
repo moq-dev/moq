@@ -26,3 +26,6 @@ over more than the spare's one-second window. Taking the least spare over two se
 since only one second had passed when the rate arrived. Check that hypothesis first, for example by
 bounding growth by the spare less the PES span that `Track::pack_start` gives at the delay.
 Reproduce it with a `paced_export` sweep over the `ffmpeg_*.ts` fixtures.
+
+This quest does not gate 0.22.0. It stays in m1 only while #9839 holds its claim; once that claim
+ends, move it to m3 with `quest mv`.
