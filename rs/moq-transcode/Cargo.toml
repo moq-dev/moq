@@ -59,10 +59,6 @@ url = { workspace = true }
 usage-rs = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
-# The ladder bench reads the driving thread's CPU clock.
-[target.'cfg(unix)'.dev-dependencies]
-libc = { workspace = true }
-
 [[bench]]
 name = "ladder"
 harness = false

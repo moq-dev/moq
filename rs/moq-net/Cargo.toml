@@ -58,7 +58,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 swole = { workspace = true }
-# Runs the group log's deferred frees before the backing bench reads the live heap.
+# Holds a read open so the pool tests see the group log defer its frees.
 crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.

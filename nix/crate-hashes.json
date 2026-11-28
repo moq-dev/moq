@@ -1,4 +1,6 @@
 {
+  "git+https://github.com/kixel-ai/swole#0.0.0": "1j9fh9xg090ybh75ip6wvah9h0l7z3pkhn0ws6f5qshlg853wld9",
+  "git+https://github.com/kixel-ai/swole#swole-macros@0.0.0": "1j9fh9xg090ybh75ip6wvah9h0l7z3pkhn0ws6f5qshlg853wld9",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_bindgen@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_core@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",

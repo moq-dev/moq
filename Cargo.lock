@@ -953,12 +953,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "c-enum"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd17eb909a8c6a894926bfcc3400a4bb0e732f5a57d37b1f14e8b29e329bace8"
-
-[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,7 +4072,6 @@ dependencies = [
  "objc2-core-media",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
- "perf-event2",
  "rand 0.10.3",
  "ringbuf",
  "rubato",
@@ -4895,7 +4888,6 @@ dependencies = [
  "futures",
  "hang",
  "kio",
- "libc",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -6163,41 +6155,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "perf-event-data"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "575828d9d7d205188048eb1508560607a03d21eafdbba47b8cade1736c1c28e1"
-dependencies = [
- "bitflags 2.13.2",
- "c-enum",
- "perf-event-open-sys2",
-]
-
-[[package]]
-name = "perf-event-open-sys2"
-version = "5.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
-dependencies = [
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "perf-event2"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0939b8fad77dfaeb29ebbd35faaeaadbf833167f30975f1b8993bbba09ea0a0f"
-dependencies = [
- "bitflags 2.13.2",
- "c-enum",
- "libc",
- "memmap2",
- "perf-event-data",
- "perf-event-open-sys2",
-]
 
 [[package]]
 name = "pest"
@@ -8294,7 +8251,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swole"
 version = "0.0.0"
-source = "git+https://github.com/kixel-ai/swole#a40ec9bf6d247ff3d1a866b453cce1981baed484"
+source = "git+https://github.com/kixel-ai/swole#b031d30e870b4925e5dd44deece539e0ebad8f75"
 dependencies = [
  "inventory",
  "swole-macros",
@@ -8303,7 +8260,7 @@ dependencies = [
 [[package]]
 name = "swole-macros"
 version = "0.0.0"
-source = "git+https://github.com/kixel-ai/swole#a40ec9bf6d247ff3d1a866b453cce1981baed484"
+source = "git+https://github.com/kixel-ai/swole#b031d30e870b4925e5dd44deece539e0ebad8f75"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10379,7 +10336,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "const-oid 0.10.2",
- "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-common 0.1.7",
  "cudarc",
@@ -10409,14 +10365,12 @@ dependencies = [
  "futures-task",
  "futures-util",
  "getrandom 0.4.3",
- "half",
  "hashbrown 0.17.1",
  "hex",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "indexmap 2.14.2",
- "itertools 0.13.0",
  "libc",
  "linux-raw-sys 0.12.1",
  "log",
