@@ -912,11 +912,14 @@ mod tests {
 					let case = format!("{upper_bound} {minimum_change} {link_payload_size_limit}: {probed:?}");
 
 					assert!(completed(&mtud), "{case}");
-					assert!(probed.iter().all(|size| (1_201..=upper_bound).contains(size)), "{case}");
-					assert!(
-						(1_200..=link_payload_size_limit.max(1_200)).contains(&mtud.current_mtu),
-						"{case}"
-					);
+					let mut confirmed = 1_200;
+					for &size in &probed {
+						assert!(size > confirmed && size <= upper_bound, "{case}");
+						if size <= link_payload_size_limit {
+							confirmed = size;
+						}
+					}
+					assert_eq!(mtud.current_mtu, confirmed, "{case}");
 				}
 			}
 		}
