@@ -18328,8 +18328,14 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		for path in ["room/*", "room/cam*1", "**"] {
-			assert!(matches!(producer.route(path, RouteOptions::default()), Err(Error::InvalidPath)));
-			assert!(matches!(producer.announce(path, RouteInfo::new()), Err(Error::InvalidPath)));
+			assert!(matches!(
+				producer.route(path, RouteOptions::default()),
+				Err(Error::InvalidPath)
+			));
+			assert!(matches!(
+				producer.announce(path, RouteInfo::new()),
+				Err(Error::InvalidPath)
+			));
 			assert!(matches!(producer.mount(path, "room"), Err(Error::InvalidPath)));
 			assert!(matches!(consumer.follow(path, None), Err(Error::InvalidPath)));
 		}
@@ -18342,7 +18348,10 @@ mod tests {
 		let producer = origin(1).produce();
 		let half = vec!["a"; Path::MAX_PARTS / 2 + 1].join("/");
 		let rooted = producer.consume().scope(half.as_str(), &Prefixes::all()).unwrap();
-		assert!(matches!(rooted.follow(half.as_str(), None), Err(Error::BoundsExceeded(_))));
+		assert!(matches!(
+			rooted.follow(half.as_str(), None),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	#[kio::test]
