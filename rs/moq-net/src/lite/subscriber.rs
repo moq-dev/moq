@@ -52,10 +52,28 @@ pub(super) struct SubscriberConfig {
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
 	pub auth: crate::auth::Link,
+	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
+	pub announces: crate::session::Slots,
+	/// The viewers whose sum the PROBE stream sends as its target.
+	pub viewers: bandwidth::Viewers,
 }
 
+/// A session's subscriber half, a handle every machine and track holds its own clone of.
+///
+/// One `Arc` rather than the fields themselves: they are hundreds of bytes, and each of the
+/// session's idle machines would hold a copy.
 #[derive(Clone)]
-pub(super) struct Subscriber {
+pub(super) struct Subscriber(Arc<Shared>);
+
+impl std::ops::Deref for Subscriber {
+	type Target = Shared;
+
+	fn deref(&self) -> &Shared {
+		&self.0
+	}
+}
+
+pub(super) struct Shared {
 	runtime: crate::time::Deadlines,
 	session: Transport,
 
@@ -653,7 +671,7 @@ impl Subscriber {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = crate::Hop::from(config.origin.node());
-		Self {
+		Self(Arc::new(Shared {
 			session: config.session,
 			runtime: config.runtime,
 			origin: config.origin,
@@ -676,10 +694,10 @@ impl Subscriber {
 			announce_streams: kio::Queue::new(),
 			going_away: config.going_away,
 			auth: config.auth,
-			announces: Default::default(),
-			viewers: Default::default(),
+			announces: config.announces,
+			viewers: config.viewers,
 			minted: Default::default(),
-		}
+		}))
 	}
 
 	/// Record the error that ended the session. The first one wins: a later cancel
@@ -5058,6 +5076,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut accept = UniAccept::new(subscriber, Vec::new());
 		// Held open and empty, so each accepted stream waits on its type.
@@ -5091,6 +5111,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut recv = DatagramRecv::new(subscriber);
 		assert!(recv.enabled);
@@ -5127,6 +5149,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut recv = DatagramRecv::new(subscriber.clone());
 		let send = |subscribe| {
@@ -5189,6 +5213,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut driver = SubscriberDriver::new(subscriber.clone(), Vec::new(), false, route_stream::Publish::idle());
 		let producer = datagram::Info::default().produce("datagrams");
@@ -5274,6 +5300,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let mut uni = UniServe {
 				subscriber,
@@ -5344,6 +5372,8 @@ mod tests {
 					cost: None,
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
+					announces: Default::default(),
+					viewers: Default::default(),
 				});
 				let track = track::Producer::new(
 					std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -5401,6 +5431,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		subscriber.subscribes.lock().insert(
 			7,
@@ -5532,6 +5564,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let pool = crate::cache::Pool::unbounded();
 		let mut info = crate::track::Info::default().with_timescale(framing.timescale);
@@ -5814,6 +5848,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		// Unchecked where the wire's timestamps may be send times, as the copy is accepted.
@@ -5972,6 +6008,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let track = track::Producer::new(
@@ -6042,6 +6080,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 
 			let track = track::Producer::new(
@@ -6132,6 +6172,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 
 			let track = track::Producer::new(
@@ -6260,6 +6302,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -6333,6 +6377,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -6408,6 +6454,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut selection = crate::model::TestSelection::new();
 		let serve = TrackServe {
@@ -6519,6 +6567,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -6607,6 +6657,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7022,6 +7074,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7491,6 +7545,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -7573,6 +7629,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: auth.clone(),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7649,6 +7707,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7723,6 +7783,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7840,6 +7902,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -7912,6 +7976,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -8007,6 +8073,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 
 			let producer = datagram::Info::default()
@@ -8072,6 +8140,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -8127,6 +8197,8 @@ mod tests {
 				peer_node: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false, route_stream::Publish::idle());
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
@@ -8157,6 +8229,8 @@ mod tests {
 					cost: None,
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
+					announces: Default::default(),
+					viewers: Default::default(),
 				});
 				let route = kio::Producer::new(());
 				let serve = TrackServe {
@@ -8231,6 +8305,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -8286,6 +8362,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		})
 	}
 
@@ -8742,6 +8820,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -8878,6 +8958,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth,
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let broadcast = crate::broadcast::Info::new().produce().with_validity(validity);
 		let consumer = broadcast.consume();
@@ -9017,6 +9099,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth,
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -9079,6 +9163,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -9149,6 +9235,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: auth.clone(),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -9219,6 +9307,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let subscribes = subscriber.subscribes.clone();
 			let serve = TrackServe {
@@ -9319,6 +9409,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -9386,6 +9478,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let subscribes = subscriber.subscribes.clone();
 			let serve = TrackServe {
@@ -9505,6 +9599,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast
@@ -9588,6 +9684,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -9663,6 +9761,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -9740,6 +9840,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -9835,6 +9937,8 @@ mod tests {
 					cost: None,
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
+					announces: Default::default(),
+					viewers: Default::default(),
 				});
 				let serve = TrackServe {
 					validity: Default::default(),
@@ -9956,6 +10060,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -10026,6 +10132,8 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
+				announces: Default::default(),
+				viewers: Default::default(),
 			});
 			let mut probe = RecvBandwidth::new(subscriber);
 			assert!(probe.poll(&kio::Waiter::noop()).is_pending());
@@ -10091,6 +10199,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let viewer = subscriber.viewers.watch(bandwidth::Rate::from_mbps(1)).unwrap();
 		let mut probe = RecvBandwidth::new(subscriber);
@@ -10565,6 +10675,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let path = Path::from_static("room/host");
@@ -10658,6 +10770,8 @@ mod tests {
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let mut announced = Announced::default();
@@ -10712,6 +10826,8 @@ mod tests {
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let path = Path::from_static("pool");
 		let mut announced = Announced::default();
@@ -10781,6 +10897,8 @@ mod tests {
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut announced = Announced::default();
 		subscriber
@@ -10837,6 +10955,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let path = Path::from_static("room/host");
@@ -10896,6 +11016,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let path = Path::from_static("room/host");
@@ -10955,6 +11077,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		// The sender's identity is already in the chain: the route came back through it.
@@ -11027,6 +11151,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		// The path as advertised to the peer: our hop is already in the chain.
@@ -11087,6 +11213,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -11134,6 +11262,8 @@ mod tests {
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]).unwrap();
@@ -11219,6 +11349,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		(subscriber, consumer)
 	}
@@ -11245,6 +11377,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 
 		let path = Path::from_static("room/host");
@@ -11348,6 +11482,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let mut prefix = AnnouncePrefix::new(
 			subscriber.clone(),
@@ -11487,6 +11623,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let snapshot = subscriber.origin.snapshot("");
 		if !version.has_routes() {
@@ -11633,6 +11771,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
 		let recv = crate::transport::boxed::RecvStream::new(session.recv());
@@ -12138,6 +12278,8 @@ mod tests {
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
@@ -12176,6 +12318,8 @@ mod tests {
 			cost: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
+			announces: Default::default(),
+			viewers: Default::default(),
 		});
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
