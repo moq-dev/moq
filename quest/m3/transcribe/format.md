@@ -18,14 +18,15 @@ groups). ✅ No cap on an utterance's length (rejected: splitting a group near
 10 s).
 
 Decided 2026-11-27 (maintainer, `/quest-plan`): ✅ segment-level optional
-`speaker` (splitting segments on speaker changes when diarization is enabled,
-keeping per-word `speaker` optional) plus optional `entities` on final
-segments, with `@moq/watch` displaying speaker labels when present (rejected:
-format fields only without `@moq/watch` speaker rendering; per-word `speaker`
-only without segment-level `speaker`). Why: segment-level `speaker` gives
-players and downstream consumers clean speaker turns without every consumer
-re-implementing word-level grouping, while keeping `entities` structured for
-programmatic consumers and out of the caption overlay.
+`speaker` (splitting segments on speaker changes on final results when
+diarization is enabled, keeping per-word `speaker` optional) plus optional
+`entities` on final segments, with `@moq/watch` displaying speaker labels
+when present (rejected: format fields only without `@moq/watch` speaker
+rendering; per-word `speaker` only without segment-level `speaker`). Why:
+segment-level `speaker` gives players and downstream consumers clean speaker
+turns without every consumer re-implementing word-level grouping, while
+keeping `entities` structured for programmatic consumers and out of the
+caption overlay.
 
 Recommended frame shape, settled in review:
 
@@ -33,13 +34,27 @@ Recommended frame shape, settled in review:
 {"id": 41, "final": true, "start": 12.48, "end": 14.02, "lang": "en",
  "speaker": 0,
  "text": "like a big pizza pie",
- "words": [{"text": "like", "start": 12.48, "end": 12.61, "confidence": 0.98, "speaker": 0}],
- "entities": [{"label": "food", "value": "pizza pie", "start_word": 3, "end_word": 4, "confidence": 0.95}]}
+ "words": [
+   {"text": "like", "start": 12.48, "end": 12.61, "confidence": 0.98, "speaker": 0},
+   {"text": "a", "start": 12.62, "end": 12.70, "confidence": 0.99, "speaker": 0},
+   {"text": "big", "start": 12.71, "end": 12.95, "confidence": 0.97, "speaker": 0},
+   {"text": "pizza", "start": 12.96, "end": 13.45, "confidence": 0.98, "speaker": 0},
+   {"text": "pie", "start": 13.46, "end": 14.02, "confidence": 0.99, "speaker": 0}
+ ],
+ "entities": [{"label": "food", "value": "pizza pie", "start_word": 3, "end_word": 5, "confidence": 0.95}]}
 ```
 
 - `words`, `confidence`, `lang`, `speaker`, and `entities` are optional,
   since a backend or configuration may lack them. `entities` appears only on
   final segments.
+- `start_word` is inclusive and `end_word` is exclusive (`[start_word, end_word)`,
+  matching Deepgram's convention). Whenever `entities` is present, `words`
+  must also be present, and readers refuse any entity whose indices fall out
+  of bounds (`start_word >= end_word` or `end_word > words.len()`).
+- `speaker` is a 0-based integer local to one continuous recognition session
+  or request (not a globally stable identity across reconnects or backfill
+  runs). Both `@moq/watch` and text exporters render it as 1-based
+  `Speaker {speaker + 1}` (`Speaker 1:` in watch, `<v Speaker 1>` in WebVTT).
 - Times sit on the source broadcast's clock, so a transcript lines up with
   the audio it came from. The frame timestamp carries `start`, as for every
   text format, so a relay never parses the payload.
@@ -72,8 +87,9 @@ aligned with the audio. A group that had already finished when the reader
 joined is history rather than late text, so it shows nothing, as above.
 
 Watch highlights words when `words` is present, prefixes a segment's caption
-with its speaker label (such as `Speaker 1:`) when `speaker` is present, and
-ignores `entities` in the caption overlay. Its renderer escapes all
+with `Speaker {speaker + 1}:` (a session-local label, not a persistent
+identity) when `speaker` is present, and ignores `entities` in the caption
+overlay. Its renderer escapes all
 markup today (`sanitizeCue` in `js/watch/src/text/renderer.ts`) and lists
 `vtt` and `utf8` as renderable (`js/watch/src/text/source.ts`), so add the
 format there and build this rendition's DOM from the JSON directly rather

@@ -22,20 +22,20 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
   trait with an [OpenAI TTS fallback](/quest/m3/transcribe/dub-openai.md) as
   its follow-up quest (rejected: Deepgram Aura-2 only; OpenAI TTS only;
   combining both providers into one PR; dropping dubbing).
-- ✅ Stream append-only translated clause deltas into TTS as they arrive,
-  flushing on `final`, to keep end-to-end dubbing latency as low as possible
-  (rejected: waiting for each translated segment's `final` before calling
-  TTS).
+- ✅ Stream append-only translated clause deltas into TTS as they arrive
+  (flushing each committed clause immediately and any remaining tail on
+  `final`) to keep end-to-end dubbing latency as low as possible (rejected:
+  waiting for each translated segment's `final` before calling TTS).
 - ✅ Queue dubbed clips sequentially without overlap
   (`max(source_start, prev_clip_end)`), shed/skip segments only if lag
-  exceeds a bounded cap (such as the track's max age), and measure real lag
-  drift before considering time-stretching (rejected: time-stretching with
-  `moq-audio::stretch` up front; truncating an active clip when the next
-  source segment starts).
-- ✅ Publish voice-only synthesized audio renditions (silence between clips),
-  letting players switch cleanly via `audio-lang` or mix client-side if
-  desired (rejected: ducking and mixing original source audio inside
-  `moq-transcribe`).
+  exceeds a bounded cap derived from the advertised `AudioConfig::delay`
+  playout budget, and measure real lag drift before considering
+  time-stretching (rejected: time-stretching with `moq-audio::stretch` up
+  front; truncating an active clip when the next source segment starts).
+- ✅ Publish voice-only synthesized audio renditions (no ducked source audio
+  mixed underneath), letting players switch cleanly via `audio-lang` or mix
+  client-side if desired (rejected: ducking and mixing original source audio
+  inside `moq-transcribe`).
 
 Guidance:
 
@@ -48,19 +48,30 @@ Guidance:
   requested dubbing language has no configured voice or is unsupported by the
   selected backend.
 - **Clause-delta streaming:** read the translator's append-only revisions in
-  process ([translate](/quest/m3/transcribe/translate.md)). Send each newly
-  appended clause delta as a `Speak` message and send `Flush` when the
-  segment's `final` arrives, writing synthesized PCM chunks onto the audio
-  track immediately as they return so players render them by timestamp with
-  minimal latency.
-- **Timeline, overlap, and backlog:** stamp each segment's first audio frame
-  at `max(source_segment_start, previous_clip_end)` on the source broadcast's
-  clock, advancing monotonically across consecutive synthesized frames and
-  re-anchoring across silent gaps so idle gaps do not inflate the player's
-  jitter estimate. Never overlap two segments on one track. When dubbing lag
-  past the live source exceeds the track's max age (30 s), drop queued text
-  and skip forward to the newest translated segment so a slow backend causes
-  a bounded gap rather than unbounded memory growth.
+  process ([translate](/quest/m3/transcribe/translate.md)). For each newly
+  committed clause delta, send a `Speak` message followed by `Flush` right
+  away (never waiting until segment `final` to flush, which would leave short
+  committed clauses buffered in silence during long segments); on `final`,
+  send and flush any remaining tail text. Write synthesized PCM chunks onto
+  the audio track immediately as they return so players render them by
+  timestamp with minimal latency.
+- **Timeline, playout delay, overlap, and backlog:** stamp each clip's first
+  audio frame at `max(source_segment_start, previous_clip_end)` on the source
+  broadcast's clock, advancing monotonically across consecutive synthesized
+  frames within that clip. Gaps between non-contiguous clips are skipped time
+  (do not publish silent PCM frames and do not re-anchor off the source
+  clock): start a new group at each non-contiguous clip's timestamp so
+  moq-lite reports silence between clips as skipped. Because STT,
+  translation, and TTS add seconds of pipeline lag behind live source audio,
+  advertise that lag via `AudioConfig::delay` in the derivative catalog
+  (`rs/hang/src/catalog/audio/mod.rs`), which `@moq/watch` already reads
+  (`js/watch/src/audio/decoder.ts`) to raise `sync.out.delay` when the dubbed
+  rendition is selected so dubbed frames play in sync with video instead of
+  being skipped as late. Set the dubbing backlog skip threshold from that
+  playout latency budget (a bounded margin past `delay`, capped by the
+  track's `max_age`, rather than the full 30 s `max_age`), dropping queued
+  text and skipping forward to the newest translated segment if the backend
+  falls behind that budget. Never overlap two clips on one track.
 - **Catalog & on-demand lifecycle:** advertise each dubbed rendition in the
   derivative catalog's `audio` section with its BCP-47 `lang`
   ([audio-lang](/quest/m3/audio-lang.md)) and a clear label distinguishing

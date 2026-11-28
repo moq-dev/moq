@@ -38,10 +38,11 @@ Guidance:
   dedicated sessions (announce request broadcast under a prefix and subscribe
   to the spawned agent broadcast), and multi-participant room prefixes
   alongside `@moq/room`.
-- **Reconnect resilience:** replay the user's lossless `moq-json` event log
-  across reconnects with `seq`/`epoch` deduplication matching
-  [spec.md](/quest/m3/agent/spec.md), and handle agent broadcast restarts
-  cleanly without resurrecting stale turns.
+- **Reconnect resilience:** maintain the bounded `moq-json` window
+  checkpoint and replay only unacknowledged prompts and pending tool
+  results across reconnects with `seq`/`epoch` deduplication and sender
+  backpressure matching [spec.md](/quest/m3/agent/spec.md), and handle agent
+  broadcast restarts cleanly without resurrecting stale turns.
 - **Verification:** add unit tests on a mocked clock for barge-in `reset()`,
   reconnect dedupe, tool-call round-trips, and timeline window updates, plus
   a cross-language interop test pairing Rust `moq-agent` with JS `@moq/agent`

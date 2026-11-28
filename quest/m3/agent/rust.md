@@ -37,14 +37,19 @@ Guidance:
   - On barge-in / interruption, when unplayed in-flight audio exceeds the
     rotation floor (e.g. > 300 ms), **drop** (do not cleanly finish) the
     current audio track producer so it leaves the catalog immediately and
-    discards future-dated frames, rewind PTS by the unplayed lead, and open
-    the successor rendition `<track>-<n>`. Capture track generation before
-    any pacing sleep so a stale chunk never lands on the successor.
-- **Event stream & timeline window:** publish and consume the lossless
-  compressed `moq-json` conversation stream (text prompts/replies, tool calls
-  and results, turn state, barge-in, session end) with reconnect replay and
-  `seq`/`epoch` deduplication. Provide an optional typed latency timeline
-  producer/consumer (`moq-json` window) bounded to the latest exchange.
+    discards future-dated frames, rewind publish PTS using the exact rule in
+    [spec.md](/quest/m3/agent/spec.md), and open the successor rendition
+    `<track>-<n>`. Capture track generation before any pacing sleep so a
+    stale chunk never lands on the successor.
+- **Event track & timeline window:** publish and consume the bounded
+  compressed `moq-json` window conversation track (text prompts/replies,
+  tool calls and results, turn state, barge-in, session end) with
+  checkpointing, replay of only unacknowledged prompts and pending tool
+  calls/results (`seq`/`epoch` deduplication across reconnects), and sender
+  backpressure at the per-peer bound, as defined in
+  [spec.md](/quest/m3/agent/spec.md). Provide an optional typed latency
+  timeline producer/consumer (`moq-json` window) bounded to the latest
+  exchange.
 - **Multi-input & worker spawning over `Origin` prefixes:**
   - **Room / multi-input mode:** subscribe to participant broadcasts matching
     an `Origin` prefix and yield typed per-participant input streams (audio,

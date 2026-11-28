@@ -41,9 +41,11 @@ the model. Each translation track mirrors the source transcript's groups: one
 group per source utterance, at the same start. Each of its frames revises the
 segment with the source segment's `id`, `start`, and `end`, and the target
 `lang`, so a translated segment and its source map one to one and line up
-with the same audio. It carries no `words` or `confidence`, since word timing
-and scores don't carry across languages. A source segment already in the
-target language is copied rather than sent to the model.
+with the same audio. It carries no `words`, `confidence`, or `entities`, since word timing,
+scores, and source-word entity spans don't carry across languages; when the
+source segment carries `speaker`, the translated segment copies `speaker`. A
+source segment already in the target language is copied rather than sent to
+the model.
 
 **Append-only revisions.** Each revision's text extends the previous one's,
 and the last is marked final, so a viewer never sees translated text change

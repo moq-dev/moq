@@ -48,12 +48,12 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
   (rejected: voice + transcripts + barge-in only).
 - ✅ Rotate the agent's audio track on barge-in (dropping the retired audio
   producer from the catalog when unplayed audio is in flight, rewinding PTS
-  to wall-clock now, and opening a successor `<track>-<n>`, while
-  re-anchoring across idle turn gaps), matching the proven Pipecat MoQ
-  transport design (rejected: reusing one persistent audio track with one
-  group per turn). Why: faster-than-real-time TTS writes future-dated
-  timestamps seconds ahead, so reusing a monotonic track breaks timestamps
-  and STT interruption alignment.
+  as specified in [spec.md](/quest/m3/agent/spec.md), and opening a successor
+  `<track>-<n>`, while re-anchoring across idle turn gaps), matching the
+  proven Pipecat MoQ transport design (rejected: reusing one persistent audio
+  track with one group per turn). Why: faster-than-real-time TTS writes
+  future-dated timestamps seconds ahead, so reusing a monotonic track breaks
+  timestamps and STT interruption alignment.
 - ✅ Take advantage of MoQ fanout and multi-participant `Origin` prefixes:
   one agent broadcast can be watched by many subscribers, one agent can
   consume multiple input broadcasts under a shared prefix (room mode), and

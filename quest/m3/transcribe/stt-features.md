@@ -32,30 +32,39 @@ Guidance:
 
 - Map each opt-in flag onto Deepgram `/v1/listen` query parameters while
   preserving `mip_opt_out=true`:
-  - Diarization: `diarize_model=latest` (or `diarize=true`), splitting a
-    Deepgram result at word-level speaker transitions so each emitted segment
-    has a single `speaker` ID and clean start/end timestamps on the source
-    clock. When a result splits into multiple segments, adjust each segment's
-    word-index references (such as `entities` `start_word`/`end_word`) to
-    match that segment's `words` slice, or keep entity indices valid per
-    segment.
+  - Diarization: `diarize_model=latest` (or `diarize=true`). Split by speaker
+    only on `is_final` results: interim revisions stay a single provisional
+    segment under one `id` (without speaker splitting) so unstable interim
+    speaker labels can never leave orphaned segment IDs in `@moq/watch` or
+    [translate](/quest/m3/transcribe/translate.md). When a final result
+    contains word-level speaker transitions, finalize the original segment
+    `id` with the first speaker's span and emit each subsequent speaker span
+    in the utterance as a final segment with a fresh `id`, carrying its own
+    source-clock start/end timestamps and `words` slice. Remap each entity's
+    half-open `[start_word, end_word)` indices relative to its split segment's
+    `words` slice, and drop any entity whose span crosses a speaker boundary.
   - Redaction: repeated `redact=<kind>` parameters (for example `pii`,
     `pci`, `phi`, `numbers`, or granular Deepgram redaction labels); Deepgram
     masks the returned `transcript` and `words` directly.
   - Entity detection: `detect_entities=true`, mapping Deepgram's final
     `entities` array (`label`, `value`, `start_word`, `end_word`,
-    `confidence`) onto the final segment's `entities` field.
+    `confidence`, half-open `[start_word, end_word)` requiring `words`) onto
+    the final segment's `entities` field.
   - Keyterm prompting: repeated `keyterm=<term>` query parameters (never
     comma-joined). Validate non-empty keyterms and any provider limits at
     config setup rather than failing silently at runtime.
 - Keep `mip_opt_out=true` on every streaming and gap/pre-recorded request,
-  and ensure gap runs pass the same opt-in flags so rewound spans match live
-  output.
+  and pass the same opt-in flags on gap runs. Document clearly that Deepgram
+  assigns speaker numbers per request, so `speaker` IDs are only stable
+  within one continuous recognition session and are not guaranteed to match
+  across gap runs or reconnects (`format.md` specifies session-local labels
+  for `@moq/watch`).
 - When [the local whisper backend](/quest/m4/transcribe-local.md) joins
   later, unsupported flags return a typed setup error rather than warning and
   continuing.
-- Test speaker-change segment splitting, entity index remapping, and option
-  validation with deterministic fixture responses on a mocked clock.
+- Test final-only speaker splitting (verifying interims never orphan IDs),
+  entity index remapping and boundary-crossing drops, and option validation
+  with deterministic fixture responses on a mocked clock.
 
 Public API: additive optional fields on `moq_transcribe::Config`. Wire: none
 beyond [the transcript format](/quest/m3/transcribe/format.md).
