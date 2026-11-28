@@ -11726,7 +11726,13 @@ impl Cursor {
 		let bound = drift.bound.unwrap_or(Duration::MAX);
 		let stale = |key: u64| self.state.read().is_stale(key, &drift.edge, bound);
 		while let Some(group) = self.lowest_unread(from) {
-			if !delivered.contains(group.start) && !stale(group.start) {
+			// Past the whole run handed out, not each group held in it: a copy replaced
+			// mid-run holds many the serving copy delivered.
+			if delivered.contains(group.start) {
+				from = delivered.gaps(group.start..u64::MAX).next()?.start;
+				continue;
+			}
+			if !stale(group.start) {
 				return Some(group.start);
 			}
 			from = group.start.checked_add(1)?;
