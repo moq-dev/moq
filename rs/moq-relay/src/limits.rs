@@ -135,6 +135,25 @@ pub struct Quic {
 		setting = "limits.peer.quic.send_window"
 	)]
 	pub send_window: std::num::NonZeroU64,
+	/// Report a peer link stale once it goes unheard this long, ranking its routes below
+	/// every other's until it is heard again; see `[quic]`'s `keep_alive_soft`. Unset (the
+	/// default) probes nothing. Set with `keep_alive_hard`.
+	#[usage(
+		long = "limits-peer-quic-keep-alive-soft",
+		env = "MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_SOFT",
+		setting = "limits.peer.quic.keep_alive_soft"
+	)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub keep_alive_soft: Option<moq_tokio::cli::Duration>,
+	/// Close a peer link that goes unheard this long, as an idle timeout. Set with
+	/// `keep_alive_soft`, longer than it and no longer than `[quic]`'s idle timeout.
+	#[usage(
+		long = "limits-peer-quic-keep-alive-hard",
+		env = "MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_HARD",
+		setting = "limits.peer.quic.keep_alive_hard"
+	)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub keep_alive_hard: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Quic {
@@ -148,6 +167,8 @@ impl Default for Quic {
 			max_streams: std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_MAX_STREAMS).expect("non-zero"),
 			receive_window: window,
 			send_window: window,
+			keep_alive_soft: None,
+			keep_alive_hard: None,
 		}
 	}
 }
@@ -163,7 +184,13 @@ impl Quic {
 			self.receive_window.get() >= min,
 			"invalid [limits.peer.quic]: receive_window must be at least {min} bytes to fit the largest message"
 		);
+		self.keep_alive().context("invalid [limits.peer.quic]")?;
 		Ok(())
+	}
+
+	/// The keep-alive a peer link runs, or `None` for none.
+	pub(crate) fn keep_alive(&self) -> anyhow::Result<Option<moq_net::transport::KeepAlive>> {
+		Ok(moq_tokio::quic::liveness(self.keep_alive_soft, self.keep_alive_hard)?)
 	}
 
 	/// Apply these limits to the `[quic]` section a peer link is dialed with.
@@ -171,6 +198,10 @@ impl Quic {
 		quic.max_streams = Some(self.max_streams.get());
 		quic.receive_window = Some(self.receive_window.get());
 		quic.send_window = Some(self.send_window.get());
+		if self.keep_alive_soft.is_some() {
+			quic.keep_alive_soft = self.keep_alive_soft;
+			quic.keep_alive_hard = self.keep_alive_hard;
+		}
 	}
 
 	/// The limits an accepted peer connection widens to, as either QUIC runtime takes them.

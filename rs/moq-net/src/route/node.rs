@@ -653,6 +653,17 @@ impl Stream {
 		state.flush(&self.node);
 	}
 
+	/// The peer turned stale, or was heard again: while stale, what it gave ranks below
+	/// everything else.
+	pub fn stale(&self, stale: bool) {
+		let mut state = self.node.lock();
+		let now = self.now(&state);
+		state.router.clock(now);
+		state.router.stale(self.key, stale);
+		state.note(Some(self.key));
+		state.flush(&self.node);
+	}
+
 	/// The session is leaving: nothing more is queued for the peer.
 	pub fn mute(&self) {
 		let _state = self.node.lock();

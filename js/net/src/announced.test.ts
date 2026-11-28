@@ -43,7 +43,7 @@ test("a listing reports only a path becoming present or absent", async () => {
 	expect((await listing.next())?.kind).toBe("absent");
 });
 
-test("a listing shows a route's facts, never its epoch, hops, credential, or drain state", async () => {
+test("a listing shows a route's facts, never its epoch, hops, or credential", async () => {
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
 
@@ -63,9 +63,9 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 		kind: "present",
 		prefix: p("a"),
 		captures: undefined,
-		route: { identity, cost: 5n, available: true },
+		route: { identity, cost: 5n, available: true, draining: true },
 	});
-	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "identity"]);
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "draining", "identity"]);
 });
 
 test("a listing stays quiet as availability flips and reports a let-go path absent", async () => {

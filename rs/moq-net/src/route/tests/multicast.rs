@@ -365,6 +365,26 @@ impl RelaySim {
 		}
 	}
 
+	/// `at` hears its session to `peer` turn stale, or live again.
+	pub fn stale(&mut self, at: Node, peer: Node, stale: bool) {
+		if let Some(router) = self.relay(at) {
+			router.stale(peer, stale);
+		}
+		if self.auto {
+			self.flush();
+		}
+	}
+
+	/// `peer` sends GOAWAY on its session to `at` alone.
+	pub fn goaway_to(&mut self, at: Node, peer: Node) {
+		if let Some(router) = self.relay(at) {
+			router.goaway(peer);
+		}
+		if self.auto {
+			self.flush();
+		}
+	}
+
 	pub fn client(&mut self, node: Node) {
 		self.spots[node] = Spot::Endpoint {
 			id: None,
@@ -1045,6 +1065,70 @@ fn a_scoped_neighbour_draining_drains_its_claims() {
 	sim.goaway(0);
 	quiesce(&mut sim);
 	assert_eq!(source(&sim), Some(Next::Local(2)));
+}
+
+/// A routing neighbour gone stale drains every route through it, at the relays past it
+/// too, so a request two hops away moves to the path around it; heard again, it takes
+/// the route back, as nothing named it draining to the mesh.
+#[test]
+fn a_stale_neighbour_drains_its_routes_until_heard() {
+	// A publisher on 0; 3 reaches it through 1, or dearer through 2, and 4 through 3.
+	let mut sim = RelaySim::new(6, relay::debounce(HOP));
+	sim.client(5);
+	sim.publish(5, 100);
+	sim.link(5, 0, 1, Tie::Peer);
+	sim.link(0, 1, 1, Tie::Peer);
+	sim.link(0, 2, 1, Tie::Peer);
+	sim.link(1, 3, 1, Tie::Peer);
+	sim.link(2, 3, 3, Tie::Peer);
+	sim.link(3, 4, 1, Tie::Peer);
+	sim.claim(5, "live", true);
+	quiesce(&mut sim);
+	let near = Some((vec![3, 1, 0, 5], true));
+	assert_eq!(sim.chase(4, 100, &p("live")), near);
+
+	sim.stale(1, 0, true);
+	quiesce(&mut sim);
+	assert_eq!(sim.chase(4, 100, &p("live")), Some((vec![3, 2, 0, 5], true)));
+
+	sim.stale(1, 0, false);
+	quiesce(&mut sim);
+	assert_eq!(sim.chase(4, 100, &p("live")), near);
+}
+
+/// A stale publisher drains the claims it gave, at the relays they reach too, so a
+/// request moves to its other uplink; heard again, it takes the claims back, unless it
+/// sent GOAWAY meanwhile, which lasts.
+#[test]
+fn a_stale_publisher_drains_its_claims_until_heard() {
+	// A publisher with uplinks 0 and 1; 2 reaches 0 cheaper, and 3 through 2.
+	let mut sim = RelaySim::new(5, relay::debounce(HOP));
+	sim.client(4);
+	sim.publish(4, 100);
+	sim.link(4, 0, 1, Tie::Peer);
+	sim.link(4, 1, 1, Tie::Peer);
+	sim.link(0, 2, 1, Tie::Peer);
+	sim.link(1, 2, 5, Tie::Peer);
+	sim.link(2, 3, 1, Tie::Peer);
+	sim.claim(4, "live", true);
+	quiesce(&mut sim);
+	let near = Some((vec![2, 0, 4], true));
+	let far = Some((vec![2, 1, 4], true));
+	assert_eq!(sim.chase(3, 100, &p("live")), near);
+
+	sim.stale(0, 4, true);
+	quiesce(&mut sim);
+	assert_eq!(sim.chase(3, 100, &p("live")), far);
+
+	sim.stale(0, 4, false);
+	quiesce(&mut sim);
+	assert_eq!(sim.chase(3, 100, &p("live")), near);
+
+	sim.stale(0, 4, true);
+	sim.goaway_to(0, 4);
+	sim.stale(0, 4, false);
+	quiesce(&mut sim);
+	assert_eq!(sim.chase(3, 100, &p("live")), far, "a GOAWAY outlasts staleness");
 }
 
 /// A relay that takes a newer copy of a node's claims from another neighbour tells its

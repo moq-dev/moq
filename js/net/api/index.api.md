@@ -591,6 +591,7 @@ export namespace Origin {
 	export interface RouteInfo {
 		readonly available: boolean;
 		readonly cost: Origin.Cost;
+		readonly draining: boolean;
 		readonly identity?: Identity.Valid;
 	}
 	export interface RouteOptions {

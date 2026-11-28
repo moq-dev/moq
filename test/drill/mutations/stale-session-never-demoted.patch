@@ -1,0 +1,21 @@
+# drill: a_stale_peer_link_drains_its_routes_until_heard
+# expect: the route never drained
+#
+# Removes demoting a stale session's routes. The edge's link to the origin goes
+# quiet past its keep-alive's soft limit, but its routes keep their rank, so the
+# subscriber sees no drain well before the link's hard limit.
+diff --git a/rs/moq-net/src/goaway.rs b/rs/moq-net/src/goaway.rs
+index b0595b4788..202856df18 100644
+--- a/rs/moq-net/src/goaway.rs
++++ b/rs/moq-net/src/goaway.rs
+@@ -179,7 +179,9 @@ pub(crate) struct Draining {
+ 
+ impl Draining {
+ 	pub fn new(going_away: GoingAway, liveness: Option<kio::Consumer<crate::transport::Liveness>>) -> Self {
+-		Self { going_away, liveness }
++		// MUTATION: staleness never demotes a route.
++		let _ = liveness;
++		Self { going_away, liveness: None }
+ 	}
+ 
+ 	/// Whether the session's routes rank as draining now.

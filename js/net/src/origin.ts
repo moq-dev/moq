@@ -2757,9 +2757,7 @@ export class Consumer implements Reader {
 		const atRoot: Filed<{ candidate: Candidate; path: Path.Valid; pattern: Path.Pattern }>[] = [];
 		const present = (path: Path.Valid, entry: Candidate, pattern: Path.Pattern): Presented => ({
 			ref: entry.ref,
-			// Draining is this node's selection state: readers, and the peers a relay forwards to, see
-			// the route as it is.
-			route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
+			route: entry.route,
 			captures: scopeCaptures(pattern, path),
 			lost: entry.lost,
 		});

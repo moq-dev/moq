@@ -1567,6 +1567,8 @@ pub struct Shared {
 	client_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
 	peer_quic: crate::limits::Quic,
+	/// The keep-alive peer links run, from `[limits.peer.quic]`.
+	peer_keep_alive: Option<moq_net::transport::KeepAlive>,
 	config: Config,
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	/// The dial state sits behind `Arc`s because it is several KiB inline, and every
@@ -1649,6 +1651,12 @@ impl Cluster {
 		} else {
 			self.client_limits
 		}
+	}
+
+	/// The keep-alive an admitted session runs: a `peer` grant's link probing, if
+	/// `[limits.peer.quic]` sets one, and otherwise whatever `[quic]` gives every session.
+	pub(crate) fn keep_alive(&self, lease: &auth::Lease) -> Option<moq_net::transport::KeepAlive> {
+		lease.token().link.as_ref().and(self.peer_keep_alive)
 	}
 
 	/// The QUIC limits an admitted session runs under once it is answered: a `peer`
@@ -1758,6 +1766,7 @@ impl Cluster {
 			shared: Arc::new(Shared {
 				client_limits: client.resolve(),
 				peer_limits: peer.resolve(),
+				peer_keep_alive: peer.quic.keep_alive()?,
 				peer_quic: peer.quic,
 				config,
 				connect: None,

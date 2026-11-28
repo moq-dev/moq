@@ -166,9 +166,10 @@ where
 		// lifetime that QUIC's idle timeout bounds on the native path.
 		// The subprotocol names the QMux version; an upgrade without one has no wire format.
 		let alpn = options.link.alpn.as_deref().unwrap_or_default();
+		let session = crate::qmux_config(&options.quic);
 		let mut upgraded = qmux::ws::Upgraded::new(io, alpn)
-			.with_keep_alive(qmux::ws::KeepAlive::default())
-			.with_session_config(crate::qmux_config(&options.quic));
+			.with_keep_alive(heartbeat(&session, alpn))
+			.with_session_config(session);
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
@@ -183,6 +184,24 @@ where
 		Ok((setup, Driver(driver)))
 	})
 	.await
+}
+
+/// The heartbeat an accepted session on the subprotocol `alpn` runs.
+///
+/// A version that probes its peer leaves closing a quiet one to the session's idle timeout,
+/// which a `[quic]` keep-alive raises to its hard limit, so the heartbeat waits a ping interval
+/// past it and the session reports an idle timeout rather than a dead socket.
+/// qmux-00 cannot probe, so it keeps the default deadline whatever the idle timeout.
+fn heartbeat(session: &qmux::Config, alpn: &str) -> qmux::ws::KeepAlive {
+	let mut heartbeat = qmux::ws::KeepAlive::default();
+	let probes = qmux::Version::ALL
+		.iter()
+		.find(|version| alpn == version.alpn() || alpn.starts_with(version.prefix()))
+		.is_some_and(|version| version.uses_records());
+	if let Some(idle) = session.idle_timeout.filter(|idle| probes && *idle > heartbeat.timeout) {
+		heartbeat.timeout = idle + heartbeat.interval;
+	}
+	heartbeat
 }
 
 /// A WebSocket session with QMux established, waiting on the peer's SETUP.
@@ -913,7 +932,7 @@ impl Listener {
 				.take()
 				.expect("successful upgrade selected a protocol");
 			let mut upgraded = qmux::ws::Upgraded::new(stream, &protocol)
-				.with_keep_alive(qmux::ws::KeepAlive::default())
+				.with_keep_alive(heartbeat(&session, &protocol))
 				.with_session_config(session);
 			if let Some(stats) = stats {
 				upgraded = upgraded.with_socket_stats(stats);
@@ -1003,6 +1022,34 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 mod tests {
 	use super::*;
 	use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+	/// A `[quic]` keep-alive raises an accepted session's QMux idle timeout to its hard limit,
+	/// rounded up to whole milliseconds. The heartbeat then waits a ping interval past it on a
+	/// version that probes, and keeps its default deadline on qmux-00, which cannot.
+	#[test]
+	fn accepted_timers_follow_the_keep_alive() {
+		let secs = |secs: u64| std::time::Duration::from_secs(secs);
+		let default = qmux::ws::KeepAlive::default();
+		let quic = crate::quic::Config {
+			idle_timeout: Some(secs(60).into()),
+			keep_alive_soft: Some(secs(35).into()),
+			keep_alive_hard: Some((secs(45) + std::time::Duration::from_micros(500)).into()),
+			..Default::default()
+		};
+		let session = crate::qmux_config(&quic.resolve());
+		assert_eq!(session.idle_timeout, Some(std::time::Duration::from_millis(45_001)));
+		for probes in ["qmux-02.moq-lite-05", "qmux-01.moq-lite-05", "qmux-01"] {
+			assert_eq!(
+				heartbeat(&session, probes).timeout,
+				std::time::Duration::from_millis(45_001) + default.interval,
+				"{probes}"
+			);
+		}
+		assert_eq!(heartbeat(&session, "qmux-00.moq-lite-05").timeout, default.timeout);
+
+		let unprobed = crate::qmux_config(&crate::quic::Resolved::default());
+		assert_eq!(heartbeat(&unprobed, "qmux-02.moq-lite-05").timeout, default.timeout);
+	}
 
 	#[test]
 	fn subprotocol_selection_requires_an_offer() {

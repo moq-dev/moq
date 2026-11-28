@@ -322,57 +322,64 @@ fn heal(network: &Network) {
 	}
 }
 
+/// A session under a [`SOFT`]/[`HARD`] keep-alive over `network` with 20 ms of latency each
+/// way, the server publishing `publisher` and the client subscribing into `viewer`
+async fn keep_alive_pair(
+	network: &Network,
+	version: Version,
+	publisher: &origin::Producer,
+	viewer: &origin::Producer,
+) -> (moq_net::Session, moq_net::Session) {
+	let keep_alive = moq_net::transport::KeepAlive::new(SOFT, HARD);
+	for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+		network.path(from, to, |path| path.latency = Duration::from_millis(20));
+	}
+	let (server_config, client_config) = tls(version);
+	let server =
+		driver::endpoint::Endpoint::new(endpoint(3, 1).with_server(server_config), network.bind(SERVER)).unwrap();
+	let client = driver::endpoint::Endpoint::new(endpoint(3, 2), network.bind(CLIENT)).unwrap();
+	let accept = async {
+		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+		let (session, driver) = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_publisher(publisher.consume())
+			.with_keep_alive(keep_alive)
+			.accept(kio::clock::now(), web::Session::raw(conn))
+			.await
+			.unwrap();
+		spawn(driver);
+		session
+	};
+	let connect = async {
+		let conn = client
+			.connect(&client_config, SERVER, "localhost")
+			.unwrap()
+			.await
+			.unwrap();
+		let (session, driver) = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_subscriber(viewer.clone())
+			.with_keep_alive(keep_alive)
+			.connect(kio::clock::now(), web::Session::raw(conn))
+			.await
+			.unwrap();
+		spawn(driver);
+		session
+	};
+	futures::join!(accept, connect)
+}
+
 /// Both sides of a session under a keep-alive stay live while idle, turn stale within `soft`
 /// once the path collapses into a full queue, live again once it heals before `hard`, and close
 /// as an idle timeout once it stays dead past `hard`.
 #[test]
 fn keep_alive() {
-	use moq_net::transport::{KeepAlive, Liveness};
+	use moq_net::transport::Liveness;
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
 		kio::clock::sim::run(async move {
 			let network = Network::new(3);
-			for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
-				network.path(from, to, |path| path.latency = Duration::from_millis(20));
-			}
-			let (server_config, client_config) = tls(version);
-			let server =
-				driver::endpoint::Endpoint::new(endpoint(3, 1).with_server(server_config), network.bind(SERVER))
-					.unwrap();
-			let client = driver::endpoint::Endpoint::new(endpoint(3, 2), network.bind(CLIENT)).unwrap();
-			let keep_alive = KeepAlive::new(SOFT, HARD);
-			let publisher = origin_producer();
-			let viewer = origin_producer();
-
-			let accept = async {
-				let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
-				let (session, driver) = moq_net::Server::new()
-					.with_versions(version.into())
-					.with_publisher(publisher.consume())
-					.with_keep_alive(keep_alive)
-					.accept(kio::clock::now(), web::Session::raw(conn))
-					.await
-					.unwrap();
-				spawn(driver);
-				session
-			};
-			let connect = async {
-				let conn = client
-					.connect(&client_config, SERVER, "localhost")
-					.unwrap()
-					.await
-					.unwrap();
-				let (session, driver) = moq_net::Client::new()
-					.with_versions(version.into())
-					.with_subscriber(viewer.clone())
-					.with_keep_alive(keep_alive)
-					.connect(kio::clock::now(), web::Session::raw(conn))
-					.await
-					.unwrap();
-				spawn(driver);
-				session
-			};
-			let (server, client) = futures::join!(accept, connect);
+			let (server, client) = keep_alive_pair(&network, version, &origin_producer(), &origin_producer()).await;
 
 			// Idle well past `soft`: the probes keep both sides live.
 			kio::clock::sleep(5 * SOFT).await;
@@ -411,6 +418,56 @@ fn keep_alive() {
 			);
 			let ended = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
 			assert_eq!(ended, Ok(None), "{version}");
+		});
+	}
+}
+
+/// A stale session's routes drain, and only while it is stale: a reader of the subscriber's
+/// origin sees the route start draining once the path collapses into a full queue, at its real
+/// cost, and stop once the path heals, the session never closing.
+#[test]
+fn stale_routes_drain() {
+	use moq_net::transport::Liveness;
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+		let version: Version = version.parse().unwrap();
+		kio::clock::sim::run(async move {
+			let network = Network::new(3);
+			let publisher = origin_producer();
+			let viewer = origin_producer();
+			let broadcast = publisher.route("live", origin::RouteOptions::default()).unwrap();
+			broadcast.announce().unwrap();
+			let mut routes = viewer.consume().routes();
+			let (_server, client) = keep_alive_pair(&network, version, &publisher, &viewer).await;
+
+			// The next route the reader sees at `live`.
+			let mut next = async || loop {
+				let event = kio::clock::timeout(HARD, routes.next())
+					.await
+					.expect("a route in time")
+					.expect("the cursor is open");
+				if event.announce.prefix.as_str() == "live" && event.kind != origin::RouteKind::End {
+					return event.announce.route;
+				}
+			};
+			let live = next().await;
+			assert!(!live.draining(), "{version}");
+
+			collapse(&network);
+			let stale = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Live)).await;
+			assert_eq!(stale, Ok(Some(Liveness::Stale)), "{version}");
+			let drained = next().await;
+			assert!(drained.draining(), "{version}");
+			assert_eq!(
+				drained.cost(),
+				live.cost(),
+				"{version}: a draining route keeps its cost"
+			);
+
+			heal(&network);
+			let live = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
+			assert_eq!(live, Ok(Some(Liveness::Live)), "{version}");
+			assert!(!next().await.draining(), "{version}");
+			assert_eq!(client.liveness(), Some(Liveness::Live), "{version}");
 		});
 	}
 }

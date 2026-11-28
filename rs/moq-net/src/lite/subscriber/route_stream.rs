@@ -99,6 +99,8 @@ struct Running {
 	answer: Answer,
 	/// The subscribe permit's epoch last applied.
 	epoch: u64,
+	/// Whether the route layer last heard the peer is stale.
+	stale: bool,
 	stall: Stall,
 	/// Passes before the machine yields, so a busy node cannot hold the task.
 	budget: kio::coop::Budget,
@@ -271,6 +273,7 @@ impl RouteStream {
 			routed,
 			answer,
 			epoch: 0,
+			stale: false,
 			stall: Stall {
 				session: subscriber.session.clone(),
 				runtime: subscriber.runtime.clone(),
@@ -285,8 +288,14 @@ impl Running {
 	fn poll(&mut self, subscriber: &Subscriber, publish: &Publish, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// A draining peer usually stops announcing, so react to the GOAWAY itself.
 		// Idempotent, since the signal stays set.
-		if subscriber.going_away.poll(waiter).is_ready() {
+		if subscriber.draining.going_away.poll(waiter).is_ready() {
 			self.routed.goaway();
+		}
+		// A stale peer's routes rank as draining until it is heard again, without the
+		// GOAWAY's lasting word to the mesh.
+		while let Poll::Ready(stale) = subscriber.draining.poll_stale(waiter, self.stale) {
+			self.stale = stale;
+			self.routed.stale(stale);
 		}
 		let direction = crate::auth::Direction::Subscribe;
 		while let Poll::Ready(permit) = subscriber.auth.poll_permit(direction, &mut self.epoch, waiter) {

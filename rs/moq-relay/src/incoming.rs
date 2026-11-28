@@ -88,6 +88,7 @@ pub trait Sealed: Sized {
 	fn peer_node(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
+	fn with_keep_alive(self, keep_alive: moq_net::transport::KeepAlive) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
 	fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self;
 
@@ -159,6 +160,10 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::with_limits(self, limits)
 	}
 
+	fn with_keep_alive(self, keep_alive: moq_net::transport::KeepAlive) -> Self {
+		moq_tokio::server::Request::with_keep_alive(self, keep_alive)
+	}
+
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self {
 		moq_tokio::server::Request::with_publisher(self, publish)
 	}
@@ -228,6 +233,11 @@ impl Sealed for Accepted {
 
 	fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.handshake = self.handshake.with_limits(limits);
+		self
+	}
+
+	fn with_keep_alive(mut self, keep_alive: moq_net::transport::KeepAlive) -> Self {
+		self.handshake = self.handshake.with_keep_alive(keep_alive);
 		self
 	}
 

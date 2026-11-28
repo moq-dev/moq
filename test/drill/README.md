@@ -35,6 +35,7 @@ checks that what the fault owned was released.
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
 | `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-22`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
 | `lite_subscriber_max_age_skips_bufferbloat` | moq-lite-06 media at 5.12Mb/s crosses a 64kb/s link behind a finite 500ms queue, with no random loss | the propagated 100ms budget and forced queue overflow | superseded groups are skipped and the newest catalog snapshot survives its budget |
+| `a_stale_peer_link_drains_its_routes_until_heard` | The peer link between an edge and the origin is cut, inside the edge's `[limits.peer.quic]` keep-alive `hard` limit, then restored | how long after the cut the route drained, and after the restore it recovered | a lite-07 subscriber of the edge sees the route drain within half of `hard`, never end, and stop draining once the link returns |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -204,6 +205,7 @@ mutation uses `impaired`, where that fault is armed.
 | `ingress-burst-never-collected` | collecting the deliberately armed ingress burst; natural shaping still runs | `bursts_cross_a_cluster::impaired` |
 | `fetch-never-sent` | sending a FETCH for an uncached group, at the subscriber and at the edge relay | `bursts_cross_a_cluster::loopback` |
 | `peer-link-never-redialed` | redialing a cluster peer after its link is lost | `bursts_cross_a_flapping_peer::loopback` |
+| `stale-session-never-demoted` | ranking a stale session's routes as draining | `a_stale_peer_link_drains_its_routes_until_heard` |
 
 The `quic-` mutations break one of QUIC's rules in moq-quic while data still
 arrives, and require moq-quic's rule checker (`moq_quic::sim::Rules` and the

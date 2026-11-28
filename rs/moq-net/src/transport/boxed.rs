@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Poll, ready};
 
@@ -35,7 +35,7 @@ impl Session {
 		let inner: Arc<Shared<dyn ErasedSession>> = Arc::new(Shared {
 			paused: AtomicU64::new(0),
 			slots: Mutex::default(),
-			keep_alive: AtomicBool::new(false),
+			liveness: OnceLock::new(),
 			session,
 		});
 		Self {
@@ -116,9 +116,15 @@ impl Session {
 		Arc::downgrade(&self.inner)
 	}
 
-	/// Whether a keep-alive started on this transport.
-	pub(crate) fn keeps_alive(&self) -> bool {
-		self.inner.keep_alive.load(Ordering::Relaxed)
+	/// The peer's liveness, once a keep-alive started on this transport.
+	pub(crate) fn liveness(&self) -> Option<kio::Consumer<Liveness>> {
+		self.inner.liveness.get().map(|watch| watch.consumer.clone())
+	}
+
+	/// Where the peer's liveness is published, once a keep-alive started: handed out once,
+	/// to the task that polls the transport for it.
+	pub(crate) fn take_liveness(&self) -> Option<kio::Producer<Liveness>> {
+		self.inner.liveness.get()?.producer.lock().ok()?.take()
 	}
 
 	/// How this side closed the transport.
@@ -156,9 +162,16 @@ pub(super) struct Shared<S: ?Sized> {
 	paused: AtomicU64,
 	/// The slots of the streams this session shapes the credit of; see [`Pacing::allowance`].
 	slots: Mutex<Slots>,
-	/// Whether a keep-alive started, so the session reports its peer's liveness.
-	keep_alive: AtomicBool,
+	/// The peer's liveness, set once a keep-alive starts.
+	liveness: OnceLock<Watch>,
 	session: S,
+}
+
+/// The peer's liveness under a keep-alive: one task takes the producer and publishes what
+/// the transport reports, and every other reads it.
+struct Watch {
+	producer: Mutex<Option<kio::Producer<Liveness>>>,
+	consumer: kio::Consumer<Liveness>,
 }
 
 impl Shared<dyn ErasedSession> {
@@ -1290,7 +1303,13 @@ impl poll::Session for Session {
 
 	fn set_keep_alive(&self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
 		self.inner.session.set_keep_alive(keep_alive)?;
-		self.inner.keep_alive.store(true, Ordering::Relaxed);
+		self.inner.liveness.get_or_init(|| {
+			let producer = kio::Producer::new(Liveness::Live);
+			Watch {
+				consumer: producer.consume(),
+				producer: Mutex::new(Some(producer)),
+			}
+		});
 		Ok(())
 	}
 

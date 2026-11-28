@@ -352,6 +352,11 @@ impl Config {
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
+		// A peer link runs `[quic]` with the peer limits on top, so its keep-alive must fit
+		// `[quic]`'s idle timeout.
+		let mut peer = self.quic.clone();
+		self.limits.peer.quic.dial(&mut peer);
+		peer.validate().context("invalid [limits.peer.quic]")?;
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
@@ -646,6 +651,55 @@ mod tests {
 		assert_eq!(config.limits.peer.quic.send_window.get(), 1000);
 
 		assert!(toml::from_str::<Config>("[limits.peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A peer link's keep-alive merges from the file and flags into one, reaches the links the
+	/// relay dials without touching `[quic]`, and is refused half set or past `[quic]`'s idle
+	/// timeout.
+	#[test]
+	fn peer_keep_alive_merges_and_dials() {
+		if !test_env::Env::without(&[
+			"MOQ_QUIC_KEEP_ALIVE_SOFT",
+			"MOQ_QUIC_KEEP_ALIVE_HARD",
+			"MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_SOFT",
+			"MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_HARD",
+		])
+		.isolate()
+		{
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-keep-alive.toml");
+		std::fs::write(&path, "[limits.peer.quic]\nkeep_alive_soft = \"2s\"\n").unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--limits-peer-quic-keep-alive-hard=8s".into(),
+		])
+		.unwrap();
+		let peer = &config.limits.peer.quic;
+		peer.validate().unwrap();
+		let keep_alive = peer.keep_alive().unwrap().expect("a keep-alive");
+		assert_eq!(
+			(keep_alive.soft, keep_alive.hard),
+			(std::time::Duration::from_secs(2), std::time::Duration::from_secs(8))
+		);
+		assert_eq!(config.quic.resolve().liveness, None, "[quic] stays unprobed");
+		let mut dialed = config.quic.clone();
+		peer.dial(&mut dialed);
+		assert_eq!(dialed.resolve().liveness, Some(keep_alive));
+
+		let half: Config = toml::from_str("[limits.peer.quic]\nkeep_alive_soft = \"2s\"\n").unwrap();
+		assert!(half.limits.peer.quic.validate().is_err());
+		let inverted: Config =
+			toml::from_str("[limits.peer.quic]\nkeep_alive_soft = \"8s\"\nkeep_alive_hard = \"2s\"\n").unwrap();
+		assert!(inverted.limits.peer.quic.validate().is_err());
+		let past_idle: Config = toml::from_str(
+			"[quic]\nidle_timeout = \"5s\"\n[limits.peer.quic]\nkeep_alive_soft = \"2s\"\nkeep_alive_hard = \"8s\"\n",
+		)
+		.unwrap();
+		past_idle.limits.peer.quic.validate().unwrap();
+		assert!(past_idle.resolve().is_err(), "a peer hard past [quic]'s idle timeout");
 	}
 
 	/// A zero peer stream limit or window would wedge the connection, so it never parses.

@@ -1199,11 +1199,11 @@ pub(super) struct Subscriber {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; this session's routes then rank below every
-	// available route (draining), so a replacement session outranks it. Requests keep opening,
-	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
-	// fail requests that land before the replacement is up.
-	going_away: crate::goaway::GoingAway,
+	// Set once the peer sends a GOAWAY, or while it is stale; this session's routes then
+	// rank below every available route (draining), so a replacement session outranks it.
+	// Requests keep opening, deliberately past draft-22 section 9.2's SHOULD NOT: refusing
+	// them would fail requests that land before the replacement is up.
+	draining: crate::goaway::Draining,
 	// Our grant: a subscription it stops covering is cancelled.
 	auth: crate::auth::Link,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`), and
@@ -1299,6 +1299,7 @@ impl Subscriber {
 		tasks: Tasks,
 		going_away: crate::goaway::GoingAway,
 	) -> Self {
+		let draining = crate::goaway::Draining::new(going_away, session.liveness());
 		Self {
 			runtime,
 			session,
@@ -1312,7 +1313,7 @@ impl Subscriber {
 			state: Default::default(),
 			tasks,
 			version,
-			going_away,
+			draining,
 			auth: crate::auth::Link::new(false),
 			announces: Default::default(),
 			listings: Default::default(),
@@ -2975,7 +2976,7 @@ impl Subscriber {
 			return Ok(None);
 		}
 		let mut route = entry.route.clone();
-		route.draining |= self.going_away.is_set();
+		route.draining = self.draining.is_set();
 		entry.dynamic = Some(self.origin.forward(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
@@ -3015,9 +3016,9 @@ impl Subscriber {
 	) -> Result<(), Error> {
 		let Advertised { mut route } = advert;
 
-		// A namespace published after the peer's GOAWAY starts out draining, so
-		// a late arrival on a dying connection can't take over as primary.
-		route.draining = self.going_away.is_set();
+		// A namespace published after the peer's GOAWAY, or while it is stale, starts out
+		// draining, so a late arrival on a dying connection can't take over as primary.
+		route.draining = self.draining.is_set();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
@@ -3156,21 +3157,23 @@ impl Subscriber {
 		tasks.poll(waiter)
 	}
 
-	/// Rank one attached route last (the peer sent a GOAWAY): every other candidate
-	/// outranks it while it stays selectable as the last path, at its real cost.
-	/// Idempotent, since the signal stays set.
-	fn drain_route(&self, path: &Path) {
+	/// Rank one attached route last (the peer sent a GOAWAY or is stale), or not (it was
+	/// heard again): every other candidate outranks a draining one while it stays
+	/// selectable as the last path, at its real cost.
+	fn drain_route(&self, path: &Path, draining: bool) {
 		let mut state = self.state.lock();
 		let Some(entry) = state.broadcasts.get_mut(path) else {
 			return;
 		};
-		if entry.route.draining {
+		// Every standing advert too, even when the current route already matches: a newer
+		// advert may have attached after the change, and withdrawing it restores an older one.
+		for (_, route) in &mut entry.adverts {
+			route.draining = draining;
+		}
+		if entry.route.draining == draining {
 			return;
 		}
-		entry.route.draining = true;
-		for (_, route) in &mut entry.adverts {
-			route.draining = true;
-		}
+		entry.route.draining = draining;
 		if let Some(dynamic) = &entry.dynamic {
 			let _ = dynamic.update(entry.route.clone());
 		}
@@ -3263,6 +3266,9 @@ struct RunRoute {
 	/// Retracted or torn down: no request will ever arrive again, but the broadcasts
 	/// already served keep their tracks in flight.
 	draining: bool,
+	/// Whether the route last ranked as draining, or `None` before the first pass, which
+	/// sets it from the signal: it may have moved since the route attached.
+	demoted: Option<bool>,
 }
 
 impl RunRoute {
@@ -3274,6 +3280,7 @@ impl RunRoute {
 			broadcasts: TaskSet::owned(),
 			epoch: 0,
 			draining: false,
+			demoted: None,
 		}
 	}
 
@@ -3285,13 +3292,15 @@ impl RunRoute {
 		if this.session.poll_closed(waiter).is_ready() {
 			return Poll::Ready(None);
 		}
-		// A draining peer usually stops publishing namespaces, so react
-		// to the GOAWAY itself; waiting for another message would leave
-		// the route primary until the session finally closed.
-		// Idempotent, since the signal stays set.
-		if this.going_away.poll(waiter).is_ready() {
-			this.drain_route(path);
+		// A draining peer usually stops publishing namespaces, and a stale one says
+		// nothing at all, so react to the signal itself; waiting for another message would
+		// leave the route primary until the session finally closed.
+		let mut last = self.demoted.unwrap_or_else(|| !this.draining.is_set());
+		while let Poll::Ready(draining) = this.draining.poll_changed(waiter, last) {
+			last = draining;
+			this.drain_route(path, draining);
 		}
+		self.demoted = Some(last);
 		// A limit that no longer covers the namespace holds the route back as a
 		// retraction would, closing its sources. Tracks in flight end on their
 		// own gates, with `Unauthorized`.
@@ -11204,6 +11213,47 @@ mod tests {
 		subscriber.stop_announce(a.clone(), first, false, true).unwrap();
 		subscriber.stop_announce(a, repeat, false, true).unwrap();
 		subscriber.start_announce(b, last, Admit::Session(None)).unwrap();
+	}
+
+	/// A namespace re-advertised while its peer was draining, then heard again, falls back
+	/// to the older advert undrained once the newer one is withdrawn.
+	#[kio::test]
+	async fn a_restored_advert_drops_a_cleared_drain() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			origin,
+			Control::new(false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			Version::Draft18,
+			tasks,
+			Default::default(),
+		);
+		let advert = |subscriber: &Subscriber| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let a = crate::Path::from_static("a");
+		let (older, newer) = (advert(&subscriber), advert(&subscriber));
+		subscriber
+			.start_announce(a.clone(), older, Admit::Session(None))
+			.unwrap();
+		subscriber.drain_route(&a, true);
+		// The newer advert attaches once the peer is heard again, ahead of the run's pass.
+		let newer = subscriber
+			.start_announce(a.clone(), newer, Admit::Session(None))
+			.unwrap();
+		subscriber.drain_route(&a, false);
+		subscriber.stop_announce(a.clone(), newer, false, false).unwrap();
+
+		let state = subscriber.state.lock();
+		assert!(
+			!state.broadcasts[&a].route.draining,
+			"the older advert kept a cleared drain"
+		);
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked

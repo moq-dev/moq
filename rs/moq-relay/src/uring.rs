@@ -162,6 +162,11 @@ impl Workers {
 		// The one mapping of `listen` onto the moq handshake, shared with the tokio listeners.
 		let moq = server.listen.server();
 		let quic = &server.quic;
+		// The `[quic]` keep-alive, as the tokio listeners apply it.
+		let moq = match quic.resolve().liveness {
+			Some(keep_alive) => moq.with_keep_alive(keep_alive),
+			None => moq,
+		};
 		for (configured, setting) in [
 			(preferred_v4.is_some(), "listen.preferred_v4"),
 			(preferred_v6.is_some(), "listen.preferred_v6"),
@@ -858,6 +863,11 @@ impl crate::incoming::Sealed for Request {
 
 	fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.handshake = self.handshake.with_limits(limits);
+		self
+	}
+
+	fn with_keep_alive(mut self, keep_alive: moq_net::transport::KeepAlive) -> Self {
+		self.handshake = self.handshake.with_keep_alive(keep_alive);
 		self
 	}
 

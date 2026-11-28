@@ -624,7 +624,8 @@ impl Session {
 			demanded: false,
 		});
 		let work = session.work().clone();
-		let liveness = session.keeps_alive().then(|| kio::Producer::new(Liveness::Live));
+		let liveness = session.take_liveness();
+		let session_liveness = liveness.as_ref().map(kio::Producer::consume);
 
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
@@ -664,7 +665,7 @@ impl Session {
 			credential,
 			work,
 			datagrams_unrouted,
-			liveness: liveness.map(|liveness| liveness.consume()),
+			liveness: session_liveness,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),

@@ -114,6 +114,8 @@ congestion_control = "bbr"           # "bbr" (BBR v3, the default), "cubic", or 
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
+# keep_alive_soft = "2s"             # Report a quiet peer stale; unset is off. Set with keep_alive_hard.
+# keep_alive_hard = "10s"            # Close a quiet peer; at most idle_timeout.
 gso = true                           # UDP segmentation offload. Default.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
@@ -143,6 +145,17 @@ matching change here. If neither end sets an idle timeout, pings still run every
 9s. Set it only for a NAT binding that expires sooner than
 the idle timeout. A value no shorter than the negotiated idle timeout could
 never keep the connection up, so it is capped at the derived interval.
+
+`keep_alive_soft` and `keep_alive_hard`, set together, probe a quiet peer once
+half of `keep_alive_soft` passes, report it stale after all of it, and close the
+connection as an idle timeout after `keep_alive_hard`, which may not exceed
+`idle_timeout`. A stale session's routes rank as draining, below every other
+route yet still serving when nothing else does, until the peer is heard again;
+the session itself stays open. Set in `[quic]`, every connection probes,
+including each viewer's, so a relay usually sets them under `[limits.peer.quic]`
+for its peer links alone. A connection that cannot be probed, such as a qmux
+draft-00 WebSocket or a client with a shorter idle timeout, runs unprobed and is
+never reported stale.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 connection carries at most its window per round trip. The 4 MiB
@@ -183,10 +196,12 @@ live_edges = 0                       # No bound.
 max_streams = 100000                 # Concurrent QUIC streams per direction.
 receive_window = 67108864            # Connection-wide receive window (64 MiB).
 send_window = 67108864               # Unacknowledged outgoing data (64 MiB).
+# keep_alive_soft = "2s"             # Demote a quiet link's routes; unset is off.
+# keep_alive_hard = "10s"            # Close a quiet link.
 ```
 
-`[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
-any other `[quic]` key is refused. They replace the `[quic]` values for a
+`[limits.peer.quic]` takes only `max_streams`, `receive_window`, `send_window`,
+`keep_alive_soft`, and `keep_alive_hard`; any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's connection once its grant is known, before the SETUP reply, over QUIC,
 WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
 A link carrying a whole cluster is then not throttled by `[quic]` limits sized
@@ -195,7 +210,11 @@ RTT and about 5 Gbps at 100 ms; raise both for a busier link. Each peer can
 make the relay buffer up to its `receive_window` of unread or incomplete
 incoming data, so the peer count times that window bounds that data. A peer's
 retained groups are bounded separately by its `live_edges` (no bound by
-default), and data sent to it but not yet acknowledged by `send_window`. Peers take the `[quic]` `stream_receive_window`
+default), and data sent to it but not yet acknowledged by `send_window`.
+With `keep_alive_soft` set, a link that goes quiet, such as one stuck behind a
+full queue, ranks its routes as draining until it is heard again, so requests
+move to another link within `keep_alive_soft` instead of waiting out
+`keep_alive_hard`. Peers take the `[quic]` `stream_receive_window`
 like every other connection, so one group stream carries at most about 4 MiB per
 round trip.
 
