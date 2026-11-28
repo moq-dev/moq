@@ -239,7 +239,9 @@ pub struct Config {
 	/// staleness.
 	///
 	/// Every session built from this section probes, so a relay sets it on its peer links
-	/// (`[limits.peer.quic]`) rather than here, which would probe every local client too.
+	/// (`[limits.peer.quic]`) rather than here, which would probe every local client too. An
+	/// accepted session that cannot be probed (qmux draft-00, a shorter idle timeout) runs
+	/// unprobed.
 	#[usage(
 		name = "quic-keep-alive-soft",
 		long = "quic-keep-alive-soft",

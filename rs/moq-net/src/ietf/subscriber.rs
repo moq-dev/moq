@@ -3107,13 +3107,15 @@ impl Subscriber {
 		let Some(entry) = state.broadcasts.get_mut(path) else {
 			return;
 		};
+		// Every standing advert too, even when the current route already matches: a newer
+		// advert may have attached after the change, and withdrawing it restores an older one.
+		for (_, route) in &mut entry.adverts {
+			route.draining = draining;
+		}
 		if entry.route.draining == draining {
 			return;
 		}
 		entry.route.draining = draining;
-		for (_, route) in &mut entry.adverts {
-			route.draining = draining;
-		}
 		if let Some(dynamic) = &entry.dynamic {
 			let _ = dynamic.update(entry.route.clone());
 		}
@@ -11064,6 +11066,47 @@ mod tests {
 		subscriber.stop_announce(a.clone(), first, false, true).unwrap();
 		subscriber.stop_announce(a, repeat, false, true).unwrap();
 		subscriber.start_announce(b, last, Admit::Session(None)).unwrap();
+	}
+
+	/// A namespace re-advertised while its peer was draining, then heard again, falls back
+	/// to the older advert undrained once the newer one is withdrawn.
+	#[kio::test]
+	async fn a_restored_advert_drops_a_cleared_drain() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			origin,
+			Control::new(false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			Version::Draft18,
+			tasks,
+			Default::default(),
+		);
+		let advert = |subscriber: &Subscriber| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let a = crate::Path::from_static("a");
+		let (older, newer) = (advert(&subscriber), advert(&subscriber));
+		subscriber
+			.start_announce(a.clone(), older, Admit::Session(None))
+			.unwrap();
+		subscriber.drain_route(&a, true);
+		// The newer advert attaches once the peer is heard again, ahead of the run's pass.
+		let newer = subscriber
+			.start_announce(a.clone(), newer, Admit::Session(None))
+			.unwrap();
+		subscriber.drain_route(&a, false);
+		subscriber.stop_announce(a.clone(), newer, false, false).unwrap();
+
+		let state = subscriber.state.lock();
+		assert!(
+			!state.broadcasts[&a].route.draining,
+			"the older advert kept a cleared drain"
+		);
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked

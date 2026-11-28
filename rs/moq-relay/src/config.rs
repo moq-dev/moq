@@ -352,6 +352,11 @@ impl Config {
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
+		// A peer link runs `[quic]` with the peer limits on top, so its keep-alive must fit
+		// `[quic]`'s idle timeout.
+		let mut peer = self.quic.clone();
+		self.limits.peer.quic.dial(&mut peer);
+		peer.validate().context("invalid [limits.peer.quic]")?;
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
@@ -649,7 +654,8 @@ mod tests {
 	}
 
 	/// A peer link's keep-alive merges from the file and flags into one, reaches the links the
-	/// relay dials without touching `[quic]`, and is refused half set.
+	/// relay dials without touching `[quic]`, and is refused half set or past `[quic]`'s idle
+	/// timeout.
 	#[test]
 	fn peer_keep_alive_merges_and_dials() {
 		if !test_env::Env::without(&[
@@ -688,6 +694,12 @@ mod tests {
 		let inverted: Config =
 			toml::from_str("[limits.peer.quic]\nkeep_alive_soft = \"8s\"\nkeep_alive_hard = \"2s\"\n").unwrap();
 		assert!(inverted.limits.peer.quic.validate().is_err());
+		let past_idle: Config = toml::from_str(
+			"[quic]\nidle_timeout = \"5s\"\n[limits.peer.quic]\nkeep_alive_soft = \"2s\"\nkeep_alive_hard = \"8s\"\n",
+		)
+		.unwrap();
+		past_idle.limits.peer.quic.validate().unwrap();
+		assert!(past_idle.resolve().is_err(), "a peer hard past [quic]'s idle timeout");
 	}
 
 	/// A zero peer stream limit or window would wedge the connection, so it never parses.

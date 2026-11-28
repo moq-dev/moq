@@ -893,7 +893,7 @@ impl Subscriber {
 		.with_cost(cost.charged(link_cost))
 		.with_via(self.via(responder));
 
-		route.draining = self.draining.is_set();
+		route.draining = announced.draining;
 		route
 	}
 
@@ -2556,8 +2556,6 @@ struct PrefixRun {
 	/// Lite05+: the ANNOUNCE_STARTs of the initial set still to read. Anything else
 	/// before them, or the stream ending, cuts the counted set short.
 	initial: u64,
-	/// Whether the routes on this stream last ranked as draining.
-	draining: bool,
 }
 
 #[kio::machine(self.state: PrefixState)]
@@ -2637,8 +2635,8 @@ impl AnnouncePrefix {
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
 			initial,
-			draining: self.subscriber.draining.is_set(),
 		};
+		run.announced.draining = self.subscriber.draining.is_set();
 
 		// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
 		// read that before the update stream. Every other version streams it as
@@ -2678,8 +2676,7 @@ impl AnnouncePrefix {
 			// A draining peer usually stops announcing, and a stale one says nothing at all,
 			// so react to the signal itself; waiting for another message would leave the
 			// route primary until the session finally closed.
-			while let Poll::Ready(draining) = self.subscriber.draining.poll_changed(waiter, run.draining) {
-				run.draining = draining;
+			while let Poll::Ready(draining) = self.subscriber.draining.poll_changed(waiter, run.announced.draining) {
 				run.announced.drain(draining);
 			}
 			// A new limit holds back what the peer may no longer publish to us,
@@ -12995,6 +12992,10 @@ struct Announced {
 	/// driver wakes for every group the session carries, so a pass must cost what
 	/// was requested, not every route the peer announced.
 	ready: kio::Queue<Path>,
+	/// Whether this stream's routes rank as draining. New and reauthorized routes take it
+	/// rather than the live signal, so one that changed since the last pass reaches them all
+	/// through [`Self::drain`].
+	draining: bool,
 }
 
 /// What we made of one advertisement the peer holds.
@@ -13035,6 +13036,7 @@ impl Announced {
 			identities: HashMap::new(),
 			minted,
 			ready: Default::default(),
+			draining: false,
 		}
 	}
 
@@ -13173,7 +13175,7 @@ impl Announced {
 				}
 				Some(Held::Withheld(mut route)) => {
 					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
-					route.draining = subscriber.draining.is_set();
+					route.draining = self.draining;
 					self.offer(subscriber, path, route);
 				}
 				_ => unreachable!("only attached and withheld routes change"),
@@ -13184,6 +13186,7 @@ impl Announced {
 	/// Rank every attached route last (the peer sent a GOAWAY or is stale), or not (it was
 	/// heard again).
 	fn drain(&mut self, draining: bool) {
+		self.draining = draining;
 		for held in self.routes.values_mut() {
 			if let Held::Attached(entry) = held {
 				entry.drain(draining);

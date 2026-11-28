@@ -153,7 +153,9 @@ connection as an idle timeout after `keep_alive_hard`, which may not exceed
 route yet still serving when nothing else does, until the peer is heard again;
 the session itself stays open. Set in `[quic]`, every connection probes,
 including each viewer's, so a relay usually sets them under `[limits.peer.quic]`
-for its peer links alone.
+for its peer links alone. A connection that cannot be probed, such as a qmux
+draft-00 WebSocket or a client with a shorter idle timeout, runs unprobed and is
+never reported stale.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 connection carries at most its window per round trip. The 4 MiB

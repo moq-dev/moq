@@ -854,7 +854,12 @@ pub(crate) async fn accept_websocket(
 		deadline,
 		active: options.active,
 	};
-	Request::accept_qmux(&options.server, session, incoming).await
+	// The `[quic]` keep-alive covers WebSocket sessions too, whichever HTTP server upgraded them.
+	let server = match options.quic.liveness {
+		Some(keep_alive) => options.server.with_keep_alive(keep_alive),
+		None => options.server,
+	};
+	Request::accept_qmux(&server, session, incoming).await
 }
 
 /// Finish a transport handshake by `deadline`, or fail with a timeout.

@@ -244,9 +244,9 @@ impl Server {
 	/// Probe a quiet client and report it [`Stale`](crate::transport::Liveness::Stale) through
 	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::transport::KeepAlive).
 	///
-	/// Started once the caller admits the session ([`Handshake::ok`]), which refuses the session
-	/// with [`Error::KeepAlive`] on a transport that cannot run it. A [`Handshake`] can set its
-	/// own with [`Handshake::with_keep_alive`].
+	/// Started once the caller admits the session ([`Handshake::ok`]). A session whose transport
+	/// cannot run it, such as qmux draft-00 or a client's shorter idle timeout, runs unprobed and
+	/// never reports stale. A [`Handshake`] can set its own with [`Handshake::with_keep_alive`].
 	pub fn with_keep_alive(mut self, keep_alive: crate::transport::KeepAlive) -> Self {
 		self.keep_alive = Some(keep_alive);
 		self
@@ -1390,9 +1390,10 @@ impl Answer {
 			if self.timer.poll(waiter).is_ready() {
 				return Poll::Ready(None);
 			}
-			if let Err(err) = open_window(&server, &paused).and_then(|()| start_keep_alive(&server, &paused)) {
+			if let Err(err) = open_window(&server, &paused) {
 				return Poll::Ready(Some(Err(err)));
 			}
+			start_keep_alive(&server, &paused);
 			let peer_node = Some(self.handshake.assigned_hop);
 			let auth = self.handshake.auth.clone();
 			let started = match paused {
@@ -1446,17 +1447,18 @@ fn open_window(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
 	}
 }
 
-/// Start the keep-alive before anything answers SETUP, refusing the session on a transport that
-/// cannot run it.
-fn start_keep_alive(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
+/// Start the keep-alive before anything answers SETUP.
+///
+/// The client picked the transport and negotiated its idle timeout, so one that cannot run the
+/// keep-alive (qmux draft-00, or an idle timeout shorter than `hard`) runs unprobed instead of
+/// being refused: its routes simply never turn stale.
+fn start_keep_alive(server: &Server, paused: &PausedHandshake) {
 	let Some(keep_alive) = server.keep_alive else {
-		return Ok(());
+		return;
 	};
-	paused
-		.transport()
-		.0
-		.set_keep_alive(keep_alive)
-		.map_err(Error::KeepAlive)
+	if let Err(err) = paused.transport().0.set_keep_alive(keep_alive) {
+		tracing::debug!(%err, "session runs without a keep-alive");
+	}
 }
 
 /// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with
@@ -2049,6 +2051,23 @@ mod tests {
 		let request = server.handshake(kio::clock::now(), fixed.clone()).await.unwrap();
 		let _accepted = request.ok().await.expect("a transport that can't widen starts");
 		assert_eq!(fixed.close_code(), None);
+	}
+
+	/// The client picks the transport, so one that cannot probe is served unprobed rather
+	/// than refused, and never reports stale.
+	#[kio::test]
+	async fn ok_serves_a_transport_that_cannot_probe_unprobed() {
+		let keep_alive =
+			crate::transport::KeepAlive::new(std::time::Duration::from_secs(1), std::time::Duration::from_secs(2));
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		let request = Server::new()
+			.with_keep_alive(keep_alive)
+			.handshake(kio::clock::now(), session.clone())
+			.await
+			.unwrap();
+		let (accepted, _driver) = request.ok().await.expect("an unprobed session starts");
+		assert_eq!(session.close_code(), None);
+		assert_eq!(accepted.liveness(), None);
 	}
 
 	/// A window the transport refuses fails the session and tells the peer, rather than
