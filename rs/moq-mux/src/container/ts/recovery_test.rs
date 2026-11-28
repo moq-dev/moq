@@ -567,6 +567,8 @@ struct Slot {
 	/// Index into the group's frames.
 	frame: usize,
 	nominal: Duration,
+	/// When its group's first frame goes out on a clean path.
+	start: Duration,
 	/// The marker of a declared discontinuity, not media.
 	marker: bool,
 	/// Its payload's size in bytes.
@@ -793,6 +795,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 					group: g,
 					frame: f,
 					nominal,
+					start: since(keyframe),
 					marker,
 					size,
 				};
@@ -865,14 +868,22 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 				events.push((last, Some((t, g, None))));
 			} else if kept > 0 {
 				// Evicted once its next frame would have arrived, after what it delivered, so the
-				// abort never lands with that last frame and takes it before the export reads it.
-				let next = cut
+				// abort never lands with that last frame and takes it before the export reads it,
+				// and no later than the track's next delivery, which the source sends after it.
+				let resumes = (next..slots.len())
+					.take_while(|&i| slots[i].0 == t)
+					.find_map(|i| match deliveries[i] {
+						Delivery::At(at) => Some(at + LAG),
+						Delivery::Omitted => None,
+					});
+				let evicted = cut
 					.get(&(t, g))
 					.copied()
 					.unwrap_or(units[units.len() - frames.len() + kept].nominal)
 					+ LAG;
+				let evicted = resumes.map_or(evicted, |resumes| evicted.min(resumes));
 				let last = events.last().map(|(at, ..)| *at).unwrap();
-				events.push((next.max(last), Some((t, g, None))));
+				events.push((evicted.max(last), Some((t, g, None))));
 			}
 			if kept > 0 && skipping {
 				gaps += 1;
@@ -1887,6 +1898,7 @@ fn the_bottleneck_admits_only_what_fits() {
 		group,
 		frame: 0,
 		nominal: Duration::ZERO,
+		start: Duration::ZERO,
 		marker: false,
 		size,
 	};
@@ -1904,11 +1916,9 @@ fn the_bottleneck_admits_only_what_fits() {
 /// short at 6 s, the video held from 9 s to 11.5 s, and the audio lost from 13 s to 14.5 s.
 fn faults(slot: Slot) -> Delivery {
 	const CYCLE: u128 = 20_000_000;
-	// Where the frame's group starts: a video group's keyframe, or the audio frame itself.
-	let start = match slot.video {
-		true => slot.nominal - FRAME * slot.frame as u32,
-		false => slot.nominal,
-	};
+	// Faults judge a frame by its group's start, so lost audio groups (100 ms each) go
+	// whole: a group that loses its head but keeps its tail can't happen on the wire.
+	let start = slot.start;
 	if start >= Duration::from_secs(100) {
 		return clean(slot);
 	}
@@ -1920,7 +1930,7 @@ fn faults(slot: Slot) -> Delivery {
 		true if within(2000, 2480, group) => Delivery::Omitted,
 		true if within(6000, 6480, group) && slot.frame >= 4 => Delivery::Omitted,
 		true if within(9000, 11500, group) => Delivery::At(slot.nominal - since + Duration::from_millis(11500)),
-		false if within(13000, 14500, since) => Delivery::Omitted,
+		false if within(13000, 14500, group) => Delivery::Omitted,
 		_ => clean(slot),
 	}
 }
