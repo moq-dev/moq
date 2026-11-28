@@ -7,6 +7,7 @@
 
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::import::track::Written;
 use moq_net::Timestamp;
 
 /// MP3 parsing errors.
@@ -109,9 +110,8 @@ pub(crate) fn duration(data: &[u8]) -> Option<Timestamp> {
 /// Every MP3 frame is independently decodable, so [`decode`](Self::decode) marks only the first
 /// frame of each group a keyframe (the rest extend it): frames accumulate into the current group
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
-/// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: cut per frame for one group per frame, or less often to batch frames into
-/// fewer groups. MP3 carries its config in band, so the rendition has no out-of-band description.
+/// [`import::Track`](crate::import::Track) facade cuts once a group holds 100 ms. MP3 carries its
+/// config in band, so the rendition has no out-of-band description.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -181,17 +181,23 @@ impl Import {
 	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
+		self.write(frame.into_bytes(), pts).map(|_| ())
+	}
+
+	/// [`decode`](Self::decode), returning the frame's timestamp and how long it plays, if known.
+	pub(crate) fn write(&mut self, payload: bytes::Bytes, pts: Option<Timestamp>) -> crate::Result<Written> {
 		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
+		let duration = duration(&payload);
 		self.track.write(Frame {
 			timestamp,
-			payload: frame.into_bytes(),
+			payload,
 			keyframe,
 			duration: None,
 		})?;
-		Ok(())
+		Ok(Written { timestamp, duration })
 	}
 }
 

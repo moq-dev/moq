@@ -1,6 +1,7 @@
 use super::Config;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::import::track::Written;
 
 /// AAC importer.
 ///
@@ -8,12 +9,14 @@ use crate::container::Frame;
 /// ESDS atom); build the config with [`config`]. Every AAC packet is independently decodable, so
 /// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend
 /// it): frames accumulate into the current group until the caller [`cut`](Self::cut)s or
-/// [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade passes that through,
-/// so boundaries are the caller's either way: [`Join`](crate::container::Join) says when a group
-/// (one QUIC stream) holds its 100 ms. The codec's
-/// packet loss concealment handles drops.
+/// [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade cuts once a group (one
+/// QUIC stream) holds 100 ms, as [`Join`](crate::container::Join) says. The codec's packet loss
+/// concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
+	/// How long each access unit plays, from the AudioSpecificConfig, or `None` for an object type
+	/// coding frames of another length.
+	frame: Option<moq_net::Timestamp>,
 }
 
 impl Import {
@@ -37,11 +40,12 @@ impl Import {
 		// The caller's config names the container; the writer is built from that same value so the
 		// wire cannot disagree with what the rendition advertises.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
+		let frame = config.description.as_deref().and_then(super::frame_duration);
 		// Build the writer before advertising the rendition: it is fallible (enrolling the track in
 		// the broadcast timeline can collide), and a rendition published for a track we then fail to
 		// produce would be advertised to consumers but never served.
 		let track = reserved.audio(track, wire, config)?;
-		Ok(Self { track })
+		Ok(Self { track, frame })
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -106,17 +110,25 @@ impl Import {
 	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		self.write(frame.into_bytes(), pts).map(|_| ())
+	}
+
+	/// [`decode`](Self::decode), returning the packet's timestamp and how long it plays, if known.
+	pub(crate) fn write(&mut self, payload: bytes::Bytes, pts: Option<moq_net::Timestamp>) -> crate::Result<Written> {
 		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
 		self.track.write(Frame {
 			timestamp,
-			payload: frame.into_bytes(),
+			payload,
 			keyframe,
 			duration: None,
 		})?;
-		Ok(())
+		Ok(Written {
+			timestamp,
+			duration: self.frame,
+		})
 	}
 }
 

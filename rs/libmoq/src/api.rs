@@ -206,7 +206,7 @@ pub struct moq_audio_hint {
 
 	/// The time between join points, the longest span between two group starts
 	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
-	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// about 100 ms for audio. An upper bound, so a broadcast
 	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
 	pub join_us: u64,
@@ -315,7 +315,7 @@ pub struct moq_video_hint {
 
 	/// The time between join points, the longest span between two group starts
 	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
-	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// about 100 ms for audio. An upper bound, so a broadcast
 	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
 	pub join_us: u64,
@@ -3138,12 +3138,9 @@ pub extern "C" fn moq_publish_timebase_free(timebase: u32) -> i32 {
 
 /// Draw a group boundary on a media importer.
 ///
-/// For a codec track this ends the open group; the next frame written starts a new one. Audio has
-/// no boundary of its own (every packet is independently decodable), so this is the only thing
-/// that gives it groups (one QUIC stream each): call it after the frame that brings a group to
-/// about 100 ms, so the relay sees the group finish at once. Frames forward as they are written
-/// either way; a cut per frame costs a stream per packet. Video
-/// groups at its own keyframes and needs this only to override that.
+/// For a codec track this ends the open group; the next frame written starts a new one. Audio
+/// closes a group on its own once it holds about 100 ms, and video at its keyframes, so this only
+/// closes one early, such as at a segment boundary.
 ///
 /// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
 /// publishes rather than ending one group.

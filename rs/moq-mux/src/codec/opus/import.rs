@@ -1,6 +1,7 @@
 use super::Config;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::import::track::Written;
 
 /// Opus importer.
 ///
@@ -11,9 +12,8 @@ use crate::container::Frame;
 /// Every Opus packet is independently decodable, so [`decode`](Self::decode) marks only the first
 /// frame of each group a keyframe (the rest extend it): frames accumulate into the current group
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
-/// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: [`Join`](crate::container::Join) says when a group (one QUIC stream)
-/// holds its 100 ms. Opus' packet loss concealment handles drops.
+/// [`import::Track`](crate::import::Track) facade cuts once a group (one QUIC stream) holds 100 ms,
+/// as [`Join`](crate::container::Join) says. Opus' packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -94,11 +94,15 @@ impl Import {
 	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		self.write(frame.into_bytes(), pts).map(|_| ())
+	}
+
+	/// [`decode`](Self::decode), returning the packet's timestamp and how long it plays, if known.
+	pub(crate) fn write(&mut self, payload: bytes::Bytes, pts: Option<moq_net::Timestamp>) -> crate::Result<Written> {
 		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
-		let payload = frame.into_bytes();
 		// The packet states its own duration, so a pause's marker lands where its audio stops.
 		let duration = super::packet_samples(&payload)
 			.and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), 48_000).ok());
@@ -108,7 +112,7 @@ impl Import {
 			keyframe,
 			duration,
 		})?;
-		Ok(())
+		Ok(Written { timestamp, duration })
 	}
 }
 

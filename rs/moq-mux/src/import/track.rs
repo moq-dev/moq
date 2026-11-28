@@ -208,30 +208,24 @@ macro_rules! import {
 /// complete frame.
 ///
 /// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
-/// boundary of its own and accumulates into the current group until the caller draws one with
-/// [`cut`](Self::cut) or [`seek`](Self::seek). Cut once a group holds about
-/// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio: frames forward as they are written
-/// either way, and each group costs a QUIC stream, so cutting per frame spends one per packet. An
-/// audio track that is never cut is one unbounded group, which strands late subscribers and the
-/// timeline alike, so this warns once when it sees that.
+/// boundary of its own: this closes a group on the frame that brings it to
+/// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio, so the relay sees it finish at once
+/// and keeps one group (one QUIC stream) per span rather than one per packet. Frames forward as they
+/// are written either way. [`cut`](Self::cut) or [`seek`](Self::seek) still close a group early,
+/// and the next span starts from the frame after.
 pub struct Track {
 	kind: TrackKind,
 
-	/// The presentation time the current audio group started at, for the never-cut warning.
-	/// Only tracked for audio: video bounds its own groups at keyframes.
-	group_start: Option<moq_net::Timestamp>,
-
-	/// The never-cut warning has fired, so it doesn't repeat every frame.
-	warned: bool,
+	/// Where the open audio group closes. Unused for video, which groups at its keyframes.
+	join: crate::container::Join,
 }
 
-/// How long an audio group may run before [`Track`] warns that nobody is cutting it.
-///
-/// Not a bound: nothing is cut and no error is raised. A group this long means the caller never
-/// called [`cut`](Track::cut), which is always a bug (a late subscriber is served the group from
-/// its first frame, the newest group is never evicted, and the timeline can't close a segment).
-/// Generous enough that a deliberately coarse segment cadence stays quiet.
-const AUDIO_GROUP_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+/// What an audio codec importer wrote: the frame's timestamp, which may come from the clock, and
+/// how long it plays, when its codec or header says.
+pub(crate) struct Written {
+	pub timestamp: moq_net::Timestamp,
+	pub duration: Option<moq_net::Timestamp>,
+}
 
 impl Track {
 	/// Create an importer that publishes a single audio codec onto a reserved track.
@@ -325,38 +319,31 @@ impl Track {
 	fn from_kind(kind: TrackKind) -> Self {
 		Self {
 			kind,
-			group_start: None,
-			warned: false,
+			join: crate::container::Join::default(),
 		}
 	}
 
-	/// Note where the current audio group started and warn once if nobody ever cuts it.
+	/// Count a written audio frame into the open group, closing it once the group holds its span.
 	///
-	/// Timing only, no boundary: the codec importer decides the keyframe bit. A frame with no
-	/// `pts` (the importer stamps a wall clock the facade never sees) is skipped rather than
-	/// guessed at.
-	fn observe_audio(&mut self, pts: Option<moq_net::Timestamp>) {
-		let Some(pts) = pts else { return };
-		let Some(start) = self.group_start else {
-			self.group_start = Some(pts);
-			return;
-		};
-
-		if self.warned {
-			return;
+	/// A frame that doesn't say how long it plays counts as a point, so its group closes on the
+	/// first frame starting a span past it instead. An Opus encoder entering DTX sends one
+	/// header-only packet and then nothing until speech resumes, so that packet closes the group
+	/// too rather than leaving it open through the silence.
+	fn join(&mut self, written: Written, pause: bool) -> Result<()> {
+		// The duration counts samples at the codec's rate, which the timestamp's scale may not share.
+		let end = written
+			.duration
+			.zip(written.timestamp.scale())
+			.and_then(|(duration, scale)| written.timestamp.checked_add(duration.convert(scale).ok()?).ok());
+		let full = self.join.fill(written.timestamp, end.unwrap_or(written.timestamp));
+		if full.is_none() && !pause {
+			return Ok(());
 		}
-		if pts
-			.checked_sub(start)
-			.and_then(std::time::Duration::try_from)
-			.is_ok_and(|span| span >= AUDIO_GROUP_WARN_AFTER)
-		{
-			self.warned = true;
-			tracing::warn!(
-				name = self.name(),
-				after = ?AUDIO_GROUP_WARN_AFTER,
-				"audio group is still open; call cut() or seek() to bound it"
-			);
-		}
+		self.join.reset();
+		// A full group ends past its furthest frame, which a rewound frame's own end can fall below,
+		// so a paused group that isn't full leaves its end to the producer.
+		let end = end.and(full);
+		import!(&mut self.kind, import => import.cut(end))
 	}
 
 	/// Decode one whole frame.
@@ -407,24 +394,23 @@ impl Track {
 			TrackKind::Vp8(ref mut import) => import.decode(frame, pts)?,
 			TrackKind::Vp9(ref mut import) => import.decode(frame, pts)?,
 			// Audio has no boundary of its own: every frame is independently decodable, so the
-			// group runs until the caller cuts it. Cutting per frame is one QUIC stream per
-			// packet, which the relay forwards without waiting; cutting at a segment cadence
-			// aligns with video. Either is the caller's call, not this facade's.
+			// group runs until it holds its span.
 			TrackKind::Aac(ref mut import) => {
-				import.decode(frame, pts)?;
-				self.observe_audio(pts);
+				let written = import.write(frame.into_bytes(), pts)?;
+				self.join(written, false)?;
 			}
 			TrackKind::Opus(ref mut import) => {
-				import.decode(frame, pts)?;
-				self.observe_audio(pts);
+				let pause = frame.as_ref().len() <= 2;
+				let written = import.write(frame.into_bytes(), pts)?;
+				self.join(written, pause)?;
 			}
 			TrackKind::Mp3(ref mut import) => {
-				import.decode(frame, pts)?;
-				self.observe_audio(pts);
+				let written = import.write(frame.into_bytes(), pts)?;
+				self.join(written, false)?;
 			}
 			TrackKind::Flac(ref mut import) => {
-				import.decode(frame, pts)?;
-				self.observe_audio(pts);
+				let written = import.write(frame.into_bytes(), pts)?;
+				self.join(written, false)?;
 			}
 		}
 
@@ -470,11 +456,10 @@ impl Track {
 
 	/// Cut the current group at `end` without finishing the track.
 	///
-	/// This is how an audio track gets group boundaries at all: call it once a group holds about
-	/// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio. Frames forward as they are
-	/// written, so cutting per frame only spends a QUIC stream per packet.
+	/// Audio closes its own groups once they hold their span; this closes one early, and the next
+	/// span starts from the frame after.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
-		self.group_start = None;
+		self.join.reset();
 		import!(&mut self.kind, import => import.cut(end))
 	}
 
@@ -482,7 +467,7 @@ impl Track {
 	///
 	/// Publishes a marker without lowering advertised values; resumed timestamps must continue forward.
 	pub fn discontinuity(&mut self) -> Result<()> {
-		self.group_start = None;
+		self.join.reset();
 		self.reset_split();
 		import!(&mut self.kind, import => import.discontinuity())
 	}
@@ -513,7 +498,7 @@ impl Track {
 
 	/// Close the current group and open the next one at `start`.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.group_start = None;
+		self.join.reset();
 		self.reset_split();
 		import!(&mut self.kind, import => import.seek(start))
 	}
@@ -1182,26 +1167,128 @@ mod tests {
 		(import, subscriber)
 	}
 
-	/// The facade draws no audio boundaries of its own: frames accumulate into the open group until
-	/// the caller cuts. Regression guard for the per-frame cut this used to hardcode, which left a
-	/// caller wanting a segment cadence no way to ask for one.
+	/// An Opus packet whose TOC (config 12, code 1) codes two 10 ms frames: 20 ms of audio.
+	const OPUS_20MS: &[u8] = b"abc";
+
+	/// The packet that brings a group to 100 ms closes it, so a caller that never cuts still gets one
+	/// group (one QUIC stream) per 100 ms rather than one unbounded group.
 	#[tokio::test(start_paused = true)]
-	async fn audio_accumulates_until_the_caller_cuts() {
+	async fn audio_groups_close_at_one_hundred_milliseconds() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
 
-		// Each `a` packet holds 20ms of Opus, so these play back to back.
-		for ts in [0, 20_000, 40_000] {
-			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+		for index in 0..12 {
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(index * 20_000).unwrap()))
+				.unwrap();
 		}
-		import.cut(None).unwrap();
-		for ts in [60_000, 80_000] {
-			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![5, 5, 2]);
+	}
+
+	/// An explicit cut still closes a group early, and the next 100 ms is measured from the frame
+	/// after it.
+	#[tokio::test(start_paused = true)]
+	async fn a_cut_closes_an_audio_group_early() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		for index in 0..10 {
+			if index == 3 {
+				import.cut(None).unwrap();
+			}
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(index * 20_000).unwrap()))
+				.unwrap();
+		}
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![3, 5, 2]);
+	}
+
+	/// An encoder entering DTX sends one header-only packet and then nothing, so that packet closes
+	/// its group instead of leaving it open through the silence.
+	#[tokio::test(start_paused = true)]
+	async fn a_dtx_packet_closes_its_audio_group() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		for ts in [0, 20_000] {
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
+				.unwrap();
+		}
+		import.decode(b"a", Some(Timestamp::from_micros(40_000).unwrap())).unwrap();
+		for ts in [2_000_000, 2_020_000] {
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
+				.unwrap();
 		}
 		let _finished = import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![3, 2]);
+	}
+
+	/// Each audio codec times its frames from its config or header, so its groups close on the
+	/// frame that brings them to 100 ms.
+	#[tokio::test(start_paused = true)]
+	async fn every_audio_codec_groups_by_its_frame_length() {
+		let aac = crate::codec::aac::Config {
+			profile: 2,
+			sample_rate: 48_000,
+			channel_count: 2,
+		};
+		let flac = crate::codec::flac::Config {
+			min_block_size: 4096,
+			max_block_size: 4096,
+			min_frame_size: 0,
+			max_frame_size: 0,
+			sample_rate: 48_000,
+			channel_count: 2,
+			bits_per_sample: 16,
+			total_samples: 0,
+			md5: [0; 16],
+		};
+		// MPEG-1 Layer III, 128 kbps, 44.1 kHz.
+		let mp3 = [0xFF, 0xFB, 0x90, 0x44];
+		let cases = [
+			// 1024 samples at 48 kHz never land on 100 ms, so a group takes the frame past it.
+			(AudioFormat::Aac, aac.encode().unwrap().to_vec(), vec![0x21, 0x10], 21_333, [5, 5]),
+			// 4096-sample blocks, about 85 ms each.
+			(
+				AudioFormat::Flac,
+				flac.description().to_vec(),
+				vec![0xFF, 0xF8, 0xCA, 0x18, 0x00],
+				85_333,
+				[2, 2],
+			),
+			// 1152 samples at 44.1 kHz.
+			(AudioFormat::Mp3, mp3.to_vec(), [&mp3[..], &[0; 8]].concat(), 26_122, [4, 4]),
+		];
+		for (format, init, frame, step, expected) in cases {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let request = broadcast.reserve_track("audio").unwrap();
+			let mut import = Track::audio(request, catalog.reserve(), AudioInit::new(format, init)).unwrap();
+			let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(30)),
+					max: Some(Duration::from_secs(30)),
+				},
+			)]);
+			let track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
+			for index in 0..expected.iter().sum::<usize>() as u64 {
+				import
+					.decode(frame.clone(), Some(Timestamp::from_micros(index * step).unwrap()))
+					.unwrap();
+			}
+			let _finished = import.finish().unwrap();
+			assert_eq!(collect_groups(track).await, expected, "{format:?}");
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1211,13 +1298,13 @@ mod tests {
 		let mut import: Track = import.into();
 		for pts in [0, 20] {
 			import
-				.decode(b"a", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
 		import.discontinuity().unwrap();
 		for pts in [100, 120] {
 			import
-				.decode(b"b", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
 		let _finished = import.finish().unwrap();
@@ -1233,7 +1320,9 @@ mod tests {
 		let mut import: Track = import.into();
 
 		for ts in [0, 20_000, 40_000] {
-			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
+				.unwrap();
 			import.cut(None).unwrap();
 		}
 		let _finished = import.finish().unwrap();

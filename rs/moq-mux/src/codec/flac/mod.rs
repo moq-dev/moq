@@ -161,9 +161,54 @@ impl Config {
 	}
 }
 
+/// How many samples the FLAC frame at the start of `frame` codes, from its header (RFC 9639
+/// §9.1.1). `None` when the header doesn't parse.
+pub(crate) fn block_samples(frame: &[u8]) -> Option<u32> {
+	// The 14-bit sync code, a reserved zero bit, and the blocking strategy.
+	if frame.len() < 5 || frame[0] != 0xFF || frame[1] & 0xFE != 0xF8 {
+		return None;
+	}
+	let code = frame[2] >> 4;
+	match code {
+		1 => Some(192),
+		2..=5 => Some(576 << (code - 2)),
+		8..=15 => Some(256 << (code - 8)),
+		// The size minus one follows the UTF-8-style coded frame or sample number.
+		6 | 7 => {
+			let coded = match frame[4].leading_ones() {
+				0 => 1,
+				length @ 2..=7 => length as usize,
+				_ => return None,
+			};
+			let at = 4 + coded;
+			let size = match code {
+				6 => u32::from(*frame.get(at)?),
+				_ => u32::from(u16::from_be_bytes([*frame.get(at)?, *frame.get(at + 1)?])),
+			};
+			Some(size + 1)
+		}
+		_ => None,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn block_samples_reads_the_frame_header() {
+		// Fixed blocking: 4096 samples (code 12), 1152 (code 3), and 192 (code 1).
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0xC9, 0x18, 0x00]), Some(4096));
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0x39, 0x18, 0x00]), Some(1152));
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0x19, 0x18, 0x00]), Some(192));
+		// An 8-bit size after a one-byte frame number, and a 16-bit one after a two-byte number.
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0x69, 0x18, 0x05, 0xFF]), Some(256));
+		assert_eq!(block_samples(&[0xFF, 0xF9, 0x79, 0x18, 0xC2, 0x80, 0x03, 0xE7]), Some(1000));
+		// No sync, a reserved size, and a header cut short.
+		assert_eq!(block_samples(&[0x00, 0xF8, 0xC9, 0x18, 0x00]), None);
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0x09, 0x18, 0x00]), None);
+		assert_eq!(block_samples(&[0xFF, 0xF8, 0x79, 0x18, 0x00, 0x03]), None);
+	}
 
 	fn sample() -> Config {
 		Config {

@@ -1409,6 +1409,57 @@ async fn whole_media_frames_require_the_callers_timestamp() {
 	broadcast.close().unwrap();
 }
 
+/// Every binding's whole-frame audio closes a group on the frame that brings it to 100 ms without
+/// calling `cut`, and an explicit `cut` still closes one early.
+#[tokio::test(start_paused = true)]
+async fn audio_groups_close_at_one_hundred_milliseconds() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("mic".into()),
+		},
+		audio_init(MoqAudioFormat::opus(), opus_head()),
+	)
+	.unwrap();
+	let track = subscribe(&broadcast, "mic").await;
+
+	// TOC config 1, code 0: one 20 ms SILK frame.
+	let packet = vec![1 << 3, 0, 0];
+	let mut next = 0;
+	for (frames, cut) in [(5, false), (3, true), (5, false)] {
+		for _ in 0..frames {
+			media
+				.write_frame(MoqFrame {
+					payload: packet.clone(),
+					timestamp: us(next * 20_000),
+				})
+				.unwrap();
+			next += 1;
+		}
+		if cut {
+			media.cut().unwrap();
+		}
+		let group = kio::clock::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("timed out waiting for a group")
+			.unwrap()
+			.expect("expected a group");
+		let mut read = 0;
+		while kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("the group closes without another write")
+			.unwrap()
+			.is_some()
+		{
+			read += 1;
+		}
+		assert_eq!(read, frames);
+	}
+	media.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
 #[tokio::test]
 async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
