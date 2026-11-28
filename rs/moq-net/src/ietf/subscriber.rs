@@ -8465,6 +8465,15 @@ fn object_time(timing: ObjectTiming, key: u64, object_id: u64, tie: u64) -> Resu
 }
 
 impl GroupIngest {
+	/// A draft-23 group starts at its frame 0's time, so the Group ID is where its first
+	/// object sits.
+	fn check_first(&self, group: &crate::recv::Group, timestamp: crate::Timestamp) -> Result<(), Error> {
+		match self.timing.timestamp_ids && group.frame_count() == 0 && timestamp.value() != group.start {
+			true => Err(Error::TimestampMismatch),
+			false => Ok(()),
+		}
+	}
+
 	/// Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap
 	/// says none of them will ever exist. Best effort: a publisher that sends none leaves
 	/// the keys to arrive or be given up. Once per group, since every object naming it must
@@ -8574,6 +8583,7 @@ impl GroupIngest {
 					}
 					let id = self.prior_object.expect("payload follows object ID");
 					let timestamp = object_time(self.timing, group.start, id, self.tie.unwrap_or(0))?;
+					self.check_first(group, timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8598,6 +8608,7 @@ impl GroupIngest {
 					if status == 0 {
 						let id = self.prior_object.expect("status follows object ID");
 						let timestamp = object_time(self.timing, group.start, id, self.tie.unwrap_or(0))?;
+						self.check_first(group, timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
@@ -17273,6 +17284,32 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	/// A draft-23 group starts at its frame 0's time, its Group ID, so one whose first object
+	/// sits past it is refused, and the track lives on.
+	#[kio::test]
+	async fn a_timed_group_whose_first_object_misses_its_group_id_is_refused() {
+		use futures::FutureExt;
+
+		let h = Harness::new(Fill::Done, vec![tail_stream(KEY, 3, &[b"late"])]);
+		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().timing =
+			ObjectTiming::timed(Some(Timescale::MICRO));
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		let mut group = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("delivered")
+			.unwrap()
+			.unwrap();
+		let read = group.read_frame().now_or_never();
+		assert!(
+			matches!(read, Some(Err(Error::TimestampMismatch))),
+			"{res:?} {read:?}"
+		);
+		assert!(h.track.closed().now_or_never().is_none());
 	}
 
 	#[kio::test]
