@@ -969,15 +969,17 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 					producers[t].skip_groups(run);
 				}
 			}
-			let group = open[t].get_or_insert_with(|| {
-				kept[t] = 0;
-				let info = moq_net::group::Info { start: *sequence };
-				producers[t].create_group(info).unwrap()
-			});
-			assert_eq!(group.start, *sequence, "a schedule interleaves groups of track {t}");
-			group
-				.write_frame(frames[f].timestamp, frames[f].payload.clone())
-				.unwrap();
+			let (timestamp, payload) = (frames[f].timestamp, frames[f].payload.clone());
+			match &mut open[t] {
+				Some(group) => group.write_frame(timestamp, payload).unwrap(),
+				// A group is keyed by its first frame, as the published one was.
+				None => {
+					kept[t] = 0;
+					open[t] = Some(producers[t].create_group(timestamp, payload).unwrap());
+				}
+			}
+			let start = open[t].as_ref().unwrap().start;
+			assert_eq!(start, *sequence, "a schedule interleaves groups of track {t}");
 			kept[t] += 1;
 		}
 		assert!(open.iter().all(Option::is_none), "every group ends");

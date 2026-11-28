@@ -1811,17 +1811,6 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group on every track and reopen at `start`, in each track's timescale.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		for stream in self.streams.values_mut() {
-			stream.seek(start)?;
-		}
-		for section in self.sections.values_mut() {
-			section.seek(start)?;
-		}
-		Ok(())
-	}
-
 	fn finish_stream(&mut self, pid: Pid) -> Result<u64> {
 		match self.streams.get_mut(&pid) {
 			Some(stream) => stream.finish(),
@@ -2400,11 +2389,6 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, start: u64) -> Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	fn finish(&mut self) -> Result<()> {
 		self.track.end_with(None)?;
 		Ok(())
@@ -2650,11 +2634,6 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		if published {
 			self.track.discontinuity()?;
 		}
-		Ok(())
-	}
-
-	fn seek(&mut self, start: u64) -> Result<()> {
-		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -3321,8 +3300,7 @@ impl<E: catalog::Catalog> Stream<E> {
 	}
 
 	/// Sync was lost: drop whatever partial unit is held and stop vouching for the next
-	/// boundary. This is [`seek`](Self::seek) without reopening the group at a new start, for a
-	/// break the stream recovers from in place.
+	/// boundary, for a break the stream recovers from in place.
 	fn desync(&mut self) {
 		match self {
 			Stream::H264 { split, assembly, .. } => {
@@ -3388,36 +3366,6 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Opus(stream) => stream.discontinuity(published),
 			Stream::Legacy(stream) => stream.discontinuity(published),
 			Stream::PesPacket(stream) => stream.discontinuity(published),
-			Stream::Clock | Stream::Ignored => Ok(()),
-		}
-	}
-
-	fn seek(&mut self, start: u64) -> Result<()> {
-		match self {
-			Stream::H264 {
-				split,
-				assembly,
-				import,
-				..
-			} => {
-				assembly.reset();
-				split.reset();
-				Ok(import.seek(start)?)
-			}
-			Stream::H265 {
-				split,
-				assembly,
-				import,
-				..
-			} => {
-				assembly.reset();
-				split.reset();
-				Ok(import.seek(start)?)
-			}
-			Stream::Aac(stream) => stream.seek(start),
-			Stream::Opus(stream) => stream.seek(start),
-			Stream::Legacy(stream) => stream.seek(start),
-			Stream::PesPacket(stream) => stream.seek(start),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -3602,7 +3550,7 @@ impl Resync {
 	}
 
 	/// Whether the offset itself is one nothing has vouched for, which is true from a scan
-	/// (or the start of a stream, or a seek) until the frame it found is published.
+	/// (or the start of a stream, or a discontinuity) until the frame it found is published.
 	fn unconfirmed(&self) -> bool {
 		self.unconfirmed
 	}
@@ -3663,8 +3611,8 @@ impl Resync {
 	/// frame after it has to be confirmed again.
 	///
 	/// The budget resets too. It measures how long *this* run of the stream has gone without
-	/// a frame, and a seek ends that run: carrying the count over would fail a perfectly
-	/// good stream on its first parse failure after seeking away from the damage.
+	/// a frame, and a discontinuity ends that run: carrying the count over would fail a
+	/// perfectly good stream on its first parse failure after it moved past the damage.
 	fn desynced(&mut self) {
 		// A scan in flight is abandoned rather than completed, so the bytes it discarded
 		// still count while the resync it belongs to does not.
@@ -4122,16 +4070,6 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
-		self.group.take();
-		self.desync();
-		if let Some(import) = &mut self.import {
-			import.seek(start)?;
-		}
-		Ok(())
-	}
-
 	/// Close the open group where its last frame stops.
 	fn close_group(&mut self) -> Result<()> {
 		if let (Some(end), Some(import)) = (self.group.take(), &mut self.import) {
@@ -4250,11 +4188,6 @@ impl OpusStream {
 			self.import.discontinuity()?;
 		}
 		Ok(())
-	}
-
-	fn seek(&mut self, start: u64) -> Result<()> {
-		self.group.take();
-		Ok(self.import.seek(start)?)
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -4760,16 +4693,6 @@ impl<E: CatalogExt> LegacyStream<E> {
 		self.desync();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
-		}
-		Ok(())
-	}
-
-	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
-		self.group.take();
-		self.desync();
-		if let Some(import) = &mut self.import {
-			import.seek(start)?;
 		}
 		Ok(())
 	}
@@ -7373,53 +7296,6 @@ pub(super) mod test {
 		);
 	}
 
-	// A seek is a discontinuity, so whatever vouched for the next boundary no longer holds
-	// and the frame after it is confirmed like any other unvouched-for one.
-	#[tokio::test(start_paused = true)]
-	async fn legacy_confirms_the_first_frame_after_a_seek() {
-		const MP2_PID: u16 = 0x0061;
-
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-
-		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
-		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
-
-		let mut opening = mp2_frame(0xAA);
-		opening.extend_from_slice(&mp2_frame(0xBB));
-		import
-			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &opening).as_slice())
-			.unwrap();
-
-		// Two seconds in, in the track's microseconds: past the group already published.
-		import.seek(2_000_000).unwrap();
-
-		// Landing mid-frame after the seek, on a fragment that parses as a header but whose
-		// declared frame ends inside a real one.
-		let mut landed = mp2_frame(0)[..4].to_vec();
-		landed.resize(40, 0x11);
-		import
-			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &landed).as_slice())
-			.unwrap();
-		let mut real = mp2_frame(0xCC);
-		real.extend_from_slice(&mp2_frame(0xDD));
-		import
-			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &real).as_slice())
-			.unwrap();
-		let _finished = import.finish().unwrap();
-
-		// Only the four real frames: the fragment the seek landed inside is dropped rather
-		// than spliced onto the front of the first real frame after it.
-		let frames = read_audio_frames(&consumer, &catalog).await;
-		assert_eq!(
-			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
-			vec![mp2_frame(0xAA), mp2_frame(0xBB), mp2_frame(0xCC), mp2_frame(0xDD)],
-			"published the unvouched-for bytes the seek landed in the middle of"
-		);
-	}
-
 	// A frame that legitimately arrives over many small PES must not trip the resync budget.
 	// The candidate is rescanned each time the buffer grows, and charging those bytes on
 	// every pass would bill a single 8 KiB frame for over a hundred KiB of "discarded" data
@@ -7683,57 +7559,6 @@ pub(super) mod test {
 		assert!(
 			matches!(&err, super::Error::Malformed(msg) if msg.contains("never regained sync")),
 			"gave up with the wrong error: {err}"
-		);
-	}
-
-	// A seek is a discontinuity, so the budget spent failing to find a frame before it says
-	// nothing about the stream after it. Carrying it over means a stream that scanned close
-	// to the budget, then seeked somewhere clean, dies on its first parse failure with
-	// "never regained sync" despite being perfectly in sync.
-	#[tokio::test(start_paused = true)]
-	async fn legacy_seek_resets_the_resync_budget() {
-		const MP2_PID: u16 = 0x0061;
-
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-
-		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
-		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
-
-		// Burn the budget down to just under the give-up threshold: these discard 147 bytes
-		// and then 150 apiece (a 3-byte partial sync is carried), so 436 of them leaves
-		// 65397 against a 65536 budget.
-		let junk = vec![0x00u8; 150];
-		for i in 0..436 {
-			import
-				.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, &junk).as_slice())
-				.expect("still under the budget");
-		}
-
-		// Seek away from the damage. Landing mid-frame costs a couple more failures, which
-		// is what tips a carried-over budget past the threshold.
-		import.seek(10).unwrap();
-		for i in 0..2 {
-			import
-				.decode(audio_pes_packet(MP2_PID, i, 270_000, &junk).as_slice())
-				.expect("a seek must not inherit the pre-seek budget");
-		}
-
-		// Then a perfectly good stream.
-		let mut good = mp2_frame(0xAA);
-		good.extend_from_slice(&mp2_frame(0xBB));
-		import
-			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &good).as_slice())
-			.expect("a clean stream after a seek must not inherit the pre-seek budget");
-		let _finished = import.finish().unwrap();
-
-		let frames = read_audio_frames(&consumer, &catalog).await;
-		assert_eq!(
-			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
-			vec![mp2_frame(0xAA), mp2_frame(0xBB)],
-			"the post-seek stream should publish normally"
 		);
 	}
 

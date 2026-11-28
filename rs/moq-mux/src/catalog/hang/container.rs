@@ -147,7 +147,7 @@ impl ContainerTrait for Container {
 
 	fn finish_group(
 		&self,
-		group: &mut moq_net::group::Producer,
+		group: &mut crate::container::Writer<'_>,
 		end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		match self {
@@ -162,7 +162,7 @@ impl ContainerTrait for Container {
 		}
 	}
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut crate::container::Writer<'_>, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).write(group, frames),
 			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).write(group, frames),

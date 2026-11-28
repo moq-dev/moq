@@ -81,6 +81,7 @@ impl annexb::Codec for Codec {
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	use std::task::Poll;
 
 	use bytes::{Bytes, BytesMut};
@@ -132,7 +133,7 @@ mod tests {
 		out.freeze()
 	}
 
-	fn write_length_prefixed(group: &mut moq_net::group::Producer, timestamp_us: u64, nals: &[&[u8]]) {
+	fn write_length_prefixed(group: &mut Lazy, timestamp_us: u64, nals: &[&[u8]]) {
 		let mut payload = BytesMut::new();
 		for nal in nals {
 			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -147,7 +148,7 @@ mod tests {
 		};
 		<crate::catalog::hang::Container as crate::container::Container>::write(
 			&crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
-			group,
+			&mut group.writer(),
 			&[frame],
 		)
 		.unwrap();
@@ -209,11 +210,11 @@ mod tests {
 			.create_track("video.hvc1", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 
-		let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut g0 = Lazy::new(&track);
 		write_length_prefixed(&mut g0, 0, &[idr]);
 		g0.finish().unwrap();
 
-		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		let mut g1 = Lazy::new(&track);
 		write_length_prefixed(&mut g1, 33_000, &[trail]);
 		g1.finish().unwrap();
 		let _track = track.finish().unwrap();
@@ -339,7 +340,7 @@ mod tests {
 			let track = broadcast
 				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
-			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+			let mut group = Lazy::new(&track);
 			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
 			group.finish().unwrap();

@@ -9,6 +9,8 @@
 use std::io::{Cursor, Write};
 use std::time::Duration;
 
+use crate::container::test_util::Lazy;
+
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
 use mpeg2ts::es::StreamType;
@@ -254,7 +256,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 			.create_track(moq_msf::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let msf = moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap();
-		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 		group.write_frame(moq_net::Timestamp::ZERO, msf).unwrap();
 		group.finish().unwrap();
 		broadcast.announce().unwrap();
@@ -1049,7 +1051,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		(11, vec![200, 180, 190, 210]),
 		(13, vec![400, 380, 390, 410]),
 	] {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let mut group = Lazy::new(&track);
 		let frames: Vec<_> = stamps
 			.into_iter()
 			.enumerate()
@@ -1065,7 +1067,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 				},
 			})
 			.collect();
-		format.write(&mut group, &frames).unwrap();
+		format.write(&mut group.writer(), &frames).unwrap();
 		group.finish().unwrap();
 	}
 	let _track = track.finish().unwrap();
@@ -1366,9 +1368,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 		.insert("video".into(), config);
 	let format = HangContainer::Legacy(Kind::Video);
 	for (sequence, stamps) in groups.iter().enumerate() {
-		let mut group = track
-			.create_group(moq_net::group::Info { start: sequence as u64 })
-			.unwrap();
+		let mut group = Lazy::new(&track);
 		let frames: Vec<_> = stamps
 			.iter()
 			.enumerate()
@@ -1384,7 +1384,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 				},
 			})
 			.collect();
-		format.write(&mut group, &frames).unwrap();
+		format.write(&mut group.writer(), &frames).unwrap();
 		group.finish().unwrap();
 	}
 	let track = track.finish().unwrap();
@@ -6538,15 +6538,15 @@ async fn a_start_group_cut_short_goes_out() {
 
 	// The first group delivers five pictures before the next group lands and the publisher
 	// resets it.
-	let mut cut = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+	let mut cut = Lazy::new(&track);
 	for tick in 0..5 {
 		rig.at(tick * VIDEO_US).await;
-		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		wire.write(&mut cut.writer(), &[picture(tick)]).unwrap();
 		out.extend(poll_frames(&mut export));
 		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
-	let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
-	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	let mut group = Lazy::new(&track);
+	wire.write(&mut group.writer(), &[picture(GOP)]).unwrap();
 	cut.abort(moq_net::Error::Old).unwrap();
 	for tick in 5..GOP {
 		rig.at(tick * VIDEO_US).await;
@@ -6557,9 +6557,9 @@ async fn a_start_group_cut_short_goes_out() {
 		rig.at(tick * VIDEO_US).await;
 		if tick.is_multiple_of(GOP) {
 			group.finish().unwrap();
-			group = track.create_group(moq_net::group::Info { start: tick / GOP }).unwrap();
+			group = Lazy::new(&track);
 		}
-		wire.write(&mut group, &[picture(tick)]).unwrap();
+		wire.write(&mut group.writer(), &[picture(tick)]).unwrap();
 		out.extend(poll_frames(&mut export));
 		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
@@ -8873,7 +8873,7 @@ async fn a_skipped_group_flags_the_clock() {
 			for sequence in 0..80 + 2 * missing {
 				kio::clock::sleep_until(start.saturating_add(Duration::from_millis(sequence * 100))).await;
 				if !(20..20 + missing).contains(&sequence) && !(40 + missing..40 + 2 * missing).contains(&sequence) {
-					let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+					let mut group = Lazy::new(&track);
 					for k in 0..5u64 {
 						let frame = Frame {
 							timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
@@ -8883,7 +8883,7 @@ async fn a_skipped_group_flags_the_clock() {
 							keyframe: k == 0,
 						};
 						HangContainer::Legacy(crate::container::Kind::Audio)
-							.write(&mut group, &[frame])
+							.write(&mut group.writer(), &[frame])
 							.unwrap();
 					}
 					group.finish().unwrap();
@@ -9018,7 +9018,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 	for sequence in 0..11u64 {
 		kio::clock::sleep_until(start.saturating_add(Duration::from_secs(sequence))).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
-		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let mut group = Lazy::new(&track);
 		for k in 0..50u64 {
 			let millis = if sequence == 10 && k == 0 { 9_001 } else { base + k * 20 };
 			let frame = Frame {
@@ -9029,7 +9029,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 				keyframe: k == 0,
 			};
 			HangContainer::Legacy(crate::container::Kind::Audio)
-				.write(&mut group, &[frame])
+				.write(&mut group.writer(), &[frame])
 				.unwrap();
 		}
 		group.finish().unwrap();
@@ -11206,7 +11206,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			.broadcast()
 			.create_track(name, hang::Catalog::default_track_info())
 			.unwrap();
-		let mut group = old_catalog.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&old_catalog);
 		group.write_frame(Timestamp::ZERO, snapshot).unwrap();
 		group.finish().unwrap();
 		let source = crate::source::resolved(&origin, "live").await;

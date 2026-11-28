@@ -539,7 +539,7 @@ impl Container for Wire {
 
 	type Error = Error;
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
+	fn write(&self, group: &mut crate::container::Writer<'_>, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
 		let timescale = self.timescale()?;
 		if group.timescale() != Some(timescale) {
 			return Err(Error::TimescaleMismatch {
@@ -685,7 +685,7 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 	Ok(frames)
 }
 
-fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: FragmentInfo) -> Result<()> {
+fn encode(group: &mut crate::container::Writer<'_>, frames: &[Frame], info: FragmentInfo) -> Result<()> {
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time, which `decode` anchors its samples to.
 	// It is rounded to the track's ticks the same way the samples are, so the two agree.
@@ -1630,6 +1630,7 @@ fn first_traf(fragment: &Bytes) -> mp4_atom::Traf {
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	#[test]
 	fn received_metadata_is_bounded() {
 		let mut bounded = true;
@@ -2197,9 +2198,9 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(timescale);
 		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.append_group(Timestamp::from_micros(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 		let input = [sample(100_000), sample(33_000), sample(66_000)];
-		wire.write(&mut group, &input).unwrap();
+		wire.write(&mut group.writer(), &input).unwrap();
 
 		let frame = group.consume().read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp.as_micros().unwrap(), 33_000);
@@ -2248,9 +2249,9 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 
-		let err = wire.write(&mut group, &[sample(0)]).unwrap_err();
+		let err = wire.write(&mut group.writer(), &[sample(0)]).unwrap_err();
 		assert!(matches!(err, Error::TimescaleMismatch { .. }), "got {err:?}");
 	}
 

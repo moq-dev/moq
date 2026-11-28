@@ -450,7 +450,9 @@ impl Entry {
 		// A cut can land on the same millisecond as the last one (a retraction cuts at once, and SI
 		// without media PTS cuts at zero), so it is stamped a unit later instead of refused.
 		let (_, pts) = crate::start::next(track, pts)?;
-		let mut group = track.append_group(pts)?;
+		// A snapshot with nothing left is one zero-byte frame, which holds no sections.
+		let mut frames = frames.into_iter();
+		let mut group = track.append_group(pts, frames.next().unwrap_or_default())?;
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}

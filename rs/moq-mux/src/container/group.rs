@@ -117,6 +117,7 @@ impl<F: Container> GroupConsumer<F> {
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
 
@@ -247,17 +248,17 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format
-			.write(&mut group, &[frame(1_000_000, b"keyframe", true)])
+			.write(&mut group.writer(), &[frame(1_000_000, b"keyframe", true)])
 			.unwrap();
 		let first = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
 		assert_eq!(first.duration, None);
 
-		format.write(&mut group, &[frame(1_020_000, b"delta", false)]).unwrap();
+		format.write(&mut group.writer(), &[frame(1_020_000, b"delta", false)]).unwrap();
 		let second = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
@@ -272,11 +273,11 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format
-			.write(&mut group, &[frame(1_000_000, b"keyframe", true)])
+			.write(&mut group.writer(), &[frame(1_000_000, b"keyframe", true)])
 			.unwrap();
 		// A truncated timestamp varint.
 		group
@@ -286,7 +287,7 @@ mod tests {
 			)
 			.unwrap();
 		// Frames past the malformed object are never returned.
-		format.write(&mut group, &[frame(1_040_000, b"after", false)]).unwrap();
+		format.write(&mut group.writer(), &[frame(1_040_000, b"after", false)]).unwrap();
 		group.finish().unwrap();
 
 		let first = live.read().await.unwrap().unwrap();

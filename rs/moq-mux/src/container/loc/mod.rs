@@ -30,7 +30,7 @@ impl Wire {
 impl Container for Wire {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut crate::container::Writer<'_>, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			// LOC's wire format omits per-frame timescale by convention; the catalog
 			// default is microseconds, so convert at the boundary.
@@ -87,7 +87,7 @@ impl Container for Wire {
 
 	fn finish_group(
 		&self,
-		group: &mut moq_net::group::Producer,
+		group: &mut crate::container::Writer<'_>,
 		end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		if self.0 == Kind::Video

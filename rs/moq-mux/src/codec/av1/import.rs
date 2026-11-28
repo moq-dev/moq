@@ -230,12 +230,6 @@ impl Import {
 		self.catalog.set_enabled(&mut self.track, enabled)
 	}
 
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	/// Write split frames to the track, resolving the config from the first
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {

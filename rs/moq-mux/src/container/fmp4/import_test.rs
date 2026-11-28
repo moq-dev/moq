@@ -1379,7 +1379,7 @@ async fn video_drops_the_samples_before_its_edit() {
 	}
 }
 
-/// A video track joined mid-GOP, at the start or after a `seek`, publishes nothing before its next
+/// A video track joined mid-GOP, at the start or after a `rejoin`, publishes nothing before its next
 /// sync sample, passthrough or unwrapped, even when that sample sits inside a fragment, so no group
 /// opens on a frame its decoder cannot use.
 #[tokio::test]
@@ -1401,7 +1401,7 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 		),
 		video_fragment(video_id, 5 * tick, tick, &[(0, 0, 0xF), (0, non_sync, 0x10)]),
 	];
-	let after_seek = [
+	let after_rejoin = [
 		video_fragment(video_id, 7 * tick, tick, &[(0, non_sync, 0x11)]),
 		video_fragment(video_id, 8 * tick, tick, &[(0, non_sync, 0x12), (0, 0, 0x13)]),
 	];
@@ -1421,9 +1421,8 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 		for fragment in &fragments {
 			fmp4.decode(fragment).unwrap();
 		}
-		// Past every start the tracks hold, in either's timescale: group starts strictly increase.
-		fmp4.seek(1_000_000).unwrap();
-		for fragment in &after_seek {
+		fmp4.rejoin().unwrap();
+		for fragment in &after_rejoin {
 			fmp4.decode(fragment).unwrap();
 		}
 		let _finished = fmp4.finish().unwrap();
@@ -1551,44 +1550,6 @@ async fn audio_runs_in_one_moof_share_a_group() {
 			vec![2, 2],
 			"one group per segment, passthrough {passthrough}"
 		);
-	}
-}
-
-/// A sync sample whose group key doesn't pass a seek's start continues the open group, keeping a
-/// leading picture that presents at or before the newest sample, as only the groups before it
-/// bound the group's samples, passthrough or unwrapped.
-#[tokio::test]
-async fn video_continuing_a_seeked_group_keeps_its_leading_pictures() {
-	let (_, (video_id, video_scale), _) = bbb_init();
-	let tick = video_scale.as_u64() / 24;
-	let non_sync = 0x0001_0000;
-	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
-	// Presents 0, 6, 2; then a sync sample at 7 and a leading picture at 4.
-	let fragments: [(u64, &[(u64, u32)]); 2] = [
-		(0, &[(0, 0), (5, non_sync), (0, non_sync)]),
-		(3, &[(4, 0), (0, non_sync)]),
-	];
-	for passthrough in [false, true] {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
-		fmp4.decode(&init).unwrap();
-		fmp4.seek(10_000_000).unwrap();
-		for (dts, samples) in fragments {
-			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
-			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
-				.unwrap();
-		}
-		let _finished = fmp4.finish().unwrap();
-		let [video, _] = published(&consumer, &catalog).await;
-		let presented: Vec<u64> = video
-			.iter()
-			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
-			.collect();
-		assert_eq!(presented, [0, 6, 2, 7, 4], "passthrough {passthrough}");
-		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		assert_eq!(starts(&consumer, &name).await.len(), 1, "passthrough {passthrough}");
 	}
 }
 
@@ -1853,73 +1814,6 @@ fn test_vp9_catalog() {
 	let mvex = moov.mvex.as_ref().unwrap();
 	assert_eq!(mvex.trex.len(), 1);
 	assert_eq!(mvex.trex[0].track_id, moov.trak[0].tkhd.track_id);
-}
-
-/// `Import::seek(n)` starts the next group at sequence `n`; subsequent fragments
-/// auto-increment from there.
-#[tokio::test]
-async fn test_seek_sets_initial_sequence() {
-	for passthrough in [false, true] {
-		test_seek_sets_initial_sequence_in(passthrough).await;
-	}
-}
-
-async fn test_seek_sets_initial_sequence_in(passthrough: bool) {
-	use mp4_atom::{Any, DecodeMaybe};
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let broadcast_consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
-
-	let data = include_bytes!("test_data/bbb.mp4");
-
-	// Walk the file atom-by-atom so we can seek before any fragments are processed.
-	// Init atoms (ftyp/moov) come first; everything after is moof/mdat pairs.
-	let mut init_buf = bytes::BytesMut::new();
-	let mut frag_buf = bytes::BytesMut::new();
-	let mut cursor = std::io::Cursor::new(&data[..]);
-	let mut init_done = false;
-	let mut position = 0;
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap_or(None) {
-		let end = cursor.position() as usize;
-		let bytes = &data[position..end];
-		match atom {
-			Any::Ftyp(_) | Any::Styp(_) | Any::Moov(_) => init_buf.extend_from_slice(bytes),
-			_ => {
-				init_done = true;
-				frag_buf.extend_from_slice(bytes);
-			}
-		}
-		position = end;
-		if init_done && frag_buf.len() > 1024 {
-			break;
-		}
-	}
-
-	// Decode init so the tracks exist, then seek, then decode the fragments.
-	fmp4.decode(&init_buf).unwrap();
-
-	let snap = catalog.snapshot();
-	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
-	let mut video_track = broadcast_consumer
-		.track(&video_name)
-		.unwrap()
-		.subscribe(None)
-		.await
-		.expect("video track should exist");
-
-	fmp4.seek(100).unwrap();
-	// Trailing partial fragments may error; ignore.
-	let _ = fmp4.decode(&frag_buf);
-	let _finished = fmp4.finish().unwrap();
-
-	let starts = drain_group_starts(&mut video_track);
-	assert!(!starts.is_empty(), "expected at least one group");
-	assert_eq!(starts[0], 100, "first group should land at the seeked start");
-	for win in starts.windows(2) {
-		assert!(win[1] > win[0], "subsequent groups start later, at their keyframes");
-	}
 }
 
 /// E2E test: publish via the fMP4 importer, subscribe to the MSF catalog track,
@@ -3160,44 +3054,6 @@ async fn import_refuses_a_restart() {
 	);
 }
 
-/// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
-/// after a seek is still refused. A signalled discontinuity skips the import's own comparison,
-/// but the track still refuses a group that starts before the one before it.
-#[tokio::test]
-async fn seek_keeps_the_decode_time_until_a_discontinuity() {
-	for passthrough in [false, true] {
-		seek_keeps_the_decode_time_until_a_discontinuity_in(passthrough).await;
-	}
-}
-
-async fn seek_keeps_the_decode_time_until_a_discontinuity_in(passthrough: bool) {
-	let (init, _, _) = bbb_init();
-	for discontinuity in [false, true] {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
-		fmp4.decode(&init).unwrap();
-		fmp4.decode(&live_session(5_000_000, 5)).unwrap();
-		if discontinuity {
-			fmp4.discontinuity().unwrap();
-		}
-		fmp4.seek(100).unwrap();
-		let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
-		if discontinuity {
-			// Passthrough and unwrapped tracks both refuse a rewound group themselves.
-			assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
-		} else {
-			assert!(
-				matches!(
-					err,
-					crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
-				),
-				"{err:?}"
-			);
-		}
-	}
-}
-
 /// The catalog is first published at the first fragment, carrying the clock that fragment
 /// anchors, rather than at the moov on a provisional clock a copy-once reader would keep.
 #[tokio::test]
@@ -3645,24 +3501,6 @@ async fn webvtt_kind_and_lone_cr_terminators() {
 		&frame.payload[..],
 		b"WEBVTT\nKind: captions\n\n00:00:00.250 --> 00:00:01.500\nHello\nworld\n\n"
 	);
-}
-
-/// Text closes a group per cue, so a segment seek must not rewind onto a cue group already written.
-#[test]
-fn webvtt_seek_after_several_cues_does_not_reuse_a_group() {
-	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut importer = super::Import::new(broadcast, catalog.reserve());
-	importer.decode(&webvtt_init("WEBVTT")).unwrap();
-	importer.seek(100).unwrap();
-	importer
-		.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone(), cue.clone()], 1000))
-		.unwrap();
-	// Segment 101 was missed; groups 100..=102 already hold the three cues.
-	importer.seek(102).unwrap();
-	importer.decode(&webvtt_fragment(4000, &[cue], 1000)).unwrap();
-	let _finished = importer.finish().unwrap();
 }
 
 /// A text fragment may not start inside the decode span of the previous fragment's samples.

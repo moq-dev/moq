@@ -1087,6 +1087,7 @@ pub(crate) fn build_video_transform(config: &VideoConfig) -> Option<VideoTransfo
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	use hang::catalog::{AudioCodec, Container, H264};
 	use moq_net::path::Relative;
 
@@ -1254,7 +1255,7 @@ mod tests {
 			// together.
 			let settle = kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
 			assert!(settle.await.is_err(), "nothing is written yet");
-			let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+			let mut group = Lazy::appending(&track);
 			let held = match failure {
 				"malformed" => {
 					// An empty Legacy audio frame is malformed.
@@ -1441,8 +1442,8 @@ mod tests {
 		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		let write = |sequence: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
+			let mut group = Lazy::new(&track);
+			wire.write(&mut group.writer(), &[raw_frame(sequence * 24_000, b"audio", true)])
 				.unwrap();
 			group.finish().unwrap();
 		};
@@ -1524,8 +1525,8 @@ mod tests {
 			let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 			let pes = |pes: u64| {
 				for sequence in pes * 5..pes * 5 + 5 {
-					let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-					wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
+					let mut group = Lazy::new(&track);
+					wire.write(&mut group.writer(), &[raw_frame(sequence * 24_000, b"audio", true)])
 						.unwrap();
 					group.finish().unwrap();
 				}
@@ -1703,8 +1704,8 @@ mod tests {
 		let (track, mut export) = audio_export().await;
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		let group = |sequence: u64, timestamp: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			wire.write(&mut group, &[raw_frame(timestamp, b"audio", true)]).unwrap();
+			let mut group = Lazy::new(&track);
+			wire.write(&mut group.writer(), &[raw_frame(timestamp, b"audio", true)]).unwrap();
 			group
 		};
 		// Group 1 is missing whole; group 3 is cut short after its first frame.
@@ -1737,9 +1738,9 @@ mod tests {
 
 		let (track, mut export) = audio_export().await;
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = Lazy::new(&track);
 		let frames = [0, 20_000].map(|at| raw_frame(at, b"audio", at == 0));
-		wire.write(&mut group, &frames).unwrap();
+		wire.write(&mut group.writer(), &frames).unwrap();
 		let waiter = kio::Waiter::noop();
 		for _ in 0..2 {
 			assert!(matches!(
@@ -1761,8 +1762,8 @@ mod tests {
 		let (track, mut export) = audio_export().await;
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		for (sequence, timestamp, payload) in [(0, 0, b"audio".as_slice()), (2, 1_000_000, b"".as_slice())] {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			wire.write(&mut group, &[raw_frame(timestamp, payload, true)]).unwrap();
+			let mut group = Lazy::new(&track);
+			wire.write(&mut group.writer(), &[raw_frame(timestamp, payload, true)]).unwrap();
 			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();
@@ -1812,8 +1813,8 @@ mod tests {
 			),
 			(2, vec![raw_frame(100_000, b"resumed", true)]),
 		] {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			wire.write(&mut group, &frames).unwrap();
+			let mut group = Lazy::new(&track);
+			wire.write(&mut group.writer(), &frames).unwrap();
 			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();

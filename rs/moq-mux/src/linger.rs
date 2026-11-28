@@ -81,6 +81,7 @@ impl<T> Drop for Linger<T> {
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	use super::*;
 
 	const PATH: &str = "live";
@@ -98,11 +99,7 @@ mod tests {
 		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
 		let track = route.broadcast().create_track("video", info).unwrap();
 		for _ in 0..3 {
-			let mut group = track
-				.append_group(moq_net::Timestamp::unscaled(
-					track.largest().map_or(0, |largest| largest.group + 1),
-				))
-				.unwrap();
+			let mut group = Lazy::appending(&track);
 			group
 				.write_frame(
 					moq_net::Timestamp::unscaled(group.start),

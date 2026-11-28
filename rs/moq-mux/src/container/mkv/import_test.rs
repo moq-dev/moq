@@ -1906,45 +1906,6 @@ fn cmaf_output_is_refused_before_its_rendition() {
 	assert!(catalog.snapshot().video.renditions.is_empty());
 }
 
-/// A seek while a block streams waits for it to end, so its frames stay in one group.
-#[tokio::test(start_paused = true)]
-async fn a_seek_mid_block_waits_for_the_block() {
-	use webm_iterable::matroska_spec::{BlockLacing, Frame};
-	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
-	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
-		unreachable!()
-	};
-	children.push(MatroskaSpec::DefaultDuration(20_000_000));
-	let packets: Vec<&[u8]> = vec![b"\xf8\xff\xfe", b"\xf8\xff\xfd"];
-	let mut laced = SimpleBlock::new_uncheked(&[], 1, 0, false, Some(BlockLacing::Xiph), false, true);
-	laced.set_frame_data(&packets.iter().map(|data| Frame { data }).collect());
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.tracks(vec![entry])
-		.cluster(0, || vec![laced.into(), simple_block(1, 40, true, b"\xf8\xff\xfc")])
-		.segment_end()
-		.build();
-	// Split inside the laced block's second frame.
-	let split = data.windows(3).position(|window| window == b"\xf8\xff\xfd").unwrap() + 1;
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut importer = super::Import::new(broadcast, catalog.reserve());
-	importer.decode(&data[..split]).unwrap();
-	importer.seek(100).unwrap();
-	importer.decode(&data[split..]).unwrap();
-	let _finished = importer.finish().unwrap();
-
-	let snapshot = catalog.snapshot();
-	let name = snapshot.audio.renditions.keys().next().unwrap();
-	let groups = groups(&consumer, name).await;
-	// The block's group ends whole past its second 20ms frame, so the seek's group starts there.
-	assert_eq!(groups, [(0, 2), (40_000, 1)]);
-}
-
 /// A WebM with one VP9 track whose `Video` element holds `children` beside its dimensions.
 fn spatial_webm(children: Vec<MatroskaSpec>) -> Vec<u8> {
 	use MatroskaSpec::*;
@@ -2490,47 +2451,4 @@ async fn laced_audio_with_a_block_duration() {
 			"before {before}"
 		);
 	}
-}
-
-/// A seek while a BlockGroup's trailing fields stream in waits behind the one its Block deferred,
-/// so the newer start wins.
-#[tokio::test(start_paused = true)]
-async fn a_seek_after_a_deferred_one_wins() {
-	use MatroskaSpec::{BlockDuration, ReferenceBlock};
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.track_video(1, "V_VP9", 16, 16)
-		.cluster(0, || {
-			vec![
-				simple_block(1, 0, true, b"key"),
-				block_group(1, 33, b"delta", vec![ReferenceBlock(-33)], vec![BlockDuration(33)]),
-				simple_block(1, 66, true, b"next"),
-			]
-		})
-		.segment_end()
-		.build();
-	let delta = data.windows(5).position(|window| window == b"delta").unwrap();
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut importer = super::Import::new(broadcast, catalog.reserve());
-	// Mid-Block, then between the Block and its BlockDuration.
-	importer.decode(&data[..delta + 2]).unwrap();
-	importer.seek(1_000_000).unwrap();
-	importer.decode(&data[delta + 2..delta + 5]).unwrap();
-	importer.seek(2_000_000).unwrap();
-	importer.decode(&data[delta + 5..]).unwrap();
-	let _finished = importer.finish().unwrap();
-
-	let snapshot = catalog.snapshot();
-	let name = snapshot.video.renditions.keys().next().unwrap();
-	let starts: Vec<u64> = groups(&consumer, name)
-		.await
-		.into_iter()
-		.map(|(start, _)| start)
-		.collect();
-	assert_eq!(starts, [0, 2_000_000]);
 }
