@@ -166,9 +166,10 @@ where
 		// lifetime that QUIC's idle timeout bounds on the native path.
 		// The subprotocol names the QMux version; an upgrade without one has no wire format.
 		let alpn = options.link.alpn.as_deref().unwrap_or_default();
+		let session = crate::qmux_config(&options.quic);
 		let mut upgraded = qmux::ws::Upgraded::new(io, alpn)
-			.with_keep_alive(qmux::ws::KeepAlive::default())
-			.with_session_config(crate::qmux_config(&options.quic));
+			.with_keep_alive(heartbeat(&session))
+			.with_session_config(session);
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
@@ -183,6 +184,16 @@ where
 		Ok((setup, Driver(driver)))
 	})
 	.await
+}
+
+/// The heartbeat an accepted session runs: it closes a silent connection no sooner than the
+/// session's idle timeout, which a `[quic]` keep-alive raises to its hard limit.
+fn heartbeat(session: &qmux::Config) -> qmux::ws::KeepAlive {
+	let mut heartbeat = qmux::ws::KeepAlive::default();
+	if let Some(idle) = session.idle_timeout {
+		heartbeat.timeout = heartbeat.timeout.max(idle);
+	}
+	heartbeat
 }
 
 /// A WebSocket session with QMux established, waiting on the peer's SETUP.
@@ -913,7 +924,7 @@ impl Listener {
 				.take()
 				.expect("successful upgrade selected a protocol");
 			let mut upgraded = qmux::ws::Upgraded::new(stream, &protocol)
-				.with_keep_alive(qmux::ws::KeepAlive::default())
+				.with_keep_alive(heartbeat(&session))
 				.with_session_config(session);
 			if let Some(stats) = stats {
 				upgraded = upgraded.with_socket_stats(stats);
@@ -1003,6 +1014,25 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 mod tests {
 	use super::*;
 	use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+	/// An accepted session's QMux idle timeout and WebSocket heartbeat both outlast a `[quic]`
+	/// keep-alive's hard limit, so the keep-alive rather than either timer closes a quiet peer.
+	#[test]
+	fn accepted_timers_outlast_the_keep_alive() {
+		let secs = |secs: u64| std::time::Duration::from_secs(secs);
+		let quic = crate::quic::Config {
+			idle_timeout: Some(secs(60).into()),
+			keep_alive_soft: Some(secs(35).into()),
+			keep_alive_hard: Some(secs(45).into()),
+			..Default::default()
+		};
+		let session = crate::qmux_config(&quic.resolve());
+		assert_eq!(session.idle_timeout, Some(secs(45)));
+		assert_eq!(heartbeat(&session).timeout, secs(45));
+
+		let unprobed = crate::qmux_config(&crate::quic::Resolved::default());
+		assert_eq!(heartbeat(&unprobed).timeout, qmux::ws::KeepAlive::default().timeout);
+	}
 
 	#[test]
 	fn subprotocol_selection_requires_an_offer() {

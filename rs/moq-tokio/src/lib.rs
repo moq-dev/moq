@@ -62,6 +62,10 @@ pub mod websocket;
 fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 	let mut config = qmux::Config::default();
 	config.limits = quic.limits();
+	// A keep-alive closes a quiet session at its hard limit, so the idle timeout must not first.
+	if let Some(keep_alive) = quic.liveness {
+		config.idle_timeout = config.idle_timeout.map(|idle| idle.max(keep_alive.hard));
+	}
 	config
 }
 
