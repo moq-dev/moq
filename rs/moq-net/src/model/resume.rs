@@ -1385,6 +1385,18 @@ impl Subscriber {
 			.collect()
 	}
 
+	/// Take back group `key` from every copy, so whichever holds it hands it out again; see
+	/// [`track::Subscriber::give_back`].
+	#[cfg(feature = "async")]
+	pub(super) fn give_back(&mut self, key: u64) {
+		for copy in &mut self.reader().copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.give_back(key);
+			}
+		}
+		self.disarm();
+	}
+
 	/// Forget the gaps in `delivered` below each group past the reader's budget, as
 	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {

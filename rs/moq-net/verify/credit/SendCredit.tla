@@ -21,11 +21,12 @@
 (* While the waiting group ranks below every stream its subscription       *)
 (* serves, none included (`stuck`), the cursor hands out the group ranked  *)
 (* highest by the policy it would go out at now, only if it outranks the   *)
-(* waiting one (`Admit::Above`), which then gives way (`give_way`): it is  *)
-(* deferred, taking the place back once it empties or once it outranks     *)
-(* the waiting one. Credit never gives a group up; only a budget does,     *)
+(* waiting one (`Admit::Above`), which then gives way (`give_way`): it     *)
+(* goes back to the cache unread (`Subscriber::give_back`), and the cursor *)
+(* hands it out again. Credit never gives a group up; only a budget does,  *)
 (* which the model leaves out. While none waits the cursor hands out any   *)
-(* group; otherwise none.                                                  *)
+(* group, by rank once one gave way (`Admit::Best`), which any order       *)
+(* covers here; otherwise none.                                            *)
 (*                                                                         *)
 (* A subscription's groups go newest first, or oldest first in `Asc`.      *)
 (* Mixed ranges cover some at another policy: `HistOnly` groups only an    *)
@@ -83,7 +84,7 @@ Above(a, b) ==
 (***************************************************************************)
 (* The whole state, one record, so a poll's parts compose as functions.    *)
 (*   st:       each group: "pending" (yet to arrive), "cached", "opening", *)
-(*             "deferred" (out of line), "serving" (its stream listed),    *)
+(*             "serving" (its stream listed),                              *)
 (*             "fin" (sent whole, unlisted), "reset" (preempted), or       *)
 (*             "closed" (freed by the peer)                                *)
 (*   aged:     the `Both` groups aged past the live join, by subscription  *)
@@ -167,14 +168,6 @@ Open(x, s) ==
 \* The highest-ranked of `s`'s groups `ks`.
 Best(x, s, ks) == CHOOSE k \in ks : \A j \in ks : InGroup(x, s, k) >= InGroup(x, s, j)
 
-Deferred(x, s) == {k \in 1..G : x.st[s, k] = "deferred"}
-
-\* Once the place empties, the best deferred group takes it.
-Refill(x, s) ==
-    IF x.opening[s] # 0 \/ Deferred(x, s) = {} THEN x
-    ELSE LET k == Best(x, s, Deferred(x, s)) IN
-         [x EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
-
 Join(x, s) ==
     [x EXCEPT !.rank[s] = Rank(x, s, x.opening[s]), !.arrival[s] = x.arrivals,
               !.arrivals = x.arrivals + 1]
@@ -184,12 +177,12 @@ PollOpen(x, s) ==
     IF x.opening[s] = 0 THEN x
     ELSE IF x.rank[s] = <<>> /\ Placed(x) = {}
     THEN \* Nobody waits: take credit if there is any, and join the line only without it.
-         IF Credit(x) THEN Refill(Open(x, s), s)
+         IF Credit(x) THEN Open(x, s)
          ELSE Room([Join(x, s) EXCEPT !.asked[s] = TRUE])
     ELSE LET y == IF x.rank[s] = <<>> THEN Join(x, s) ELSE x IN
          IF ~IsHead(y, s) THEN Room(y)
          ELSE IF Credit(y)
-         THEN Refill(Leave([Open(y, s) EXCEPT !.resets = IF y.resets > 0 THEN y.resets - 1 ELSE 0], s), s)
+         THEN Leave([Open(y, s) EXCEPT !.resets = IF y.resets > 0 THEN y.resets - 1 ELSE 0], s)
          ELSE Room([y EXCEPT !.asked[s] = TRUE])
 
 \* `TrackRun::stuck`: the waiting group ranks below every stream the subscription serves.
@@ -203,21 +196,19 @@ Outranking(x, s, ks) ==
     IF ks # {} /\ InGroup(x, s, Best(x, s, ks)) > InGroup(x, s, x.opening[s])
     THEN {Best(x, s, ks)} ELSE {}
 
-\* The groups `s` may take next: while none waits, any cached, in the order they arrived; while one
-\* waits and is stuck, the best deferred one if it outranks it, else the best cached one if that
-\* does (`Admit::Above`); otherwise none.
+\* The groups `s` may take next: while none waits, any cached; while one waits and is stuck, the
+\* best cached one if it outranks it (`Admit::Above`); otherwise none.
 Admitted(x, s) ==
     LET cached == {k \in 1..G : x.st[s, k] = "cached"} IN
     IF x.opening[s] = 0 THEN cached
     ELSE IF ~Stuck(x, s) THEN {}
-    ELSE IF Outranking(x, s, Deferred(x, s)) # {} THEN Outranking(x, s, Deferred(x, s))
     ELSE Outranking(x, s, cached)
 
-\* Group `k` takes the place, the waiting group giving way (`give_way`) to be deferred.
+\* Group `k` takes the place, the waiting group giving way (`give_way`) back to the cache.
 Cursor(x, s, k) ==
     LET w == x.opening[s]
         z == IF w = 0 THEN x
-             ELSE LET g == [x EXCEPT !.st[s, w] = "deferred", !.opening[s] = 0] IN
+             ELSE LET g == [x EXCEPT !.st[s, w] = "cached", !.opening[s] = 0, !.gave = TRUE] IN
                   IF g.rank[s] = <<>> THEN g ELSE Leave(g, s)
     IN [z EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
 
@@ -272,7 +263,8 @@ Init ==
          turn |-> [s \in Subs |-> 0],
          turns |-> 0,
          opened |-> 0,
-         closed |-> 0]
+         closed |-> 0,
+         gave |-> FALSE]
 
 System == (\E s \in Subs : Step(s)) \/ (\E p \in Pairs : Finish(p) \/ Free(p) \/ Arrive(p) \/ Age(p))
 
@@ -297,7 +289,7 @@ WithinCredit == v.opened <= MaxStreams + v.closed
 \* Every behavior ends quiet, as in ReceiveCredit.tla, by `Progress`; `Ends` and `TopDelivered`
 \* say what a quiet state may leave undone.
 StRank(x) == CASE x = "pending" -> 0 [] x = "cached" -> 2 [] x = "opening" -> 4
-               [] x = "deferred" -> 5 [] x = "serving" -> 7 [] x \in {"fin", "reset"} -> 9
+               [] x = "serving" -> 7 [] x \in {"fin", "reset"} -> 9
                [] OTHER -> 10
 
 RECURSIVE SumSet(_, _)
@@ -305,8 +297,8 @@ SumSet(f(_), S) == IF S = {} THEN 0
                    ELSE LET e == CHOOSE e \in S : TRUE IN f(e) + SumSet(f, S \ {e})
 
 \* First the groups' states and the groups aged, outweighing the places taken and the waiting
-\* groups' ranks, which a deferred group taking the place raises (twice, so it outweighs the
-\* place it leaves); then the opens asking the transport, and the tasks parked.
+\* groups' ranks, which a group taking the place of one that gives way raises (twice, so it
+\* outweighs the place it leaves); then the opens asking the transport, and the tasks parked.
 Waiting(x) == SumSet(LAMBDA s: IF x.opening[s] = 0 THEN 0 ELSE InGroup(x, s, x.opening[s]) + G, Subs)
 Weight == Cardinality(Subs) * (1 + 2 * (Scale + 2 * G)) + 1
 Counted == Weight * (SumSet(LAMBDA p: StRank(v.st[p]), Pairs) + Cardinality(v.aged))
@@ -332,7 +324,7 @@ Ends ==
         \/ v.st[p] = "closed"
         \/ v.st[p] = "serving" /\ p \in Live
         \/ v.st[p] = "opening" /\ Blocked(p[1], p[2])
-        \/ v.st[p] \in {"cached", "deferred"} /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
+        \/ v.st[p] = "cached" /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
 
 \* Once quiet, each subscription's highest-ranked group reached the peer, was reset for a higher
 \* priority, or is blocked: a waiting group never holds back one that could reset a live stream.
@@ -342,18 +334,15 @@ TopDelivered ==
         \/ v.st[s, k] \in {"serving", "fin", "reset", "closed"}
         \/ v.st[s, k] \in {"cached", "opening"} /\ Blocked(s, k)
 
-\* A subscription parked behind its stuck waiting group holds no group, cached or deferred, that
-\* outranks it: nothing ranked lower holds one ranked higher back.
+\* A subscription parked behind its stuck waiting group holds no cached group, one that gave way
+\* included, that outranks it: nothing ranked lower holds one ranked higher back.
 NoHeadOfLine ==
     \A s \in Subs : (~v.awake[s] /\ Stuck(v, s)) =>
-        \A k \in 1..G : v.st[s, k] \in {"cached", "deferred"} => InGroup(v, s, k) < InGroup(v, s, v.opening[s])
-
-\* Only a waiting group defers another.
-DeferredWaits == \A s \in Subs : Deferred(v, s) # {} => v.opening[s] # 0
+        \A k \in 1..G : v.st[s, k] = "cached" => InGroup(v, s, k) < InGroup(v, s, v.opening[s])
 
 \* Witnesses, each expected to fail.
 NeverPreempts == \A p \in Pairs : v.st[p] # "reset"
 NeverWaits == \A s \in Subs : v.rank[s] = <<>>
 NeverBlocked == ~(Quiet /\ \E s \in Subs : v.opening[s] # 0)
-NeverDefers == \A p \in Pairs : v.st[p] # "deferred"
+NeverGivesWay == ~v.gave
 =============================================================================

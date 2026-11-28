@@ -5279,7 +5279,8 @@ fn poll_recv_next(
 		let mut groups_finished = false;
 		let next = match admit {
 			Admit::All => track.poll_recv_group(waiter),
-			Admit::Above(waiting) => track.poll_recv_group_above(waiting, waiter),
+			Admit::Best => track.poll_recv_group_above(None, waiter),
+			Admit::Above(waiting) => track.poll_recv_group_above(Some(waiting), waiter),
 			Admit::None => Poll::Pending,
 		};
 		match next {
@@ -5729,16 +5730,6 @@ struct Steer {
 	inflight: Arc<std::collections::BTreeMap<u64, Vec<u64>>>,
 }
 
-/// A group that gave way while it waited for stream credit, to open again from `frame_start`
-/// once it takes the place back; see [`TrackRun::give_way`].
-struct Deferred {
-	group: group::Consumer,
-	frame_start: u64,
-	/// Its copy closed with frames left that a route may bring back: it recovers once it takes
-	/// the place, one group at a time, so until then only its budget is watched.
-	closed: bool,
-}
-
 /// Which groups a run's cursor hands out.
 #[derive(Clone, Copy)]
 enum Admit {
@@ -5746,6 +5737,9 @@ enum Admit {
 	None,
 	/// Any, in the subscription's order.
 	All,
+	/// Any, the group ranked highest by the policy it would go out at now first: one that gave
+	/// way may wait among them.
+	Best,
 	/// Behind a group waiting for credit it cannot make room for, ranked here: the group ranked
 	/// highest by the policy it would go out at now, if it outranks that one; see
 	/// [`TrackRun::poll_track`].
@@ -6297,11 +6291,10 @@ struct TrackRun {
 	/// withholds credit. One that cannot make room gives way to a group that outranks it
 	/// (see [`Self::stuck`]).
 	opening: Option<GroupServe>,
-	/// Groups that gave way to one outranking them, the best taking `opening` once it empties or
-	/// once it outranks it (see [`Self::give_way`]). Each is only its handle on a group the cache
-	/// holds, with no machine and no place in line, kept while a range still wants it: the cache
-	/// may let it go, and the budgets give it up.
-	deferred: Vec<Deferred>,
+	/// A group that waited for credit gave way since the cursor last had nothing left to hand
+	/// out, so the place refills by rank rather than in the subscription's order: see
+	/// [`Self::give_way`].
+	gave_way: bool,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe>,
 	/// The track side's last poll, if it parked; see [`Self::poll_step`].
@@ -6455,7 +6448,7 @@ impl TrackRun {
 			answer,
 			end_sent: false,
 			opening: None,
-			deferred: Vec::new(),
+			gave_way: false,
 			children: kio::Tasks::new(),
 			idle: None,
 			datagrams: None,
@@ -6942,8 +6935,8 @@ impl TrackRun {
 		let mut running = self.children.len();
 		let _ = self.children.poll(waiter);
 		// The group waiting for stream credit joins the others once it has one, or fails
-		// without one, and the best deferred group takes its place.
-		while let Some(opening) = &mut self.opening
+		// without one, and the cursor fills its place.
+		if let Some(opening) = &mut self.opening
 			&& let Poll::Ready(res) = opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter)
 		{
 			// The track side takes groups again.
@@ -6956,11 +6949,6 @@ impl TrackRun {
 					let _ = self.children.poll(waiter);
 				}
 				Err(err) => opening.settle_failed(&err),
-			}
-			// Any drop it names goes out below.
-			self.prune_deferred(waiter);
-			if let Some(deferred) = self.take_deferred(None, waiter) {
-				self.open(deferred.group, deferred.frame_start);
 			}
 		}
 		// A retired machine releases its group, and the track side waits on the machines
@@ -7077,26 +7065,22 @@ impl TrackRun {
 		let emit_boundary = self.answer.emits_range() && !self.end_sent;
 		// A group waiting for credit it cannot make room for must not hold back one that could:
 		// the group ranked highest by the policy it would go out at now takes its place if it
-		// outranks it, a deferred one first. Nothing ranked lower is handed out, so none holds
-		// back one ranked higher: the backlog waits in the cache, which ages and evicts it.
-		// Behind a group that can make room, the backlog waits in the cache too.
-		if self.prune_deferred(waiter) {
-			return Poll::Ready(Ok(ControlFlow::Continue(())));
-		}
+		// outranks it, and the waiting one goes back to the cache unread. Nothing ranked lower
+		// is handed out, so none holds back one ranked higher: the backlog waits in the cache,
+		// which ages and evicts it. Behind a group that can make room, it waits there too.
 		let admit = match (&self.opening, self.stuck()) {
+			(None, _) if self.gave_way => Admit::Best,
 			(None, _) => Admit::All,
 			(Some(_), None) => Admit::None,
-			(Some(_), Some(waiting)) => match self.take_deferred(Some(waiting), waiter) {
-				Some(deferred) => {
-					self.give_way();
-					self.open(deferred.group, deferred.frame_start);
-					return Poll::Ready(Ok(ControlFlow::Continue(())));
-				}
-				None => Admit::Above(waiting),
-			},
+			(Some(_), Some(waiting)) => Admit::Above(waiting),
 		};
 		let end_error = self.ctx.version.has_end_error();
-		if let Poll::Ready(res) = poll_recv_next(&mut self.track, admit, emit_boundary, end_error, waiter) {
+		let polled = poll_recv_next(&mut self.track, admit, emit_boundary, end_error, waiter);
+		// With nothing left to hand out, no group that gave way waits unread.
+		if polled.is_pending() && matches!(admit, Admit::Best) {
+			self.gave_way = false;
+		}
+		if let Poll::Ready(res) = polled {
 			match res? {
 				Recv::Group(group) => {
 					// Never a second stream for a key this subscription already accounted
@@ -7642,7 +7626,8 @@ impl TrackRun {
 	}
 
 	/// Resolve a start no group resolved: the lowest range start the cursor resolves, or
-	/// `none` when no range starts anywhere.
+	/// `none` when no range starts anywhere, never above a group lite-07 already served while
+	/// delivery was unresolved, as [`Self::start`] does.
 	fn resolve_held(
 		&mut self,
 		none: u64,
@@ -7652,7 +7637,15 @@ impl TrackRun {
 			true => self.starts(self.floor).into_iter().filter_map(|(_, start)| start).min(),
 			false => None,
 		};
-		self.resolve(start.unwrap_or(none), writer)
+		let served = match &self.answer {
+			Answer::Ranges(Ranges {
+				delivery: Delivery::Unresolved { served, .. },
+				..
+			}) => *served,
+			_ => None,
+		};
+		let start = start.unwrap_or(none);
+		self.resolve(served.map_or(start, |served| served.min(start)), writer)
 	}
 
 	/// Lite-07, on a track known to have no group yet: answer each range starting at the oldest
@@ -7860,89 +7853,28 @@ impl TrackRun {
 		held.all(|held| held > waiting).then_some(waiting)
 	}
 
-	/// Account for the deferred groups given up, registering `waiter` for the aging or the
-	/// close that would give one up: aged past every range wanting it, or its frames gone with
-	/// no route to bring them. So the budgets and the cache bound what waits. One a route may
-	/// still bring back waits to recover once it takes the place, so a stall asks upstream for
-	/// one group at a time. Whether it named any, in a drop that still has to go out.
-	fn prune_deferred(&mut self, waiter: &kio::Waiter) -> bool {
-		let track_stream = self.ctx.version.has_track_stream();
-		let outcomes = &self.ctx.outcomes;
-		let before = self.deferred.len();
-		self.deferred.retain_mut(|deferred| {
-			let err = if deferred.group.poll_expired(waiter) {
-				Some(Error::Old)
-			} else if deferred.closed {
-				None
-			} else if let Poll::Ready(lost) = deferred.group.poll_lost(waiter) {
-				// Closed: it never changes again, so it is judged once.
-				deferred.closed = true;
-				lost.filter(|_| !deferred.group.recoverable())
-			} else {
-				None
-			};
-			let Some(err) = err else {
-				return true;
-			};
-			// Named as a group waiting for credit is when it fails: stale under the budget that
-			// judged it, or with the error the cache gave.
-			if track_stream {
-				let group = &deferred.group;
-				let hole = (group.expired_under()).map_or_else(|| Hole::drop(StreamError::from(&err)), Hole::stale);
-				outcomes
-					.dropped
-					.lock()
-					.unwrap()
-					.push((span(group.start, group.end()), hole));
-			}
-			false
-		});
-		track_stream && self.deferred.len() < before
-	}
-
-	/// Take the deferred group ranked highest by the ranges' policies now, if it ranks above
-	/// `above`, registering `waiter` for the aging that would lower one.
-	fn take_deferred(&mut self, above: Option<(i8, i64)>, waiter: &kio::Waiter) -> Option<Deferred> {
-		if self.deferred.is_empty() {
-			return None;
-		}
-		// A retune not yet read would rank them by the policies it replaced.
-		self.ctx.steer_current();
-		let mut best: Option<(usize, (i8, i64))> = None;
-		for index in 0..self.deferred.len() {
-			let Deferred { group, frame_start, .. } = &self.deferred[index];
-			let (key, frame_start) = (group.start, *frame_start);
-			let covers = self.covering(key);
-			let group = &self.deferred[index].group;
-			let policy = poll_policy(&self.ctx.steer_seen, &covers, &mut None, group, waiter);
-			let rank = (
-				policy.priority,
-				crate::priority::in_group(key, frame_start, policy.order),
-			);
-			if best.is_none_or(|(_, best)| rank > best) {
-				best = Some((index, rank));
-			}
-		}
-		let (best, rank) = best?;
-		above
-			.is_none_or(|above| rank > above)
-			.then(|| self.deferred.swap_remove(best))
-	}
-
 	/// The Range IDs covering the group at `key`; see [`covering`].
 	fn covering(&mut self, key: u64) -> Vec<u64> {
 		covering(&self.ctx.steer_seen, &mut self.track, key)
 	}
 
-	/// Take the group waiting for stream credit out of line, for one that outranks it, deferring
-	/// it: congestion never gives up a group a range still wants. Only its budget does, which
-	/// [`Self::take_deferred`] accounts for. At most one group per subscription waits for credit.
+	/// Take the group waiting for stream credit out of line, for one that outranks it, and give
+	/// it back to the cache unread: congestion never gives up a group a range still wants. The
+	/// cursor hands it out again while it is cached and wanted, and its budget and the cache
+	/// account for it as for any group never handed out. At most one group per subscription
+	/// waits for credit.
 	fn give_way(&mut self) {
 		let Some(waiting) = self.opening.take() else {
 			return;
 		};
-		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key = waiting.key, "deferring for a higher-ranked group");
-		self.deferred.push(waiting.defer());
+		let key = waiting.key;
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "giving way to a higher-ranked group");
+		waiting.give_way();
+		if self.answer.emits_range() {
+			self.track.record_mut().untell(key..key + 1);
+		}
+		self.track.give_back(key);
+		self.gave_way = true;
 	}
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
@@ -8502,18 +8434,13 @@ impl GroupServe {
 		self
 	}
 
-	/// A group still waiting for credit, set aside: its machine goes, leaving its place in line
-	/// to the next open, and only its group stays, from the frame it starts at.
-	fn defer(self) -> Deferred {
+	/// Give up its place in line for stream credit, never having opened a stream, so its group
+	/// goes back to the cache.
+	fn give_way(self) {
 		debug_assert!(
 			matches!(self.state, GroupState::Open),
-			"only a waiting group is deferred"
+			"only a group waiting for credit gives way"
 		);
-		Deferred {
-			group: self.group,
-			frame_start: self.frame_start,
-			closed: false,
-		}
 	}
 
 	/// Where it ranks against the subscription's other groups: by priority, then by its key
@@ -12378,10 +12305,10 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [], "nothing is given up");
 	}
 
-	/// A deferred group the cache evicts after it finished is named and let go at once, so what
-	/// waits for credit stays bounded by the cache.
+	/// A group that gave way waits in the cache like any group never handed out: once the cache
+	/// evicts it, it takes no credit, so what waits for credit stays bounded by the cache.
 	#[kio::test]
-	async fn lite07_a_deferred_group_evicted_finished_is_let_go() {
+	async fn lite07_a_group_that_gave_way_then_evicted_takes_no_credit() {
 		let version = Version::Lite07;
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -12397,52 +12324,24 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		let second = write_open(&mut track, 2);
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(2));
-		assert_eq!(run.deferred.len(), 1, "group 1 gave way");
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(2), "group 1 gave way");
 
 		first.finish().unwrap().abort(Error::Evicted).unwrap();
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert!(run.deferred.is_empty(), "the evicted group is let go");
-		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
-
 		*gate.write().ok().unwrap() = true;
 		second.finish().unwrap();
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1);
-	}
-
-	/// A frame written to a deferred group wakes no subscription it waits on: only its copy
-	/// closing or its budget can give it up.
-	#[kio::test]
-	async fn lite07_a_frame_written_to_a_deferred_group_wakes_nothing() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			1,
+			"only group 2 went out"
 		);
-		let gate = kio::Producer::new(false);
-		let session = SinkSession::gated_open_uni(gate.consume());
-		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[from_group(0, 0, Order::Descending)]);
-
-		let mut first = write_open(&mut track, 1);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let _second = write_open(&mut track, 2);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(run.deferred.len(), 1, "group 1 gave way");
-
-		let woken = Arc::new(Woken::default());
-		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		first
-			.write_frame(Timestamp::from_millis(1).unwrap(), b"y".as_slice())
-			.unwrap();
-		assert!(!woken.0.load(Ordering::Relaxed), "a frame woke the subscription");
+		let _ = drops(&mut writer, &log, version).await;
 	}
 
-	/// A deferred group whose received copy fails while a re-offer is held for it is not given
-	/// up: it goes out from the re-offer, as a group already serving would.
+	/// A group that gave way and whose received copy then fails while a re-offer is held for it
+	/// is not given up: it goes out from the re-offer, as a group never handed out would.
 	#[kio::test]
-	async fn lite07_a_deferred_group_whose_copy_fails_goes_out_from_its_reoffer() {
+	async fn lite07_a_group_that_gave_way_goes_out_from_its_reoffer() {
 		let version = Version::Lite07;
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -12463,16 +12362,13 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		let second = write_open(&mut track, 2);
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(2));
-		assert_eq!(run.deferred.len(), 1, "group 1 gave way");
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(2), "group 1 gave way");
 
 		let Ok(track::Received::Held(hold)) = track.create_group_at(group::Info { start: 1 }, 0, 0..0) else {
 			panic!("the re-offer waits on the copy still arriving");
 		};
 		first.abort(Error::Cancel).unwrap();
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.deferred.len(), 1, "group 1 waits on its re-offer");
-		assert!(run.deferred[0].closed, "it recovers once it takes the place");
 		assert_eq!(drops(&mut writer, &log, version).await, [], "group 1 is not given up");
 
 		let Ok(track::Received::Group(mut again)) = track.create_group_at(group::Info { start: 1 }, 0, 0..0) else {
@@ -12492,10 +12388,51 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [], "nothing is given up");
 	}
 
-	/// A retune read before the slot refills: the deferred group it raises takes the credit a
-	/// stream returns, ahead of one it used to rank below.
+	/// Once a group gave way, each slot credit returns goes to the best group unread, whether it
+	/// gave way or never went out: a priority-5 group arriving late during the stall goes
+	/// before the newer priority-1 group a priority-9 one displaced.
 	#[kio::test]
-	async fn lite07_a_retune_ranks_deferred_groups_before_the_slot_refills() {
+	async fn lite07_a_slot_goes_to_the_best_unread_group_once_one_gave_way() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume()).with_groups();
+		let log = session.log.clone();
+		let only = |key: u64, priority: i8| lite::Range {
+			end: Some(lite::Anchor::Absolute(track::Position::group(key + 1))),
+			..from_group(key, priority, Order::Descending)
+		};
+		// Newest first, the subscription's order would take group 2 before group 1.
+		let ranges = [only(1, 5), only(2, 1), only(3, 9)];
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &ranges);
+		let waiter = kio::Waiter::noop();
+
+		let mut open = Vec::new();
+		for key in [2, 3] {
+			open.push(write_open(&mut track, key));
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+		}
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(3), "group 2 gave way");
+		open.push(write_open(&mut track, 1));
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+
+		*gate.write().ok().unwrap() = true;
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		// Each stream joins its priority's send group as it opens.
+		let groups: std::collections::HashMap<usize, i64> = log.groups().into_iter().collect();
+		let opened: Vec<i64> = (log.joins().into_iter()).map(|(_, group)| groups[&group]).collect();
+		let at = |priority: i8| crate::priority::group(priority, 0);
+		assert_eq!(opened, [at(9), at(5), at(1)], "by rank");
+		drop(open);
+	}
+
+	/// Once a group gave way, the place refills by rank: the group a retune raised takes the
+	/// credit a stream returns, ahead of one it used to rank below.
+	#[kio::test]
+	async fn lite07_a_retune_ranks_groups_that_gave_way_before_the_slot_refills() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -12516,8 +12453,11 @@ mod serve_group_test {
 			open.push(write_open(&mut track, key));
 			while run.poll_step(&mut writer, &waiter).is_ready() {}
 		}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(3));
-		assert_eq!(run.deferred.len(), 2, "groups 1 and 2 gave way");
+		assert_eq!(
+			run.opening.as_ref().map(|serve| serve.key),
+			Some(3),
+			"groups 1 and 2 gave way"
+		);
 
 		run.update(lite::SubscribeUpdate {
 			wanted_group: None,
@@ -12550,10 +12490,10 @@ mod serve_group_test {
 		drop(open);
 	}
 
-	/// A deferred group that ages past its budget is named at once, even while nothing else
-	/// can move.
+	/// A group that gave way and then ages past its budget is named, as one never handed out
+	/// would be.
 	#[kio::test]
-	async fn lite07_a_deferred_group_aging_out_is_named_at_once() {
+	async fn lite07_a_group_that_gave_way_aging_out_is_named() {
 		let version = Version::Lite07;
 		let gate = kio::Producer::new(false);
 		let mut track = track::Producer::new(
@@ -12570,8 +12510,11 @@ mod serve_group_test {
 		kio::clock::sim::advance(Duration::from_millis(500)).await;
 		open.push(write_open(&mut track, 500));
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(500));
-		assert_eq!(run.deferred.len(), 1, "group 0 gave way");
+		assert_eq!(
+			run.opening.as_ref().map(|serve| serve.key),
+			Some(500),
+			"group 0 gave way"
+		);
 
 		// Group 500 landing above lets the clock convict group 0. An update that admits nothing
 		// wakes the track side to look.
@@ -12588,8 +12531,7 @@ mod serve_group_test {
 			order: Order::Descending,
 		});
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert!(run.deferred.is_empty(), "group 0 aged out");
-		assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)], "group 0 aged out");
 		drop(open);
 	}
 

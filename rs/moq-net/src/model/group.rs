@@ -4752,6 +4752,12 @@ impl Consumer {
 							.is_some_and(|e| e.is_expired(self.recover(), waiter).is_some()) =>
 				{
 					if !closed {
+						// Named by the budget that judged it, as `poll_expiry` records it.
+						let budget =
+							(self.expiry.as_ref()).and_then(|expiry| expiry.is_expired(self.recover(), waiter));
+						if let Some(budget) = budget {
+							let _ = self.delivery.stale_under.set(budget);
+						}
 						return Poll::Ready(Err(self.fail(Error::Old)));
 					}
 					self.let_go();
@@ -4826,30 +4832,6 @@ impl Consumer {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expiry(waiter, true)
-	}
-
-	/// Once the copy this cursor reads closes, the error that took frames it has yet to read,
-	/// if any: aborted, or released short of them. Registers `waiter` for the close alone, so
-	/// a frame written wakes no one. A route may still bring them, which
-	/// [`Self::recoverable`] says and [`Self::poll_finished`] asks.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_lost(&self, waiter: &kio::Waiter) -> Poll<Option<Error>> {
-		ready!(self.cursor.state.poll_closed(waiter));
-		let index = self.cursor.index;
-		let state = self.cursor.state.read();
-		Poll::Ready(match &state.outcome {
-			_ if state.past_cut(index) => Some(Error::Evicted),
-			Outcome::Released(total, _, abort) if index < *total => Some(abort.error().clone()),
-			Outcome::Aborted(abort) => Some(abort.error().clone()),
-			Outcome::Open | Outcome::Finished(..) | Outcome::Released(..) => None,
-		})
-	}
-
-	/// Whether a route may bring back frames this cursor's copy lost, as a read would ask: it
-	/// resumes across routes, or its track holds another copy of the group or fetches one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn recoverable(&self) -> bool {
-		self.resumes() || (self.cursor.cache.track()).is_some_and(|track| track::recovers(&track, self))
 	}
 
 	/// Whether the group has aged past `budget` under the subscription it was handed out

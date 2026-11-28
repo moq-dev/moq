@@ -5334,15 +5334,6 @@ impl Refly {
 	}
 }
 
-/// Whether `track` may bring `reader` a copy of its group once the copy it reads lost frames:
-/// a hold promising one, another copy, or handlers that serve a flight.
-pub(super) fn recovers(track: &kio::Producer<TrackState>, reader: &group::Consumer) -> bool {
-	let state = track.read();
-	state.holds.contains_key(&reader.start)
-		|| (state.lookup.get(&reader.start)).is_some_and(|slot| slot.copies().any(|copy| !copy.is_read_by(reader)))
-		|| state.fills.read().has_handlers()
-}
-
 /// Whether `track`'s [`Requests`] handlers can serve a flight, which [`board`] asks of them.
 pub(super) fn flies(track: &kio::Producer<TrackState>) -> bool {
 	track.read().fills.read().has_handlers()
@@ -12103,6 +12094,15 @@ impl Cursor {
 		})
 	}
 
+	/// Take back `key`, handed out and never read: it is owed again, so a read hands it out
+	/// while it is cached and wanted, as one never handed out.
+	#[cfg(feature = "async")]
+	fn give_back(&mut self, key: u64) {
+		self.record.delivered.remove(key..key + 1);
+		self.filter.owed.insert(key..=key);
+		idle::Idle::disarm(&mut self.idle);
+	}
+
 	/// Record `key` as handed out. An ordered read never goes back, and any reader
 	/// stops expecting what is past its budget, so only the gaps within it cost memory.
 	fn hand_out(&mut self, key: u64, ordered: bool) {
@@ -13384,16 +13384,18 @@ impl Subscriber {
 	}
 
 	/// [`Self::poll_recv_group`], picking the group ranked highest by the policy it would go out
-	/// at now ([`Pick::Ranked`]) and handing it out only if it ranks above `above`: one refused
-	/// stays unread, and the read is `Pending` without parking on it. Nothing ranked lower holds
-	/// back one ranked higher.
+	/// at now ([`Pick::Ranked`]) and handing it out only if it ranks above `above`, when given:
+	/// one refused stays unread, and the read is `Pending` without parking on it. Nothing ranked
+	/// lower holds back one ranked higher.
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_recv_group_above(
 		&mut self,
-		above: Rank,
+		above: Option<Rank>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		let admit = |_: &mut Self, reserved: &Reserved| reserved.rank().is_some_and(|rank| rank > above);
+		let admit = |_: &mut Self, reserved: &Reserved| {
+			above.is_none_or(|above| reserved.rank().is_some_and(|rank| rank > above))
+		};
 		self.poll_group_in(false, Pick::Ranked, admit, waiter)
 	}
 
@@ -13679,6 +13681,21 @@ impl Subscriber {
 				// Its retention decisions also need the containing reader's past prefix.
 				// This records what is no longer owed, without handing a group out.
 				logical.record.delivered.forget_below(floor);
+			}
+		}
+	}
+
+	/// Take back group `key`, handed out by an unordered read and never read, so a read hands
+	/// it out again while it is cached and wanted, as one never handed out. A publisher whose
+	/// stream for it waited for credit leaves it to the cache this way when a higher-ranked
+	/// group takes the stream's place.
+	#[cfg(feature = "async")]
+	pub(crate) fn give_back(&mut self, key: u64) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.give_back(key),
+			Inner::Resume(resume, logical) => {
+				logical.record.delivered.remove(key..key + 1);
+				resume.give_back(key);
 			}
 		}
 	}
