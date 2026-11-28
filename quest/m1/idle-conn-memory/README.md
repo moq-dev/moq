@@ -29,7 +29,7 @@ allocation is filed under the leaf-most frame naming a layer:
 | QUIC driver (`moq-tokio`) | 25.6 | `ConnectionInner` 10 KiB (holds moq-quic's `Connection`), the connection's event channel 12.6 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
 | QUIC connection (`moq-quic`, `moq-congestion`) | 14.3 | sent-packet slot chunk 4.2 KiB, BBRv3 1.5 KiB, datagram schedule 1.4 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
 | TLS (rustls) | 13.5 | packet keys 5 KiB, handshake buffer 2.6 KiB, `TlsSession` 1.4 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
-| Auth (`moq-net`, `moq-relay`, `moq-auth`) | 9.9 | one-entry `BTreeMap` leaves: `auth::State::links` 3.5 KiB, `Refresh::credentials` 3.1 KiB | [auth-state](/quest/m1/idle-conn-memory/auth-state.md) |
+| Auth (`moq-net`, `moq-relay`, `moq-auth`) | 9.9 | one-entry `BTreeMap` leaves: `auth::State::links` 3.5 KiB, `Refresh::credentials` 3.1 KiB | Shrunk by boxing; re-measure with the idle workload |
 | WebTransport session (`moq-tokio`) | 6.6 | `web::Session` state and task 5.4 KiB | [session-futures](/quest/m1/idle-conn-memory/session-futures.md) |
 
 The parts no child owns are needed: the current and next 1-RTT key
