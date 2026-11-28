@@ -4,10 +4,11 @@
 
 Text renditions gain a `transcript` format, in the Rust and JS catalogs
 and the hang draft alike. Each group is one utterance, and each frame is a
-JSON revision of one of its segments: interim revisions, then a final one.
-`@moq/watch` renders a transcript rendition as captions, updating a segment
-as its revisions arrive. Older consumers ignore the format, as they do any
-unknown one.
+JSON revision of one of its segments: interim revisions, then a final one,
+carrying optional speaker attribution and (on final segments) detected
+entities. `@moq/watch` renders a transcript rendition as captions, updating a
+segment as its revisions arrive and prefixing speaker labels when present.
+Older consumers ignore the format, as they do any unknown one.
 
 ## Plan
 
@@ -16,16 +17,29 @@ Decided 2026-11-23 (maintainer, `/quest-run`): ✅ one group per utterance
 groups). ✅ No cap on an utterance's length (rejected: splitting a group near
 10 s).
 
+Decided 2026-11-27 (maintainer, `/quest-plan`): ✅ segment-level optional
+`speaker` (splitting segments on speaker changes when diarization is enabled,
+keeping per-word `speaker` optional) plus optional `entities` on final
+segments, with `@moq/watch` displaying speaker labels when present (rejected:
+format fields only without `@moq/watch` speaker rendering; per-word `speaker`
+only without segment-level `speaker`). Why: segment-level `speaker` gives
+players and downstream consumers clean speaker turns without every consumer
+re-implementing word-level grouping, while keeping `entities` structured for
+programmatic consumers and out of the caption overlay.
+
 Recommended frame shape, settled in review:
 
 ```json
-{"id": 41, "final": false, "start": 12.48, "end": 14.02, "lang": "en",
+{"id": 41, "final": true, "start": 12.48, "end": 14.02, "lang": "en",
+ "speaker": 0,
  "text": "like a big pizza pie",
- "words": [{"text": "like", "start": 12.48, "end": 12.61, "confidence": 0.98}]}
+ "words": [{"text": "like", "start": 12.48, "end": 12.61, "confidence": 0.98, "speaker": 0}],
+ "entities": [{"label": "food", "value": "pizza pie", "start_word": 3, "end_word": 4, "confidence": 0.95}]}
 ```
 
-- `words`, `confidence`, and `lang` are optional, since a backend may lack
-  them.
+- `words`, `confidence`, `lang`, `speaker`, and `entities` are optional,
+  since a backend or configuration may lack them. `entities` appears only on
+  final segments.
 - Times sit on the source broadcast's clock, so a transcript lines up with
   the audio it came from. The frame timestamp carries `start`, as for every
   text format, so a relay never parses the payload.
@@ -57,7 +71,9 @@ misses no text; a player whose latency target exceeds the lag shows it
 aligned with the audio. A group that had already finished when the reader
 joined is history rather than late text, so it shows nothing, as above.
 
-Watch highlights words when `words` is present. Its renderer escapes all
+Watch highlights words when `words` is present, prefixes a segment's caption
+with its speaker label (such as `Speaker 1:`) when `speaker` is present, and
+ignores `entities` in the caption overlay. Its renderer escapes all
 markup today (`sanitizeCue` in `js/watch/src/text/renderer.ts`) and lists
 `vtt` and `utf8` as renderable (`js/watch/src/text/source.ts`), so add the
 format there and build this rendition's DOM from the JSON directly rather

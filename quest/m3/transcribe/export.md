@@ -24,7 +24,8 @@ No exporter writes any text rendition on main.
 exporters, not just a format conversion. Convert each format to cues once,
 in `rs/moq-mux/src/container/text.rs`: `vtt` passes through, `utf8` becomes
 cues that each end at the next, `ttml` becomes cues of its text, and
-`transcript` becomes one cue per final segment. fMP4 also carries `ttml` as
+`transcript` becomes one cue per final segment (emitting a WebVTT `<v Speaker N>`
+voice span when `speaker` is set). fMP4 also carries `ttml` as
 IMSC1 (`stpp`) unchanged, since converting it to WebVTT loses its styling.
 
 A segmented exporter writes a subtitle segment once every cue starting in its
