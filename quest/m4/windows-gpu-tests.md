@@ -25,6 +25,20 @@ quest as related, so they sit in m4 rather than the lab.
 - Media Foundation encode: `mediafoundation_cpu_rgba`.
   `mediafoundation_camera_texture` needs a camera the host lacks, so it stays
   in the parent quest.
+- Media Foundation rate control:
+  `encode::backend::mediafoundation::tests::quality_under_a_cap`, run with
+  `--nocapture` so it prints the mode each MFT reports and each scene's mean
+  and peak. It skips without a hardware MFT, so on a hosted runner it passes
+  without encoding. Then measure the average and peak against a 4000 kbps cap
+  on 10 s 720p30 I420 static, talking-head, and high-motion clips (for
+  example `testsrc2` looped from one frame, and `mandelbrot`) with
+  `cargo run --release -p moq-video --example encode-presets -- <clip>.yuv 1280x720 30 4000000 mediafoundation <h264|h265> low-latency`.
+  A peak past the cap tunes `MIN_QP` or `BUFFER_FRAMES` in
+  `mediafoundation.rs`, or narrows which MFTs get peak-constrained VBR.
+  Capped VBR on Media Foundation shipped without this run (maintainer,
+  2026-11-28, [moq-dev/moq#9715](https://github.com/moq-dev/moq/pull/9715)):
+  the `windows` host was down, and its numbers belong here rather than
+  holding that PR.
 - A GPU export on a hardware encoder:
   `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
   has only WARP, which has no Direct3D11 video device) and

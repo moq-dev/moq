@@ -1422,7 +1422,7 @@ mod tests {
 		});
 		let registry = Registry::new(Default::default());
 		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
-		cluster.refusals = crate::refusals::Refusals::new(&registry);
+		cluster.shared_mut().refusals = crate::refusals::Refusals::new(&registry);
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let fetched = serve_fetch(
 			Path("room/video".to_owned()),

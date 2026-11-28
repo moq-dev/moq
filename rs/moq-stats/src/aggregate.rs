@@ -125,7 +125,13 @@ pub struct Consumer {
 impl Consumer {
 	/// Wrap an origin consumer. `config`'s `prefix` must match the producing
 	/// side.
+	///
+	/// # Panics
+	///
+	/// If `config.grace` is zero: a returning node's counters would be folded
+	/// into the total and then added again.
 	pub fn new(origin: origin::Consumer, config: Config) -> Self {
+		assert!(!config.grace.is_zero(), "aggregate grace must be non-zero");
 		Self { origin, config }
 	}
 
@@ -1915,6 +1921,22 @@ mod tests {
 		settle(&mut traffic).await;
 		assert_eq!(traffic.inner.nodes.len(), 1, "still announced, so not folded");
 		assert!(traffic.inner.retired.is_empty());
+	}
+
+	#[tokio::test]
+	#[should_panic(expected = "grace must be non-zero")]
+	async fn a_zero_grace_is_refused() {
+		Consumer::new(produce_origin().consume(), Config::new().with_grace(Duration::ZERO));
+	}
+
+	#[test]
+	fn peer_counters_saturate() {
+		let mut total = Traffic::default();
+		total.bytes = u64::MAX - 1;
+		let mut other = Traffic::default();
+		other.bytes = 5;
+		total.add(other);
+		assert_eq!(total.bytes, u64::MAX);
 	}
 
 	#[tokio::test(start_paused = true)]

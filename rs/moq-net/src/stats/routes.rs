@@ -48,12 +48,12 @@ macro_rules! kinds {
 
 			/// The sum over every kind.
 			pub fn total(&self) -> u64 {
-				0 $(+ self.$field)+
+				0u64 $(.saturating_add(self.$field))+
 			}
 
 			/// Add every kind from another readout.
 			pub fn add(&mut self, other: Self) {
-				$(self.$field += other.$field;)+
+				$(self.$field = self.$field.saturating_add(other.$field);)+
 			}
 
 			/// Whether any cumulative count went backwards.
@@ -175,8 +175,8 @@ impl Routes {
 
 	/// Add every counter from another readout.
 	pub fn add(&mut self, other: Self) {
-		self.changed += other.changed;
-		self.rewritten += other.rewritten;
+		self.changed = self.changed.saturating_add(other.changed);
+		self.rewritten = self.rewritten.saturating_add(other.rewritten);
 		self.sent.add(other.sent);
 		self.received.add(other.received);
 		self.refused.add(other.refused);

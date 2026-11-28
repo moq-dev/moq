@@ -12,10 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "audio"]
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
-# Conformance tests are included from codec-specific test modules.
-[package.metadata.cargo-shear]
-ignored-paths = ["src/decode/conformance.rs"]
-
 [features]
 # Off by default: the device features, because on Linux cpal links libasound at
 # build time, the one system build dependency in this crate. macOS and Windows

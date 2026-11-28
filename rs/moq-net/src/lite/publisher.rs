@@ -263,8 +263,9 @@ pub(super) struct Publisher {
 	// Each control child reaches the whole track model: the cell proves `Send + Sync` once
 	// here, so the session driver's proof stays within the default recursion limit.
 	children: SendCell<kio::Tasks<Control>>,
-	/// Aborts the session on a publication outside our grant (dialing side only).
-	enforce: Option<Enforce>,
+	/// Aborts the session on a publication outside our grant (dialing side only), boxed
+	/// because a server holds none and its state is most of this struct.
+	enforce: Option<Box<Enforce>>,
 }
 
 impl Publisher {
@@ -274,7 +275,7 @@ impl Publisher {
 		// across every session, required for cross-session loop detection.
 		let self_origin = crate::Hop::from(config.origin.node());
 		let accept = config.session.clone();
-		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
+		let enforce = (config.client && config.version.has_auth()).then(Box::<Enforce>::default);
 		Self {
 			enforce,
 			shared: Arc::new(Shared {
