@@ -89,4 +89,4 @@ nothing here, since it pins an older moq revision and keeps the model.
 
 ## Related
 
-- [delete moq-pattern](/quest/m2/delete-moq-pattern.md) - its PR, [moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800), moves prefixes into `rs/moq-net/src/path/`; whichever lands second rebases
+- delete moq-pattern - its PR, [moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800), moves prefixes into `rs/moq-net/src/path/`; whichever lands second rebases
