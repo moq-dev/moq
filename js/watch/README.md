@@ -97,6 +97,16 @@ position relative to the viewport:
 
 Only the distance mode suspends video while the tab is hidden; `always` keeps downloading.
 
+### Playing in step
+
+Wrap several `<moq-watch>` in a `<moq-sync>` to show the same capture instant in each, aligned
+through every broadcast's catalog `sync.clock`. It takes `delay` (`auto` or a duration, default
+`auto`) and `cap` (a duration, default `10s`); a member that can't stay in step within the cap,
+or has no `sync.clock`, plays alone and carries an `out-of-sync` attribute. A member with
+`delay="instant"` or a `lookahead` is refused. A camera clock that is off stays in step while the group's
+playhead falls within that member's reach, from its own target to the cap: one ahead shows images
+that much older, one behind holds the whole group back. In JavaScript, pass one shared `Sync` as each `Player`'s `sync`.
+
 ## JavaScript API
 
 For a headless player, construct `Player` with a connection origin and a canvas.
@@ -160,6 +170,7 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` el
 - **WebCodecs decoding**: Hardware-accelerated video and audio decoding
 - **Reactive state**: All properties are signals from `@moq/signals`
 - **Latency control**: A delay target plus optional buffering for future-dated frames
+- **Synchronized walls**: `<moq-sync>` plays sibling broadcasts on one wall-clock timeline
 - **Quality selection**: Switch between available renditions
 - **Custom tracks**: Unknown catalog sections pass through, and `broadcast.out.active` subscribes your own tracks
 

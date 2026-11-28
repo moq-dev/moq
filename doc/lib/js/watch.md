@@ -102,6 +102,63 @@ also counts `skips`, each jump that dropped buffered audio rather than playing
 it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
+## Playing in step
+
+Wrap several `<moq-watch>` in a `<moq-sync>` to show the same capture instant in
+every one of them, such as a camera wall or the angles of one event. Each
+broadcast is placed on one timeline through its catalog's
+[`sync.clock`](/concept/hang), so the cameras' clocks must agree (NTP is enough)
+and each publisher must advertise one.
+
+```html
+<moq-sync style="display: grid; grid-template-columns: 1fr 1fr">
+    <moq-watch url="https://relay.example.com/anon" name="site/gate.hang" muted><canvas></canvas></moq-watch>
+    <moq-watch url="https://relay.example.com/anon" name="site/yard.hang" muted><canvas></canvas></moq-watch>
+</moq-sync>
+```
+
+`<moq-sync>` lays out as its children alone (`display: contents`), so it can
+wrap the cells of a grid. Its `delay` replaces each member's: `"auto"` (the
+default) holds each member's own measured playout target behind its fastest
+arrival, and a duration holds that much instead. The group then plays as late
+as its slowest member needs, so the faster ones wait for it.
+
+A member that would have to wait longer than `cap` (10 s by default) to stay in
+step plays alone instead, at its own delay, and carries an `out-of-sync`
+attribute you can style, until it fits again. So does a broadcast without a
+`sync.clock`, and one whose clock is far off, since the group follows whichever
+playhead the most members agree on. A member that receives nothing yet, or is
+hidden by `visible`, neither holds the group back nor leaves it: it joins at the
+shared playhead once frames arrive. Only members showing video place the
+playhead; one playing only audio or captions follows it when it can and plays
+alone otherwise. A member that dropped out comes back only once it fits with a
+tenth of the cap to spare, so one hovering at the cap doesn't flicker in and
+out. The group compares the members' `sync.clock`s with each other only, never
+with the viewer's clock, so a viewer whose clock is off or steps changes
+nothing. `delay="instant"` is refused on
+`<moq-sync>`, and so is `delay="instant"` or a `lookahead` on a `<moq-watch>`
+inside one: its setter throws, and one that already had it when it joined is
+reported with an `error` event and plays alone, since a shared timeline can
+honor neither. A `<moq-sync>` whose `delay` exceeds its `cap` fits no one, so its
+members report an `error` too. Audio follows each member's clock as usual, so unmute the one you want
+to hear.
+
+The cap also bounds how far a wrong camera clock can move the wall. The group
+places one playhead, where the most members can play, and a member stays in step
+as long as that playhead falls within its own reach, read on its own
+`sync.clock`: no sooner than its fastest arrival plus its own target, and no
+later than its fastest arrival plus the cap. A member whose clock runs ahead
+holds its frames that much longer, so it shows images that much older while
+looking in sync: on real cameras, a clock 2 s ahead showed frames about 2.6 s
+old with the default cap. One whose clock runs behind holds the whole group back
+by as much while the playhead stays within the others' reach; otherwise the
+playhead follows the most members and the one left over plays alone.
+
+Without the element, pass one shared `Watch.Sync` as `sync` to each
+[`Player`](#without-the-element). `player.sync` stays the player's own clock,
+which links to the shared one; `player.sync.out.outOfSync` and
+`player.sync.out.error` report the same as the attribute and the event.
+
 ## Binding from a framework
 
 `import "@moq/watch/element"` registers `<moq-watch>` when the module

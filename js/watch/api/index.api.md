@@ -157,6 +157,7 @@ export type PlayerInput = {
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
 	stretch: Signals.Getter<Clock.Duration>;
+	sync: Signals.Getter<Sync | undefined>;
 	text: {
 		container: Signals.Getter<HTMLElement | undefined>;
 		target: Signals.Getter<string | undefined>;
@@ -188,16 +189,21 @@ export class Sync {
 }
 
 export type SyncInput = {
+	cap: Signals.Getter<Clock.Duration>;
+	clock: Signals.Getter<Hang.Catalog.Clock | undefined>;
 	delay: Signals.Getter<Delay>;
 	lookahead: Signals.Getter<Clock.Duration>;
 	stretch: Signals.Getter<Clock.Duration>;
+	sync: Signals.Getter<Sync | undefined>;
 };
 
 export type SyncOutput = {
 	buffered: Signals.Signal<boolean>;
 	delay: Signals.Signal<Clock.Duration>;
+	error: Signals.Signal<Error | undefined>;
 	instant: Signals.Signal<boolean>;
 	maxDelay: Signals.Signal<Clock.Duration>;
+	outOfSync: Signals.Signal<boolean>;
 	timestamp: Signals.Signal<Clock.Duration | undefined>;
 };
 

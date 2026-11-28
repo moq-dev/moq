@@ -1,5 +1,6 @@
 import { Duration, Instant, now, sleep } from "@moq/clock";
 import { Container } from "@moq/hang";
+import type * as Catalog from "@moq/hang/catalog";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
@@ -60,6 +61,28 @@ export type SyncInput = {
 	 * pad. Video is unaffected either way: it stays on the clock.
 	 */
 	stretch: Getter<Duration>;
+
+	/**
+	 * A shared {@link Sync} to play in step with, or none to play alone (the default).
+	 *
+	 * Every sync linked to one shared sync is a member of its group: they present the same capture
+	 * instant together, placed on one timeline through each one's {@link SyncInput.clock}. The shared
+	 * sync's `delay` and {@link SyncInput.cap} apply instead of the member's: an `"auto"` group holds
+	 * each member's own measured target, a fixed group delay replaces it. A member with no clock, or
+	 * that can't stay in step within the cap, plays alone on this sync and reads
+	 * {@link SyncOutput.outOfSync}. A member set to `"instant"` or a nonzero lookahead is refused with
+	 * {@link SyncOutput.error}, since a shared timeline can honor neither.
+	 */
+	sync: Getter<Sync | undefined>;
+
+	/** The broadcast's catalog `sync.clock`, which places this member on its group's timeline. */
+	clock: Getter<Catalog.Clock | undefined>;
+
+	/**
+	 * As a group: the most a member may trail its own fastest arrival to stay in step (default: 10 s).
+	 * Members that can't fit within it play alone rather than slow the others down.
+	 */
+	cap: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -94,6 +117,16 @@ export type SyncOutput = {
 	// Derived: `delay + lookahead`, the furthest a held frame may sit ahead of the playhead. Feeds the
 	// transport subscription and the container consumer, which bound the same span. Always finite.
 	maxDelay: Signal<Duration>;
+
+	/**
+	 * Whether this is linked to a shared {@link SyncInput.sync} yet plays alone: it has no `clock`, the group
+	 * refused it, or the group's timeline sits outside the delay it can hold within the cap. It
+	 * rejoins on its own once it fits again. False when not grouped.
+	 */
+	outOfSync: Signal<boolean>;
+
+	/** Why the group refused this member, as for an `"instant"` delay or a nonzero lookahead. */
+	error: Signal<Error | undefined>;
 };
 
 /**
@@ -150,6 +183,8 @@ export class Clock {
 		timestamp: new Signal<Duration | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
 		maxDelay: new Signal<Duration>(Duration.ZERO),
+		outOfSync: new Signal<boolean>(false),
+		error: new Signal<Error | undefined>(undefined),
 	};
 
 	readonly parts = new Signal<Part[]>([]);
@@ -164,6 +199,9 @@ export class Clock {
 	// The furthest playhead a skip has jumped to on this timeline. A frame below it was passed over.
 	floor: number | undefined;
 
+	// Whether the delay holds a group's playhead rather than a delay behind this clock's reference.
+	joined = false;
+
 	// Releases parked waits on `close()`.
 	readonly closed = new Signal(false);
 
@@ -176,6 +214,9 @@ export class Clock {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
 			stretch: getter(props?.stretch ?? STRETCH),
+			sync: getter(props?.sync),
+			clock: getter(props?.clock),
+			cap: getter(props?.cap ?? DELAY_MAX),
 		};
 	}
 
@@ -244,6 +285,13 @@ export class Clock {
 		}
 		this.out.reference.set(reference);
 		this.owner = part;
+
+		// In step with a group, the playhead is the group's: an earlier reference moves the delay with
+		// it, so nothing skips, and the group settles the delay from there.
+		if (this.joined) {
+			this.out.delay.set(Duration.millis(delay + current - reference));
+			return late;
+		}
 
 		// The playhead now sits at `timestamp - cap`, plus however long this frame waited between
 		// ingress and here. "instant" has no cap, so every newer frame would pass over whatever is
@@ -461,6 +509,32 @@ export class Track {
 	}
 }
 
+/**
+ * What a group member offers its group: its earliest arrival on the group's timeline (its
+ * reference less its clock's PTS zero), and the delay it needs held behind that.
+ */
+type Member = {
+	reference: Getter<number | undefined>;
+	target: Getter<Duration>;
+	video: Getter<boolean>;
+	// Out of step at its last check: it rejoins only with a tenth of the cap to spare.
+	margin: Signal<boolean>;
+};
+
+/**
+ * The group's playhead offset: the latest each member wants to trail is `reference + cap`, the
+ * earliest `reference + target`. Picks the offset inside the most members' spans, the earliest on a
+ * tie, so one member whose clock is far off is the one left out rather than everyone else.
+ */
+function playhead(spans: { lo: number; hi: number }[]): number | undefined {
+	let best: { at: number; count: number } | undefined;
+	for (const { lo: at } of spans) {
+		const count = spans.filter(({ lo, hi }) => lo <= at && at <= hi).length;
+		if (!best || count > best.count || (count === best.count && at < best.at)) best = { at, count };
+	}
+	return best?.at;
+}
+
 /** The playback clock: decides when each frame plays so audio and video stay together at the configured delay. */
 export class Sync {
 	/** The wired inputs, read-only. */
@@ -472,15 +546,40 @@ export class Sync {
 	/** Whether buffered startup has released the media consumers. @internal */
 	readonly playing: Getter<boolean>;
 
-	#signals = new Effect();
+	// The largest registered playout target, at most DELAY_MAX: the "auto" delay alone, and what this
+	// asks of a group.
+	#target = new Signal<Duration>(Duration.ZERO);
+	// As a member: the delay the group's playhead puts this at, or undefined while playing alone.
+	#joined = new Signal<Duration | undefined>(undefined);
+	// As a group: who plays in step, and the playhead offset on the group's timeline.
+	#members = new Signal<Member[]>([]);
+	#playhead = new Signal<number | undefined>(undefined);
+	// As a member: out of step at its last check, kept across re-registering with its group, and
+	// dropped for another group, which it owes nothing.
+	#margin = new Signal(false);
+	#marginGroup: Sync | undefined;
+
+	/**
+	 * Whether this member's video is playing. Only such members place the group's playhead; one with
+	 * only audio or captions follows it, or plays alone when it can't. Set by the player.
+	 * @internal
+	 */
+	readonly video = new Signal<boolean>(true);
+
+	// Created after the clock, which refuses a renamed input before anything needs closing.
+	#signals: Effect;
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.#clock = new Clock(props);
+		this.#signals = new Effect();
 		this.in = this.#clock.in;
 		this.out = readonlys(this.#clock.out);
 		this.playing = this.#clock.playing;
 
 		this.#signals.run(this.#runInstant.bind(this));
+		this.#signals.run(this.#runTarget.bind(this));
+		this.#signals.run(this.#runMember.bind(this));
+		this.#signals.run(this.#runPlayhead.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxDelay.bind(this));
 		this.#signals.run(this.#runStartup.bind(this));
@@ -553,24 +652,148 @@ export class Sync {
 		out.maxDelay.set(delay.add(lookahead));
 	}
 
+	// The deepest track's target. See doc/concept/audio-jitter.md for how a target is measured.
+	#runTarget(effect: Effect): void {
+		let target = Duration.ZERO;
+		for (const { props } of effect.get(this.#clock.parts)) {
+			target = target.max(effect.get(props.target) ?? Duration.ZERO);
+		}
+		// Capped once, on the resolved delay, so audio and video stay on one clock. The
+		// subscription's live join max follows it.
+		this.#target.set(target.min(DELAY_MAX));
+	}
+
 	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
-	// plays from one clock. See doc/concept/audio-jitter.md for how a target is measured.
+	// plays from one clock. A member in step with its group holds the group's playhead instead.
 	#runDelay(effect: Effect): void {
+		const joined = effect.get(this.#joined);
 		const mode = effect.get(this.in.delay);
 
 		let delay = Duration.ZERO;
-		if (mode instanceof Duration) {
+		if (joined) {
+			delay = joined;
+		} else if (mode instanceof Duration) {
 			delay = mode;
 		} else if (mode === "auto") {
-			for (const { props } of effect.get(this.#clock.parts)) {
-				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
-			}
-			// Capped once, on the resolved delay, so audio and video stay on one clock. The
-			// subscription's live join max follows it.
-			delay = delay.min(DELAY_MAX);
+			delay = effect.get(this.#target);
 		}
 
+		this.#clock.joined = joined !== undefined;
 		this.#clock.out.delay.set(delay);
+	}
+
+	// Join the group, if any: offer this member's place on the group's timeline, then hold whatever
+	// delay puts its frames at the group's playhead, or play alone when that is outside its reach.
+	#runMember(effect: Effect): void {
+		const out = this.#clock.out;
+		const group = effect.get(this.in.sync);
+		// A closed shared sync places no playhead: its members play alone, as if unlinked.
+		if (!group || effect.get(group.#clock.closed)) return;
+		if (group !== this.#marginGroup) {
+			this.#marginGroup = group;
+			this.#margin.set(false);
+		}
+
+		const error = this.#refusal(
+			group,
+			[effect.get(this.in.delay), effect.get(this.in.lookahead)],
+			[effect.get(group.in.delay), effect.get(group.in.lookahead), effect.get(group.in.cap)],
+		);
+		effect.set(out.error, error, undefined);
+		// Without a clock, this broadcast has no place on the group's timeline.
+		const clock = effect.get(this.in.clock);
+		effect.set(out.outOfSync, true, false);
+		if (error || !clock) return;
+
+		// PTS zero on the group's timeline. Only differences between members matter, so the
+		// viewer's own wall clock never enters, and a step in it moves nothing.
+		const zero = (clock.wall * 1000) / clock.timescale;
+		const reference = new Derived([out.reference], (reference) =>
+			reference === undefined ? undefined : reference - zero,
+		);
+		// What the group sees: a member showing video keeps its place while its timeline restarts, as
+		// when its publisher does, so the others don't jump ahead and back. One that stops showing
+		// video, as a hidden tile, lets go at once.
+		const place = new Signal<number | undefined>(undefined);
+		effect.run((nested) => {
+			const current = nested.get(reference);
+			if (current !== undefined || !nested.get(this.video)) place.set(current);
+		});
+		const member: Member = {
+			reference: place,
+			target: this.#target,
+			video: this.video,
+			margin: this.#margin,
+		};
+		group.#members.update((members) => [...members, member]);
+		effect.cleanup(() => group.#members.update((members) => members.filter((other) => other !== member)));
+
+		effect.run((nested) => {
+			const at = nested.get(group.#playhead);
+			const ours = nested.get(reference);
+			// Nothing received yet: nothing to align, and nothing out of step either.
+			if (at === undefined || ours === undefined) {
+				nested.set(out.outOfSync, false, true);
+				return;
+			}
+			// The same sums the playhead was placed with, so the member that set it is exactly in reach.
+			const [lo, hi] = group.#span(nested, member, ours);
+			const inStep = lo <= at && at <= hi;
+			member.margin.set(!inStep);
+			if (!inStep) return;
+			// Forced: an earlier reference already moved the clock's delay, and the group's delay
+			// lands again even when it equals the last one, as for the member setting the playhead.
+			this.#joined.set(Duration.millis(at - ours), true);
+			nested.cleanup(() => this.#joined.set(undefined));
+			nested.set(out.outOfSync, false, true);
+		});
+	}
+
+	// Why `group` won't take this member, if it won't.
+	#refusal(group: Sync, own: [Delay, Duration], shared: [Delay, Duration, Duration]): Error | undefined {
+		if (group === this) return new Error("Watch.Sync: a sync can't be its own group");
+		if (own[0] === "instant") return new Error('Watch.Sync: a grouped member can\'t use delay "instant"');
+		if (!own[1].isZero()) return new Error("Watch.Sync: a grouped member can't hold a lookahead");
+		if (shared[0] === "instant") return new Error('Watch.Sync: a group can\'t use delay "instant"');
+		if (!shared[1].isZero()) return new Error("Watch.Sync: a group can't hold a lookahead");
+		if (shared[0] instanceof Duration && shared[0].gt(shared[2])) {
+			return new Error("Watch.Sync: a group's delay can't exceed its cap");
+		}
+		return undefined;
+	}
+
+	// The delay a member needs held behind its earliest arrival: its own measured target in "auto",
+	// or the group's fixed delay, which replaces it as it would for a sync playing alone.
+	#memberTarget(effect: Effect, member: Member): number {
+		const mode = effect.get(this.in.delay);
+		return (mode instanceof Duration ? mode : effect.get(member.target)).asMillis();
+	}
+
+	// Where on the group's timeline a member at `reference` can play in step: no sooner than its
+	// target, and no later than the cap, less a tenth while it has to earn its way back, so one
+	// hovering at the cap doesn't flip in and out with every small change.
+	#span(effect: Effect, member: Member, reference: number): [number, number] {
+		const cap = effect.get(this.in.cap).asMillis();
+		const reach = effect.get(member.margin) ? cap - cap / 10 : cap;
+		return [reference + this.#memberTarget(effect, member), reference + reach];
+	}
+
+	// As a group: place the playhead where the most members can play in step.
+	#runPlayhead(effect: Effect): void {
+		if (effect.get(this.in.delay) === "instant") {
+			this.#playhead.set(undefined);
+			return;
+		}
+		const members = effect.get(this.#members);
+		// Members playing video place the playhead; the rest only follow it. With none, all of them do.
+		const video = members.filter((member) => effect.get(member.video));
+		const spans = (video.length ? video : members).flatMap((member) => {
+			const reference = effect.get(member.reference);
+			if (reference === undefined) return [];
+			const [lo, hi] = this.#span(effect, member, reference);
+			return [{ lo, hi }];
+		});
+		this.#playhead.set(playhead(spans));
 	}
 
 	/**

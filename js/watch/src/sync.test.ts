@@ -8,6 +8,7 @@ import { Manual } from "@moq/clock/test";
 // A monotonic instant `ms` after the clock origin.
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
+import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import { target } from "./audio/latency";
 import { type Delay, type Span, Sync } from "./sync";
@@ -692,6 +693,485 @@ describe("tracks", () => {
 		await clock.advance(Duration.millis(110));
 		expect(sync.now()).toEqual(Duration.millis(10));
 		sync.close();
+	});
+});
+
+describe("group", () => {
+	// Local time is pinned, so every deadline below is exact.
+	let clock: Manual;
+	let installed: Installed;
+	beforeEach(() => {
+		clock = new Manual();
+		clock.jump(Duration.millis(5000));
+		installed = clock.install();
+	});
+	afterEach(() => installed.close());
+
+	// A catalog clock whose PTS zero was captured `ms` after the moq epoch.
+	const zero = (ms: number) => ({ wall: Catalog.u53(ms * 1000), timescale: 1_000_000 });
+
+	// A member with one video track measuring `target` ms, on `group` under the catalog clock `wall`.
+	const member = (group: Sync | undefined, wall: number | undefined, target = 20) => {
+		const sync = new Sync({ sync: group, clock: wall === undefined ? undefined : zero(wall) });
+		const video = sync.track({ target: new Signal<Duration | undefined>(Duration.millis(target)) });
+		return { sync, video };
+	};
+
+	it("presents the same capture instant together, whatever each member's latency", async () => {
+		const group = new Sync();
+		// Both cameras capture the same instant at their PTS 1000 and 950: B's clock started 50ms later.
+		const a = member(group, 1000);
+		const b = member(group, 1050);
+		await flush();
+
+		// A's frame arrives at once; B's 100ms later.
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(950), at(5100));
+		await flush();
+		// B is the slowest, so it holds only its own target and A holds the rest.
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		const first = a.video.wait(Duration.millis(1000));
+		const second = b.video.wait(Duration.millis(950));
+		await clock.advance(Duration.millis(119));
+		expect(Bun.peek.status(first)).toBe("pending");
+		expect(Bun.peek.status(second)).toBe("pending");
+		await clock.advance(Duration.millis(1));
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+		expect(b.sync.out.outOfSync.peek()).toBe(false);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("leaves a member past the cap to play alone, and takes it back once it fits", async () => {
+		const group = new Sync({ cap: Duration.millis(500) });
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(7000));
+		await flush();
+		// B trails by 2s, past the 500ms cap: A keeps its own pace and B plays alone, flagged.
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(b.sync.out.outOfSync.peek()).toBe(true);
+
+		// B's path recovers: a new timeline within the cap rejoins at the shared playhead.
+		b.video.reset();
+		b.video.received(Duration.millis(3200), at(7300));
+		await flush();
+		expect(b.sync.out.outOfSync.peek()).toBe(false);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("leaves out the one member whose clock is far off, not everyone else", async () => {
+		const group = new Sync({ cap: Duration.millis(500) });
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		// C's clock reads 5s ahead, so its frames seem to arrive 5s before they were captured.
+		const c = member(group, 6000);
+		await flush();
+
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5030));
+		c.video.received(Duration.millis(1000), at(5000));
+		await flush();
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+		expect(b.sync.out.outOfSync.peek()).toBe(false);
+		expect(c.sync.out.outOfSync.peek()).toBe(true);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(50));
+
+		for (const { sync } of [a, b, c, { sync: group }]) sync.close();
+	});
+
+	it("plays a member without a catalog clock alone", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, undefined, 40);
+		await flush();
+		expect(b.sync.out.outOfSync.peek()).toBe(true);
+
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(40));
+		expect(b.sync.out.outOfSync.peek()).toBe(true);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("holds a fixed group delay behind every member instead of its own target", async () => {
+		const group = new Sync({ delay: Duration.millis(300) });
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(400));
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(300));
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("refuses an instant or lookahead member, and plays it alone", async () => {
+		const group = new Sync();
+		const instant = new Sync({ sync: group, clock: zero(1000), delay: "instant" });
+		const lookahead = new Sync({ sync: group, clock: zero(1000), lookahead: Duration.secs(1) });
+		await flush();
+		expect(instant.out.error.peek()?.message).toContain('"instant"');
+		expect(instant.out.outOfSync.peek()).toBe(true);
+		expect(lookahead.out.error.peek()?.message).toContain("lookahead");
+		expect(lookahead.out.outOfSync.peek()).toBe(true);
+
+		for (const sync of [instant, lookahead, group]) sync.close();
+	});
+
+	it("leaves the others' delay and reference alone when a faster member joins", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		await flush();
+		const reference = a.sync.out.reference.peek();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+
+		// B's frames arrive 50ms sooner after capture: it waits for A, and A doesn't move.
+		const b = member(group, 1000);
+		await flush();
+		b.video.received(Duration.millis(1000), at(4950));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.reference.peek()).toBe(reference);
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(70));
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("keeps a member in step up to the cap, but takes one back only with a tenth to spare", async () => {
+		const cap = new Signal(Duration.millis(500));
+		const group = new Sync({ cap });
+		const a = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		await flush();
+
+		// B and C trail A by 470ms: A holds 490ms, within the cap, even on its first check.
+		const b = member(group, 1000);
+		const c = member(group, 1000);
+		await flush();
+		b.video.received(Duration.millis(1000), at(5470));
+		c.video.received(Duration.millis(1000), at(5470));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(490));
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+
+		// Below 490ms A leaves, and comes back only once 490ms is a tenth under the cap.
+		cap.set(Duration.millis(480));
+		await flush();
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		expect(b.sync.out.outOfSync.peek()).toBe(false);
+		cap.set(Duration.millis(530));
+		await flush();
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		cap.set(Duration.millis(550));
+		await flush();
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(490));
+
+		// A newcomer has nothing to earn back: D, arriving like A, joins at 490ms under a 500ms cap.
+		cap.set(Duration.millis(500));
+		const d = member(group, 1000);
+		await flush();
+		d.video.received(Duration.millis(1000), at(5000));
+		await flush();
+		expect(d.sync.out.outOfSync.peek()).toBe(false);
+		expect(d.sync.out.delay.peek()).toEqual(Duration.millis(490));
+
+		for (const { sync } of [a, b, c, d, { sync: group }]) sync.close();
+	});
+
+	it("starts a member moved to another group without the margin it owed the last one", async () => {
+		const first = new Sync({ cap: Duration.millis(480) });
+		const second = new Sync({ cap: Duration.millis(500) });
+		const groupSignal = new Signal<Sync | undefined>(first);
+		const x = new Sync({ sync: groupSignal, clock: zero(1000) });
+		const video = x.track({ target: new Signal<Duration | undefined>(Duration.millis(20)) });
+		const others = [first, first, second, second].map((group) => member(group, 1000));
+		await flush();
+		video.received(Duration.millis(1000), at(5000));
+		for (const other of others) other.video.received(Duration.millis(1000), at(5470));
+		await flush();
+		// 490ms is past the first group's 480ms cap: X plays alone, and owes a margin to rejoin it.
+		expect(x.out.outOfSync.peek()).toBe(true);
+
+		// The second group's cap fits 490ms, which a newcomer needs no margin for.
+		groupSignal.set(second);
+		await flush();
+		expect(x.out.outOfSync.peek()).toBe(false);
+		expect(x.out.delay.peek()).toEqual(Duration.millis(490));
+
+		for (const sync of [x, ...others.map((other) => other.sync), first, second]) sync.close();
+	});
+
+	it("keeps the member that sets the playhead in step, however large its clock and odd its target", async () => {
+		// PTS zero 7 years after the moq epoch, and a target with a fraction of a millisecond.
+		const group = new Sync();
+		const wall = 7 * 365 * 24 * 3600 * 1000;
+		for (const target of [20.123457, 33.333333, 41.7, 0.000001]) {
+			const sync = new Sync({ sync: group, clock: zero(wall) });
+			const video = sync.track({ target: new Signal<Duration | undefined>(Duration.millis(target)) });
+			await flush();
+			video.received(Duration.millis(1000), at(5000));
+			await flush();
+			expect(sync.out.outOfSync.peek()).toBe(false);
+			sync.close();
+			await flush();
+		}
+		group.close();
+	});
+
+	it("drops nothing when a joined member's reference moves earlier", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// A's frame 1050 is due at 5170. Then one of A's frames arrives 170ms sooner than any before.
+		const parked = a.video.wait(Duration.millis(1050));
+		await clock.advance(Duration.millis(30));
+		a.video.received(Duration.millis(1200), at(5030));
+		await flush();
+		// A's delay grows by as much, so the group's playhead, and A's place on it, don't move.
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(290));
+		await clock.advance(Duration.millis(139));
+		expect(Bun.peek.status(parked)).toBe("pending");
+		await clock.advance(Duration.millis(1));
+		expect(await parked).toBe(true);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("brings the member setting the playhead back to its target when its reference moves earlier", async () => {
+		for (const delay of ["auto", Duration.millis(300)] as Delay[]) {
+			const group = new Sync({ delay });
+			const a = member(group, 1000);
+			const b = member(group, 1000);
+			await flush();
+			a.video.received(Duration.millis(1000), at(5000));
+			b.video.received(Duration.millis(1000), at(5100));
+			await flush();
+			const target = delay === "auto" ? 20 : 300;
+			expect(b.sync.out.delay.peek()).toEqual(Duration.millis(target));
+
+			// B, which sets the playhead, gets a frame 50ms faster: the wall moves up with it.
+			b.video.received(Duration.millis(1100), at(5150));
+			await flush();
+			expect(b.sync.out.delay.peek()).toEqual(Duration.millis(target));
+			expect(a.sync.out.delay.peek()).toEqual(Duration.millis(target + 50));
+			for (const { sync } of [a, b, { sync: group }]) sync.close();
+		}
+	});
+
+	it("refuses members of a group whose fixed delay is past its cap", async () => {
+		const delay = new Signal<Delay>(Duration.secs(2));
+		const group = new Sync({ delay, cap: Duration.millis(500) });
+		const a = member(group, 1000);
+		await flush();
+		expect(a.sync.out.error.peek()?.message).toContain("can't exceed its cap");
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		delay.set(Duration.millis(300));
+		await flush();
+		expect(a.sync.out.error.peek()).toBeUndefined();
+		for (const sync of [a.sync, group]) sync.close();
+	});
+
+	it("lets a member without video follow the playhead but never place it", async () => {
+		const group = new Sync({ cap: Duration.millis(500) });
+		const a = member(group, 1000);
+		const early = member(group, 1000);
+		const late = member(group, 1000);
+		early.sync.video.set(false);
+		late.sync.video.set(false);
+		await flush();
+
+		a.video.received(Duration.millis(1000), at(5000));
+		early.video.received(Duration.millis(1000), at(4950));
+		late.video.received(Duration.millis(1000), at(5200));
+		await flush();
+		// The faster audio-only member follows A; the slower one would hold the wall back, so it plays alone.
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(early.sync.out.delay.peek()).toEqual(Duration.millis(70));
+		expect(early.sync.out.outOfSync.peek()).toBe(false);
+		expect(late.sync.out.outOfSync.peek()).toBe(true);
+
+		for (const { sync } of [a, early, late, { sync: group }]) sync.close();
+	});
+
+	it("ignores the viewer's wall clock and any offset every member's clock shares", async () => {
+		const run = async (offset: number) => {
+			const group = new Sync({ cap: Duration.millis(500) });
+			const a = member(group, 1000 + offset);
+			const b = member(group, 1050 + offset);
+			await flush();
+			a.video.received(Duration.millis(1000), at(5000));
+			b.video.received(Duration.millis(950), at(5100));
+			// The viewer's clock steps a minute: nothing the group reads moves.
+			clock.stepWall(clock.wall().add(Duration.secs(60)));
+			await flush();
+			const delays = [a, b].map(({ sync }) => sync.out.delay.peek().asMillis());
+			const out = [a, b].map(({ sync }) => sync.out.outOfSync.peek());
+			for (const { sync } of [a, b, { sync: group }]) sync.close();
+			return { delays, out };
+		};
+		const base = await run(0);
+		expect(base).toEqual({ delays: [120, 20], out: [false, false] });
+		// Every publisher's clock 5s off the viewer's, as an unsynced viewer sees them.
+		expect(await run(5000)).toEqual(base);
+	});
+
+	it("refuses a member switched to instant while grouped, and takes it back once it isn't", async () => {
+		const group = new Sync();
+		const delay = new Signal<Delay>("auto");
+		const sync = new Sync({ sync: group, clock: zero(1000), delay });
+		const video = sync.track({ target: new Signal<Duration | undefined>(Duration.millis(20)) });
+		const b = member(group, 1000);
+		await flush();
+		video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		delay.set("instant");
+		await flush();
+		expect(sync.out.error.peek()?.message).toContain('"instant"');
+		expect(sync.out.outOfSync.peek()).toBe(true);
+		expect(sync.out.delay.peek()).toEqual(Duration.ZERO);
+
+		delay.set("auto");
+		await flush();
+		expect(sync.out.error.peek()).toBeUndefined();
+		expect(sync.out.outOfSync.peek()).toBe(false);
+		expect(sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		for (const s of [sync, b.sync, group]) s.close();
+	});
+
+	it("aligns frames captured before the page loaded, as a warmup replays", async () => {
+		const group = new Sync();
+		// PTS zero years before the viewer's clock origin, and frames from its first seconds.
+		const a = member(group, 0);
+		const b = member(group, 50);
+		await flush();
+		a.video.received(Duration.millis(0), at(5000));
+		b.video.received(Duration.millis(0), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(70));
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(20));
+
+		const first = a.video.wait(Duration.millis(50));
+		const second = b.video.wait(Duration.millis(0));
+		await clock.advance(Duration.millis(119));
+		expect(Bun.peek.status(first)).toBe("pending");
+		await clock.advance(Duration.millis(1));
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("plays its members alone once the shared sync closes", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// Closing a member closes only its own sync; closing the shared one releases the rest.
+		b.sync.close();
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		group.close();
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+
+		a.sync.close();
+	});
+
+	it("refuses members of a shared sync that holds a lookahead", async () => {
+		const group = new Sync({ lookahead: Duration.secs(1) });
+		const a = member(group, 1000);
+		await flush();
+		expect(a.sync.out.error.peek()?.message).toContain("group can't hold a lookahead");
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		for (const sync of [a.sync, group]) sync.close();
+	});
+
+	it("holds a restarting member's place, so the others don't jump ahead and back", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// B's publisher restarts: its only track's timeline ends until the new one's first frame.
+		b.video.reset();
+		await flush();
+		expect(b.sync.out.reference.peek()).toBeUndefined();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+		b.video.received(Duration.millis(2000), at(6100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// Hidden, B shows no video and lets go of the playhead at once.
+		b.video.reset();
+		b.sync.video.set(false);
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("plays exactly as alone once it leaves its group", async () => {
+		const groupSignal = new Signal<Sync | undefined>(new Sync());
+		const group = groupSignal.peek();
+		const a = new Sync({ sync: groupSignal, clock: zero(1000) });
+		const b = member(group, 1000);
+		const video = a.track({ target: new Signal<Duration | undefined>(Duration.millis(20)) });
+		await flush();
+		video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.out.delay.peek()).toEqual(Duration.millis(120));
+
+		groupSignal.set(undefined);
+		await flush();
+		expect(a.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.out.outOfSync.peek()).toBe(false);
+		expect(a.out.error.peek()).toBeUndefined();
+
+		for (const sync of [a, b.sync, group]) sync?.close();
 	});
 });
 

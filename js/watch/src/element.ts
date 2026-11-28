@@ -15,7 +15,7 @@ import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast
 import { formatDuration, parseDuration } from "./duration";
 import { checkName, Echo } from "./echo";
 import { Player } from "./player";
-import { type Delay, STRETCH, type Sync } from "./sync";
+import { DELAY_MAX, type Delay, STRETCH, Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
@@ -275,6 +275,9 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlay = new Signal<HTMLElement | undefined>(undefined);
 	#captionsOverlayEl?: HTMLDivElement;
 
+	// The enclosing `<moq-sync>`'s clock, while connected inside one.
+	#shared = new Signal<Sync | undefined>(undefined);
+
 	// Whether the element is connected to a document.
 	#connected = false;
 	// The attributes holding a refused value, which suspend the element until corrected.
@@ -306,6 +309,7 @@ export default class MoqWatch extends HTMLElement {
 			follow: this.#follow,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
+			sync: this.#shared,
 			...this.controls,
 			video: {
 				...this.controls.video,
@@ -410,6 +414,14 @@ export default class MoqWatch extends HTMLElement {
 			this.#reflect(effect, "stretch", formatDuration(effect.get(this.controls.stretch))),
 		);
 
+		// Styleable state, not a setting: never observed, so it needs no reflection guard.
+		this.signals.run((effect) => this.toggleAttribute("out-of-sync", effect.get(this.sync.out.outOfSync)));
+		// A `<moq-sync>` refused this element's own delay or lookahead: it plays alone, and says why.
+		this.signals.run((effect) => {
+			const error = effect.get(this.sync.out.error);
+			if (error) reportError(error);
+		});
+
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
 		const updateDimensions = (width: number, height: number) => {
@@ -441,6 +453,17 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#connected = true;
+		const group = this.parentElement?.closest("moq-sync");
+		this.#shared.set(group instanceof MoqSync ? group.sync : undefined);
+		// A delay or lookahead refused inside a `<moq-sync>` may be valid outside it, and the reverse.
+		for (const name of ["delay", "lookahead"] as const) {
+			if (!this.#invalid.peek().has(name)) continue;
+			try {
+				this.attributeChangedCallback(name, null, this.getAttribute(name));
+			} catch {
+				// Still refused, and already reported when it was set.
+			}
+		}
 		this.#update();
 		this.style.display = "block";
 		this.style.position = "relative";
@@ -463,6 +486,7 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#connected = false;
+		this.#shared.set(undefined);
 		this.#update();
 	}
 
@@ -666,6 +690,9 @@ export default class MoqWatch extends HTMLElement {
 	set delay(value: Delay) {
 		if (!(value instanceof Duration) && value !== "auto" && value !== "instant")
 			throw invalidAttribute("delay", value, '"auto", "instant", or a Duration');
+		// Inside a `<moq-sync>`, a shared timeline can't honor "instant".
+		if (value === "instant" && this.#shared.peek())
+			throw invalidAttribute("delay", value, '"auto" or a duration inside <moq-sync>');
 		this.controls.delay.set(parseDelay(value instanceof Duration ? formatDuration(value) : value));
 		this.#accept("delay");
 	}
@@ -686,6 +713,9 @@ export default class MoqWatch extends HTMLElement {
 
 	set lookahead(value: Duration) {
 		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
+		// Inside a `<moq-sync>`, a shared timeline can't hold a lookahead.
+		if (!value.isZero() && this.#shared.peek())
+			throw invalidAttribute("lookahead", formatDuration(value), "zero inside <moq-sync>");
 		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
 		this.#accept("lookahead");
 	}
@@ -770,10 +800,89 @@ export default class MoqWatch extends HTMLElement {
 	}
 }
 
+/** The attributes `<moq-sync>` observes. */
+const SYNC_OBSERVED = ["delay", "cap"] as const;
+
+// Parse a `<moq-sync>` delay: as `<moq-watch>`'s, except "instant", which a shared timeline can't honor.
+function parseGroupDelay(value: string | null): Delay {
+	if (value === null) return "auto";
+	const trimmed = value.trim();
+	if (trimmed === "auto") return trimmed;
+	const parsed = parseDuration(trimmed);
+	if (parsed !== undefined) return parsed;
+	throw new Error(`moq-sync: invalid delay="${value}", expected "auto" or a duration like "300ms"`);
+}
+
+// Parse the `cap` attribute: a duration, or the default when absent.
+function parseCap(value: string | null): Duration {
+	if (value === null) return DELAY_MAX;
+	const parsed = parseDuration(value);
+	if (parsed !== undefined) return parsed;
+	throw new Error(`moq-sync: invalid cap="${value}", expected a duration like "10s"`);
+}
+
+/**
+ * The `<moq-sync>` element: plays every `<moq-watch>` inside it in step, showing the same capture
+ * instant, aligned through each broadcast's catalog `sync.clock`. A member that can't keep up
+ * within the `cap` plays alone and carries an `out-of-sync` attribute until it fits again. Lays out
+ * as its children alone (`display: contents`), so it can wrap the cells of a CSS grid.
+ */
+export class MoqSync extends HTMLElement {
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof SYNC_OBSERVED = SYNC_OBSERVED;
+
+	/** The group's settings, which its members' own `delay` gives way to. */
+	readonly controls = {
+		delay: new Signal<Delay>("auto"),
+		cap: new Signal<Duration>(DELAY_MAX),
+	};
+
+	/** The shared clock every enclosed `<moq-watch>` joins. */
+	readonly sync: Sync = new Sync({ delay: this.controls.delay, cap: this.controls.cap });
+
+	/** Called by the browser when the element joins a document. */
+	connectedCallback() {
+		this.style.display = "contents";
+	}
+
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof SYNC_OBSERVED)[number], oldValue: string | null, newValue: string | null) {
+		if (oldValue === newValue) return;
+		if (name === "delay") this.controls.delay.set(parseGroupDelay(newValue));
+		else if (name === "cap") this.controls.cap.set(parseCap(newValue));
+		else {
+			const exhaustive: never = name;
+			throw new Error(`Invalid attribute: ${exhaustive}`);
+		}
+	}
+
+	/** How far the group trails its members' live edge: `"auto"` holds each member's own measured target. */
+	get delay(): Delay {
+		return this.controls.delay.peek();
+	}
+
+	set delay(value: Delay) {
+		this.controls.delay.set(parseGroupDelay(value instanceof Duration ? formatDuration(value) : value));
+	}
+
+	/** The most a member may trail its own earliest arrival to stay in step (default: 10 s). */
+	get cap(): Duration {
+		return this.controls.cap.peek();
+	}
+
+	set cap(value: Duration) {
+		if (!(value instanceof Duration)) throw new Error(`moq-sync: invalid cap="${value}", expected a Duration`);
+		this.controls.cap.set(value);
+	}
+}
+
+// Defined first, so a `<moq-watch>` already inside one finds it upgraded.
+customElements.define("moq-sync", MoqSync);
 customElements.define("moq-watch", MoqWatch);
 
 declare global {
 	interface HTMLElementTagNameMap {
+		"moq-sync": MoqSync;
 		"moq-watch": MoqWatch;
 	}
 }
