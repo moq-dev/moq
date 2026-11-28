@@ -1592,7 +1592,7 @@ int main()
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 		destroySource(source);
-		report(sibling ? "failed sibling resolution preserves playback"
+		report(sibling ? "failed sibling subscription preserves playback"
 			       : "rejected subscription preserves playback");
 	}
 
