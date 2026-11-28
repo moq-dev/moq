@@ -51,7 +51,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `e91efb9653c0b0bad08040d72bc7bd7c14b685c1`, for ResumeReader and StaleRecover alike. Run `git log e91efb9653.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `e9737346bf5fcd76f671988574fb624193e5737b`, for ResumeReader and StaleRecover alike. Run `git log e9737346bf.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
