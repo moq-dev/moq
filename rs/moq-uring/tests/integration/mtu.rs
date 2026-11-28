@@ -285,11 +285,15 @@ fn discovery_stays_off_by_default() {
 }
 
 /// Transfer until discovery has raised the MTU past the floor, so a train
-/// staged after it packs the larger datagrams.
+/// staged after it packs the larger datagrams. A probe crossing the hop only
+/// proves the path carries more; the sender has adopted the size once most of
+/// a transfer rides above the floor.
 async fn discover(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &mut quic::Connection, path: &Path) {
+	const LEN: usize = PAYLOAD / 16;
 	for _ in 0..50 {
-		transfer(handle, from, to, PAYLOAD / 16).await;
-		if path.large_up() > 0 {
+		let before = path.large_up();
+		transfer(handle, from, to, LEN).await;
+		if (path.large_up() - before) as usize > LEN / ETHERNET / 2 {
 			return;
 		}
 	}
@@ -330,7 +334,11 @@ fn discovery_finds_a_larger_mtu() {
 		.expect("worker");
 	assert!(path.largest() > FLOOR, "discovered {}", path.largest());
 	assert!(path.largest() <= ETHERNET, "discovered {}", path.largest());
-	assert!(datagrams > 2 * sends, "{datagrams} datagrams in {sends} sends");
+	// How long a train runs is the host's to decide: the worker counts the receiver's one-datagram
+	// ACK sends too, and a contended host wakes each end per datagram, so trains shrink to a few
+	// segments and ACKs outnumber them. What the larger MTU must not break is batching at all, which
+	// leaves more datagrams than sends.
+	assert!(datagrams > sends, "{datagrams} datagrams in {sends} sends");
 }
 
 /// A path that shrinks after discovery black-holes the larger datagrams, and
