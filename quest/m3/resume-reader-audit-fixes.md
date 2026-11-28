@@ -30,4 +30,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Consolidate moq-net track and resume state machines and expand TLA+ coverage](/quest/m3/resume-track-consolidation.md) - addresses the underlying architectural complexity driving this patch chain
-- [Model resume skips and failover source closure in TLA+ specs](/quest/m1/verify-resume-failover-sync.md) - brings the TLA+ sync commits up to date
+- [Model source closure before copy failure in FailoverChain.tla](/quest/m3/verify-failover-source-closure.md) - brings the failover TLA+ model and its sync commit up to date

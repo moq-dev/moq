@@ -22,7 +22,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Model resume skips and failover source closure in TLA+ specs](/quest/m1/verify-resume-failover-sync.md) - restores baseline TLA+ sync
+- [Model source closure before copy failure in FailoverChain.tla](/quest/m3/verify-failover-source-closure.md) - brings the failover TLA+ model and its sync commit up to date
 
 ## Related
 
