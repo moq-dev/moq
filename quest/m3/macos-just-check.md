@@ -1,4 +1,4 @@
-# [S] `just check` passes on macOS
+# [S] just check passes on macOS
 
 ## Goal
 
