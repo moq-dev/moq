@@ -49,11 +49,11 @@ if (input.mode === "serve") {
 	const msg = await Subscribe.decode(new Reader(undefined, bytes, version), version);
 	if (!msg.meta) throw new Error("not a metadata SUBSCRIBE");
 	void publisher.runSubscribe(msg, stream);
-	// Group 2, which starts at its first frame's time.
-	const group = track.createGroup(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
-	group.writeFrame(textFrame("", Timestamp.fromMillis(3)));
-	group.writeFrame(textFrame("hello", Timestamp.fromMillis(4)));
-	group.finishAt(5n);
+	// Group 0, which starts at its first frame's time.
+	const group = track.createGroup(textFrame("a".repeat(300), Timestamp.fromMillis(0)));
+	group.writeFrame(textFrame("", Timestamp.fromMillis(1)));
+	group.writeFrame(textFrame("hello", Timestamp.fromMillis(2)));
+	group.finishAt(3n);
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 	const next = await opened.read();
 	if (next.done) throw new Error("the publisher opened no group stream");
