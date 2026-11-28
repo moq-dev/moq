@@ -25,7 +25,9 @@ Seen three times, each in a full `just test interop --all`, and never in a targe
 - On [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794) (2026-11-28): every
   `finish cpp -> *` cell failed again, with `error: missing health group` from the `cpp`
   reader, while the other readers logged `finish clean frames=10`. An immediate full rerun
-  passed.
+  passed. Later the same day it failed once more, this time with
+  `error: finish did not drain naturally (frames=0 expected=10)` from the `c` reader, and the
+  rerun passed.
 
 Each is a whole publisher row with a reader seeing an empty track. Since the C++ row hits it
 too, the cause is more likely the relay's copy of a finished publisher's tracks (or the

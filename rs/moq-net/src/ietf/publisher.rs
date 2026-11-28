@@ -328,12 +328,17 @@ impl PrepareFetch {
 			// A start past Largest Object in a group the cache holds is refused INVALID_RANGE
 			// (draft-22 section 9.11), rather than waiting on the live group. A group past every
 			// one held does not exist yet.
-			// A copy that can't prove its last moq-timestamp ID holds only a lower bound on it, so
-			// a start past that bound may still name a published object.
-			let estimated = track
-				.peek_group(largest.group)
-				.is_some_and(|group| !group_last_id_exact(&group, timed));
-			if (range.start.group, range.start.object) > (largest.group, largest.object) && !estimated {
+			if (range.start.group, range.start.object) > (largest.group, largest.object) {
+				// A copy that can't prove its last moq-timestamp ID holds only a lower bound on it,
+				// so a start past that bound in its group may name a published object it can't
+				// serve by ID, or bound by an end it can trust.
+				let estimated = range.start.group == largest.group
+					&& track
+						.peek_group(largest.group)
+						.is_some_and(|group| !group_last_id_exact(&group, timed));
+				if estimated {
+					return Err((Error::Unsupported, "start past an estimated Largest Object".into()));
+				}
 				let held = range
 					.start
 					.group
@@ -16421,6 +16426,44 @@ mod serve_tests {
 		code
 	}
 
+	/// A draft-23 FETCH past a headless timed copy's estimated last Object ID, in that group, is
+	/// refused as unsupported: the true last ID may lie past the estimate, so neither
+	/// INVALID_RANGE nor an end at the estimate holds. A group past every held one is still
+	/// refused as missing.
+	#[kio::test]
+	async fn a_fetch_past_an_estimated_largest_object_is_unsupported() {
+		const NOT_SUPPORTED: u64 = 0x3;
+		let version = Version::Draft23;
+		for (group_id, expected) in [(0, NOT_SUPPORTED), (1, DOES_NOT_EXIST)] {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.start_at(1).unwrap();
+			// Offsets 5, 10, 10: Object IDs 5, 10, 11, estimated as 10 without frame 0.
+			for ms in [5, 10, 10] {
+				group
+					.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
+					.unwrap();
+			}
+			group.finish().unwrap();
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location {
+					group: group_id,
+					object: 11,
+				},
+				Location {
+					group: group_id,
+					object: 12,
+				},
+				GroupOrder::Ascending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), expected, "group {group_id}");
+		}
+	}
+
 	/// A group that does not exist, below the newest one or past it, is refused.
 	#[kio::test]
 	async fn a_standalone_fetch_of_a_missing_group_is_refused() {
@@ -23513,7 +23556,8 @@ mod compression_tests {
 	}
 
 	/// A timed copy without frame 0 knows only a lower bound on its last timestamp Object ID,
-	/// so a FETCH past it isn't refused INVALID_RANGE on that bound; a whole copy knows it exactly.
+	/// so a FETCH past it in that group is refused as unsupported rather than INVALID_RANGE on
+	/// that bound; a whole copy knows it exactly.
 	#[test]
 	fn a_headless_timed_copy_estimates_its_last_id() {
 		for headless in [false, true] {
