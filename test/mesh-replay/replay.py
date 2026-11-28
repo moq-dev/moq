@@ -578,7 +578,12 @@ class Auth:
                 self.end_headers()
                 self.wfile.write(payload)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        class Server(ThreadingHTTPServer):
+            # Every session of a mesh authenticates at once, and macOS resets a connection past a
+            # backlog of 5 instead of retrying its SYN as Linux does.
+            request_queue_size = 128
+
+        self.server = Server(("127.0.0.1", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self) -> None:
