@@ -1427,6 +1427,8 @@ test("an audio-only broadcast declares its group spacing as the join interval", 
 
 test("a backlog encode refusal aborts its rendition when demand arrives", async () => {
 	using _webcodecs = installFakeWebCodecs();
+	// The backlog expires against the media clock, which a loaded host would run past the frame's retention.
+	using _now = manualAt(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("refused.hang") });
 	const feed = new Feed();
 	const configuring = configured();
