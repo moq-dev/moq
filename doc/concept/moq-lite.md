@@ -70,7 +70,9 @@ want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
 served under a prefix claim has nothing to list. A relay lists its upstream's
 tracks as they arrive and syncs when its upstream does, so a track listed after
-the synced mark is new at the source, through any number of hops.
+the synced mark is new at the source, through any number of hops. A moq-transport
+upstream never signals a complete list, so a relay listing one syncs at once
+with the tracks it already knows.
 
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks

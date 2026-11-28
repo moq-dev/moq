@@ -105,7 +105,8 @@ pub enum TracksEvent<'a> {
 	/// finished.
 	Finished { kind: Kind, name: Cow<'a, str> },
 	/// SYNCED: every track this hop listed once its listing was complete, and still lists, was
-	/// sent; a relay's listing completes on its upstream's SYNCED.
+	/// sent; a relay's listing completes on its moq-lite upstream's SYNCED, while one over a
+	/// moq-transport upstream completes at once with the tracks this hop already knows.
 	Synced,
 }
 
