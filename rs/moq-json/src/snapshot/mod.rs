@@ -261,9 +261,8 @@ mod test {
 			let waiter = kio::Waiter::noop();
 
 			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-			group
-				.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
+			let group = track
+				.create_group(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 				.unwrap();
 			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 			assert!(consumer.poll_latest(&waiter).is_pending());
@@ -276,9 +275,8 @@ mod test {
 			);
 
 			// The replacement arrives and the reader picks up where the value now lives.
-			let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
-			group
-				.write_frame(
+			let _group = track
+				.create_group(
 					moq_net::Timestamp::from_millis(1).unwrap(),
 					Bytes::from_static(br#"{"a":2}"#),
 				)
@@ -298,9 +296,8 @@ mod test {
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
+		let group = track
+			.create_group(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 			.unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 
@@ -1048,38 +1045,29 @@ mod test {
 		));
 	}
 
-	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
-	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
-	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
-	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
-	/// allocating 32 MB to provoke it.
+	/// A timed track whose newest group starts at ten seconds, so a group a frame at [`rewound`]
+	/// would open is refused for starting before it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		group
-			.write_frame(
-				moq_net::Timestamp::from_millis(10_000).unwrap(),
-				bytes::Bytes::from_static(b"{}"),
-			)
+		track
+			.append_group(moq_net::Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"{}"))
+			.unwrap()
+			.finish()
 			.unwrap();
-		group.finish().unwrap();
 		track
 	}
 
-	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
-	/// at it is refused.
+	/// Before [`rejecting_track`]'s newest group, so a group opened at it is refused.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
 
-	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
-	/// close the track. Dropping the handle does not close the group either, so without an explicit
-	/// close a subscriber that advanced into it waits there forever.
+	/// A refused snapshot leaves no group behind for a subscriber to advance into and wait on.
 	#[test]
-	fn a_rejected_snapshot_does_not_strand_an_empty_group() {
+	fn a_rejected_snapshot_publishes_no_group() {
 		let track = rejecting_track();
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, cfg(false));
@@ -1090,13 +1078,11 @@ mod test {
 		));
 
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
-			panic!("the group was published, so a subscriber sees it");
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the track's own group is there");
 		};
-		assert!(
-			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
-			"the empty group must be closed, not left open for a subscriber to wait in"
-		);
+		assert_eq!(group.start, 10_000);
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "the refused snapshot published nothing");
 	}
 
 	#[test]
@@ -1181,26 +1167,25 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
-		let _track = track.finish().unwrap();
-		let waiter = kio::Waiter::noop();
-
-		// Track is finished but the open group is empty: pending, not end-of-stream.
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Pending));
-
-		group
-			.write_frame(
+		let group = track
+			.append_group(
 				moq_net::Timestamp::ZERO,
 				Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()),
 			)
 			.unwrap();
-		group.finish().unwrap();
+		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
+		let _track = track.finish().unwrap();
+		let waiter = kio::Waiter::noop();
 
 		match consumer.poll_latest(&waiter) {
 			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
 			other => panic!("expected the catalog value, got {other:?}"),
 		}
+		// Track is finished but its group is still open: pending, not end-of-stream.
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Pending));
+
+		group.finish().unwrap();
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	#[test]

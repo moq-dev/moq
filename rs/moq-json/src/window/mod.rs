@@ -309,29 +309,22 @@ mod test {
 		Consumer::new(track, consumer::Config::default())
 	}
 
-	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
-	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
-	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
-	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
-	/// allocating 32 MB to provoke it.
+	/// A timed track whose newest group starts at ten seconds, so a group a frame at [`rewound`]
+	/// would open is refused for starting before it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		group
-			.write_frame(
-				moq_net::Timestamp::from_millis(10_000).unwrap(),
-				bytes::Bytes::from_static(b"{}"),
-			)
+		track
+			.append_group(moq_net::Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"{}"))
+			.unwrap()
+			.finish()
 			.unwrap();
-		group.finish().unwrap();
 		track
 	}
 
-	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
-	/// at it is refused.
+	/// Before [`rejecting_track`]'s newest group, so a group opened at it is refused.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
@@ -684,8 +677,7 @@ mod test {
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
 			first.commit();
-			let mut lost = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-			lost.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
+			let lost = track.append_group(moq_net::Timestamp::ZERO, payload).unwrap();
 			assert_eq!(
 				drain(&mut consumer),
 				vec![Event::Push {
@@ -698,11 +690,11 @@ mod test {
 			let second = encoder.push(&rec(1)).unwrap();
 			let payload = second.payload.clone();
 			second.commit();
-			let mut checkpoint = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
-			checkpoint
-				.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), payload)
+			track
+				.append_group(moq_net::Timestamp::from_millis(1).unwrap(), payload)
+				.unwrap()
+				.finish()
 				.unwrap();
-			checkpoint.finish().unwrap();
 			let _track = track.finish().unwrap();
 
 			assert_eq!(
@@ -868,16 +860,17 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, Config::default());
 
-		// Rewound past the first group, so the header group is published before the write fails.
+		// Before the track's newest group, so the header group is refused and publishes nothing.
 		assert!(producer.push(&rec(1), rewound()).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
-			panic!("the rejected group's header was published");
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the track's own group is there");
 		};
-		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(group.start, 10_000);
+		assert!(subscriber.poll_next_group(&waiter).is_pending());
 	}
 
 	#[test]

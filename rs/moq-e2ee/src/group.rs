@@ -20,7 +20,8 @@ pub struct Frame {
 	pub plaintext: Bytes,
 }
 
-/// Exclusive writer for one group; frames are numbered from 0 in write order.
+/// Exclusive writer for one group; frames are numbered in write order after frame 0, which
+/// opened the group.
 ///
 /// Dropping without [`Self::finish`] or [`Self::abort`] lets the net group close uncleanly.
 pub struct Producer {
@@ -40,7 +41,7 @@ impl Producer {
 			inner: Ok(inner),
 			track,
 			key,
-			next_frame: 0,
+			next_frame: 1,
 		}
 	}
 

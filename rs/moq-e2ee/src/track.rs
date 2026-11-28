@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::generation::Domain;
 use crate::group;
 use crate::key::{Claim, TrackKey};
+use crate::limits::MAX_GROUPED_PAYLOAD;
 use crate::terminal::Terminal;
 
 /// Exclusive producer for one physical stream track.
@@ -33,37 +34,58 @@ impl Producer {
 		self.inner.name()
 	}
 
-	/// Start the next group at `start`, as [`moq_net::track::Producer::append_group`] does:
-	/// converted into the track's timescale, or [`Timestamp::unscaled`] at the group's key
-	/// on a scale-less track. The key must be above every start this name allocated under
-	/// the generation.
+	/// Start the next group with `plaintext` as its first frame at `timestamp`, which is where the
+	/// group starts, as [`moq_net::track::Producer::append_group`] does: converted into the
+	/// track's timescale, or [`Timestamp::unscaled`] at the group's key on a scale-less track.
+	/// The start must be above every start this name allocated under the generation.
 	///
 	/// # Errors
 	///
-	/// [`Error::Reuse`](crate::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::Error::Identity) if
-	/// it exceeds `2^53-1`, or a net error.
-	pub fn append_group(&mut self, start: Timestamp) -> Result<group::Producer> {
-		// Rescaled before allocating, so a refused start allocates nothing.
-		let start = self.inner.info().rescale(start)?;
-		let (_, inner) = self
-			.claim
-			.allocate(Some(start.value()), |_| Ok(self.inner.append_group(start)?))?;
-		Ok(self.group(inner))
+	/// [`Error::Reuse`](crate::Error::Reuse) if the start was already allocated,
+	/// [`Error::Identity`](crate::Error::Identity) if it exceeds `2^53-1`,
+	/// [`Error::Exhausted`](crate::Error::Exhausted), [`Error::Oversize`](crate::Error::Oversize),
+	/// or a net error.
+	pub fn append_group(&mut self, timestamp: Timestamp, plaintext: &[u8]) -> Result<group::Producer> {
+		self.open(timestamp, plaintext, |track, timestamp, payload| {
+			track.append_group(timestamp, payload)
+		})
 	}
 
-	/// Start a group at `start`, in the track's timescale, as
-	/// [`moq_net::track::Producer::create_group`] does. `start` must be above every start this
-	/// name allocated under the generation.
+	/// Start a group with `plaintext` as its first frame at `timestamp`, which is where the group
+	/// starts, as [`moq_net::track::Producer::create_group`] does. The start must be above every
+	/// start this name allocated under the generation.
 	///
 	/// # Errors
 	///
-	/// [`Error::Reuse`](crate::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::Error::Identity) if
-	/// it exceeds `2^53-1`, or a net error.
-	pub fn create_group(&mut self, start: u64) -> Result<group::Producer> {
-		let (_, inner) = self.claim.allocate(Some(start), |start| {
-			Ok(self.inner.create_group(moq_net::group::Info { start })?)
+	/// As [`Self::append_group`].
+	pub fn create_group(&mut self, timestamp: Timestamp, plaintext: &[u8]) -> Result<group::Producer> {
+		self.open(timestamp, plaintext, |track, timestamp, payload| {
+			track.create_group(timestamp, payload)
+		})
+	}
+
+	/// Allocate the start at `timestamp`, encrypt frame 0 there, and create the group with `create`.
+	///
+	/// Refusals before encryption allocate nothing. Once frame 0 is encrypted its identity is
+	/// spent, so the start stays allocated even when the net group is refused: a retry never
+	/// repeats a nonce with different bytes.
+	fn open(
+		&mut self,
+		timestamp: Timestamp,
+		plaintext: &[u8],
+		create: impl FnOnce(&moq_net::track::Producer, Timestamp, bytes::Bytes) -> moq_net::Result<moq_net::group::Producer>,
+	) -> Result<group::Producer> {
+		let timestamp = self.inner.info().rescale(timestamp)?;
+		let key = &self.claim.key;
+		let inner = &self.inner;
+		let (_, created) = self.claim.allocate(Some(timestamp.value()), |start| {
+			let payload = key
+				.lock()
+				.expect("track key")
+				.protect(start, 0, plaintext, MAX_GROUPED_PAYLOAD)?;
+			Ok(create(inner, timestamp, payload))
 		})?;
-		Ok(self.group(inner))
+		Ok(self.group(created?))
 	}
 
 	fn group(&self, inner: moq_net::group::Producer) -> group::Producer {
