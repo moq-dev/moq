@@ -6295,6 +6295,29 @@ test("the reserved sequence is refused", () => {
 	expect(() => producer.skipGroups(0n, 1n << 64n)).toThrow(RangeError);
 });
 
+// A group streamed in at its first frame starts at that frame's time, and a run the publisher
+// gave up reaches a reader as a drop with its error.
+test("a streamed first frame keys its group, and a dropped run reaches a reader", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe(
+		withMax({ delay: { max: null }, ranges: [{ start: 0n }], order: "ascending" }),
+	);
+	const frame = producer.createFrame({ size: 2, timestamp: Timestamp.fromMillis(5) });
+	frame.write(new Uint8Array([1]));
+	frame.write(new Uint8Array([2]));
+	const group = frame.finish();
+	expect(group.start).toBe(5n);
+	group.writeFrame(textFrame("next", Timestamp.fromMillis(6)));
+	group.finish();
+	producer.dropGroups(0n, 5n, new StreamError(StreamCode.Evicted));
+
+	expect(hooks.tryRecvGroup(subscriber, true)).toMatchObject({ kind: "drop", start: 0n, end: 5n });
+	const got = subscriber.tryRecvGroup();
+	expect(got?.start).toBe(5n);
+	expect((await got?.readFrame())?.payload).toEqual(new Uint8Array([1, 2]));
+	expect(dec.decode((await got?.readFrame())?.payload)).toBe("next");
+});
+
 // Mirrors the Rust `track::Finished` doctests: the handle `finish` returns takes no new
 // writes, at compile time and at run time, yet still fills a late group below the end.
 test("finishing returns handles that write nothing new but fill a late group", async () => {
