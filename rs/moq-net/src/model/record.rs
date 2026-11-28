@@ -36,7 +36,8 @@ pub(crate) struct Record {
 	pub(super) reported: RangeMap<u64, Report>,
 	/// The final runs reported that the reader's publisher has yet to tell its wire, with why:
 	/// given up below where delivery starts, and named once owed. Each is in `reported` too, so
-	/// no scan gives it up again, and billed and folded as reported runs are.
+	/// no scan gives it up again. Billed, and forgotten under a debt (see [`Self::fold`]) or
+	/// a retirement as reported runs are.
 	unsent: RangeMap<u64, Hole>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
@@ -437,6 +438,14 @@ impl Record {
 			}
 			self.rescan = true;
 		}
+		// So do the runs held unsent, forgotten with their reports rather than settled, as their
+		// wire was never told: a scan that finds them again, from the track or its upstream,
+		// gives them up afresh, and a later start owing them names them.
+		if !self.unsent.is_empty() {
+			for (run, _) in std::mem::take(&mut self.unsent) {
+				self.reported.remove(run);
+			}
+		}
 		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
 			self.raise(floor);
@@ -463,7 +472,6 @@ impl Record {
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
 		self.reported.remove(0..floor);
-		self.unsent.remove(0..floor);
 	}
 
 	/// Settle `stretch` as one handed-out and reported run.
@@ -471,7 +479,6 @@ impl Record {
 		self.delivered.insert_run(stretch.clone());
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
-		self.unsent.remove(stretch.clone());
 		self.reported.insert(stretch, Report::Settled);
 	}
 
@@ -642,27 +649,32 @@ mod test {
 		assert_eq!(pool.used(), 0);
 	}
 
-	/// The runs a publisher holds unsent bill as the reports they shadow do, and a debt folds
-	/// them away with those: what its wire was never told costs what the record holds.
+	/// The runs a publisher holds unsent bill each, though the report they shadow merges them,
+	/// and a debt forgets them with that report rather than settle them: their wire was never
+	/// told, so a start that owes them later gives them up again.
 	#[test]
-	fn a_debt_folds_what_is_held_unsent() {
+	fn a_debt_forgets_what_is_held_unsent() {
 		let (pool, track) = account();
 		let mut record = Record::default();
-		for key in (0..10).step_by(2) {
-			record.delivered.insert(key);
-			record.tell(key + 1..key + 2, Report::Dropped);
-			record.hold_unsent(key + 1..key + 2, Hole::Skip);
+		record.delivered.insert(0);
+		record.tell(1..5, Report::Dropped);
+		for key in 1..5 {
+			let hole = match key % 2 {
+				0 => Hole::Skip,
+				_ => Hole::drop(StreamError::NotFound),
+			};
+			record.hold_unsent(key..key + 1, hole);
 		}
+		record.delivered.insert(6);
 		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(
-			pool.used(),
-			(4 + 5 + 5) * RUN_OVERHEAD,
-			"each held run bills beside its report"
-		);
+		assert_eq!(pool.used(), (1 + 1 + 4) * RUN_OVERHEAD, "each held run bills");
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(pool.used(), 0, "all of it folded");
-		assert_eq!(record.take_unsent_below(10), None, "folded, so told for good");
+		assert_eq!(pool.used(), RUN_OVERHEAD, "only the group above them stays");
+		assert_eq!(record.take_unsent_below(5), None);
+		let mut untold = RangeSet::new();
+		untold.insert(1..6);
+		assert_eq!(record.untold(1..6), untold, "owed again, not settled");
 	}
 
 	/// Under a debt its track could not pay, a record folds what is final into its floor:
