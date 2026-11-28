@@ -276,14 +276,13 @@ moving only the wire into `m2`, leaving both in `m3`).
 
 Decided 2026-11-25 (maintainer, the pick round on
 [moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)): ✅ the cut waits
-for [unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md), so lite-07's
+for unsigned lite timestamp deltas, so lite-07's
 `FRAME` timestamp deltas freeze unsigned, so the timestamps they produce never
 decrease (rejected: the next wip version after the cut).
 
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
-- [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
 - [The lite-07 draft's TRACKS SYNCED matches relays](/quest/m2/tracks-synced-draft.md) - the draft stops saying a relay sends SYNCED before its upstream syncs
 - [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - Rust, JS, and C/binding metadata subscriber API lands before the cut so the C ABI does not break right after 0.22
 

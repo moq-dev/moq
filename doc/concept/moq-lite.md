@@ -416,7 +416,7 @@ A publisher refuses a group that starts before a lower one, and so does a
 moq-lite 07 receiver. A group's timestamps never decrease either: writing a frame
 below its predecessor fails, so a stream with B-frames stamps decode time and
 carries presentation time in its payload, as hang's `cts` container does.
-moq-lite 07 sends them as unsigned deltas. A receiver passes on the timestamps it
+moq-lite 07 sends each after a stream's first as an unsigned delta. A receiver passes on the timestamps it
 gets over moq-lite 05 and 06 without checking them, since an older publisher
 stamps an untimed track there with send times, which look like media time, and an
 older group fetched later would look like a rewind. A relay serves them on to
