@@ -8,7 +8,7 @@ Non-goals: changing `moq-net`'s public API, wire protocol, or runtime semantics;
 
 ## Plan
 
-Decided 2026-11-26 (maintainer, `/quest-plan` after 24h multi-host CPU audit): ✅ split `moq-net`'s inline `#[cfg(test)]` suites out of `rs/moq-net/src/` into external test crate(s) in `m1` (rejected: leaving all unit tests inline in `rs/moq-net/src/`).
+Decided 2026-11-26 (maintainer, `/quest-plan` after 24h multi-host CPU audit): ✅ split `moq-net`'s inline `#[cfg(test)]` suites out of `rs/moq-net/src/` into external test crate(s) in `m1` (rejected: leaving all unit tests inline in `rs/moq-net/src/`). Moved to `m3` on 2026-11-28, since it need not block `0.22.0`.
 
 Baseline (2026-11-26):
 - `rs/moq-net/src/` is 301,932 LOC total, of which 240,223 LOC (79.6%) is `#[cfg(test)]` vs 61,709 LOC of library code (`model/track.rs` = 40,038 LOC, `ietf/publisher.rs` = 22,959 LOC, `ietf/subscriber.rs` = 20,443 LOC).

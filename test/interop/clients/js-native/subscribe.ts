@@ -300,6 +300,9 @@ async function run(): Promise<void> {
 		// process.exit; otherwise the relay times the connection out.
 		await connection.close();
 		await connection.closed;
+		// Every await is behind us and process.exit follows, so a reader the harness times out
+		// after this line hung in the runtime's native exit teardown, not in the session's close.
+		console.error("session closed");
 		origin.close();
 	}
 }
