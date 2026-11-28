@@ -383,5 +383,16 @@ Scheduled runs
   lifted that: the player joins live, and a relay serving a moq-transport live SUBSCRIBE asks its
   route for a live join with no min delay.
 
+Triaged 2026-11-28 (maintainer, /quest-plan), scheduled run
+[46166329015](https://github.com/moq-dev/moq/actions/runs/46166329015) (`9a20cdf5bc`), the first
+with [moq-dev/moq#9840](https://github.com/moq-dev/moq/pull/9840)'s release relay: both lite-07
+stream-credit cells and Firefox lite-06 passed. It failed three steps: Chromium lite-06 stream
+credit (`3 subscriptions still open`, owned by
+[lite-06 lost reset](/quest/m0/test-flakes-5/lite06-lost-reset-hang.md)), the open-GOP fixture
+writing backwards timestamps since [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)
+([moq-dev/moq#9858](https://github.com/moq-dev/moq/pull/9858)), and `relay_fill_javascript`'s
+lite-07 `below the start: got {3,4}`, dropped as a one-night failure after 10 of 10 local passes
+at `f7684041f5` (re-check if it repeats).
+
 Public API: none. Wire: none.
 
