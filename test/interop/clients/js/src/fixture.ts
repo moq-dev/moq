@@ -21,9 +21,10 @@ import { Duration, Instant, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
-import type { AudioCodec, Fault, FixtureState } from "./contract";
+import type { AudioCodec, AudioHold, Fault, FixtureState } from "./contract";
 import {
 	ALT_AUDIO,
+	AUDIO_HOLDS,
 	CHANGED_SAMPLE_RATE,
 	FIXTURE_EVENT,
 	KEYFRAME_INTERVAL_MS,
@@ -43,6 +44,34 @@ const SCHEDULE_AHEAD = 2; // seconds
 
 /** Peak amplitude of the tone. Low enough to leave Opus headroom, high enough to dominate noise. */
 const AMPLITUDE = 0.5;
+
+/** Stillness shorter than this is ordinary pacing: a capture quantum every 10 ms, a frame every 20 ms. */
+const HOLD_MS = 100;
+
+/** Enough for minutes of a struggling page; the driver only ever reads the last few seconds. */
+const KEEP_HOLDS = 500;
+
+// One log per page, so the driver finds it whichever fixture the page is running now.
+const holds: AudioHold[] = [];
+(globalThis as unknown as Record<string, AudioHold[]>)[AUDIO_HOLDS] = holds;
+
+// Track one stage of the audio path, logging each stretch it stood still for at least HOLD_MS.
+function stage(name: AudioHold["stage"]): { moved: () => void; reset: () => void } {
+	let last: number | undefined;
+	return {
+		moved: () => {
+			const at = performance.timeOrigin + performance.now();
+			if (last !== undefined && at - last >= HOLD_MS) {
+				holds.push({ stage: name, at: last, duration: Math.round(at - last) });
+				if (holds.length > KEEP_HOLDS) holds.shift();
+			}
+			last = at;
+		},
+		reset: () => {
+			last = undefined;
+		},
+	};
+}
 
 /**
  * A running fixture publisher.
@@ -198,6 +227,7 @@ export class Fixture {
 		});
 		this.#audioEncoder = audio;
 		this.#signals.cleanup(() => audio.close());
+		this.#watchAudio(audioCapture, audio);
 		this.#signals.cleanup(() => this.#alt.peek()?.close());
 
 		// The tone and the picture share this clock, so neither can start until the audio graph runs.
@@ -260,6 +290,37 @@ export class Fixture {
 				),
 			};
 			console.debug(FIXTURE_EVENT + JSON.stringify(state));
+		});
+	}
+
+	// Log where the main rendition's audio stops moving: its captured frames reaching the page, and the
+	// encoder emitting them. A player's audio gap that neither covers began after the encoder.
+	#watchAudio(capture: Publish.Audio.Capture, encoder: Publish.Audio.Encoder): void {
+		const captured = stage("capture");
+		this.#signals.run((effect) => {
+			const fanout = effect.get(capture.out.frames);
+			if (!fanout) return;
+			// A new capture graph starts its own pacing; the gap while it was rebuilt is not a hold.
+			captured.reset();
+			const reader = fanout.subscribe(effect).getReader();
+			effect.cleanup(() => void reader.cancel().catch(() => {}));
+			effect.spawn(async () => {
+				for (;;) {
+					const next = await effect.race(reader.read());
+					if (!next?.value) break;
+					captured.moved();
+				}
+			});
+		});
+
+		// The encoder's frame count, not its stats as a whole, which also move with each bitrate estimate.
+		const encoded = stage("encoder");
+		let frames = 0;
+		this.#signals.run((effect) => {
+			const count = effect.get(encoder.out.stats).frames;
+			if (count === frames) return;
+			frames = count;
+			encoded.moved();
 		});
 	}
 

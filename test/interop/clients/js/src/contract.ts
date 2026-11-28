@@ -241,6 +241,22 @@ export type LongFrame = {
 export const LONG_FRAMES = "__moqLongFrames";
 
 /**
+ * A stretch the fixture's audio stopped moving at one stage: `capture` when its captured frames
+ * stopped reaching the page, `encoder` when the encoder stopped emitting them. Neither in a window
+ * whose player lost audio puts the hold after the encoder, in the send path or the network.
+ */
+export type AudioHold = {
+	stage: "capture" | "encoder";
+	/** When the stage last moved before the hold, in epoch milliseconds, so it lines up with a window. */
+	at: number;
+	/** How long until it moved again, in milliseconds. */
+	duration: number;
+};
+
+/** The `window` property the fixture page keeps its {@link AudioHold} log on. */
+export const AUDIO_HOLDS = "__moqAudioHolds";
+
+/**
  * Whether audio plays: the graph runs, the ring is not refilling, and a frame has anchored it. A
  * declared silence is not a stall, so a ring that took a publisher's end before any audio, as a
  * resume onto an on-demand encoder's ended epoch does, reads unstalled while it holds nothing.

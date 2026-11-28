@@ -62,6 +62,8 @@ import { type Capabilities, capturePath, missing, probe, type Role } from "./src
 import {
 	ALT_AUDIO,
 	AUDIBLE_RMS,
+	AUDIO_HOLDS,
+	type AudioHold,
 	audioPlays,
 	CHANGED_SAMPLE_RATE,
 	FAULTS,
@@ -332,7 +334,7 @@ async function waitForLive(
 	const startup = since + timeoutMs;
 	// Watched from the catch-up window's start, so a failure can tell a starved host from a stuck page.
 	// `top` exits on its own after a window, so a throw from a check below leaves nothing running long.
-	let host = started ? watchHost(assertion) : undefined;
+	let host = started ? watchHost(assertion, WINDOW_MS) : undefined;
 	// When the player's latest sample arrived: a page whose main thread stopped stops sampling, and its
 	// last sample then reads as a player stuck behind live.
 	let sampled: { seq: number; at: number } | undefined;
@@ -372,7 +374,7 @@ async function waitForLive(
 			if (moved && !started) {
 				started = true;
 				since = Date.now();
-				host = watchHost(assertion);
+				host = watchHost(assertion, WINDOW_MS);
 			}
 			const live = reachesLive({
 				previous: frame,
@@ -431,24 +433,36 @@ async function detach(player: Page, playerErrors: BrowserErrors, held: Resources
 	});
 }
 
+/** How {@link observe} collects and grades a window. */
+type Observe = {
+	/** How long to collect, in milliseconds. */
+	ms?: number;
+	/** Whether `grade` also holds the window to {@link assertMedia}, after the caller's own checks. */
+	media?: boolean;
+};
+
 /**
  * Collect one window while the host is watched, so a window that fails `grade`, whether on a
- * caller's own transition checks or on {@link assertMedia}, also prints what stalled the pages.
+ * caller's own checks or on {@link assertMedia}, prints every reading in it and what stalled the
+ * pages, and the summary can be traced back to the readings behind it.
  */
 async function observe(
 	player: Page,
 	playerErrors: BrowserErrors,
 	label: string,
+	{ ms = WINDOW_MS, media = true }: Observe = {},
 ): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
 	const start = Date.now();
-	const host = watchHost(label);
-	const samples = await collect(player, playerErrors, WINDOW_MS);
+	const host = watchHost(label, ms);
+	const samples = await collect(player, playerErrors, ms);
 	const bounds = { start, end: Date.now() };
 	const grade = async (checks?: () => void) => {
 		try {
 			checks?.();
-			assertMedia(samples, label);
+			if (media) assertMedia(samples, label);
 		} catch (err) {
+			console.error(`  ${label}: ${samples.length} samples`);
+			for (const sample of samples) console.error(traceLine(sample, samples[0]?.at ?? 0));
 			await explainStalls(player, bounds, label, host);
 			throw err;
 		} finally {
@@ -469,15 +483,16 @@ const STALL_READ_MS = 2000;
 const HOST_INTERVAL_S = 0.5;
 
 /**
- * Read the host's busiest processes for the length of one window, on Linux, where `top` has a batch
+ * Read the host's busiest processes for the `ms` of one window, on Linux, where `top` has a batch
  * mode. A page's main thread stopping for hundreds of milliseconds is either the page's own work or a
  * starved host, and only the host can say which.
  */
 function watchHost(
 	label: string,
+	ms: number,
 ): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string>; started: number } | undefined {
 	if (process.platform !== "linux") return undefined;
-	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
+	const iterations = Math.ceil(ms / 1000 / HOST_INTERVAL_S) + 1;
 	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
 	try {
 		const started = Date.now();
@@ -502,8 +517,40 @@ function processName(command: string): string {
 }
 
 /**
- * Print what stopped the pages' main threads during a failed window: each page's long animation
- * frames with the scripts that ran in them, and the host's busiest processes.
+ * Read the entries of a page's epoch-stamped log (`key`) that overlap `bounds`, giving up after
+ * STALL_READ_MS: Playwright puts no timeout on an evaluate, and a page still blocked never answers.
+ */
+async function readLog<T extends { at: number; duration: number }>(
+	page: Page,
+	key: string,
+	bounds: { start: number; end: number },
+): Promise<T[]> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const unanswered = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`no answer within ${STALL_READ_MS}ms, so its main thread is still blocked`)),
+				STALL_READ_MS,
+			);
+		});
+		return await Promise.race([
+			page.evaluate(
+				({ key, from, to }) =>
+					((globalThis as unknown as Record<string, T[] | undefined>)[key] ?? []).filter(
+						(entry) => entry.at + entry.duration >= from && entry.at <= to,
+					),
+				{ key, from: bounds.start, to: bounds.end },
+			),
+			unanswered,
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Print what stopped the pages during a failed window: each page's long animation frames with the
+ * scripts that ran in them, where the fixture's audio stood still, and the host's busiest processes.
  *
  * Evidence only. A page that cannot be read leaves its part out rather than masking the failure.
  */
@@ -515,42 +562,36 @@ async function explainStalls(
 ): Promise<void> {
 	// The window has already failed, so a plain evaluate's user activation can no longer skew it, and
 	// unlike `inspect` it reads a non-Chromium player too. The bounds come from the driver's clock,
-	// which the pages' epoch timestamps share, so each page reports on its own and one that cannot be
-	// read, or does not answer within STALL_READ_MS, leaves the other's evidence intact.
-	const { start, end } = bounds;
+	// which the pages' epoch timestamps share, so each log reports on its own and one that cannot be
+	// read leaves the others' evidence intact.
+	const { start } = bounds;
+	const at = (ms: number) => `+${((ms - start) / 1000).toFixed(2)}s`;
 	for (const [name, page] of [
 		["player", player],
 		["fixture", fixturePage],
 	] as const) {
 		if (!page) continue;
-		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const unanswered = new Promise<never>((_, reject) => {
-				timer = setTimeout(
-					() => reject(new Error(`no answer within ${STALL_READ_MS}ms, so its main thread is still blocked`)),
-					STALL_READ_MS,
-				);
-			});
-			const frames = await Promise.race([
-				page.evaluate(
-					({ key, from, to }) =>
-						((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
-							(frame) => frame.at + frame.duration >= from && frame.at <= to,
-						),
-					{ key: LONG_FRAMES, from: start, to: end },
-				),
-				unanswered,
-			]);
+			const frames = await readLog<LongFrame>(page, LONG_FRAMES, bounds);
 			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
 			for (const frame of frames) {
 				console.error(
-					`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
+					`    ${at(frame.at)} ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
 				);
 			}
 		} catch (err) {
 			console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
-		} finally {
-			clearTimeout(timer);
+		}
+	}
+
+	// A player's audio gap that no hold here covers began after the fixture's encoder.
+	if (fixturePage) {
+		try {
+			const holds = await readLog<AudioHold>(fixturePage, AUDIO_HOLDS, bounds);
+			console.error(`  ${label}: fixture audio holds: ${holds.length}`);
+			for (const hold of holds) console.error(`    ${at(hold.at)} ${hold.stage} still for ${hold.duration}ms`);
+		} catch (err) {
+			console.error(`  ${label}: fixture audio holds unavailable: ${err}`);
 		}
 	}
 
@@ -596,21 +637,9 @@ function traceLine(sample: Sample, start: number): string {
  * Assert the window shows advancing, audible, synchronized media, and report what it measured.
  *
  * Every number here is read at a sink: the frame counter off the canvas the renderer paints, and
- * the tone off the graph root that feeds the speakers. A failure prints every reading in the window,
- * so the summary can be traced back to the readings behind it.
+ * the tone off the graph root that feeds the speakers.
  */
 function assertMedia(samples: Sample[], label: string): void {
-	try {
-		measure(samples, label);
-	} catch (err) {
-		const start = samples[0]?.at ?? 0;
-		console.error(`  ${label}: ${samples.length} samples`);
-		for (const sample of samples) console.error(traceLine(sample, start));
-		throw err;
-	}
-}
-
-function measure(samples: Sample[], label: string): void {
 	check(samples.length >= 10, "sampling", () => `${label}: only ${samples.length} samples in the window`);
 
 	const readable = samples.filter((s) => s.frameId !== undefined);
@@ -695,16 +724,7 @@ async function followAudio(
 	const window = await observe(player, playerErrors, label);
 	const samples = window.samples;
 	const first = samples.findIndex((sample) => arrived(sample, before));
-	await window.grade(() => {
-		try {
-			followed(samples, first, before, arrived, label);
-		} catch (err) {
-			// assertMedia prints the window only when it fails itself.
-			console.error(`  ${label}: ${samples.length} samples`);
-			for (const sample of samples) console.error(traceLine(sample, samples[0]?.at ?? 0));
-			throw err;
-		}
-	});
+	await window.grade(() => followed(samples, first, before, arrived, label));
 	const now = samples[samples.length - 1];
 	// Reported rather than gated: today's player rebuffers across a re-minted or swapped track, so
 	// the window above grades only the agreement the cold start is held to.
@@ -795,25 +815,29 @@ async function checkVolume(player: Page, playerErrors: BrowserErrors, volume: nu
 		el.volume = volume;
 	}, volume);
 	await sleep(VOLUME_SETTLE_MS);
-	const samples = await collect(player, playerErrors, HELD_MS);
+	const label = `volume ${volume}`;
+	const window = await observe(player, playerErrors, label, { ms: HELD_MS, media: false });
+	const samples = window.samples;
 	const ratios = samples
 		.filter((s) => s.rms !== undefined && s.rms >= AUDIBLE_RMS && s.speakerRms !== undefined && !s.audioStalled)
 		.map((s) => (s.speakerRms as number) / (s.rms as number));
-	check(
-		ratios.length >= samples.length * AGREEMENT,
-		"volume scales the output",
-		() => `volume ${volume}: only ${ratios.length}/${samples.length} samples carried audio at the graph root`,
-	);
 	const median = percentile(ratios, 0.5);
-	const off = ratios.filter((ratio) => Math.abs(ratio - volume) > VOLUME_TOLERANCE * Math.max(volume, 0.1));
-	check(
-		off.length <= ratios.length * (1 - AGREEMENT) && Math.abs(median - volume) <= VOLUME_TOLERANCE * volume,
-		"volume scales the output",
-		() =>
-			`volume ${volume}: the speakers carried ${median.toFixed(3)} of the graph root's level (median), ` +
-			`${off.length}/${ratios.length} samples outside ±${VOLUME_TOLERANCE * 100}%`,
-	);
-	console.error(`  volume ${volume}: speakers at ${median.toFixed(3)} of the graph root's level`);
+	await window.grade(() => {
+		check(
+			ratios.length >= samples.length * AGREEMENT,
+			"volume scales the output",
+			() => `${label}: only ${ratios.length}/${samples.length} samples carried audio at the graph root`,
+		);
+		const off = ratios.filter((ratio) => Math.abs(ratio - volume) > VOLUME_TOLERANCE * Math.max(volume, 0.1));
+		check(
+			off.length <= ratios.length * (1 - AGREEMENT) && Math.abs(median - volume) <= VOLUME_TOLERANCE * volume,
+			"volume scales the output",
+			() =>
+				`${label}: the speakers carried ${median.toFixed(3)} of the graph root's level (median), ` +
+				`${off.length}/${ratios.length} samples outside ±${VOLUME_TOLERANCE * 100}%`,
+		);
+	});
+	console.error(`  ${label}: speakers at ${median.toFixed(3)} of the graph root's level`);
 }
 
 // The capability page has its own context. Evaluation may grant activation there,
