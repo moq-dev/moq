@@ -5734,6 +5734,9 @@ struct Steer {
 struct Deferred {
 	group: group::Consumer,
 	frame_start: u64,
+	/// Its copy closed with frames left that a route may bring back: it recovers once it takes
+	/// the place, one group at a time, so until then only its budget is watched.
+	closed: bool,
 }
 
 /// Which groups a run's cursor hands out.
@@ -7857,21 +7860,26 @@ impl TrackRun {
 		held.all(|held| held > waiting).then_some(waiting)
 	}
 
-	/// Account for the deferred groups given up, registering `waiter` for the aging or failure
-	/// that would give one up: aged past every range wanting it, or its frames gone with no
-	/// route to bring them, as a serving group would be. So the budgets and the cache bound
-	/// what waits. Whether it named any, in a drop that still has to go out.
+	/// Account for the deferred groups given up, registering `waiter` for the aging or the
+	/// close that would give one up: aged past every range wanting it, or its frames gone with
+	/// no route to bring them. So the budgets and the cache bound what waits. One a route may
+	/// still bring back waits to recover once it takes the place, so a stall asks upstream for
+	/// one group at a time. Whether it named any, in a drop that still has to go out.
 	fn prune_deferred(&mut self, waiter: &kio::Waiter) -> bool {
 		let track_stream = self.ctx.version.has_track_stream();
 		let outcomes = &self.ctx.outcomes;
 		let before = self.deferred.len();
 		self.deferred.retain_mut(|deferred| {
-			// Only a copy that lost frames is asked about recovery: a backlog's worth of finished
-			// groups would each be a ready poll.
-			let err = match deferred.group.poll_expired(waiter) {
-				true => Some(Error::Old),
-				false if deferred.group.poll_lost(waiter) => poll_given_up(&mut deferred.group, waiter),
-				false => None,
+			let err = if deferred.group.poll_expired(waiter) {
+				Some(Error::Old)
+			} else if deferred.closed {
+				None
+			} else if let Poll::Ready(lost) = deferred.group.poll_lost(waiter) {
+				// Closed: it never changes again, so it is judged once.
+				deferred.closed = true;
+				lost.filter(|_| !deferred.group.recoverable())
+			} else {
+				None
 			};
 			let Some(err) = err else {
 				return true;
@@ -7902,7 +7910,7 @@ impl TrackRun {
 		self.ctx.steer_current();
 		let mut best: Option<(usize, (i8, i64))> = None;
 		for index in 0..self.deferred.len() {
-			let Deferred { group, frame_start } = &self.deferred[index];
+			let Deferred { group, frame_start, .. } = &self.deferred[index];
 			let (key, frame_start) = (group.start, *frame_start);
 			let covers = self.covering(key);
 			let group = &self.deferred[index].group;
@@ -8504,6 +8512,7 @@ impl GroupServe {
 		Deferred {
 			group: self.group,
 			frame_start: self.frame_start,
+			closed: false,
 		}
 	}
 
@@ -12402,6 +12411,34 @@ mod serve_group_test {
 		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1);
 	}
 
+	/// A frame written to a deferred group wakes no subscription it waits on: only its copy
+	/// closing or its budget can give it up.
+	#[kio::test]
+	async fn lite07_a_frame_written_to_a_deferred_group_wakes_nothing() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume());
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[from_group(0, 0, Order::Descending)]);
+
+		let mut first = write_open(&mut track, 1);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let _second = write_open(&mut track, 2);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.deferred.len(), 1, "group 1 gave way");
+
+		let woken = Arc::new(Woken::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		first
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"y".as_slice())
+			.unwrap();
+		assert!(!woken.0.load(Ordering::Relaxed), "a frame woke the subscription");
+	}
+
 	/// A deferred group whose received copy fails while a re-offer is held for it is not given
 	/// up: it goes out from the re-offer, as a group already serving would.
 	#[kio::test]
@@ -12435,6 +12472,7 @@ mod serve_group_test {
 		first.abort(Error::Cancel).unwrap();
 		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		assert_eq!(run.deferred.len(), 1, "group 1 waits on its re-offer");
+		assert!(run.deferred[0].closed, "it recovers once it takes the place");
 		assert_eq!(drops(&mut writer, &log, version).await, [], "group 1 is not given up");
 
 		let Ok(track::Received::Group(mut again)) = track.create_group_at(group::Info { start: 1 }, 0, 0..0) else {

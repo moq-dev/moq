@@ -5334,6 +5334,15 @@ impl Refly {
 	}
 }
 
+/// Whether `track` may bring `reader` a copy of its group once the copy it reads lost frames:
+/// a hold promising one, another copy, or handlers that serve a flight.
+pub(super) fn recovers(track: &kio::Producer<TrackState>, reader: &group::Consumer) -> bool {
+	let state = track.read();
+	state.holds.contains_key(&reader.start)
+		|| (state.lookup.get(&reader.start)).is_some_and(|slot| slot.copies().any(|copy| !copy.is_read_by(reader)))
+		|| state.fills.read().has_handlers()
+}
+
 /// Whether `track`'s [`Requests`] handlers can serve a flight, which [`board`] asks of them.
 pub(super) fn flies(track: &kio::Producer<TrackState>) -> bool {
 	track.read().fills.read().has_handlers()

@@ -4828,29 +4828,28 @@ impl Consumer {
 		self.poll_expiry(waiter, true)
 	}
 
-	/// Whether the copy this cursor reads lost frames it has yet to read: aborted, released
-	/// short of them, or cut before them, registering `waiter` until it does. A route may still
-	/// bring them, which [`Self::poll_finished`] asks. Unlike it, a finished group parks rather
-	/// than answering, so a caller holding many polls none of them ready.
+	/// Once the copy this cursor reads closes, the error that took frames it has yet to read,
+	/// if any: aborted, or released short of them. Registers `waiter` for the close alone, so
+	/// a frame written wakes no one. A route may still bring them, which
+	/// [`Self::recoverable`] says and [`Self::poll_finished`] asks.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_lost(&self, waiter: &kio::Waiter) -> bool {
+	pub(crate) fn poll_lost(&self, waiter: &kio::Waiter) -> Poll<Option<Error>> {
+		ready!(self.cursor.state.poll_closed(waiter));
 		let index = self.cursor.index;
-		let lost = |state: &GroupState| {
-			state.past_cut(index)
-				|| match &state.outcome {
-					Outcome::Released(total, ..) => index < *total,
-					Outcome::Aborted(_) => true,
-					Outcome::Open | Outcome::Finished(..) => false,
-				}
-		};
-		match self.cursor.state.poll(waiter, |state| match lost(state) {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(())) => true,
-			Poll::Ready(Err(state)) => lost(&state),
-			Poll::Pending => false,
-		}
+		let state = self.cursor.state.read();
+		Poll::Ready(match &state.outcome {
+			_ if state.past_cut(index) => Some(Error::Evicted),
+			Outcome::Released(total, _, abort) if index < *total => Some(abort.error().clone()),
+			Outcome::Aborted(abort) => Some(abort.error().clone()),
+			Outcome::Open | Outcome::Finished(..) | Outcome::Released(..) => None,
+		})
+	}
+
+	/// Whether a route may bring back frames this cursor's copy lost, as a read would ask: it
+	/// resumes across routes, or its track holds another copy of the group or fetches one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn recoverable(&self) -> bool {
+		self.resumes() || (self.cursor.cache.track()).is_some_and(|track| track::recovers(&track, self))
 	}
 
 	/// Whether the group has aged past `budget` under the subscription it was handed out
