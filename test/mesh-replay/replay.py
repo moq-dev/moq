@@ -1109,22 +1109,19 @@ class Run:
             self.violation(report, "died", died)
 
     def paused(self, start: float, end: float) -> list[dict]:
-        """Readers that went quiet for longer than `stall` inside [start, end], the part of a pause
-        before `start` not counted. No fault ends a hold, so a pause that recovers on its own is
-        the failure, and `unfed` sees only a reader still stalled when the hold ends. A reader never
-        fed is `unfed`'s, and one still stalled from an earlier event is that event's strand."""
+        """Readers that went quiet for longer than `stall`, and read again, inside [start, end]. No
+        fault ends a hold, so a pause that recovers on its own is the failure. One that began
+        before `start` belongs to the earlier event, and one still going at `end` to `unfed`, which
+        also owns a reader never fed. A broadcast its relay does not show may be hidden on purpose."""
         rows = []
         for relay in self.relays.values():
-            known = max(start, min(end, relay.readout.status_at))
+            shows = relay.announced() if relay.proc.alive else None
             for path, state in relay.readout.paths.items():
-                if state.last is None or (relay.name, path) in self.strands:
+                if shows is None or path not in shows:
                     continue
                 longest = max(
-                    (finish - max(begin, start) for begin, finish, _ in state.gaps if finish >= start and begin <= end),
-                    default=0.0,
+                    (finish - begin for begin, finish, _ in state.gaps if start <= begin and finish <= end), default=0.0
                 )
-                # A pause still going counts up to the reader's latest status line.
-                longest = max(longest, min(end, max(known, state.last)) - max(state.last, start))
                 if longest > self.script.stall:
                     rows.append({"reader": relay.name, "path": path, "s": round(longest, 2)})
         return sorted(rows, key=lambda row: -row["s"])

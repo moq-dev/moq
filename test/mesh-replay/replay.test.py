@@ -539,37 +539,35 @@ class EventTest(unittest.TestCase):
 
 
 class HoldTest(unittest.TestCase):
-    def paused(self, paths, strands=(), stall=3.0, window=(100.0, 700.0), status_at=700.0):
-        readout = SimpleNamespace(paths=paths, status_at=status_at)
-        run = SimpleNamespace(
-            relays={"a": SimpleNamespace(name="a", readout=readout)},
-            strands={key: {} for key in strands},
-            script=SimpleNamespace(stall=stall),
+    def paused(self, paths, shown=None, stall=3.0, window=(100.0, 700.0)):
+        shown = list(paths) if shown is None else shown
+        relay = SimpleNamespace(
+            name="a", readout=SimpleNamespace(paths=paths), announced=lambda: shown, proc=SimpleNamespace(alive=True)
         )
+        run = SimpleNamespace(relays={"a": relay}, script=SimpleNamespace(stall=stall))
         return replay.Run.paused(run, *window)
 
     def test_a_pause_that_recovers_inside_the_hold_fails_it(self):
-        gap = replay.Follow(last=700.0, gaps=[(200.0, 204.5, 45)])
-        rows = self.paused({"replay/b/0": gap})
+        rows = self.paused({"replay/b/0": replay.Follow(gaps=[(200.0, 204.5, 45)])})
         self.assertEqual([(r["path"], r["s"]) for r in rows], [("replay/b/0", 4.5)])
         # At the threshold is not past it.
-        self.assertEqual(self.paused({"replay/b/0": replay.Follow(last=700.0, gaps=[(200.0, 203.0, 30)])}), [])
+        self.assertEqual(self.paused({"replay/b/0": replay.Follow(gaps=[(200.0, 203.0, 30)])}), [])
 
-    def test_only_the_part_of_a_pause_inside_the_hold_counts(self):
-        # The roll's settle left it 2.8s in; 1.2s of the pause fell inside the hold.
-        gap = replay.Follow(last=700.0, gaps=[(97.2, 101.2, 40)])
-        self.assertEqual(self.paused({"replay/b/0": gap}), [])
+    def test_a_pause_is_the_holds_only_when_it_began_and_ended_inside(self):
+        before = replay.Follow(gaps=[(90.0, 110.0, 200)])  # the roll's strand, recovering in the hold
+        after = replay.Follow(gaps=[(690.0, 710.0, 200)])  # still going at the end: unfed's
+        self.assertEqual(self.paused({"replay/b/0": before, "replay/b/1": after}), [])
 
-    def test_a_reader_never_fed_or_stalled_since_an_event_is_not_this_holds(self):
-        never = replay.Follow()
-        stalled = replay.Follow(last=90.0)
-        paths = {"replay/b/0": never, "replay/b/1": stalled}
-        self.assertEqual(self.paused(paths, strands=[("a", "replay/b/1")]), [])
-        # Unless an event never carried it: then its pause through the hold is the failure.
-        self.assertEqual([r["path"] for r in self.paused({"replay/b/1": stalled})], ["replay/b/1"])
+    def test_a_recovered_pause_counts_beside_a_later_stall(self):
+        follow = replay.Follow(gaps=[(200.0, 205.0, 50), (650.0, 750.0, 1000)])
+        self.assertEqual([r["s"] for r in self.paused({"replay/b/0": follow})], [5.0])
+
+    def test_a_broadcast_its_relay_does_not_show_is_not_paused(self):
+        follow = replay.Follow(gaps=[(200.0, 210.0, 100)])
+        self.assertEqual(self.paused({"replay/b/0": follow}, shown=[]), [])
 
     def test_every_pause_is_reported_not_the_five_worst(self):
-        paths = {f"replay/b/{n}": replay.Follow(last=700.0, gaps=[(200.0, 210.0, 100)]) for n in range(8)}
+        paths = {f"replay/b/{n}": replay.Follow(gaps=[(200.0, 210.0, 100)]) for n in range(8)}
         self.assertEqual(len(self.paused(paths)), 8)
 
     def test_a_hold_names_its_duration(self):
