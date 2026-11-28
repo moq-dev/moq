@@ -145,14 +145,11 @@ class NightlyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
-            for command in ("just", "cargo"):
+            for command in ("just", "cargo", "nix"):
                 stub = scratch / command
                 stub.write_text(
                     "#!/usr/bin/env bash\n"
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
-                    'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
-                    "[[ -z ${BENCH_LABEL:-} ]] ||\n"
-                    '    printf "%s %s\n" "$BENCH_KEEP_BUILDS" "$BENCH_BASE_BUILDS" >> "$NIGHTLY_CALLS.builds"\n'
                     # Nextest's bench profile writes a JUnit report with a case per filtered test,
                     # unless the test withholds the report or one test.
                     'if [[ ${NEXTEST_PROFILE:-} == bench && "$*" != "$NIGHTLY_NO_JUNIT" ]]; then\n'
@@ -167,16 +164,10 @@ class NightlyTest(unittest.TestCase):
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
-            # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS, and `gh run
-            # download` by logging it and failing unless NIGHTLY_KEPT is set.
+            # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS.
             gh = scratch / "gh"
             gh.write_text(
                 "#!/usr/bin/env bash\n"
-                "if [[ $2 == download ]]; then\n"
-                '    echo "$*" >> "$NIGHTLY_CALLS.download"\n'
-                "    [[ -n ${NIGHTLY_KEPT:-} ]]\n"
-                "    exit\n"
-                "fi\n"
                 "while [[ $1 != --jq ]]; do shift; done\n"
                 'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n'
             )
@@ -198,13 +189,25 @@ class NightlyTest(unittest.TestCase):
             )
             raw = scratch / "results" / "raw"
             self.raw = sorted(path.name for path in raw.iterdir()) if raw.exists() else []
-            self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
-            builds = Path(f"{calls}.builds")
-            lines = builds.read_text().splitlines() if builds.exists() else []
-            self.builds = [line.split(" ") for line in lines]
-            download = Path(f"{calls}.download")
-            self.downloads = download.read_text().splitlines() if download.exists() else []
-            return result, calls.read_text().splitlines() if calls.exists() else []
+            lines = calls.read_text().splitlines() if calls.exists() else []
+            # Each swole run's base, or "" unpaired, and its report path.
+            self.swole = []
+            for line in lines:
+                args = shlex.split(line)
+                if args[:2] == ["nix", "run"]:
+                    options = args[args.index("bench") + 1 : args.index("--", args.index("bench"))]
+                    base = options[0] if options[0] != "--report" else ""
+                    self.swole.append((base, options[options.index("--report") + 1]))
+            return result, lines
+
+    def swole_cargo(self, calls):
+        """The Cargo arguments of each swole run."""
+        runs = []
+        for call in calls:
+            args = shlex.split(call)
+            if args[:2] == ["nix", "run"]:
+                runs.append(args[args.index("--", args.index("bench")) + 1 :])
+        return runs
 
     def test_paired_base_is_the_previous_scheduled_nightly(self):
         # Nightly checks out shallowly, so the test builds the history it resolves against.
@@ -233,46 +236,19 @@ class NightlyTest(unittest.TestCase):
                 "rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.bases, {head})
-            # Each label keeps its executables; with no artifact named, none are fetched.
-            self.assertEqual(self.downloads, [])
-            self.assertEqual(len(self.builds), 7)
-            for keep, base in self.builds:
-                self.assertRegex(keep, r"/target/bench/builds/rust-uring/uring-\w+$")
-                self.assertEqual(base, "")
-            # The previous run's kept executables serve as each label's base.
-            result, _ = self.run_group(
-                "rust-uring",
-                cwd=repo,
-                BENCH_BASE="previous-nightly",
-                BENCH_BUILDS_ARTIFACT="builds-bench-rust-uring",
-                GITHUB_RUN_ID="2",
-                NIGHTLY_RUNS=runs,
-                NIGHTLY_KEPT="1",
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(len(self.downloads), 1)
-            self.assertRegex(self.downloads[0], r"^run download 1 --name builds-bench-rust-uring --dir \S+$")
-            for keep, base in self.builds:
-                label = keep.rsplit("/", 1)[1]
-                self.assertTrue(base.endswith(f"/target/bench/base-builds/rust-uring/rust-uring/{label}"), base)
-            # A previous run that kept none builds the base instead.
-            result, _ = self.run_group(
-                "rust-uring",
-                cwd=repo,
-                BENCH_BASE="previous-nightly",
-                BENCH_BUILDS_ARTIFACT="builds-bench-rust-uring",
-                GITHUB_RUN_ID="2",
-                NIGHTLY_RUNS=runs,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("kept no builds-bench-rust-uring; building the base", result.stderr)
-            self.assertEqual({base for _, base in self.builds}, {""})
-            self.assertEqual(self.bases, {head})
-            # A named revision reaches the runner as its commit.
+            # Each label pairs with the base and writes its own report.
+            self.assertEqual(len(self.swole), 7)
+            for base, path in self.swole:
+                self.assertEqual(base, head)
+                self.assertRegex(path, r"/results/swole/uring-\w+\.json$")
+            # A named revision reaches swole as its commit.
             result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.bases, {parent})
+            self.assertEqual({base for base, _ in self.swole}, {parent})
+            # Without a base, swole times this commit alone.
+            result, _ = self.run_group("rust-uring", cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual({base for base, _ in self.swole}, {""})
             result, calls = self.run_group(
                 "rust-uring",
                 cwd=repo,
@@ -309,31 +285,24 @@ class NightlyTest(unittest.TestCase):
     def test_bench_targets_share_one_invocation(self):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
-        release = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(release), 3)  # moq-net, its CPU clock, then kio.
-        # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
-        self.assertTrue(
-            any(
-                "-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
-                for call in release
-            )
+        self.assertEqual(
+            self.swole_cargo(calls),
+            [["--locked", "-p", "moq-net", "--features", "fuzz", "--benches"], ["--locked", "-p", "kio", "--benches"]],
         )
-        self.assertEqual(release[-1], "just gh criterion --no-fail-fast -p kio --bench *")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
         self.assertEqual(result.returncode, 0, result.stderr)
-        shared = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(shared), 1)
-        self.assertIn("--no-fail-fast", shared[0])
-        self.assertIn("--bench http_idle", shared[0])
-        self.assertIn("--bench chunk_interleaving", shared[0])
-        self.assertIn("--bench worker_turns", shared[0])
-        self.assertIn("-p moq-pattern", shared[0])
-        self.assertIn("--bench matching", shared[0])
-        self.assertIn("--bench containers", shared[0])
-        self.assertIn("-p moq-quic", shared[0])
-        self.assertIn("moq-quic/fuzz", shared[0])
-        self.assertIn("--bench wire", shared[0])
+        (shared,) = self.swole_cargo(calls)
+        for argument in ("http_idle", "chunk_interleaving", "worker_turns", "matching", "containers", "wire"):
+            self.assertIn(argument, shared)
+        self.assertIn("moq-stats/bench,moq-quic/fuzz", shared)
+        # swole finds a workspace of its own in the base's worktree only by an absolute path.
+        _, calls = self.run_group("rust-extra")
+        manifests = [
+            run[run.index("--manifest-path") + 1] for run in self.swole_cargo(calls) if "--manifest-path" in run
+        ]
+        self.assertEqual([Path(path).parent.name for path in manifests], ["qmux", "moq-auth"])
+        self.assertTrue(all(Path(path).is_absolute() for path in manifests), manifests)
 
     def test_every_cargo_bench_target_runs_nightly(self):
         covered = set()
@@ -342,10 +311,8 @@ class NightlyTest(unittest.TestCase):
             self.assertIn(f"recipe: gh nightly {group}\n", workflow)
             result, calls = self.run_group(group)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for call in calls:
-                args = shlex.split(call)
-                if args[:3] != ["just", "gh", "criterion"]:
-                    continue
+            for args in self.swole_cargo(calls):
+                call = shlex.join(args)
                 packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
                 packages += [Path(args[i + 1]).parent.name for i, arg in enumerate(args) if arg == "--manifest-path"]
                 targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
@@ -354,10 +321,10 @@ class NightlyTest(unittest.TestCase):
                     manifest = ROOT / "rs" / package / "Cargo.toml"
                     for bench in tomllib.loads(manifest.read_text()).get("bench", []):
                         names.add(bench["name"])
-                        if "*" in targets or bench["name"] in targets:
+                        if "--benches" in args or bench["name"] in targets:
                             covered.add((package, bench["name"]))
-                # Cargo rejects the whole invocation when any named target is missing.
-                self.assertEqual(set(targets) - names - {"*"}, set(), call)
+                # swole rejects the whole run when any named target is missing.
+                self.assertEqual(set(targets) - names, set(), call)
         declared = {
             (manifest.parent.name, bench["name"])
             for manifest in (ROOT / "rs").glob("*/Cargo.toml")
@@ -465,16 +432,14 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(missing, set(), "Nightly benchmark tests that no longer exist")
 
     def test_failed_release_build_does_not_hide_later_work(self):
-        _, calls = self.run_group("rust-bench")
-        build = next(
-            call.removeprefix("just ")
-            for call in calls
-            if call.startswith("just gh criterion") and "-p moq-net" in call
-        )
-        result, calls = self.run_group("rust-bench", build)
+        # One results directory for both runs, so the failing call names the same report.
+        with tempfile.TemporaryDirectory() as results:
+            _, calls = self.run_group("rust-bench", BENCH_RESULTS=results)
+            build = next(call for call in calls if call.startswith("nix run") and "-p moq-net" in call)
+            result, calls = self.run_group("rust-bench", build.removeprefix("nix "), BENCH_RESULTS=results)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
-        self.assertEqual(calls[-1], "just gh criterion --no-fail-fast -p kio --bench *")
+        self.assertIn("-p kio --benches", calls[-1])
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")

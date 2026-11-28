@@ -20,62 +20,42 @@ case "$1" in
         ;;
 esac
 
-# BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
-# same machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
-# That run kept its bench executables as the BENCH_BUILDS_ARTIFACT artifact. The cache
-# can't hold a linked executable, so reusing them saves relinking every target at the base.
-base_builds=
+# BENCH_BASE pairs every Rust benchmark with its build at that revision, timed on the same
+# machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
+base=
 if [[ -n ${BENCH_BASE:-} ]]; then
     if [[ $report != rust ]]; then
         echo "nightly: BENCH_BASE applies only to the Rust bench groups" >&2
         exit 2
     fi
     if [[ $BENCH_BASE == previous-nightly ]]; then
-        read -r base_run BENCH_BASE < <(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh" --run) || exit 1
-        if [[ -n ${BENCH_BUILDS_ARTIFACT:-} ]]; then
-            base_builds=$(git rev-parse --show-toplevel)/target/bench/base-builds/$1
-            rm -rf "$base_builds"
-            # A previous leg that ended before its builds kept none; the base is built instead.
-            if ! gh run download "$base_run" --name "$BENCH_BUILDS_ARTIFACT" --dir "$base_builds"; then
-                echo "nightly: run $base_run kept no $BENCH_BUILDS_ARTIFACT; building the base" >&2
-                base_builds=
-            fi
-        fi
+        BENCH_BASE=$(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh") || exit 1
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
-    # FETCH_HEAD, so the base is exported as the commit it resolved to.
+    # FETCH_HEAD, so the base is passed on as the commit it resolved to.
     if ! base=$(git rev-parse --verify --quiet "$BENCH_BASE^{commit}"); then
         git fetch --no-tags --depth=1 origin "$BENCH_BASE"
         base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
     fi
-    export BENCH_BASE=$base
 fi
 
-group=$1
 if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
     out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
-    builds=$root/target/bench/builds/$group
-    rm -rf "$builds"
     mkdir -p "$out"
-    export BENCH_RUNS="$out/criterion-runs.txt"
-    : >"$BENCH_RUNS"
-    rm -rf "$out/report.json" "$out/paired.json" "$out/raw"
-    mkdir -p "$out/raw"
+    rm -rf "$out/report.json" "$out/paired.json" "$out/raw" "$out/swole"
+    mkdir -p "$out/raw" "$out/swole"
 fi
 
 # shellcheck source=sh/checks.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
-# Each label keeps its executables for the next Nightly's base, under the directory
-# the workflow uploads.
-criterion() {
+# Time one label's benchmarks with swole, paired with the base when there is one, keeping
+# every measure in its report (see bench/README.md).
+swole() {
     local label=$1
     shift
-    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" \
-        BENCH_KEEP_BUILDS="$builds/$label" \
-        BENCH_BASE_BUILDS="${base_builds:+$base_builds/$group/$label}" \
-        just gh criterion "$@"
+    run nix run --inputs-from "$root" swole -- bench ${base:+"$base"} --report "$out/swole/$label.json" -- --locked "$@"
 }
 
 javascript() {
@@ -126,20 +106,17 @@ case "$1" in
             --features moq-audio/playback --lib --bin moq \
             -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
-    # Measured Cargo bench targets, all in the bench profile. A paired run builds and
-    # measures each group twice, so the groups split across jobs to fit an hour each.
+    # Cargo bench targets of swole's harness. A paired run builds and times each group
+    # twice, so the groups split across jobs to fit an hour each.
     rust-bench)
         # Fuzz exposes moq-net's codec benches, and moq-quic's plaintext crypto in rust-shared.
-        criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
-        # Measure the optional thread-CPU clock as well as the normal elapsed time, reusing that build.
-        SESSION_CPU=1 criterion net-cpu -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
-        # Measure each kio routine, including the contended bench's worker threads.
-        criterion kio --no-fail-fast -p kio --bench '*'
+        swole net -p moq-net --features fuzz --benches
+        swole kio -p kio --benches
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
-        # independently for each target. Keep the explicit targets: '*' would add coverage.
-        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
+        # independently for each target. Keep the explicit targets: --benches would add coverage.
+        swole shared -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
             -p moq-quic --features moq-stats/bench,moq-quic/fuzz \
             --bench http_idle --bench auth --bench http_auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
@@ -147,33 +124,31 @@ case "$1" in
             --bench streams --bench receive --bench endpoint --bench wire
         ;;
     rust-relay)
-        criterion relay -p moq-relay --features test-support --bench session
+        swole relay -p moq-relay --features test-support --bench session
         ;;
-    # Keep added coverage out of the rust-bench and rust-shared legs.
+    # Keep added coverage out of the rust-bench and rust-shared legs. qmux and moq-auth are
+    # selected by manifest, which swole finds in the base's worktree only by an absolute path.
     rust-extra)
-        criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
-        criterion msf -p moq-msf --bench catalog
+        swole qmux --manifest-path "$root/rs/qmux/Cargo.toml" --bench receive
+        swole msf -p moq-msf --bench catalog
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
-        criterion gst -p moq-gst --bench catalog
-        # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
-        # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        swole gst -p moq-gst --bench catalog
+        swole extra -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
             --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
             --bench protect --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench sync --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include \
             --bench openh264
-        criterion audio-capture -p moq-audio --features capture --bench capture
+        swole audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
-        # The concurrent cases' latency percentiles stay in the run's stdout.
-        criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify --bench jwt
+        swole auth --manifest-path "$root/rs/moq-auth/Cargo.toml" --bench verify --bench jwt
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
         # validation instead of hiding behind the Tokio target's measurements.
         for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers web_headers; do
-            criterion "uring-$target" -p moq-uring --bench "$target"
+            swole "uring-$target" -p moq-uring --bench "$target"
         done
         ;;
     js)

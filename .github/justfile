@@ -133,9 +133,8 @@ test:
     for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
     exit "$fail"
 
-# Tooling integration tests and selector timing, run nightly outside the merge gate.
+# Slow tooling tests and selector timing, run nightly outside the merge gate.
 test-integration:
-    bash sh/local.sh python3 bench/build.slow.test.py
     python3 sh/dispatch-query.test.py --bench
 
 # Have Maven Central's Portal validate a Maven repository with a rust2 checkout's ffi/release/central.sh, then drop it unpublished.
@@ -194,11 +193,6 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
-
-# Measure selected Criterion targets through the existing benchmark lifecycle.
-[positional-arguments]
-criterion *args:
-    bench/run.sh --criterion "$@"
 
 # Convert, validate, and stage nightly benchmark history.
 [positional-arguments]

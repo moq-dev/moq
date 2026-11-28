@@ -9,6 +9,7 @@ import math
 import os
 import re
 import statistics
+import subprocess
 import time
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
@@ -64,93 +65,116 @@ def write(path, entries):
     path.write_text(json.dumps(entries, indent=2) + "\n")
 
 
+def swole_reports(directory):
+    """Each label's swole `--report`, by the label its file is named for."""
+    paths = sorted((directory / "swole").glob("*.json"))
+    if not paths:
+        raise ValueError(f"no swole reports in {directory / 'swole'}")
+    reports = {}
+    for path in paths:
+        data = json.loads(path.read_text())
+        if data.get("schema_version") != 1 or data.get("mode") != "bench":
+            raise ValueError(f"not a swole bench report of schema version 1: {path}")
+        reports[path.stem] = data
+    return reports
+
+
+def nanoseconds(side, label):
+    """A side's median nanoseconds per call."""
+    time = side["time"]
+    if time.get("unit") != "ns":
+        raise ValueError(f"unexpected time unit in {label}: {time.get('unit')!r}")
+    return value(time["value"])
+
+
 def rust(directory):
-    manifest = directory / "criterion-runs.txt"
-    runs = [Path(line) for line in manifest.read_text().splitlines() if line]
-    if not runs:
-        raise ValueError(f"no measured Criterion runs in {manifest}")
     entries = []
-    for run in runs:
-        metadata = json.loads((run / "metadata.json").read_text())
-        if metadata["mode"] != "--criterion":
-            raise ValueError(f"not a measured Criterion run: {run}")
-        label = metadata["environment"].get("BENCH_LABEL")
-        if not isinstance(label, str) or not label:
-            raise ValueError(f"missing Criterion source label: {run}")
-        estimates = sorted((run / "criterion").glob("**/new/estimates.json"))
-        if not estimates:
-            raise ValueError(f"Criterion produced no measured estimates: {run}")
-        for path in estimates:
-            benchmark = json.loads(path.with_name("benchmark.json").read_text())
-            estimate = json.loads(path.read_text())["mean"]
-            interval = estimate["confidence_interval"]
-            low, high = value(interval["lower_bound"]), value(interval["upper_bound"])
+    for label, data in swole_reports(directory).items():
+        timed = [(name, benchmark["head"]) for name, benchmark in data["benchmarks"].items() if "head" in benchmark]
+        # A label that timed nothing at this commit, as a target whose every case skipped, fails.
+        if not timed:
+            raise ValueError(f"swole timed no benchmark at this commit for {label}")
+        for name, head in timed:
             entries.append(
                 {
-                    "name": f"rust/{label}/{benchmark['full_id']}",
+                    "name": f"rust/{label}/{name}",
                     "unit": "ns",
-                    "value": value(estimate["point_estimate"]),
-                    "range": f"{low:.4g}..{high:.4g}",
-                    # Criterion does not record a target's measurement, so the clock is left to the README.
-                    "extra": f"Mean nanoseconds per iteration; {metadata['revision']}",
+                    "value": nanoseconds(head, label),
+                    # Times compare only on hosts sharing a fingerprint.
+                    "extra": f"Median nanoseconds per call; {data['fingerprint']}",
                 }
             )
     return checked(entries)
 
 
-def paired(directory):
-    """Combine each run's paired comparison under its trend series names; None when no run was paired."""
-    runs = [Path(line) for line in (directory / "criterion-runs.txt").read_text().splitlines() if line]
-    metadata = [json.loads((run / "metadata.json").read_text()) for run in runs]
-    bases = {data["base"] for data in metadata}
-    if bases == {""}:
+# A paired change whose whole 95% interval lies beyond this fails the nightly. Load that slows
+# one side more than the other shifts a change past what its interval holds, which a hosted
+# runner's neighbors can do, so the bar stays wide.
+THRESHOLD_PCT = 10
+
+
+def verdict(change):
+    if change["lower"] > 1 + THRESHOLD_PCT / 100:
+        return "regression"
+    if change["upper"] < 1 - THRESHOLD_PCT / 100:
+        return "faster"
+    return "unchanged"
+
+
+def paired(directory, commit):
+    """Combine each label's paired times under its trend series names; None when no label was paired."""
+    reports = swole_reports(directory)
+    bases = {data.get("base") for data in reports.values()}
+    if bases == {None}:
         return None
     if len(bases) != 1:
-        raise ValueError(f"Criterion runs disagree on their paired base: {sorted(bases)}")
-    combined = {"unavailable": [], "cases": []}
-    for run, data in zip(runs, metadata):
-        comparison = json.loads((run / "paired.json").read_text())
-        for key in ("commit", "base", "threshold_pct", "rounds"):
-            if combined.setdefault(key, comparison[key]) != comparison[key]:
-                raise ValueError(f"paired run disagrees on {key}: {run}")
-        label = data["environment"]["BENCH_LABEL"]
-        combined["unavailable"] += [
-            {"name": f"rust/{label}/{entry['target']}", "reason": entry["reason"]}
-            for entry in comparison["unavailable"]
-        ]
-        for case in comparison["cases"]:
-            case = dict(case)
-            combined["cases"].append({"name": f"rust/{label}/{case.pop('id')}", **case})
-    return combined
+        raise ValueError(f"swole reports disagree on their paired base: {sorted(map(str, bases))}")
+    cases = []
+    for label, data in reports.items():
+        for name, benchmark in data["benchmarks"].items():
+            base, head = benchmark.get("base"), benchmark.get("head")
+            case = {
+                "name": f"rust/{label}/{name}",
+                "base_ns": nanoseconds(base, label) if base else None,
+                "current_ns": nanoseconds(head, label) if head else None,
+            }
+            if "change" in benchmark:
+                change = {key: value(benchmark["change"][key]) for key in ("value", "lower", "upper")}
+                case.update(change=change, verdict=verdict(change))
+            else:
+                case["verdict"] = "removed" if head is None else "new"
+            cases.append(case)
+    return {"commit": commit, "base": bases.pop(), "threshold_pct": THRESHOLD_PCT, "cases": cases}
+
+
+def change_pct(ratio):
+    return f"{100 * (ratio - 1):+.1f}%"
 
 
 def gate(directory):
-    """Print confirmed paired regressions and what was not compared.
-
-    Nonzero on a regression or a comparison that could not run.
-    """
+    """Print paired regressions; nonzero on any."""
     path = directory / "paired.json"
     if not path.exists():
         raise ValueError(f"no paired comparison in {directory}")
     comparison = json.loads(path.read_text())
     regressions = [case for case in comparison["cases"] if case["verdict"] == "regression"]
-    identical = sum(case["verdict"] == "identical" for case in comparison["cases"])
     lines = [
         f"Paired comparison of {comparison['commit'][:9]} against {comparison['base'][:9]}: "
-        f"{len(regressions)} confirmed regressions, {len(comparison['unavailable'])} targets not compared, "
-        f"{identical} cases not compared as the same build on both sides",
+        f"{len(regressions)} regressions beyond {comparison['threshold_pct']}%",
         "",
     ]
     for case in regressions:
-        rounds = ", ".join(f"{delta:+.1f}%" for delta in case["rounds"]["paired_deltas_pct"])
-        lines.append(f"- `{case['name']}`: {case['rounds']['delta_pct']:+.1f}% (rounds {rounds})")
-    lines += [f"- `{entry['name']}` not compared: {entry['reason']}" for entry in comparison["unavailable"]]
+        change = case["change"]
+        lines.append(
+            f"- `{case['name']}`: {change_pct(change['value'])} "
+            f"(95% interval {change_pct(change['lower'])} to {change_pct(change['upper'])})"
+        )
     text = "\n".join(lines) + "\n"
     print(text, end="")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as stream:
             stream.write(text)
-    return 1 if regressions or comparison["unavailable"] else 0
+    return 1 if regressions else 0
 
 
 def measurement_unit(column):
@@ -318,7 +342,8 @@ def kixel(head, bases):
         result = {}
         for entry in checked(entries):
             benchmark, _, column = entry["name"].rpartition("/")
-            if not benchmark or measurement_unit(column) != entry["unit"]:
+            # A CSV column is an identifier; a swole benchmark's name holds `::` and brackets.
+            if not benchmark or not re.fullmatch(r"\w+", column) or measurement_unit(column) != entry["unit"]:
                 benchmark, measure = entry["name"], MEASURES.get(entry["unit"], entry["unit"])
             else:
                 measure = column
@@ -355,7 +380,7 @@ def nightly_metrics(directory):
             bases.setdefault(comparison["base"], []).extend(
                 {"name": case["name"], "unit": "ns", "value": case["base_ns"]} for case in measured
             )
-    # A comparison of only identical builds measured no base.
+    # A comparison whose base timed nothing, as one from before swole's harness, adds no base.
     return kixel(head, {commit: entries for commit, entries in bases.items() if entries}) if head else None
 
 
@@ -456,17 +481,22 @@ def table(rows):
 
 def paired_table(cases):
     body = []
-    for case in sorted(cases, key=lambda case: -abs(case.get("delta_pct") or 0)):
+    for case in sorted(cases, key=lambda case: -abs(case["change"]["value"] - 1) if "change" in case else 0):
         sides = [number(case[side], "ns") if case[side] is not None else "" for side in ("base_ns", "current_ns")]
         status = {"regression": "worse", "faster": "better"}.get(case["verdict"], "")
-        change = f"{case['delta_pct']:+.1f}%" if "delta_pct" in case else case["verdict"]
-        rounds = " ".join(f"{delta:+.1f}%" for delta in case["rounds"]["paired_deltas_pct"]) if "rounds" in case else ""
+        if change := case.get("change"):
+            median, interval = (
+                change_pct(change["value"]),
+                f"{change_pct(change['lower'])} to {change_pct(change['upper'])}",
+            )
+        else:
+            median, interval = case["verdict"], ""
         body.append(
             f'<tr class="paired"><td>{html.escape(case["name"])}<td>{sides[0]}<td>{sides[1]}'
-            f'<td class="{status}">{change}<td>{rounds}'
+            f'<td class="{status}">{median}<td>{interval}'
         )
     return (
-        "<table><thead><tr><th>Series<th>Base<th>Current<th>Screen<th>Rounds</thead><tbody>"
+        "<table><thead><tr><th>Series<th>Base<th>Current<th>Change<th>95% interval</thead><tbody>"
         + "\n".join(body)
         + "</tbody></table>"
     )
@@ -474,13 +504,10 @@ def paired_table(cases):
 
 # Paired verdicts by section: open sections hold what needs a look tonight.
 PAIRED_SECTIONS = [
-    ({"regression"}, "Confirmed regressions", True),
-    ({"unavailable"}, "Not compared", True),
-    ({"faster"}, "Faster in the screen", True),
-    ({"unconfirmed", "noise"}, "Slower in the screen, not confirmed", False),
+    ({"regression"}, "Regressions", True),
+    ({"faster"}, "Faster", True),
     ({"new", "removed"}, "Measured on one side only", False),
     ({"unchanged"}, "Unchanged", False),
-    ({"identical"}, "Same build on both sides, not compared", False),
 ]
 
 
@@ -492,7 +519,7 @@ def paired_section(directory):
     sources = json.loads(path.read_text())["sources"]
     if not sources:
         return '<h2>Paired comparison</h2><p class="muted">No paired comparison finished on the latest nightly.</p>'
-    cases, notes, unavailable = [], [], []
+    cases, notes = [], []
     for source, comparison in sorted(sources.items()):
         commit, base = comparison["commit"], comparison["base"]
         notes.append(
@@ -500,20 +527,13 @@ def paired_section(directory):
             f"{base[:9]}...{commit[:9]}</a>"
         )
         cases += [{**case, "name": f"{source}/{case['name']}"} for case in comparison["cases"]]
-        unavailable += [
-            f"<li>{html.escape(source)}/{html.escape(entry['name'])}: {html.escape(entry['reason'])}"
-            for entry in comparison["unavailable"]
-        ]
-    threshold, rounds = comparison["threshold_pct"], comparison["rounds"]
+    threshold = comparison["threshold_pct"]
     parts = [
         f"""<h2>Paired comparison</h2>
-<p>Each source built the previous nightly's commit beside this one and ran both on one runner, alternating
-which went first. A quick screen flags a change beyond {threshold}%; each slowdown then reruns in {rounds}
-alternating rounds of longer measurements, and fails the nightly when every round is slower and their median
-exceeds {threshold}%. {"; ".join(notes)}</p>"""
+<p>Each source built the previous nightly's commit beside this one and timed both on one runner with swole,
+in alternating pairs of samples. A change is the median of the pairs' ratios with its 95% interval, and fails
+the nightly when the whole interval is more than {threshold}% slower. {"; ".join(notes)}</p>"""
     ]
-    if unavailable:
-        parts.append(f'<p class="worse">Targets not compared:</p><ul>{"".join(unavailable)}</ul>')
     for verdicts, label, flagged in PAIRED_SECTIONS:
         rows = [case for case in cases if case["verdict"] in verdicts]
         if rows or flagged:
@@ -656,7 +676,8 @@ def main():
     args = parser.parse_args()
     if args.command == "rust":
         write(args.output, rust(args.directory))
-        if (comparison := paired(args.directory)) is not None:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        if (comparison := paired(args.directory, commit)) is not None:
             args.output.with_name("paired.json").write_text(json.dumps(comparison, indent=2) + "\n")
     elif args.command == "gate":
         raise SystemExit(gate(args.directory))

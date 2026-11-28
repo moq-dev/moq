@@ -528,25 +528,6 @@ mutants *args:
 build:
     bash sh/local.sh cargo build --locked
 
-# Run the comparable epoll and io_uring UDP matrices.
-[positional-arguments]
-bench-udp *args:
-    bash sh/local.sh cargo bench -p moq-uring --bench udp_tokio -- "$@"
-    bash sh/local.sh cargo bench -p moq-uring --bench udp_uring -- "$@"
-
-# Measure a QUIC echo through the io_uring worker, ablating receive
-# batching, GRO, and GSO one at a time. Linux 6.12+ (skips loudly otherwise).
-[positional-arguments]
-bench-echo *args:
-    bash sh/local.sh cargo bench -p moq-uring --bench echo_quic -- "$@"
-
-# Measure a full moq-lite session (publisher to subscriber) through the
-# io_uring worker, same ablations and per-iteration unit as bench-echo.
-# Linux 6.12+ (skips loudly otherwise).
-[positional-arguments]
-bench-session *args:
-    bash sh/local.sh cargo bench -p moq-uring --bench session_lite -- "$@"
-
 # Publish crates before proposing the next release, so merged versions aren't proposed again.
 release:
     release-plz release --git-token "$GITHUB_TOKEN"
@@ -591,7 +572,7 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
-# Count the deterministic Criterion benches' instructions under stock Valgrind with swole
+# Count the deterministic benches' instructions under stock Valgrind with swole
 # (x86-64 Linux), as CI's nightly count does: `just rs instructions run --out metrics.json`,
 # `just rs instructions compare <base>` for each bench's change since a commit, or `just rs
 # instructions fingerprint`. `--benchmarks <file>` counts, and builds the targets of, only the
@@ -604,38 +585,3 @@ instructions *args:
 [positional-arguments]
 bench-tests *args:
     bash sh/rs/nextest.sh cargo nextest run --locked --release --success-output immediate "$@"
-
-# Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
-[positional-arguments]
-bench-rtmp *args:
-    bash sh/local.sh cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
-
-# Refresh one credential across unrelated sessions and held token counts.
-[positional-arguments]
-bench-relay-auth *args:
-    bash sh/local.sh cargo bench --locked -p moq-relay --bench auth -- "$@"
-
-# One relay's stats tick, plus the decode and aggregate tables. `--test` runs each tick once; the tables ignore it and print every configuration.
-[positional-arguments]
-bench-stats *args:
-    bash sh/local.sh cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode --bench aggregate -- "$@"
-
-# Exact TS receiver scheduling across PID and queued-unit fanout.
-[positional-arguments]
-bench-ts-schedule *args:
-    bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
-
-# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
-[positional-arguments]
-bench-ts-programs *args:
-    cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
-
-# Sweep container export tracks and queued frames independently.
-[positional-arguments]
-bench-export *args:
-    bash sh/local.sh cargo bench --locked -p moq-mux --bench export -- "$@"
-
-# Requested-pad catalog gating and resolved EOS lookup across renditions x touched pads.
-[positional-arguments]
-bench-gst-catalog *args:
-    bash sh/local.sh cargo bench -p moq-gst --bench catalog "$@"

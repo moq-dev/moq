@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Reduce paired relay rounds and Criterion runs; retain dispersion instead of implying single-run precision."""
+"""Reduce paired relay rounds; retain dispersion instead of implying single-run precision."""
 
 import argparse
 import json
 import math
-import shutil
 import statistics
-from collections import Counter
 from pathlib import Path
 
 METRICS = (
@@ -127,180 +125,10 @@ def load(directory, case):
     ]
 
 
-def criterion_cases(directory):
-    """Read exact IDs from a fresh target's discovery measurements."""
-    ids = set()
-    for path in directory.glob("**/discovery/benchmark.json"):
-        benchmark = json.loads(path.read_text())["full_id"]
-        if not isinstance(benchmark, str) or not benchmark or any(c in benchmark for c in "\t\r\n"):
-            raise ValueError(f"invalid Criterion full_id in {path}: {benchmark!r}")
-        ids.add(benchmark)
-    if not ids:
-        raise ValueError(f"no Criterion benchmark cases found in {directory}")
-    return sorted(ids)
-
-
-def criterion_baseline(directory, discovery, benchmark):
-    """Place the exact baseline at the current revision's Criterion directory."""
-    sources = [
-        path.parent
-        for path in directory.glob("**/base/benchmark.json")
-        if json.loads(path.read_text())["full_id"] == benchmark
-    ]
-    targets = [
-        path.parent.parent.relative_to(discovery)
-        for path in discovery.glob("**/discovery/benchmark.json")
-        if json.loads(path.read_text())["full_id"] == benchmark
-    ]
-    if len(sources) != 1 or len(targets) != 1:
-        raise ValueError(f"expected one baseline and discovery case for {benchmark!r}")
-    destination = directory / targets[0] / "base"
-    if sources[0] != destination:
-        shutil.copytree(sources[0], destination, dirs_exist_ok=True)
-
-
-# A paired case beyond this change is flagged, and fails the nightly only when its rounds agree.
-# Byte-identical builds measured up to 12% apart in A/A runs, so those are not compared, and
-# builds of unchanged source up to 10% apart; see bench/README.md#paired-comparison.
-THRESHOLD_PCT = 10
-# Each alternating round costs seconds per case, so a noisy night confirms only its worst slowdowns.
-CONFIRMATIONS = 20
-
-
-def criterion_means(home):
-    """Map each (target, full ID) measured under HOME/<package>/<target>/ to its mean nanoseconds."""
-    means = {}
-    for path in home.glob("*/*/**/new/estimates.json"):
-        benchmark = json.loads(path.with_name("benchmark.json").read_text())["full_id"]
-        if not isinstance(benchmark, str) or not benchmark or any(c in benchmark for c in "\t\r\n"):
-            raise ValueError(f"invalid Criterion full_id in {path}: {benchmark!r}")
-        key = ("/".join(path.relative_to(home).parts[:2]), benchmark)
-        if key in means:
-            raise ValueError(f"duplicate Criterion case {key} in {home}")
-        mean = json.loads(path.read_text())["mean"]["point_estimate"]
-        if isinstance(mean, bool) or not isinstance(mean, (int, float)) or not math.isfinite(mean) or mean <= 0:
-            raise ValueError(f"invalid Criterion mean in {path}: {mean!r}")
-        means[key] = mean
-    return means
-
-
-def percent(base, current):
-    return 100 * (current / base - 1)
-
-
-def criterion_screen(run):
-    """The quick screen's slowdowns past the threshold, worst first, up to the confirmation budget."""
-    base, current = criterion_means(run / "criterion-base"), criterion_means(run / "criterion")
-    slower = sorted(((percent(base[key], current[key]), key) for key in base.keys() & current.keys()), reverse=True)
-    return [key for delta, key in slower if delta > THRESHOLD_PCT][:CONFIRMATIONS]
-
-
-def criterion_paired(run):
-    """Classify every case from the quick screen and the alternating confirmation rounds."""
-    metadata = json.loads((run / "metadata.json").read_text())
-    rounds = metadata["rounds"]
-    base, current = criterion_means(run / "criterion-base"), criterion_means(run / "criterion")
-    unavailable = []
-    if (run / "paired-unavailable.tsv").exists():
-        for line in (run / "paired-unavailable.tsv").read_text().splitlines():
-            target, reason = line.split("\t", 1)
-            unavailable.append({"target": target, "reason": reason})
-    blocked = {entry["target"] for entry in unavailable}
-    identical_path = run / "paired-identical.txt"
-    identical = set(identical_path.read_text().splitlines()) if identical_path.exists() else set()
-    confirmed = {}
-    lines = (run / "confirm.tsv").read_text().splitlines() if (run / "confirm.tsv").exists() else []
-    for index, line in enumerate(lines, 1):
-        key = tuple(line.split("\t", 1))
-        if key[0] in blocked:
-            continue
-        deltas = []
-        for number in range(1, rounds + 1):
-            sides = [
-                criterion_means(run / "confirm" / str(index) / f"round-{number}" / side).get(key)
-                for side in ("base", "current")
-            ]
-            if None in sides:
-                raise ValueError(f"confirmation round {number} did not measure {key}")
-            deltas.append(percent(*sides))
-        confirmed[key] = summarize(deltas)
-    cases = []
-    for key in sorted(base.keys() | current.keys()):
-        target, benchmark = key
-        case = {"target": target, "id": benchmark, "base_ns": base.get(key), "current_ns": current.get(key)}
-        if key not in current:
-            case["verdict"] = "removed"
-        elif target in identical:
-            case["verdict"] = "identical"
-        elif key not in base:
-            case["verdict"] = "unavailable" if target in blocked else "new"
-        else:
-            case["delta_pct"] = delta = percent(base[key], current[key])
-            if key in confirmed:
-                case["rounds"] = confirmed[key]
-                # Every round strictly slower, so a tie or a single fast round rejects it at any round count.
-                slower = all(delta > 0 for delta in case["rounds"]["paired_deltas_pct"])
-                case["verdict"] = "regression" if slower and case["rounds"]["delta_pct"] > THRESHOLD_PCT else "noise"
-            elif delta > THRESHOLD_PCT:
-                case["verdict"] = "unavailable" if target in blocked else "unconfirmed"
-            elif delta < -THRESHOLD_PCT:
-                case["verdict"] = "faster"
-            else:
-                case["verdict"] = "unchanged"
-        cases.append(case)
-    return {
-        "commit": metadata["revision"],
-        "base": metadata["base"],
-        "threshold_pct": THRESHOLD_PCT,
-        "rounds": rounds,
-        "unavailable": unavailable,
-        "cases": cases,
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--criterion-cases", action="store_true", help="list full IDs from isolated discovery samples")
-    parser.add_argument(
-        "--criterion-baseline",
-        nargs=2,
-        metavar=("DISCOVERY", "ID"),
-        help="align an exact baseline with current discovery",
-    )
-    parser.add_argument("--criterion-screen", action="store_true", help="list a paired run's slowdowns to confirm")
-    parser.add_argument(
-        "--criterion-paired", action="store_true", help="classify a paired run's cases into paired.json"
-    )
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
-    if args.criterion_cases:
-        print("\n".join(criterion_cases(args.directory)))
-        return
-    if args.criterion_screen:
-        for target, benchmark in criterion_screen(args.directory):
-            print(f"{target}\t{benchmark}")
-        return
-    if args.criterion_paired:
-        result = criterion_paired(args.directory)
-        (args.directory / "paired.json").write_text(json.dumps(result, indent=2) + "\n")
-        verdicts = Counter(case["verdict"] for case in result["cases"])
-        print(
-            f"\nPaired comparison against {result['base']}: "
-            + ", ".join(f"{count} {verdict}" for verdict, count in sorted(verdicts.items()))
-        )
-        for case in result["cases"]:
-            if case["verdict"] == "regression":
-                print(
-                    f"REGRESSION {case['target']} {case['id']}: "
-                    f"{case['rounds']['delta_pct']:+.1f}% over {result['rounds']} rounds"
-                )
-        for entry in result["unavailable"]:
-            print(f"UNAVAILABLE {entry['target']}: {entry['reason']}")
-        return
-    if args.criterion_baseline:
-        discovery, benchmark = args.criterion_baseline
-        criterion_baseline(args.directory, Path(discovery), benchmark)
-        return
     for case in cases(args.directory):
         result = reduce(load(args.directory, case))
         (args.directory / f"comparison-{case.replace('/', '-')}.json").write_text(json.dumps(result, indent=2) + "\n")

@@ -45,14 +45,16 @@ default:
 dev:
     just demo
 
-# Benchmark the current tree, or compare it with a commit: `just bench origin/main`.
-# TRANSPORTS picks what chat and fanout dial. Example: `just bench origin/main ws`.
-bench $BASE="" $TRANSPORTS="quic ws wss tcp tls":
-    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
+# Time the Cargo bench targets with swole, alone or paired with a commit:
+# `just bench origin/main -- -p moq-net --features fuzz --bench varint`.
+[positional-arguments]
+bench *args:
+    bench/lock.sh nix run --inputs-from . swole -- bench "$@"
 
-# Run only the relay workloads, with the same paired rounds as `bench`.
+# Run the relay workloads, or compare them with a commit in paired rounds.
+# TRANSPORTS picks what chat and fanout dial. Example: `just bench-relay origin/main ws`.
 bench-relay $BASE="" $TRANSPORTS="quic ws wss tcp tls":
-    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh --relay "$BASE"
+    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
 
 # Compare admitted suites across checkouts and worker counts; see bench/README.md.
 [positional-arguments]

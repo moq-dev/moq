@@ -126,8 +126,8 @@ measurement to finish. Counter deltas stay in the run's log beside the timing
 series in the nightly `rust-shared` group.
 
 ```bash
-just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
-just rs bench-echo
+just bench -- -p moq-uring --bench udp_tokio --bench udp_uring
+just bench -- -p moq-uring --bench echo_quic
 ```
 
 `benchmark_socket_queues` (ignored integration tests, run nightly) attributes
