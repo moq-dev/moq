@@ -8,7 +8,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Timestamp, Version, frame, origin, track};
 
-use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,20 +53,22 @@ async fn a_segmented_frame_crosses_whole() {
 		subscribed(&track).await;
 
 		// Two frames: one read whole, one streamed.
-		let mut group = track.append_next().unwrap();
+		let info = frame::Info {
+			size: SIZE as u64,
+			timestamp: Timestamp::ZERO,
+		};
+		let mut group: Option<moq_net::group::Producer> = None;
 		for _ in 0..2 {
-			let mut frame = group
-				.create_frame(frame::Info {
-					size: SIZE as u64,
-					timestamp: Timestamp::ZERO,
-				})
-				.unwrap();
+			let mut frame = match group.take() {
+				None => track.append_frame(info).unwrap(),
+				Some(group) => group.create_frame(info).unwrap(),
+			};
 			for chunk in payload.chunks(300_000) {
 				frame.write(Bytes::copy_from_slice(chunk)).unwrap();
 			}
-			group = frame.finish().unwrap();
+			group = Some(frame.finish().unwrap());
 		}
-		group.finish().unwrap();
+		group.unwrap().finish().unwrap();
 
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

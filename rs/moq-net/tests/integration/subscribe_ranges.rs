@@ -34,9 +34,8 @@ fn timed() -> Info {
 }
 
 fn write_group(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-	group
-		.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+	let group = track
+		.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 		.unwrap();
 	group.finish().unwrap();
 }
@@ -301,9 +300,8 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..history {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+		let group = track
+			.create_group(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 	}
@@ -436,9 +434,9 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		.await
 		.expect("the narrowed range never reached the publisher");
 		reader.update(initial.with_ranges([support::keys(0..)])).unwrap();
-		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(6).unwrap(), b"later".as_slice())
+		let group = fixture
+			.track
+			.create_group(Timestamp::from_millis(6).unwrap(), b"later".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(next(&mut reader).await, Some(6), "relay={relay}");
@@ -507,9 +505,9 @@ async fn draft22_carries_time_ends_as_group_ids() {
 async fn draft22_can_widen_while_the_current_group_is_quiet() {
 	for relay in [false, true] {
 		let fixture = range_fixture(relay).await;
-		let mut quiet = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
-		quiet
-			.write_frame(Timestamp::from_millis(6).unwrap(), b"head".as_slice())
+		let quiet = fixture
+			.track
+			.create_group(Timestamp::from_millis(6).unwrap(), b"head".as_slice())
 			.unwrap();
 		let mut live = subscribe(&fixture.remote, live()).await;
 		let mut current = kio::clock::timeout(TIMEOUT, live.recv_group())
@@ -593,9 +591,9 @@ async fn draft18_updates_narrow_then_widen() {
 		.await
 		.unwrap_or_else(|_| panic!("{version} relay={relay}: narrowing did not reach the publisher"));
 		for key in 6..8 {
-			let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
+			let group = fixture
+				.track
+				.create_group(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -645,9 +643,9 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 				reader.poll_recv_group(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Ok(None))
 			));
-			let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(6).unwrap(), b"sibling".as_slice())
+			let group = fixture
+				.track
+				.create_group(Timestamp::from_millis(6).unwrap(), b"sibling".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 			assert_eq!(next(&mut sibling).await, Some(6), "{version} relay={relay}");
@@ -674,9 +672,9 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			)
 			.await
 			.unwrap_or_else(|_| panic!("{version} relay={relay}: empty demand retained a wire subscription"));
-			let mut group = fixture.track.create_group(moq_net::group::Info { start: 7 }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(7).unwrap(), b"resumed".as_slice())
+			let group = fixture
+				.track
+				.create_group(Timestamp::from_millis(7).unwrap(), b"resumed".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 			reader.update(live).unwrap();
@@ -734,9 +732,9 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			.await
 			.unwrap_or_else(|_| panic!("relay={relay}: narrowing to {future} stalled"));
 			for key in start..future {
-				let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
-				group
-					.write_frame(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
+				let group = fixture
+					.track
+					.create_group(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
 					.unwrap();
 				group.finish().unwrap();
 			}
@@ -870,14 +868,14 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 		let name = format!("{version} {order:?} budget={budget:?}");
 		let fixture = range_fixture_history(version, true, 0).await;
 		for key in (0..=9).filter(|key| *key != ABSENT) {
-			let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
+			let group = fixture
+				.track
+				.create_group(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+				.unwrap();
 			if key == DROPPED {
 				group.abort(moq_net::Error::App(1)).unwrap();
 				continue;
 			}
-			group
-				.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
-				.unwrap();
 			group.finish().unwrap();
 		}
 
@@ -915,12 +913,9 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 		for _ in 0..WANT.len() - 1 {
 			got.extend(next(&mut reader).await);
 		}
-		let mut group = fixture
+		let group = fixture
 			.track
-			.create_group(moq_net::group::Info { start: LIVE_MILLIS })
-			.unwrap();
-		group
-			.write_frame(Timestamp::from_millis(LIVE_MILLIS).unwrap(), b"x".as_slice())
+			.create_group(Timestamp::from_millis(LIVE_MILLIS).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 		let _finished = fixture.track.clone().finish().unwrap();

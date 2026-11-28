@@ -46,7 +46,7 @@ use moq_net::{
 use crate::support::harness::{self, MockConnectOptions, MockPair, connect_mock};
 use crate::support::mock::create_mock_session_pair;
 use crate::support::schedule::{self, Schedule};
-use crate::support::{self, AppendNext, AtStart, Rng};
+use crate::support::{self, AppendNext, Rng};
 
 const VERSION: &str = "moq-lite-07-wip";
 
@@ -201,8 +201,7 @@ fn publish(origin: &origin::Producer, path: &str) -> Live {
 	let route = origin.route(path, origin::RouteOptions::hidden()).unwrap();
 	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = route.broadcast().create_track(TRACK, info).unwrap();
-	let mut group = track.append_next().unwrap();
-	group.write_frame(group.at_start(), path.as_bytes()).unwrap();
+	let group = track.append_next(path.as_bytes()).unwrap();
 	group.finish().unwrap();
 	route.announce().unwrap();
 	Live { route, _track: track }

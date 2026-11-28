@@ -1,6 +1,6 @@
 //! A snapshot reader on a received track never waits on a hole the subscription still owes.
 use moq_json::snapshot;
-use moq_net::{fuzz, group, track};
+use moq_net::{fuzz, track};
 use serde_json::{Value, json};
 use std::{task::Poll, time::Duration};
 
@@ -28,9 +28,8 @@ fn reads_skip_an_owed_hole() {
 		let mut next = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let waiter = kio::Waiter::noop();
 		let put = |start: u64| {
-			let mut group = track.create_group(group::Info { start }).unwrap();
-			group
-				.write_frame(
+			let group = track
+				.create_group(
 					moq_net::Timestamp::unscaled(start),
 					serde_json::to_vec(&json!({ "n": start })).unwrap(),
 				)

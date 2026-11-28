@@ -48,10 +48,10 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// Four frames starting at `key` seconds, so a group created late still starts
 /// below the one after it.
 fn write_group(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-	for frame in 0..4 {
-		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
-		group.write_frame(timestamp, &b"x"[..]).unwrap();
+	let at = |frame: u64| Timestamp::from_millis(key * 1000 + frame).unwrap();
+	let mut group = track.create_group(at(0), &b"x"[..]).unwrap();
+	for frame in 1..4 {
+		group.write_frame(at(frame), &b"x"[..]).unwrap();
 	}
 	group.finish().unwrap();
 }
@@ -76,7 +76,8 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 				None => break,
 			}
 		}
-		got.push((group.start, frames));
+		// Each group starts at its key in seconds.
+		got.push((group.start / 1000, frames));
 	}
 	got
 }
@@ -280,7 +281,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("recv_group timed out")
 		.expect("recv_group")
 		.expect("group 1");
-	assert_eq!(first.start, 1, "{version}: the live reader starts at group 1");
+	assert_eq!(first.start, 1000, "{version}: the live reader starts at group 1");
 	let mut oldest = subscribe(floored(Some(0)), None).await;
 
 	// Idle time lets the merged demand reach the publisher before the lower group exists.

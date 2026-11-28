@@ -117,12 +117,12 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.create_track("video", timed())
 		.expect("failed to create track");
 
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+	let group = track
+		.append_group(
+			moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			payload,
+		)
 		.expect("failed to append group");
-	group
-		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
-		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -682,14 +682,12 @@ async fn quic_client_close_drains_finished_track() {
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
 			}
-			let mut group = track
+			let group = track
 				.append_group(
 					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+					payload,
 				)
 				.expect("failed to append group");
-			group
-				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
-				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
 			let _track = track.finish().expect("failed to finish track");
 
@@ -829,14 +827,12 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			}
 			migrated_tx.send(()).unwrap();
 
-			let mut group = track
+			let group = track
 				.append_group(
 					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+					payload,
 				)
 				.expect("failed to append group");
-			group
-				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
-				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
 			let _track = track.finish().expect("failed to finish track");
 

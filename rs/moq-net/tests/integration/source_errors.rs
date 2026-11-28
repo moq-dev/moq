@@ -8,7 +8,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
@@ -141,8 +140,7 @@ async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 		let setup = relayed(version).await;
 		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
+		let group = track.append_next(b"head".as_ref()).unwrap();
 		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -169,8 +167,7 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 		let setup = relayed(version).await;
 		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
+		let group = track.append_next(b"head".as_ref()).unwrap();
 		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

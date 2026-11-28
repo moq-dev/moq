@@ -84,8 +84,7 @@ impl Chain {
 		let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-		let mut group0 = track.append_next().unwrap();
-		group0.write_frame(group0.at_start(), payload(0, 0)).unwrap();
+		let group0 = track.append_next(payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read0.start, 0);
 		assert_eq!(
@@ -93,8 +92,7 @@ impl Chain {
 			payload(0, 0)
 		);
 
-		let mut group1 = track.append_next().unwrap();
-		group1.write_frame(group1.at_start(), payload(1, 0)).unwrap();
+		let group1 = track.append_next(payload(1, 0)).unwrap();
 		group1.finish().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read1.start, 1);

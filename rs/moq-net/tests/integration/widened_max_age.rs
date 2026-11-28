@@ -43,9 +43,9 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+/// A track in seconds with no publisher max age, so only a reader's budget skips its groups.
 fn timed() -> Info {
-	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
+	Info::default().with_timescale(Timescale::SECOND).with_max_age(None)
 }
 
 /// A publisher holding every group, a relay, and a viewer behind it.
@@ -96,9 +96,9 @@ impl Chain {
 
 	fn populate(&self) {
 		for key in 0..GROUPS {
-			let mut group = self.source.create_group(moq_net::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
+			let group = self
+				.source
+				.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -320,9 +320,8 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.unwrap();
 	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 	for key in 0..GROUPS {
-		let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
+		let group = source
+			.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
 	}
@@ -379,9 +378,8 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 		let source = route.broadcast().create_track("video", timed()).unwrap();
 		route.announce().unwrap();
 		for key in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
+			let group = source
+				.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}

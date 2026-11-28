@@ -13,7 +13,6 @@ use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use crate::support::AppendNext;
 use futures::channel::mpsc;
 use moq_net::{Error, StreamError, Timestamp, Version, origin, track};
 
@@ -92,9 +91,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let mut tick = 0;
 	for key in 0..groups {
 		// Each group starts at its first frame's time.
-		let mut group = track
-			.append_group(Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap())
-			.unwrap();
+		let mut group = crate::support::LazyGroup::append(&track);
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -237,7 +234,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	let mut write = async |groups: u64| {
 		for _ in 0..groups {
 			let key = tick / FRAMES;
-			let mut group = track.append_next().unwrap();
+			let mut group = crate::support::LazyGroup::append(&track);
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 				group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -274,8 +271,9 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 #[kio::test]
 async fn a_payload_stall_with_live_sessions_is_never_recovered() {
 	const SPAN: Duration = Duration::from_secs(30);
-	// The stall starts after group 1, and `P` writes one group per second through it.
-	let newest = 1 + SPAN.as_secs();
+	// The stall starts after group 1, and `P` writes one group per second through it, each keyed by
+	// its first frame's millisecond.
+	let newest = (1 + SPAN.as_secs()) * 1000;
 	for stall in [Stall::Upstream, Stall::Downstream, Stall::Headers] {
 		let (e, w) = kio::clock::timeout(TEST_TIMEOUT, payload_stall(stall, SPAN))
 			.await

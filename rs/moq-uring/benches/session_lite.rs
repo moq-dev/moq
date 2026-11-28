@@ -204,9 +204,10 @@ mod linux {
 											track.largest().map_or(0, |largest| largest.group + 1),
 										)
 										.unwrap(),
+										frame.clone(),
 									)
 									.expect("append group");
-								for _ in 0..FRAMES {
+								for _ in 1..FRAMES {
 									writer
 										.write_frame(
 											moq_net::Timestamp::from_millis(writer.start).unwrap(),

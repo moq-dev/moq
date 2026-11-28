@@ -10,7 +10,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -100,8 +99,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 				.get_or_insert_with(|| record_track!(request.demand()));
 			kio::clock::sleep(STARTUP).await;
 			let track = request.accept(timed());
-			let mut group = track.append_next().unwrap();
-			group.write_frame(group.at_start(), b"key".as_ref()).unwrap();
+			let group = track.append_next(b"key".as_ref()).unwrap();
 			served.0.borrow_mut().push((track, group));
 		}
 	});
@@ -193,8 +191,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	let publisher = kio::clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
 			let track = request.accept(timed());
-			let mut group = track.append_next().unwrap();
-			group.write_frame(group.at_start(), b"key".as_ref()).unwrap();
+			let group = track.append_next(b"key".as_ref()).unwrap();
 			served.borrow_mut().push((track, group));
 		}
 	});

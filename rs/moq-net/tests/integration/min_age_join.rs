@@ -25,8 +25,7 @@ fn origin(hop: u64) -> origin::Producer {
 /// Append the 500 ms group starting at `start`, presenting there.
 fn append(source: &track::Producer, start: u64) {
 	let start = Timestamp::from_millis(start).unwrap();
-	let mut group = source.append_group(start).unwrap();
-	group.write_frame(start, &b"x"[..]).unwrap();
+	let group = source.append_group(start, &b"x"[..]).unwrap();
 	group.finish().unwrap();
 }
 

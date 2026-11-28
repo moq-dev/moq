@@ -56,8 +56,7 @@ async fn a_switch_mid_group_sends_each_frame_over_one_route() {
 	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-	let mut group0 = track.append_next().unwrap();
-	group0.write_frame(group0.at_start(), payload(0, 0)).unwrap();
+	let mut group0 = track.append_next(payload(0, 0)).unwrap();
 	group0.write_frame(group0.at_start(), payload(0, 1)).unwrap();
 	let mut read0 = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(read0.start, 0);

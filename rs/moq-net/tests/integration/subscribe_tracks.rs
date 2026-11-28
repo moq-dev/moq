@@ -6,7 +6,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
@@ -96,8 +95,7 @@ async fn setup(version: Version) -> Setup {
 }
 
 async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
-	let mut group = setup.track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload).unwrap();
+	let group = setup.track.append_next(payload).unwrap();
 	group.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())
 		.await

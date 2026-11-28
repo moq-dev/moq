@@ -224,11 +224,12 @@ impl Source {
 			if let Some(live) = last.take() {
 				self.write_tail(case, live);
 			}
+			let at = Timestamp::from_millis(start).unwrap();
 			let mut group = match case.append {
-				true => self.track.append_group(Timestamp::from_millis(start).unwrap()).unwrap(),
-				false => self.track.create_group(moq_net::group::Info { start }).unwrap(),
+				true => self.track.append_group(at, &b"x"[..]).unwrap(),
+				false => self.track.create_group(at, &b"x"[..]).unwrap(),
 			};
-			for frame in 0..case.frames.div_ceil(2) {
+			for frame in 1..case.frames.div_ceil(2) {
 				group
 					.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..])
 					.unwrap();

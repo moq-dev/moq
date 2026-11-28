@@ -13,7 +13,6 @@
 
 use crate::WithMax as _;
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -213,11 +212,11 @@ impl Topology {
 	fn group(&mut self) -> Vec<(u64, Vec<u8>)> {
 		let key = self.key;
 		self.key += 1;
-		let mut group = self.track.append_next().unwrap();
-		let mut written = Vec::new();
-		for frame in 0..FRAMES {
+		let mut group = self.track.append_group(timestamp(key, 0), payload(key, 0)).unwrap();
+		let mut written = vec![(group.start, payload(key, 0))];
+		for frame in 1..FRAMES {
 			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
-			written.push((key, payload(key, frame)));
+			written.push((group.start, payload(key, frame)));
 		}
 		group.finish().unwrap();
 		written
@@ -260,10 +259,11 @@ impl Topology {
 	}
 }
 
-/// Every frame once, in order, with no timestamp rewinding.
+/// Every frame once, in order, with no timestamp rewinding. Each group is keyed by its frame
+/// 0's millisecond.
 fn assert_continuous(seen: &[(u64, Vec<u8>, Timestamp)], groups: u64) {
 	let expected: Vec<_> = (0..groups)
-		.flat_map(|group| (0..FRAMES).map(move |frame| (group, payload(group, frame))))
+		.flat_map(|group| (0..FRAMES).map(move |frame| (1_000 + group * 100, payload(group, frame))))
 		.collect();
 	let frames: Vec<_> = seen.iter().map(|(group, frame, _)| (*group, frame.clone())).collect();
 	assert_eq!(frames, expected);
@@ -372,7 +372,8 @@ async fn restarts_across_protocols(secondary: &str) {
 		);
 		let mut fresh = topology.subscribe().await;
 		let (key, _, bytes) = next(&mut fresh).await;
-		assert_eq!(key, 1, "the fresh subscription joins the current group");
+		// Group 1 starts at its first frame, 1.1s in.
+		assert_eq!(key, 1_100, "the fresh subscription joins the current group");
 		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})

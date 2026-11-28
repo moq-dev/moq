@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Timescale, Timestamp, broadcast, cache, fuzz::GroupRecv, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, cache, frame, fuzz::GroupRecv, group, track};
 
 /// Stream bytes per packet: a 1200-byte datagram less its QUIC overhead.
 const PACKET: usize = 1150;
@@ -301,20 +301,29 @@ impl Cache {
 		let mut open: Vec<Option<(GroupRecv, usize)>> = (0..media.tracks).map(|_| None).collect();
 		for frame in &media.frames {
 			let slot = &mut open[frame.track];
+			let chunks: Vec<_> = frame.chunks.iter().map(|chunk| driver.chunk(media, *chunk)).collect();
+			let size = chunks.iter().map(Bytes::len).sum::<usize>();
+			let timestamp = Timestamp::new(frame.timestamp, Timescale::MILLI).unwrap();
 			if frame.start {
 				if let Some((recv, bytes)) = slot.take() {
 					self.groups[frame.track].push((recv.finish().unwrap(), bytes));
 				}
-				// A group starts at its first frame's timestamp, in the track's milliseconds.
-				let group = self.tracks[frame.track]
-					.append_group(Timestamp::from_millis(frame.timestamp).unwrap())
+				// A group opens with its first frame, whose chunks are written as they arrived
+				// since the frame reader only takes an open group.
+				let mut first = self.tracks[frame.track]
+					.append_frame(frame::Info {
+						size: size as u64,
+						timestamp,
+					})
 					.unwrap();
-				*slot = Some((GroupRecv::new(group), 0));
+				for chunk in chunks {
+					first.write(chunk).unwrap();
+				}
+				*slot = Some((GroupRecv::new(first.finish().unwrap()), size));
+				continue;
 			}
 			let (recv, bytes) = slot.as_mut().expect("every track opens with a group");
-			let chunks: Vec<_> = frame.chunks.iter().map(|chunk| driver.chunk(media, *chunk)).collect();
-			*bytes += chunks.iter().map(Bytes::len).sum::<usize>();
-			let timestamp = Timestamp::new(frame.timestamp, Timescale::MILLI).unwrap();
+			*bytes += size;
 			recv.frame(timestamp, chunks).unwrap();
 		}
 		for (track, recv) in open.into_iter().enumerate() {

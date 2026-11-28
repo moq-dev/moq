@@ -73,9 +73,8 @@ async fn routing(version: &str, cluster: bool) {
 		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
-	let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
-	group
-		.write_frame(moq_net::Timestamp::unscaled(0), &b"conformance"[..])
+	let group = track
+		.append_group(moq_net::Timestamp::unscaled(0), &b"conformance"[..])
 		.unwrap();
 	group.finish().unwrap();
 	let track = track.finish().unwrap();

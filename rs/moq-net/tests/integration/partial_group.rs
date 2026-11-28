@@ -7,7 +7,6 @@
 use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
@@ -74,8 +73,7 @@ async fn round(version: &str) -> Option<Ended> {
 	.expect("subscribe");
 	subscribed(&track).await;
 
-	let mut stalled = track.append_next().unwrap();
-	stalled.write_frame(stalled.at_start(), &b"head"[..]).unwrap();
+	let stalled = track.append_next(&b"head"[..]).unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, live.recv_group())
 		.await
 		.expect("group timeout")
@@ -87,8 +85,8 @@ async fn round(version: &str) -> Option<Ended> {
 	// The live edge moves a full second past the stalled group's reach.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	for millis in [1000, 2000] {
-		let mut next = track.append_next().unwrap();
-		next.write_frame(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
+		let next = track
+			.append_group(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
 			.unwrap();
 		next.finish().unwrap();
 	}

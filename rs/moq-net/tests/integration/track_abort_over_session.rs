@@ -5,11 +5,10 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -52,8 +51,7 @@ async fn after_abort(version: &str, hops: u32) {
 		.unwrap()
 		.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut open = track.append_next().unwrap();
-	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
+	let open = track.append_next(b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"head".as_ref());
 	track.abort(moq_net::Error::Cancel).unwrap();
@@ -93,16 +91,13 @@ async fn recreate(finish: bool) {
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut open = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
-	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
+	let open = track.create_group(track.key_time(2), b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.start, 2);
 	group.read_frame().await.unwrap().unwrap();
 	track.abort(moq_net::Error::Cancel).unwrap();
 	let fresh = broadcast.broadcast().create_track("video", timed()).unwrap();
-	let mut next = fresh.create_group(moq_net::group::Info { start: 3 }).unwrap();
-	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
-		.unwrap();
+	let _next = fresh.create_group(fresh.key_time(3), b"next".as_ref()).unwrap();
 	drop(open);
 	let result = kio::clock::timeout(Duration::from_secs(2), async {
 		if finish {

@@ -121,9 +121,9 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.expect("no subscriber appeared")
 		.unwrap();
 
-	let mut head = track.append_next().unwrap();
-	for payload in HEAD {
-		head.write_frame(head.at_start(), payload).unwrap();
+	let mut head = track.append_next(HEAD[0]).unwrap();
+	for payload in &HEAD[1..] {
+		head.write_frame(head.at_start(), *payload).unwrap();
 	}
 	head.finish().unwrap();
 	kio::clock::timeout(TIMEOUT, drained_rx)
@@ -134,8 +134,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// The final group opens and its first frame is sent, then the track's end is
 	// declared: SUBSCRIBE_END reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
-	let mut tail = track.append_next().unwrap();
-	tail.write_frame(tail.at_start(), TAIL[0]).unwrap();
+	let mut tail = track.append_next(TAIL[0]).unwrap();
 	let track = track.finish().unwrap();
 	settle().await;
 
@@ -273,8 +272,7 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 	crate::support::wanted(track.demand())
 		.await
 		.expect("no subscriber appeared");
-	let mut group = track.append_next().unwrap();
-	group.write_frame(group.at_start(), HEAD[0]).unwrap();
+	let group = track.append_next(HEAD[0]).unwrap();
 	settle().await;
 
 	match kill {

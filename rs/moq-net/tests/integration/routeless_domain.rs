@@ -141,8 +141,7 @@ async fn a_reader_moves_around_a_ring_without_routes() {
 		.unwrap();
 	let mut rx = read(sub);
 
-	let mut group = track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
+	let mut group = track.append_next(payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
 
 	let moved = kio::clock::now();
@@ -164,7 +163,6 @@ async fn a_reader_moves_around_a_ring_without_routes() {
 	group.write_frame(group.at_start(), payload(0, 1)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)));
-	let mut group = track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
+	let _group = track.append_next(payload(1, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (1, payload(1, 0)));
 }
