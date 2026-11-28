@@ -315,7 +315,9 @@ Darwin `swift-format` at it or at nixpkgs-unstable's head
 from [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)
 ([moq-dev/moq#9858](https://github.com/moq-dev/moq/pull/9858)); and the three easy surviving
 `resume.rs` mutants ([moq-dev/moq#9861](https://github.com/moq-dev/moq/pull/9861)). New child, in m3 by decision:
-[resume.rs's back-cut mutants](/quest/m3/resume-cut-mutants.md), the other 16. Owned by open
+[resume.rs's back-cut mutants](/quest/m3/resume-cut-mutants.md), the other 16. Since that quest
+sits in m3 by decision, this epic's passing run may fail a `mutants` shard only on a survivor that
+quest lists; any other missed mutant still fails it. Owned by open
 PRs or quests: Windows' CRLF crate names
 ([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545), a draft since 11-24),
 quic-interop's moq-quic client against quic-go `handshakeloss`, a runner miscount
