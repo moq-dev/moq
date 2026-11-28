@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `track::Producer::abort_handle`, a `track::AbortHandle` that aborts the track, unlisting it first, without keeping it open, for an owner that hands the producer out and ends the track on its own shutdown.
 - `transport::SETUP_RECEIVE_WINDOW`, the connection credit a server offers before it admits a session: enough for the SETUP and one in-band AUTH.
 - `Server::with_allocator`, the accepting mirror of `Client::with_allocator`: every session the server accepts reserves into one `bandwidth::Allocator` and probes for the sum, instead of each starting an empty registry.
+- `Error::superseded`, whether a group read failed because a newer group superseded it, so the reader moves on to the next group instead of ending the track.
+
+### Changed
+
+- On moq-transport, a superseded group resets with `DELIVERY_TIMEOUT` and a received `DELIVERY_TIMEOUT` reads as `Old`; a publisher's own timeout resets with `INTERNAL_ERROR` instead.
 
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
 

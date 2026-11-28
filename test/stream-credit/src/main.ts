@@ -105,7 +105,7 @@ async function read(
 						entry.at = performance.now() - started;
 					} catch (err) {
 						entry.error = String(err);
-						if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.Old) return;
+						if (Moq.Error.superseded(err)) return;
 						entry.fetched = await fetch(consumer, group.start);
 					}
 				})(),

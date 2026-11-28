@@ -462,10 +462,12 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}
-	// moq-transport registers no OLD, so a superseded group says DELIVERY_TIMEOUT, as Rust's does.
+	// moq-transport registers no OLD, so a superseded group says DELIVERY_TIMEOUT, as Rust's does,
+	// and a publisher's own timeout, a failure, says INTERNAL_ERROR instead.
 	expect(toStreamCode(new StreamError(StreamCode.Old), { version: Version.DRAFT_22 })).toBe(
 		StreamCode.DeliveryTimeout,
 	);
+	expect(toStreamCode(new TimeoutError("late"), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 });
 
 test("superseded: a superseded group reads as one across either wire, and an abort never does", () => {
@@ -476,10 +478,9 @@ test("superseded: a superseded group reads as one across either wire, and an abo
 		for (const code of [StreamCode.Cancel, StreamCode.Evicted, StreamCode.NotFound, StreamCode(71)]) {
 			expect(superseded(across(new StreamError(code)))).toBe(false);
 		}
+		// A publisher's own timeout is a failure, not a superseded group.
+		expect(superseded(across(new TimeoutError("late")))).toBe(false);
 	}
 	expect(superseded(new StreamError(StreamCode.Old))).toBe(true);
 	expect(superseded(new Error("boom"))).toBe(false);
-	// moq-lite keeps a publisher's own timeout apart from a superseded group.
-	const late = fromTransport(toTransport(toStreamCode(new TimeoutError("late")), "reset"));
-	expect(superseded(late)).toBe(false);
 });

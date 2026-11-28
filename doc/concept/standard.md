@@ -134,7 +134,8 @@ choices. They follow the product model.
 - **A superseded group resets with `DELIVERY_TIMEOUT`.** The registry has no
   equivalent of moq-lite's `OLD`, so a group given up because a newer one replaced
   it resets its stream with `DELIVERY_TIMEOUT`, and a received one reads as
-  superseded: the reader moves on to the next group.
+  superseded: the reader moves on to the next group. A publisher's own timeout
+  is a failure, so it resets with `INTERNAL_ERROR` instead.
 
 - **A relay judges `NEW_GROUP_REQUEST` instead of forwarding it.**
   [Draft 22 §9.20.19](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.19)

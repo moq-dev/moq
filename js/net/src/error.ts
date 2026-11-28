@@ -384,8 +384,10 @@ export function toStreamCode(err: unknown, options?: TransportErrorOptions): Str
 	const code = localStreamCode(err);
 	if (options?.version === undefined) return code;
 	// The registry has no OLD, and a group given up for a newer one is late content its reader
-	// skips, as one past its delivery deadline is: {@link superseded} counts the two the same.
+	// skips, as one past its delivery deadline is. Read back as Old, so the code says only that:
+	// a publisher's own timeout, a failure, goes as INTERNAL_ERROR, as in Rust.
 	if (code === StreamCode.Old) return StreamCode.DeliveryTimeout;
+	if (code === StreamCode.DeliveryTimeout) return StreamCode.Internal;
 	return sharedStreamCode(code) ? code : StreamCode.Internal;
 }
 
@@ -538,8 +540,8 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 	if (options?.version !== undefined && !sharedStreamCode(code) && claimedLocally(code)) {
 		return new Stream(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
-	// How a group given up for a newer one says so on moq-transport (see toStreamCode), and content
-	// past its deadline is skipped the same way, as in Rust.
+	// How a group given up for a newer one says so on moq-transport (see toStreamCode). Another
+	// implementation's content past its deadline is late too, so its reader skips it alike, as in Rust.
 	if (options?.version !== undefined && code === StreamCode.DeliveryTimeout) {
 		return new Stream(StreamCode.Old, { cause: err });
 	}

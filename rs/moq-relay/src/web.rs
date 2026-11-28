@@ -1108,11 +1108,13 @@ async fn serve_fetch(
 			Ok(group) => group,
 			// A miss upstream arrives as the stream reset that refused the FETCH. A group past
 			// the track's max age is gone, so it is a miss too.
-			Err(
-				moq_net::Error::NotFound
-				| moq_net::Error::Old
-				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::Old),
-			) => {
+			Err(err)
+				if err.superseded()
+					|| matches!(
+						err,
+						moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)
+					) =>
+			{
 				return Err(StatusCode::NOT_FOUND);
 			}
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),

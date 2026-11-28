@@ -108,9 +108,11 @@ mod tests {
 		let ietf = crate::Version::ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
+		assert_eq!(ietf.encode_stream_code(&StreamError::Old), 0x2);
+		assert_eq!(ietf.decode_stream_code(0x2), StreamError::Old);
 		assert_eq!(
-			ietf.encode_stream_code(&StreamError::Old),
-			ietf.encode_stream_code(&StreamError::DeliveryTimeout)
+			ietf.encode_stream_code(&StreamError::DeliveryTimeout),
+			ietf::error::INTERNAL_ERROR
 		);
 
 		// Both agree on a cancellation, which is the one code that has to be right.
@@ -153,15 +155,12 @@ mod tests {
 				Error::Lagged,
 				Error::MalformedTrack,
 				Error::NotFound,
+				// A publisher's own timeout is a failure, not a superseded group.
+				Error::Timeout,
 			] {
 				assert!(!across(&err).superseded(), "{version:?}: {err:?}");
 			}
 		}
-		// moq-lite keeps a publisher's own timeout apart from a superseded group.
-		let lite = crate::Version::lite(lite::Version::Lite06);
-		let timeout =
-			Error::Stream(lite.decode_stream_code(lite.encode_stream_code(&StreamError::from(&Error::Timeout))));
-		assert!(!timeout.superseded(), "{timeout:?}");
 	}
 
 	/// `Closed` also describes virtual streams, so it cannot claim that the transport's

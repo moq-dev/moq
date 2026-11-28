@@ -845,8 +845,9 @@ for (const [version, tooFarBehind] of [
 			[new FrameTooLarge(), version === QUIC ? StreamCode.FrameTooLarge : StreamCode.Internal],
 			[new GroupTooLarge(), version === QUIC ? StreamCode.GroupTooLarge : StreamCode.Internal],
 			[new NotFound("broadcast"), version === QUIC ? StreamCode.NotFound : StreamCode.Internal],
+			// moq-transport's DELIVERY_TIMEOUT says a group was superseded, which a timeout is not.
+			[new TimeoutError("open"), version === QUIC ? StreamCode.DeliveryTimeout : StreamCode.Internal],
 			// Assigned by every draft, so these survive the translation intact.
-			[new TimeoutError("open"), StreamCode.DeliveryTimeout],
 			[new ProtocolViolation("bad message"), StreamCode.SessionClosed],
 			[new StreamError(StreamCode.Cancel), StreamCode.Cancel],
 		] as const) {

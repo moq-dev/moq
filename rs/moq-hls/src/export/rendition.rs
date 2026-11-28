@@ -3091,15 +3091,13 @@ fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer)
 /// variant, not a collapsed integer: session unauthorized and stream delivery-timeout are
 /// also 2 in their own registries.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
-	matches!(
-		err,
-		moq_net::Error::NotFound
-			| moq_net::Error::Old
-			| moq_net::Error::Evicted
-			| moq_net::Error::Stream(
-				moq_net::StreamError::NotFound | moq_net::StreamError::Old | moq_net::StreamError::Evicted
-			)
-	)
+	err.superseded()
+		|| matches!(
+			err,
+			moq_net::Error::NotFound
+				| moq_net::Error::Evicted
+				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::Evicted)
+		)
 }
 
 /// True if the bound publisher is gone, so a listed segment can never be served.
@@ -3324,9 +3322,10 @@ mod tests {
 			assert!(is_cache_miss(&local), "{local:?} locally");
 			let lite = over_lite(&local);
 			assert!(is_cache_miss(&lite), "{local:?} over lite ({lite:?})");
-			// IETF has no stream-reset value for a miss, so one stays 500.
-			assert!(!is_cache_miss(&over_ietf_miss()), "{local:?} over ietf must not 404");
 		}
+		// IETF has no stream-reset value for a missing or evicted group, so one stays 500. An
+		// old group crosses as DELIVERY_TIMEOUT, which reads back as `Old`.
+		assert!(!is_cache_miss(&over_ietf_miss()), "a miss over ietf must not 404");
 	}
 
 	#[test]

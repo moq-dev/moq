@@ -35,7 +35,8 @@ pub enum MoqProtocolKind {
 	Timeout,
 	/// No version could be negotiated.
 	Version,
-	/// The content missed its delivery deadline.
+	/// The content missed its delivery deadline. Never over moq-transport, where that code says
+	/// a newer group superseded this one, which reports as `Old`.
 	DeliveryTimeout,
 	/// The session is going away (a GOAWAY was received).
 	GoingAway,

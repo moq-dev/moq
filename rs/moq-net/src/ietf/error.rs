@@ -60,12 +60,9 @@ pub fn to_stream_code(err: &StreamError) -> u32 {
 	match err {
 		StreamError::Internal => INTERNAL_ERROR,
 		StreamError::Cancel => CANCELLED,
-		// We never negotiate the section 8 DELIVERY_TIMEOUT parameter, so this is only ever
-		// our own delivery deadline. That is what the code describes, and the same claim
-		// moq-lite makes with it, so a relay can carry a peer's timeout across either wire.
-		StreamError::DeliveryTimeout => DELIVERY_TIMEOUT,
 		// The registry has no OLD, and a group given up for a newer one is late content its
-		// reader skips, as one past its delivery deadline is. Read back as OLD.
+		// reader skips, as one past its delivery deadline is. Read back as OLD, so the code
+		// says only that: a publisher's own timeout, a failure, goes as INTERNAL_ERROR.
 		StreamError::Old => DELIVERY_TIMEOUT,
 		// Flattened, as on the moq-lite wire: the session registry is disjoint, so the
 		// specific reason travels on the session close instead.
@@ -88,8 +85,8 @@ pub fn from_stream_code(code: u32) -> StreamError {
 	match code {
 		INTERNAL_ERROR => StreamError::Internal,
 		CANCELLED => StreamError::Cancel,
-		// How a group given up for a newer one says so (see [`to_stream_code`]), and content
-		// past its deadline is skipped the same way: either way the reader moves on.
+		// How a group given up for a newer one says so (see [`to_stream_code`]). Another
+		// implementation's content past its deadline is late too, so its reader skips it alike.
 		DELIVERY_TIMEOUT => StreamError::Old,
 		// The peer's session code is not on this stream, so the reason is unknown here.
 		SESSION_CLOSED => StreamError::Session(SessionError::Internal),
@@ -644,7 +641,6 @@ mod tests {
 		let errors = [
 			StreamError::Internal,
 			StreamError::Cancel,
-			StreamError::DeliveryTimeout,
 			StreamError::ControlTimeout,
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
@@ -685,6 +681,8 @@ mod tests {
 			StreamError::Unauthorized,
 			StreamError::Skip,
 			StreamError::ControlTimeout,
+			// DELIVERY_TIMEOUT says superseded, which a publisher's own timeout is not.
+			StreamError::DeliveryTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),
 		] {

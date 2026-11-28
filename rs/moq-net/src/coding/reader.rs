@@ -917,7 +917,7 @@ mod tests {
 		assert_eq!(lite.stream.get_ref().stops, vec![StreamError::Old.to_code()]);
 		assert_eq!(
 			ietf.stream.get_ref().stops,
-			vec![crate::ietf::error::to_stream_code(&StreamError::DeliveryTimeout)]
+			vec![crate::ietf::error::to_stream_code(&StreamError::Old)]
 		);
 		assert_ne!(lite.stream.get_ref().stops, ietf.stream.get_ref().stops);
 	}

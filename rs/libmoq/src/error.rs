@@ -121,7 +121,8 @@ pub enum moq_protocol_kind {
 	/// Version.
 	MOQ_PROTOCOL_KIND_VERSION = 7,
 	// 4 and 8 through 10 are unassigned; the values that follow stay put for compiled consumers.
-	/// Delivery timeout.
+	/// The content missed its delivery deadline. Never over moq-transport, where that code says
+	/// a newer group superseded this one, which reports as `MOQ_PROTOCOL_KIND_OLD`.
 	MOQ_PROTOCOL_KIND_DELIVERY_TIMEOUT = 11,
 	/// Session closed.
 	MOQ_PROTOCOL_KIND_SESSION_CLOSED = 12,
