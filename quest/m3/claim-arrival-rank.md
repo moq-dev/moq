@@ -34,7 +34,7 @@ adds the JS bench. Facts, from `main` at e56d723e60 and that PR's head:
   removal sorts every entry at the prefix by `route_order`, then each touching
   cursor rescans that list with `Epochs::of`; a cursor's root row runs
   `TableCursor::best` over every covering entry. Measured here
-  (`cargo bench -p moq-net --features fuzz --bench origin -- origin/announce_duplicate`),
+  (`just bench -- -p moq-net --features fuzz --bench origin`, its `announce_duplicate` cases),
   one arrival costs 3.1 µs at 1 route and 1 cursor, 4.7 µs at 30 and 1,
   143 µs at 60 and 60, 286 µs at 240 and 60, and 1.12 ms at 240 and 240.
 
