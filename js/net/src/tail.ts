@@ -21,8 +21,8 @@ export interface Counted {
 	/** Hold the end open again once it reads the group itself. Idempotent. */
 	resume(): void;
 	/**
-	 * Settles once {@link Tail.settle} gave up on it: the subscription ended and the grace passed
-	 * while it delivered nothing, as a stream whose reset the browser lost does. It stays counted
+	 * Settles once {@link Tail.drain} gave up on it: the subscription ended and it delivered nothing
+	 * for the grace, as a stream whose reset the browser lost does. It stays counted
 	 * until the reader ends it with {@link done}.
 	 */
 	readonly stalled: Promise<void>;
@@ -34,6 +34,8 @@ interface Held {
 	last: () => Instant;
 	// When it began being held, since a resumed stream's wait on a copy is not its quiet time.
 	since: Instant;
+	// Given up on, so it is not watched again.
+	stalled: boolean;
 	stall: () => void;
 }
 
@@ -101,7 +103,7 @@ export class Tail {
 		const stalled = new Promise<void>((resolve) => {
 			stall = resolve;
 		});
-		const held: Held | undefined = last && { last, since: now(), stall };
+		const held: Held | undefined = last && { last, since: now(), stalled: false, stall };
 		if (held) this.#held.add(held);
 
 		// Parked holds nothing.
@@ -126,7 +128,7 @@ export class Tail {
 				if (state !== "parked") return;
 				state = "held";
 				this.#active += 1;
-				if (held) {
+				if (held && !held.stalled) {
 					held.since = now();
 					this.#held.add(held);
 				}
@@ -221,14 +223,32 @@ export class Tail {
 	 *
 	 * A stream still being read is waited for, until its own FIN or reset, or until a drop naming
 	 * its group lets go of it (see {@link Counted.done}). The grace gives up on streams that never
-	 * arrived, and `limit` caps it. Once it passes, a stream that delivered nothing for that long
-	 * is given up on too ({@link Counted.stalled}): a browser can lose a stream's reset, leaving it
-	 * open forever. With no grace nothing is timed: every start waits for the wire to account for it.
+	 * arrived, and `limit` caps it. With no grace nothing is timed: every start waits for the wire
+	 * to account for it.
 	 */
-	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
+	settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
+		return this.#settle(complete, closed, limit, false);
+	}
+
+	/**
+	 * {@link settle} once the publisher ended the subscription, which also gives up on a stream that
+	 * delivered nothing for {@link GRACE} since (see {@link Counted.stalled}): a browser can lose a
+	 * stream's reset, leaving it open forever. Not with no grace, where the wire names every group.
+	 */
+	drain(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
+		return this.#settle(complete, closed, undefined, true);
+	}
+
+	async #settle(
+		complete: () => boolean,
+		closed: GetPromise<unknown>,
+		limit: Duration | undefined,
+		drain: boolean,
+	): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
 		const grace = this.#grace();
-		this.#ledger.expire(now(), grace);
+		const from = now();
+		this.#ledger.expire(from, grace);
 
 		const wait = grace === undefined ? undefined : limit === undefined ? grace : grace.min(limit);
 		let expired = false;
@@ -242,14 +262,14 @@ export class Tail {
 				() => {},
 			);
 		}
-		// Wakes the loop when the quietest stream's grace ends, one at a time.
+		// Wakes the loop when the quietest stream's time is up, one at a time.
 		let wake: AbortController | undefined;
 		try {
 			while (closed.peek() === undefined) {
 				if (this.#active === 0 && (expired || complete())) return;
-				if (expired && wait !== undefined) {
+				if (drain && grace !== undefined) {
 					wake?.abort();
-					const next = this.#quiet(wait);
+					const next = this.#quiet(GRACE, from);
 					if (next !== undefined) {
 						wake = new AbortController();
 						void sleep(next, { signal: wake.signal }).then(
@@ -266,15 +286,16 @@ export class Tail {
 		}
 	}
 
-	// Give up on each held stream that delivered nothing for `window`, and return how long until the
-	// next one would have, or undefined with none held.
-	#quiet(window: Duration): Duration | undefined {
+	// Give up on each held stream that delivered nothing for `window` since `from`, and return how
+	// long until the next one would have, or undefined with none held.
+	#quiet(window: Duration, from: Instant): Duration | undefined {
 		const at = now();
 		let next: Duration | undefined;
 		for (const held of this.#held) {
-			const quiet = at.since(held.last().max(held.since));
+			const quiet = at.since(held.last().max(held.since).max(from));
 			if (quiet.ge(window)) {
 				this.#held.delete(held);
+				held.stalled = true;
 				held.stall();
 				continue;
 			}

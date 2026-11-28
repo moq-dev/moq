@@ -5,6 +5,7 @@ import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
@@ -187,7 +188,9 @@ describe("Tail", () => {
 		};
 	};
 
-	test("the grace gives up on a stream that delivered nothing for it", async () => {
+	const SILENCE = TAIL_GRACE_MS;
+
+	test("a drain gives up on a stream that delivered nothing for the grace", async () => {
 		const { clock, tail: t } = tail(Duration.millis(10));
 		const quiet = meter();
 		const read = t.open(0n, quiet.read);
@@ -196,101 +199,134 @@ describe("Tail", () => {
 			stalled = true;
 		});
 		let settled = false;
-		const settling = t
-			.settle(() => false, new Once<unknown>())
+		const draining = t
+			.drain(() => false, new Once<unknown>())
 			.then(() => {
 				settled = true;
 			});
 
-		await clock.advance(Duration.millis(5));
+		// Its own grace is no measure: only silence for GRACE is.
+		await clock.advance(SILENCE.div(2));
 		expect(stalled).toBe(false);
-		await clock.advance(Duration.millis(5));
+		await clock.advance(SILENCE.div(2));
 		await read.stalled;
-		// Still counted until its reader lets go, which the settle waits for.
+		// Still counted until its reader lets go, which the drain waits for.
 		expect(t.reading).toBe(true);
 		expect(settled).toBe(false);
 		read.done();
-		await settling;
+		await draining;
+	});
+
+	test("a drain with no age limit still gives up on a silent stream", async () => {
+		const { clock, tail: t } = tail(Duration.millis(NO_MAX_DELAY));
+		const read = t.open(0n, meter().read);
+		const draining = t.drain(() => true, new Once<unknown>());
+
+		await clock.advance(SILENCE);
+		await read.stalled;
+		read.done();
+		await draining;
 	});
 
 	test("a stream still delivering within each grace is waited for", async () => {
-		const { clock, tail: t } = tail(Duration.millis(10));
+		const { clock, tail: t } = tail();
 		const slow = meter();
 		const read = t.open(0n, slow.read);
 		let stalled = false;
 		void read.stalled.then(() => {
 			stalled = true;
 		});
-		const settling = t.settle(() => false, new Once<unknown>());
+		const draining = t.drain(() => false, new Once<unknown>());
 
-		// Past the grace, and every window since carries some bytes.
 		for (let i = 0; i < 10; i++) {
-			await clock.advance(Duration.millis(7));
+			await clock.advance(SILENCE.mul(3).div(4));
 			slow.deliver();
 		}
 		expect(stalled).toBe(false);
 
-		await clock.advance(Duration.millis(10));
+		await clock.advance(SILENCE);
 		await read.stalled;
 		read.done();
-		await settling;
+		await draining;
 	});
 
-	test("a parked stream is not given up on, and restarts its quiet time when it resumes", async () => {
+	test("a drain gives a stream the whole grace after it starts, however long it was quiet before", async () => {
+		const { clock, tail: t } = tail();
+		const read = t.open(0n, meter().read);
+		await clock.advance(SILENCE.mul(5));
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const draining = t.drain(() => false, new Once<unknown>());
+
+		await clock.advance(SILENCE.mul(9).div(10));
+		expect(stalled).toBe(false);
+		await clock.advance(SILENCE.div(10));
+		await read.stalled;
+		read.done();
+		await draining;
+	});
+
+	test("a settle before the end never gives up on a quiet stream", async () => {
 		const { clock, tail: t } = tail(Duration.millis(10));
 		const read = t.open(0n, meter().read);
 		let stalled = false;
 		void read.stalled.then(() => {
 			stalled = true;
 		});
-		// Something else keeps the settle waiting while it is parked.
-		const release = t.hold();
 		const settling = t.settle(() => false, new Once<unknown>());
 
+		await clock.advance(SILENCE.mul(10));
+		expect(stalled).toBe(false);
+		read.done();
+		await settling;
+	});
+
+	test("a parked stream is not given up on, and restarts its quiet time when it resumes", async () => {
+		const { clock, tail: t } = tail();
+		const read = t.open(0n, meter().read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		// Something else keeps the drain waiting while it is parked.
+		const release = t.hold();
+		const draining = t.drain(() => false, new Once<unknown>());
+
 		read.park();
-		await clock.advance(Duration.millis(50));
+		await clock.advance(SILENCE.mul(5));
 		expect(stalled).toBe(false);
 
 		read.resume();
-		await clock.advance(Duration.millis(5));
+		await clock.advance(SILENCE.div(2));
 		expect(stalled).toBe(false);
-		await clock.advance(Duration.millis(5));
+		await clock.advance(SILENCE.div(2));
 		await read.stalled;
 		read.done();
 		release();
-		await settling;
-	});
-
-	test("a limit shortens the quiet time a stream is given", async () => {
-		const { clock, tail: t } = tail(Duration.millis(100));
-		const read = t.open(0n, meter().read);
-		const settling = t.settle(() => false, new Once<unknown>(), Duration.millis(10));
-
-		await clock.advance(Duration.millis(10));
-		await read.stalled;
-		read.done();
-		await settling;
+		await draining;
 	});
 
 	test("a stream opened without a meter is waited for until it ends", async () => {
-		const { clock, tail: t } = tail(Duration.millis(10));
+		const { clock, tail: t } = tail();
 		const read = t.open(0n);
 		let stalled = false;
 		void read.stalled.then(() => {
 			stalled = true;
 		});
 		let settled = false;
-		const settling = t
-			.settle(() => false, new Once<unknown>())
+		const draining = t
+			.drain(() => false, new Once<unknown>())
 			.then(() => {
 				settled = true;
 			});
 
-		await clock.advance(Duration.millis(100));
+		await clock.advance(SILENCE.mul(10));
 		expect(stalled).toBe(false);
 		expect(settled).toBe(false);
 		read.done();
-		await settling;
+		await draining;
 	});
 
 	test("with no grace, a gap is owed until it is accounted for", async () => {
@@ -334,6 +370,21 @@ describe("Tail", () => {
 		expect(stalled).toBe(false);
 		stream.done();
 		await settling;
+	});
+
+	test("with no grace, a drain never gives up on a silent stream", async () => {
+		const { clock, tail: t } = tail(null);
+		const read = t.open(0n, meter().read);
+		let stalled = false;
+		void read.stalled.then(() => {
+			stalled = true;
+		});
+		const draining = t.drain(() => true, new Once<unknown>());
+
+		await clock.advance(SILENCE.mul(100));
+		expect(stalled).toBe(false);
+		read.done();
+		await draining;
 	});
 
 	test("a parked stream holds nothing until it resumes", () => {

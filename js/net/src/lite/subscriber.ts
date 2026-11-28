@@ -3201,10 +3201,11 @@ export class Subscriber {
 	//
 	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
 	// key, such as a lost datagram, still waits out the grace. Streams whose
-	// headers arrived keep reading until their own FIN or reset.
+	// headers arrived keep reading until their own FIN or reset, or, with a grace, until they go
+	// quiet for it: a browser can lose a stream's reset.
 	async #settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
-		await tail.settle(() => this.#covered(entry), hooks.trackReleased(track));
+		await tail.drain(() => this.#covered(entry), hooks.trackReleased(track));
 	}
 
 	// Whether the groups received and dropped account for every group the demand is owed once
@@ -3606,7 +3607,7 @@ export class Subscriber {
 			}
 			target.taken = true;
 			target.arrived();
-			const counted = entry.tail.open(group.key, () => stream.last);
+			const counted = entry.tail.open(group.key);
 			try {
 				const format = {
 					scale: entry.timescale,
