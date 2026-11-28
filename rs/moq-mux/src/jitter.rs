@@ -1851,27 +1851,40 @@ mod tests {
 	}
 
 	/// A commit that moves the replacement's deadlines later to keep the output in order moves
-	/// what its frames had to spare with them.
+	/// what its frames had to spare with them: the margin of a whole second, and before one has
+	/// passed, the least so far.
 	#[kio::test]
 	async fn a_commit_shift_moves_the_spare_with_the_deadlines() {
-		let start = kio::clock::now();
-		let delay = Duration::from_millis(500);
-		let mut buffer = Buffer::new(delay).replay();
-		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
-		buffer.push(0, arrival(start, 100, "A1")).unwrap();
-		buffer.start([1], [1]);
-		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
-		let before = buffer.replacement_engine().unwrap().spare_seen().unwrap();
-		assert!((before - 0.5).abs() < 1e-6, "B arrived a delay ahead: {before} s");
-		kio::clock::sleep(delay + Duration::from_millis(100)).await;
-		assert_eq!(due(&mut buffer), ["A0", "A1"]);
-		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
-			panic!("B ready");
-		};
-		// A1 went out 100 ms after B's first deadline, so the commit shifts B 100 ms later.
-		buffer.commit(first).unwrap();
-		let after = buffer.replacement_engine().unwrap().spare_seen().unwrap();
-		assert!((after - 0.6).abs() < 1e-6, "shifted with the deadlines: {after} s");
+		for whole in [false, true] {
+			let start = kio::clock::now();
+			let delay = Duration::from_millis(500);
+			let mut buffer = Buffer::new(delay).replay();
+			buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+			buffer.push(0, arrival(start, 100, "A1")).unwrap();
+			buffer.start([1], [1]);
+			buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+			kio::clock::sleep(delay + Duration::from_millis(100)).await;
+			assert_eq!(due(&mut buffer), ["A0", "A1"]);
+			if whole {
+				// A second after B's first, the next completes B's window.
+				kio::clock::sleep(Duration::from_millis(400)).await;
+				buffer.push(1, arrival(kio::clock::now(), 11_000, "B1")).unwrap();
+			}
+			let engine = buffer.replacement_engine().unwrap();
+			assert_eq!(engine.margin().is_some(), whole);
+			let before = engine.spare_seen().unwrap();
+			assert!((before - 0.5).abs() < 1e-6, "B arrived a delay ahead: {before} s");
+			let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+				panic!("B ready");
+			};
+			// A1 went out 100 ms after B's first deadline, so the commit shifts B 100 ms later.
+			buffer.commit(first).unwrap();
+			let after = buffer.replacement_engine().unwrap().spare_seen().unwrap();
+			assert!(
+				(after - 0.6).abs() < 1e-6,
+				"whole {whole}: shifted with the deadlines: {after} s"
+			);
+		}
 	}
 
 	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames
