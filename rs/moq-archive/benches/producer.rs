@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_archive::{Producer, Store, producer};
-use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use object_store::memory::InMemory;
 
 const FRAMES_PER_GROUP: u64 = 2;
@@ -29,10 +29,10 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 		.map(|index| {
 			let track = source.create_track(format!("track{index}"), info.clone()).unwrap();
 			for sequence in 0..groups {
-				let mut group = track.create_group(group::Info { start: sequence }).unwrap();
-				for frame in 0..FRAMES_PER_GROUP {
-					let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
-					group.write_frame(pts, vec![0u8; 64]).unwrap();
+				let pts = |frame: u64| Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
+				let mut group = track.create_group(pts(0), vec![0u8; 64]).unwrap();
+				for frame in 1..FRAMES_PER_GROUP {
+					group.write_frame(pts(frame), vec![0u8; 64]).unwrap();
 				}
 				group.finish().unwrap();
 			}
