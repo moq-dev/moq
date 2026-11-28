@@ -130,12 +130,12 @@ objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 
 [dev-dependencies]
-swole = { workspace = true }
 # An HLS-only viewer starting an on-demand capture.
 moq-hls = { workspace = true, features = ["async"] }
 # Reads the jitter conformance corpus at doc/concept/audio-jitter/.
 serde = { workspace = true }
 serde_json = { workspace = true }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 workspace-hack = { path = "../workspace-hack" }
 

@@ -106,7 +106,6 @@ moq-sock = { workspace = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-swole = { workspace = true }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
@@ -123,6 +122,7 @@ pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
+swole = { workspace = true }
 tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }

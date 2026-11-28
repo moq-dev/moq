@@ -39,12 +39,12 @@ url = { workspace = true }
 gst-plugin-version-helper = "0.8"
 
 [dev-dependencies]
-swole = { workspace = true }
 futures = { workspace = true }
 # A test clock for synced sinks, so lateness checks hold however loaded the machine is.
 gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_16"] }
 # Decodes the OpusHead the sink publishes, so the surround regression checks playback.
 moq-audio = { path = "../moq-audio", default-features = false }
+swole = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }

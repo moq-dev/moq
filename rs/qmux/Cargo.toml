@@ -42,7 +42,6 @@ libc = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-swole = { workspace = true }
 kio = { path = "../kio", features = ["sim"] }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
@@ -50,6 +49,7 @@ qmux06 = { package = "qmux", version = "0.6.3", default-features = false, featur
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
+swole = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # The 0.6 release's stream API, for driving it in the interop tests.
 web-transport-trait = { workspace = true }

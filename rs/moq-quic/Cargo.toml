@@ -52,7 +52,6 @@ tracing = { version = "0.1.10", default-features = false, features = ["std"] }
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 cpu-time = "1.0.0"
-swole = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 kio = { path = "../kio", features = ["runtime", "sim"] }
@@ -65,6 +64,7 @@ rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
+swole = { workspace = true }
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 workspace-hack = { path = "../workspace-hack" }
 

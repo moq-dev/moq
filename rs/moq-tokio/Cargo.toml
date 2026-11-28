@@ -98,7 +98,6 @@ libc = { workspace = true }
 anyhow = "1"
 bytes = "1"
 chrono = "0.4"
-swole = { workspace = true }
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
@@ -124,6 +123,7 @@ serde_json = { workspace = true }
 # worker tests can prove a stopped group closed its own, and port reservations
 # that never listen, so a test needn't release a port another test could take.
 socket2 = { workspace = true, features = ["all"] }
+swole = { workspace = true }
 tempfile = "3"
 # Runs the tests that need a variable set in a child process given it.
 test-env = { path = "../test-env" }

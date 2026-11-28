@@ -58,9 +58,9 @@ web-transport-proto = { workspace = true }
 [dev-dependencies]
 anyhow = "1"
 bytes = { workspace = true }
-swole = { workspace = true }
 moq-net = { path = "../moq-net" }
 pem = { workspace = true }
+swole = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 workspace-hack = { path = "../workspace-hack" }

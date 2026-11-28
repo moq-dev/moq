@@ -59,9 +59,9 @@ url = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-swole = { workspace = true }
 kio = { path = "../kio", features = ["manual", "runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
+swole = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test = { workspace = true }

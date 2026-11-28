@@ -4495,7 +4495,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "hashlink",
  "kio",
- "libc",
  "moq-net",
  "moq-pattern",
  "num_enum",

@@ -57,7 +57,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-swole = { workspace = true }
 # Holds a read open so the pool tests see the group log defer its frees.
 crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
@@ -67,15 +66,12 @@ kio = { path = "../kio", features = ["runtime", "sim"] }
 moq-net = { path = ".", default-features = false, features = ["relay", "test-support"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+swole = { workspace = true }
 # The benches run on tokio, the session fanout bench across worker threads. test-util
 # (tokio::time::pause/advance) is test-only, so it must not leak into the normal
 # dependency feature set.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 workspace-hack = { path = "../workspace-hack" }
-
-# Thread and process CPU timing in the session benchmark.
-[target.'cfg(unix)'.dev-dependencies]
-libc = { workspace = true }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.

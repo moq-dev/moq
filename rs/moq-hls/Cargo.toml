@@ -43,7 +43,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-swole = { workspace = true }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
 # Compile the gateways for the tests, with or without the `server` feature.
@@ -52,6 +51,7 @@ moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio" }
 mp4-atom = { workspace = true }
 object_store = { workspace = true }
+swole = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
