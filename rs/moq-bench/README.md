@@ -66,9 +66,11 @@ and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 Subscribers read groups in arrival order (out-of-order included) and track each
 subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
-loss (which the transport already repairs). The newest group is the live frontier
-and is excluded from the count: groups just behind it may still be in flight, so a
-gap is only blamed once a higher group confirms it was truly skipped. The span
+loss (which the transport already repairs). A gap is blamed only once the player
+can no longer receive it: a group overtaken by newer ones still arrives within the
+`--max-delay` budget, so the count stops at the newest group whose start is more
+than that budget behind the newest start seen, below which the subscriber's live
+read skips any missing group as stale. The span
 starts at the first group a subscription receives: an older group that arrives
 later is history, counted in `history_groups` rather than widening the span, so
 a join that over-fetches history never reads as loss. A group the

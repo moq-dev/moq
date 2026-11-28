@@ -1,5 +1,53 @@
 # Release performance comparison
 
+## Chat startup loss (2026-11-27)
+
+The groups `main` lost while `chat`'s 2,000 viewers joined were two things:
+groups the generator counted lost though they arrived, and a real loss when
+the relay falls behind its UDP socket. Neither is drop forwarding: the `Old`
+drops the relay sends a joining viewer name only groups from before it
+joined, which the generator never counted.
+
+- **Late groups counted lost, fixed.** The generator settled a gap once two
+  newer groups arrived, and a later arrival never undid it. During the ramp
+  single groups reached every viewer about 0.5 s behind their neighbours,
+  inside the 2 s that players wait. One `main` round counted 11.7% lost with
+  every group delivered, and every `release` round counted 0.5% to 1.8% the
+  same way. The generator now settles a gap only once the group above it
+  starts more than `--max-delay` behind the newest, past which the viewer's
+  live read skips a missing group as stale. `groups_lost` then equals the
+  gaps still open at the end of every round.
+- **Relay receive backlog, real.** In every round that lost groups the
+  relay's UDP receive queue was 6.4 MiB or deeper, and in most it reached the
+  16 MiB buffer and the kernel dropped datagrams. The publisher's groups reached
+  the relay 2.0 to 2.7 s after the publisher opened their streams, so some
+  arrived past the budget and others never arrived; no viewer was sent a drop
+  for those. The relay used less CPU in those rounds (1.9 to 2.8 cores) than
+  in clean ones (4.1 to 4.2), so it stops draining its one socket rather than
+  running out of CPU. `main` reached the full buffer in 8 of 14 rounds,
+  `release` in 1 of 13. [Relay receive backlog](/quest/m1/relay-receive-backlog.md)
+  owns the cause.
+
+Alternating rounds of quic `chat` on `fedora` (32 CPUs, shared: one-minute
+load 29 to 70), `release` at
+[e3064ac47a](https://github.com/moq-dev/moq/commit/e3064ac47a), `main` at
+[f24ac5065e](https://github.com/moq-dev/moq/commit/f24ac5065e), the default
+shared runtime:
+
+| | release | main |
+| --- | ---: | ---: |
+| rounds that lost groups | 3 of 13 | 6 of 14 |
+| groups never delivered, per losing round | 2 to 3,225 | 1,019 to 31,302 |
+| rounds whose relay receive queue filled 16 MiB | 1 | 8 |
+
+The last four rounds of each used the fixed generator, where `main` read
+8.0% and 12.9% `loss_pct` in its two losing rounds and `release` at most
+0.01%. With 8 QUIC shards (`tokio-workers`, one socket each) neither relay
+queued more than 131 KiB or lost a group in four rounds, but at load 15, so
+that does not yet separate the socket from the host. Per-group timings came
+from a scratch probe logging each publisher stream open, relay header
+decode, viewer arrival, and received drop; it did not land.
+
 ## Relay memory (2026-11-16)
 
 The 2026-11-05 pairing below recorded relay RSS but never reported it: `chat`,
@@ -145,7 +193,7 @@ offered 20,000 frames/s in the window; the three at the offered rate read
 over each run's lifetime, all during the startup ramp, and `release` none.
 Earlier runs in the same session saw `main` lose up to 11.9% there, with the
 window still draining the backlog, which read the largest CPU per frame of
-any pair. [Chat startup loss](/quest/m1/chat-startup-loss.md) owns that loss.
+any pair. [Chat startup loss](#chat-startup-loss-2026-11-27) explains that loss.
 
 The transport lead was measured and not taken. A connection with every packet
 acknowledged before it sends the next frees its 8 KiB chunk of sent packets
