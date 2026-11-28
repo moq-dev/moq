@@ -19,21 +19,23 @@ server connection's heap went from 17.8 KB to 6.2 KB and its inline
 `Connection` from 8,240 B to 7,712 B.
 
 What remains is the Initial and Handshake `PacketSpace`s, 800 B each, inline
-in `Connection::spaces` for the connection's whole life. Moving them behind a
-box that is freed once both are discarded means auditing the ~90
-`spaces[...]` index sites that can name a discarded space: any site the audit
-misses becomes a panic a peer can trigger. One way to do it: a `Spaces` type
-whose reads of a discarded space return a shared empty space and whose writes
-cannot reach one by construction.
+in `Connection::spaces` for the connection's whole life. Move them behind a
+box that is freed once both are discarded. That means auditing the ~90
+`spaces[...]` index sites that can name a discarded space, since any site the
+audit misses becomes a panic a peer can trigger. One way to do it: a `Spaces`
+type whose reads of a discarded space return a shared empty space and whose
+writes cannot reach one by construction. The audit runs the `fuzz` connection
+target over the state machine before the PR is ready, so a missed site shows
+as a crash there rather than in production.
+
+The maintainer chose (2026-11-28) to do this as its own work after the 0.22.0
+cut, not in #9827 and not dropped.
 
 The rest of the profile's items stay: the current and next 1-RTT keys
 (precomputed so a spoofed key phase costs nothing), BBRv3's state, the stream
 waits table (entries live only while a waiter is), and `moq_congestion::Lost`
 (only a temporary `Vec` in `detect_lost_packets`; nothing keeps one).
 
-## Waiting
+## Parked
 
-- Maintainer: Should the Initial and Handshake packet spaces (1.6 KB inline per connection) move behind a box freed after the handshake, given that it means auditing ~90 index sites where a missed one is a remote-triggerable panic?
-  - Separate quest after the 0.22.0 cut (Recommended) - an L-sized audit of the QUIC state machine on its own, with the fuzz target run over it
-  - Do it in #9827 - finishes the Goal in one PR, but holds the measured 11.6 KB/conn heap saving behind a riskier refactor
-  - Drop it - 1.6 KB is about 2% of the relay's 93 KB per idle connection
+- until the 0.22.0 cut ships - the maintainer deferred it past the cut; move it to m3 (`quest mv`) once #9827 merges and releases the claim, then delete this section

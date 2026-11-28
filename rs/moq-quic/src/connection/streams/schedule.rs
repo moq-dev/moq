@@ -25,14 +25,26 @@ use std::{
 
 use slab::Slab;
 
-/// Drop an emptied tree's root node, which std keeps for reuse: an idle connection would
-/// otherwise hold one for every tree it ever filled.
-fn shrink<T: Default>(tree: &mut T)
-where
-	for<'a> &'a T: IntoIterator,
-{
-	if tree.into_iter().next().is_none() {
-		*tree = T::default();
+/// A tree whose emptied root node, which std keeps for reuse, can be freed: an idle
+/// connection would otherwise hold one for every tree it ever filled.
+trait Shrink {
+	/// Free the root node if the tree is empty.
+	fn shrink(&mut self);
+}
+
+impl<K, V> Shrink for BTreeMap<K, V> {
+	fn shrink(&mut self) {
+		if self.is_empty() {
+			*self = Self::new();
+		}
+	}
+}
+
+impl<T> Shrink for BTreeSet<T> {
+	fn shrink(&mut self) {
+		if self.is_empty() {
+			*self = Self::new();
+		}
 	}
 }
 
@@ -145,8 +157,8 @@ impl<K: Copy, D> Queue<K, D> {
 
 	/// Free the nodes the queue's emptied trees keep.
 	fn shrink(&mut self) {
-		shrink(&mut self.items);
-		shrink(&mut self.datagrams);
+		self.items.shrink();
+		self.datagrams.shrink();
 	}
 
 	#[cfg(test)]
@@ -564,9 +576,9 @@ impl<K: Copy, D> Schedule<K, D> {
 				count.remove();
 			}
 		}
-		shrink(&mut self.frames);
+		self.frames.shrink();
 		self.index(group);
-		shrink(&mut self.victims);
+		self.victims.shrink();
 
 		self.deactivate(group);
 		if let Some(group) = group {
@@ -692,7 +704,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		let priority = state.priority;
 		if next == group {
 			self.levels.remove(&priority);
-			shrink(&mut self.levels);
+			self.levels.shrink();
 			return;
 		}
 		self.link(prev).next = next;
