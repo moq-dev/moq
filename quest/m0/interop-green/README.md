@@ -175,7 +175,8 @@ Three causes, plus one media flake:
   flakes epic.
 - 11-26 Chromium media: `volume scales the output: volume 0.25: only 27/31 samples carried audio`,
   seen once. The fixture's audio reached the relay about 250 ms late while its video kept flowing,
-  so the hold was in the publisher's Chromium, not the player. It did not recur in 36 full media
+  so the hold was upstream of the relay (the publisher's Chromium or its link to the relay), not in
+  the player. A recurrence opens a new child of the test flakes epic. It did not recur in 36 full media
   lanes on `ubuntu-latest` at `1b05509572` or in the scheduled runs of 11-27 and 11-28.
   [moq-dev/moq#9869](https://github.com/moq-dev/moq/pull/9869) made a failed window print where
   the fixture's audio held.

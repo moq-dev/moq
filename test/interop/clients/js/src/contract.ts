@@ -241,16 +241,19 @@ export type LongFrame = {
 export const LONG_FRAMES = "__moqLongFrames";
 
 /**
- * A stretch the fixture's audio stopped moving at one stage: `capture` when its captured frames
- * stopped reaching the page, `encoder` when the encoder stopped emitting them. Neither in a window
- * whose player lost audio puts the hold after the encoder, in the send path or the network.
+ * A stretch the fixture's main audio rendition stopped moving at one stage: `capture` when its
+ * captured frames stopped reaching the page, `encoder` when the encoder stopped emitting them while
+ * it had a subscriber. Neither covering a gap the player heard in that rendition puts the hold after
+ * the encoder, in the send path or the network.
  */
 export type AudioHold = {
 	stage: "capture" | "encoder";
 	/** When the stage last moved before the hold, in epoch milliseconds, so it lines up with a window. */
 	at: number;
-	/** How long until it moved again, in milliseconds. */
+	/** How long until it moved again, or until the log was read while it is still held, in milliseconds. */
 	duration: number;
+	/** Whether the stage was still held when the log was read. */
+	open?: boolean;
 };
 
 /** The `window` property the fixture page keeps its {@link AudioHold} log on. */

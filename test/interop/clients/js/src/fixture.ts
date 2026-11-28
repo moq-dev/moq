@@ -51,24 +51,38 @@ const HOLD_MS = 100;
 /** Enough for minutes of a struggling page; the driver only ever reads the last few seconds. */
 const KEEP_HOLDS = 500;
 
+const epoch = () => performance.timeOrigin + performance.now();
+
 // One log per page, so the driver finds it whichever fixture the page is running now.
 const holds: AudioHold[] = [];
-(globalThis as unknown as Record<string, AudioHold[]>)[AUDIO_HOLDS] = holds;
+// When each stage of the running fixture last moved, so a hold still open when the log is read shows.
+const last: Partial<Record<AudioHold["stage"], number>> = {};
+Object.defineProperty(globalThis, AUDIO_HOLDS, {
+	get: (): AudioHold[] => {
+		const now = epoch();
+		const open = Object.entries(last).flatMap(([stage, at]) =>
+			at !== undefined && now - at >= HOLD_MS
+				? [{ stage: stage as AudioHold["stage"], at, duration: Math.round(now - at), open: true }]
+				: [],
+		);
+		return [...holds, ...open];
+	},
+});
 
 // Track one stage of the audio path, logging each stretch it stood still for at least HOLD_MS.
 function stage(name: AudioHold["stage"]): { moved: () => void; reset: () => void } {
-	let last: number | undefined;
 	return {
 		moved: () => {
-			const at = performance.timeOrigin + performance.now();
-			if (last !== undefined && at - last >= HOLD_MS) {
-				holds.push({ stage: name, at: last, duration: Math.round(at - last) });
+			const at = epoch();
+			const since = last[name];
+			if (since !== undefined && at - since >= HOLD_MS) {
+				holds.push({ stage: name, at: since, duration: Math.round(at - since) });
 				if (holds.length > KEEP_HOLDS) holds.shift();
 			}
-			last = at;
+			last[name] = at;
 		},
 		reset: () => {
-			last = undefined;
+			delete last[name];
 		},
 	};
 }
@@ -294,9 +308,16 @@ export class Fixture {
 	}
 
 	// Log where the main rendition's audio stops moving: its captured frames reaching the page, and the
-	// encoder emitting them. A player's audio gap that neither covers began after the encoder.
+	// encoder emitting them. A gap in that rendition at the player that neither covers began after the
+	// encoder. The alternate rendition is not watched.
 	#watchAudio(capture: Publish.Audio.Capture, encoder: Publish.Audio.Encoder): void {
 		const captured = stage("capture");
+		const encoded = stage("encoder");
+		// A closed fixture holds nothing.
+		this.#signals.cleanup(() => {
+			captured.reset();
+			encoded.reset();
+		});
 		this.#signals.run((effect) => {
 			const fanout = effect.get(capture.out.frames);
 			if (!fanout) return;
@@ -314,10 +335,14 @@ export class Fixture {
 		});
 
 		// The encoder's frame count, not its stats as a whole, which also move with each bitrate estimate.
-		const encoded = stage("encoder");
+		// An encoder with no subscriber to encode for is idle, not held.
 		let frames = 0;
 		this.#signals.run((effect) => {
 			const count = effect.get(encoder.out.stats).frames;
+			if (!effect.get(encoder.out.active)) {
+				encoded.reset();
+				return;
+			}
 			if (count === frames) return;
 			frames = count;
 			encoded.moved();

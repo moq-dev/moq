@@ -15,9 +15,10 @@ groups about 400 ms apart, and the catalog advertised a 586 ms delay. The other 
 
 ## Plan
 
-The fixture's audio-hold log (`AUDIO_HOLDS` in `test/interop/clients/js/src/contract.ts`) saw
-only one 102 ms encoder hold in that window. Capture and encoder kept up, so start after the
-encoder: the JS group writes and Chromium's WebTransport send. Check whether the steady long
+Rerun with the source audio-hold log (`AUDIO_HOLDS` in `test/interop/clients/js/src/contract.ts`)
+to place the hold: capture, encoder, or after it (the JS group writes and Chromium's WebTransport
+send). Its first version, which missed a hold still open when it was read, logged one 102 ms
+encoder hold in the failing window, so that run settles nothing. Check whether the steady long
 frames (headless Chromium without a GPU adapter, painting through Canvas2D) starve that path,
 and whether a headed or GPU-backed launch on macOS changes it. Fix at the cause; if it is a
 headless macOS limitation, the lane fails loud on macOS with that reason instead of timing out.

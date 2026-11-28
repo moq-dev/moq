@@ -455,14 +455,17 @@ async function observe(
 	const start = Date.now();
 	const host = watchHost(label, ms);
 	const samples = await collect(player, playerErrors, ms);
-	const bounds = { start, end: Date.now() };
+	// A source hold plays out at the player up to its delay later, so the window's audio covers that far back.
+	const lead = Math.max(0, ...samples.map((sample) => sample.delay));
+	const bounds = { start, end: Date.now(), lead };
 	const grade = async (checks?: () => void) => {
 		try {
 			checks?.();
 			if (media) assertMedia(samples, label);
 		} catch (err) {
+			// Timed from the window's start, as explainStalls times its evidence, so the lists line up.
 			console.error(`  ${label}: ${samples.length} samples`);
-			for (const sample of samples) console.error(traceLine(sample, samples[0]?.at ?? 0));
+			for (const sample of samples) console.error(traceLine(sample, start));
 			await explainStalls(player, bounds, label, host);
 			throw err;
 		} finally {
@@ -556,7 +559,7 @@ async function readLog<T extends { at: number; duration: number }>(
  */
 async function explainStalls(
 	player: Page,
-	bounds: { start: number; end: number },
+	bounds: { start: number; end: number; lead?: number },
 	label: string,
 	host: ReturnType<typeof watchHost>,
 ): Promise<void> {
@@ -568,7 +571,7 @@ async function explainStalls(
 	const at = (ms: number) => `+${((ms - start) / 1000).toFixed(2)}s`;
 	for (const [name, page] of [
 		["player", player],
-		["fixture", fixturePage],
+		["source", sourcePage],
 	] as const) {
 		if (!page) continue;
 		try {
@@ -584,14 +587,19 @@ async function explainStalls(
 		}
 	}
 
-	// A player's audio gap that no hold here covers began after the fixture's encoder.
-	if (fixturePage) {
+	// A gap the player heard in the source's main rendition that no hold here covers began after the
+	// source's encoder. Looked up from as far back as the player's delay, since a hold plays out that late.
+	if (sourcePage) {
 		try {
-			const holds = await readLog<AudioHold>(fixturePage, AUDIO_HOLDS, bounds);
-			console.error(`  ${label}: fixture audio holds: ${holds.length}`);
-			for (const hold of holds) console.error(`    ${at(hold.at)} ${hold.stage} still for ${hold.duration}ms`);
+			const from = { start: start - (bounds.lead ?? 0), end: bounds.end };
+			const holds = await readLog<AudioHold>(sourcePage, AUDIO_HOLDS, from);
+			console.error(`  ${label}: source audio holds: ${holds.length}`);
+			for (const hold of holds) {
+				const still = hold.open ? " (still held)" : "";
+				console.error(`    ${at(hold.at)} ${hold.stage} still for ${hold.duration}ms${still}`);
+			}
 		} catch (err) {
-			console.error(`  ${label}: fixture audio holds unavailable: ${err}`);
+			console.error(`  ${label}: source audio holds unavailable: ${err}`);
 		}
 	}
 
@@ -884,8 +892,11 @@ async function capabilities(browser: Browser, engine: Engine, role: Role): Promi
 
 const server = serve();
 
-/** The fixture publisher, whose stalls {@link explainStalls} reports beside the player's. */
-let fixturePage: Page | undefined;
+/**
+ * The fixture publisher the player under test is watching, whose stalls {@link explainStalls}
+ * reports beside the player's. A case that watches another fixture points this at it for its run.
+ */
+let sourcePage: Page | undefined;
 const browsers: Browser[] = [];
 
 // One browser per role. Chromium's default autoplay behavior varies with engagement and when the
@@ -1052,7 +1063,7 @@ try {
 			pageUrl(server.origin, "fixture", { url: relayFor(publisherEngine), broadcast, fault }),
 			"fixture",
 		);
-		fixturePage = publisher;
+		sourcePage = publisher;
 
 		console.error("=== publisher readiness ===");
 		const beforePublisherGesture = await readFixtureState(publisher);
@@ -1374,6 +1385,7 @@ try {
 				}),
 				`old-${version}`,
 			);
+			sourcePage = old;
 			let next: Page | undefined;
 			let viewer: Page | undefined;
 			try {
@@ -1413,6 +1425,7 @@ try {
 					`new-${version}`,
 				);
 				next = replacement;
+				sourcePage = replacement;
 				await gesture(replacement);
 				const { readyAt: ready } = await waitForFixture(replacement, replacementErrors, {
 					deadline: Date.now() + timeoutMs,
@@ -1443,6 +1456,7 @@ try {
 				check(held.ready && held.frameId > before.frameId, "incumbent stays live", () => JSON.stringify(held));
 				const withdrawn = Date.now();
 				await command(replacement, "stop");
+				sourcePage = old;
 				const back = await waitForState(watch, watchErrors, {
 					deadline: withdrawn + SWITCH_MS,
 					assertion: "live incumbent fallback plays",
@@ -1467,6 +1481,7 @@ try {
 					`  ${version}: replacement ${replacementMs}ms, fallback ${fallbackMs}ms, bound ${SWITCH_MS}ms`,
 				);
 			} finally {
+				sourcePage = publisher;
 				await viewer?.context().close();
 				await next?.context().close();
 				await old.context().close();
@@ -1650,6 +1665,7 @@ try {
 			}),
 			"aac-fixture",
 		);
+		sourcePage = source;
 		let viewer: Page | undefined;
 		try {
 			await gesture(source);
@@ -1670,6 +1686,7 @@ try {
 			});
 			await measurePlayback(watch, watchErrors, "AAC publish");
 		} finally {
+			sourcePage = publisher;
 			await viewer?.context().close();
 			await source.context().close();
 		}
