@@ -1,5 +1,64 @@
 # Release performance comparison
 
+## Chat startup loss (2026-11-27)
+
+The groups `main` lost while `chat`'s 2,000 viewers joined were two things:
+groups the generator counted lost though they arrived, and the relay falling
+behind its UDP socket. Neither is drop forwarding: the `Old` drops the relay
+sends a joining viewer name only groups from before it joined, which the
+generator never counted.
+
+- **Late groups counted lost, fixed.** The generator settled a gap once two
+  newer groups arrived, and a later arrival never undid it. During the ramp
+  single groups reached every viewer about 0.5 s behind their neighbours,
+  inside the 2 s that players wait. One `main` round counted 11.7% lost with
+  every group delivered. The generator had read in arrival order and kept its
+  own gap ledger since before the ordered reader reported what it gave up
+  ([moq-dev/moq#8910](https://github.com/moq-dev/moq/pull/8910)). It now reads
+  each track in key order as a player does, waiting `--max-delay` for a
+  missing group, and counts the group numbers skipped between those it
+  reaches.
+- **Relay receive backlog, real.** In the rounds that went wrong the relay's
+  UDP receive queue reached the 16 MiB buffer and the kernel dropped
+  datagrams. The publisher's groups reached the relay 2.0 to 2.7 s after the
+  publisher opened their streams. The relay used less CPU in those rounds (1.9
+  to 2.8 cores) than in clean ones (4.1 to 4.2), so it stops draining its one
+  socket rather than running out of CPU.
+  [Relay receive backlog](/quest/m3/relay-receive-backlog.md) owns the cause.
+
+Read in key order, the backlog mostly shows as late groups and a lower
+delivered rate rather than as `loss_pct`. QUIC retransmits what the kernel
+dropped, so the groups still arrive, up to 4.5 s late, and a viewer that
+joins during the backlog starts later and expects fewer groups. Ten
+alternating rounds of quic `chat` on `fedora` (32 CPUs, shared), `release` at
+[e3064ac47a](https://github.com/moq-dev/moq/commit/e3064ac47a), `main` at
+[f24ac5065e](https://github.com/moq-dev/moq/commit/f24ac5065e) with this
+generator, on the default shared runtime:
+
+| | release | main |
+| --- | ---: | ---: |
+| rounds whose relay receive queue dropped datagrams | 0 of 10 | 7 of 10 |
+| rounds delivering under 19k of the offered 20k frames/s | 0 | 6 (5.5k to 15.8k) |
+| latency p99 | 2.0 to 2.5 s | 1.5 to 4.5 s |
+| latency p50 | 2.0 s | 27 ms to 2.0 s |
+| `loss_pct` | 1.2% to 6.1% | 0 in 8 rounds, 2.1% and 4.1% |
+
+`release`'s loss and 2 s p50 are the ordered reader against a relay that
+predates drop forwarding
+([moq-dev/moq#5691](https://github.com/moq-dev/moq/pull/5691)): without word
+of which groups it will never get, the reader waits out its budget, and the
+groups it gives up are startup groups (numbers 2 to 28) that landed after it
+passed them. Its arrival-order read had received them all. So compare the two
+by delivered rate and latency, not `loss_pct`.
+
+Earlier rounds with the arrival-order generator showed the same split: the
+queue filled in 8 of 14 `main` rounds and 1 of 13 `release` rounds. With 8
+QUIC shards (`tokio-workers`, one socket each) neither relay queued more than
+131 KiB or lost a group in four rounds, but at load 15, so that does not yet
+separate the socket from the host. Per-group timings came from a scratch probe
+logging each publisher stream open, relay header decode, viewer arrival, and
+received drop; it did not land.
+
 ## Relay memory (2026-11-16)
 
 The 2026-11-05 pairing below recorded relay RSS but never reported it: `chat`,
@@ -145,7 +204,7 @@ offered 20,000 frames/s in the window; the three at the offered rate read
 over each run's lifetime, all during the startup ramp, and `release` none.
 Earlier runs in the same session saw `main` lose up to 11.9% there, with the
 window still draining the backlog, which read the largest CPU per frame of
-any pair. [Chat startup loss](/quest/m1/chat-startup-loss.md) owns that loss.
+any pair. [Chat startup loss](#chat-startup-loss-2026-11-27) explains that loss.
 
 The transport lead was measured and not taken. A connection with every packet
 acknowledged before it sends the next frees its 8 KiB chunk of sent packets
