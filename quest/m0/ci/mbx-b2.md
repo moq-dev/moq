@@ -27,6 +27,10 @@ separate [XS] quest (rejected: folding it into
 [the B2 verification](/quest/m0/ci/mbx-b2-verify.md)), and ✅ the B2 bucket
 keeps the name `mbx-moq-dev` (rejected: renaming it).
 
+Decided 2026-11-28 (maintainer, /quest-run): ✅ keep R2 until an agent
+confirms or rules out manifest overwrites on B2 (rejected: tear R2 down now;
+move the Rust cache back to R2).
+
 Steps:
 
 1. Compare each Rust-cache job's hits and "not looked up" counts
@@ -59,10 +63,32 @@ Steps:
    `.config/hakari.toml` excluded kio), and the other jobs on the same
    compiler stayed warm, so a manifest one job overwrote with another
    compiler's or flags' predictions fits better than a toolchain change.
-   Confirm it by finding which build wrote the manifests those jobs loaded:
-   the B2 bucket's keys are `b2-us-east-key-id` and `b2-us-east-key` in
-   Bitwarden Secrets Manager. R2 has taken no writes since 2026-11-25, so its
-   30-day expiry empties it by about 2026-12-25 and holding it costs little.
+   Found 2026-11-28, from the B2 bucket's object versions (B2 keeps an
+   overwritten version for a day): two separate effects.
+
+   - The eight cold jobs were not B2's doing. The Cargo.lock change made a new
+     task manifest key, and mbx seeds a new key from earlier lockfile states
+     in Git history only while no manifest exists under it. `x11 / SHM and
+     GetImage` (Linux-ARM64) published the key's first manifest at 17:17:32
+     ("19 of 534 predicted actions were not published": 534 - 19 = 515) from
+     a depth-1 checkout, so unseeded. Every Linux-ARM64 job that started
+     after it loaded those 515 x11 predictions instead of history and matched
+     none; the ones that started later hit, because earlier cold jobs had
+     merged their own predictions in by then. R2's create-only write lets the
+     first writer win the same way. Fixed in this quest's PR: every cache
+     writer checks out full history (`fetch-depth: 0`, `filter: blob:none`,
+     about 5 s more per job), and `.github/actions/rust-cache` refuses a
+     shallow writer.
+   - Overwrites on B2 are real. mbx merges against the manifest it loaded
+     when the build started and then writes unconditionally, so a writer
+     drops whatever others published while it built (`doctest` at 17:26:19
+     kept 779 of the 1,018 predictions `Media (firefox player)` published 26
+     s earlier). That night, 76 versions of the Linux-ARM64 manifest
+     published 4,680 distinct predictions between them, but the final version
+     kept 2,327. That costs prefetch coverage, not correctness, and only mbx
+     can fix it: it has no setting to give manifests their own key, and a
+     per-job namespace would split the content-addressed results jobs share.
+
 2. Delete the `MBX_R2_*` secrets: `gh secret delete MBX_R2_ACCESS_KEY_ID`
    and `MBX_R2_SECRET_ACCESS_KEY`, each with and without `--env
    cache-write`, on `moq-dev/moq`. A branch that has not merged `main` since
@@ -79,16 +105,20 @@ Steps:
 
 ## Waiting
 
-- Maintainer: On the second Nightly after the Rust cache moved from R2 to
-  B2, total hits held (16,077 against R2's 16,677) but eight jobs went fully
-  cold after loading a task manifest that matched none of their
-  compilations, against one to three per R2 Nightly. B2 refuses the
-  conditional writes R2 used to keep concurrent jobs from overwriting each
-  other's manifests, and that overwrite fits the evidence. Deleting R2's
-  bucket, tokens, and `MBX_R2_*` secrets is irreversible. Tear R2 down now?
-  - Keep R2 until an agent confirms or rules out manifest overwrites on B2 (Recommended) - R2 costs little while its objects expire, and keeping it leaves conditional writes one revert away if overwrites are the cause
-  - Tear R2 down now - totals sit inside R2's own night-to-night swing (20,932 then 16,677 hits), so accept the per-job churn
+- Maintainer: The Rust cache moved from R2 to B2, and R2's bucket, API
+  tokens, and `MBX_R2_*` secrets are still there. The eight jobs that went
+  cold on the second B2 Nightly were caused by a shallow cache writer, which
+  would have done the same on R2, and is fixed now. B2's lack of conditional
+  writes does lose concurrent jobs' prediction updates (one night's
+  Linux-ARM64 manifest kept 2,327 of the 4,680 predictions written to it),
+  which costs prefetch coverage on later builds but never a wrong result.
+  Deleting R2 is irreversible. When should R2 be torn down?
+  - After the first Nightly with the shallow-writer fix shows no job loading a manifest that matches none of its build (Recommended) - the remaining loss is coverage, which totals show inside R2's own night-to-night swing, and R2 empties itself by about 2026-12-25 anyway
+  - Only once mbx stops losing manifest updates on stores without conditional writes - keeps a revert to R2 open, at the cost of a bucket and tokens kept indefinitely
   - Move the Rust cache back to R2 - keeps conditional writes and drops the B2 credits
+- Maintainer: mbx (jdx/mr-boxington, outside moq-dev) loses concurrent task manifest updates on stores without conditional writes such as B2, since it merges against the manifest read when the build started and then writes unconditionally. Only mbx can fix this; this repository cannot key manifests per job without splitting the results jobs share. Raise it upstream?
+  - Open an issue on jdx/mr-boxington with this quest's B2 version evidence, asking for a re-read and merge just before an unconditional write, or per-writer manifest shards merged on read (Recommended) - the fix belongs where the bug is, and an agent can draft it once posting there is approved
+  - Accept the loss - coverage only, and night-to-night totals sit within R2's swing
 
 ## Related
 
