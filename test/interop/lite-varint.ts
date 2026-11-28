@@ -117,7 +117,7 @@ if (untimed) {
 	untimedGroupBytes = await write(async (w) => {
 		await untimedGroup.encode(w, version);
 		for (const payload of untimedFrames) {
-			await w.write(frameHeader(version, undefined, undefined, payload.byteLength, lengthFirst));
+			await w.write(frameHeader(version, undefined, undefined, payload.byteLength, lengthFirst, false));
 			await w.write(payload);
 		}
 	});

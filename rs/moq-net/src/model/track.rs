@@ -423,7 +423,6 @@ impl Info {
 
 	/// Whether the upstream moq-transport publisher's Object IDs encode timestamps (a timed
 	/// track from draft-23), or `None` for a native moq-lite track.
-	#[cfg(feature = "async")]
 	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
 		self.properties
 			.as_ref()
@@ -17497,6 +17496,55 @@ mod test {
 				assert_eq!(producer.subscribe(replay()).largest().now_or_never(), Some(Some(held)));
 			}
 			assert_eq!(answered.is_ok(), ok, "object {object}");
+		}
+	}
+
+	/// A copy held from mid-group whose Object IDs skip is sparse on a timed track whose IDs are
+	/// ordinals (draft-18..22); only timestamp Object IDs (draft-23) skip the ticks between frames.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_mid_group_copy_is_sparse_when_its_ordinal_ids_skip() {
+		for (version, sparse) in [
+			(crate::ietf::Version::Draft22, true),
+			(crate::ietf::Version::Draft23, false),
+		] {
+			let mut info = Info::timed().with_max_age(None);
+			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+				version,
+				values: Vec::new(),
+			}));
+			let producer = track_producer("test", info);
+			let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+			group.start_at(3).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: false,
+					first_id: 3,
+					extensions: true,
+					has_end: false,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			for id in [3, 9] {
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: 1,
+							timestamp: Timestamp::from_millis(id).unwrap(),
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(&b"x"[..]).unwrap();
+				group = frame.finish().unwrap();
+			}
+			assert_eq!(group.wire().unwrap().sparse, sparse, "{version:?}");
 		}
 	}
 

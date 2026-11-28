@@ -309,9 +309,10 @@ const UNDERSTOOD: [u64; 6] = [
 	super::flate::COMPRESSION,
 ];
 
-/// Whether moq-net applies the Track Property `id` itself.
-pub(crate) fn understood(id: u64) -> bool {
-	UNDERSTOOD.contains(&id)
+/// Whether moq-net applies the Track Property `id` of a track published over moq-transport
+/// `version` itself: draft-18..22 tracks still carry their timescale as `0x08`.
+pub(crate) fn understood(id: u64, version: super::Version) -> bool {
+	UNDERSTOOD.contains(&id) || (id == LEGACY_TIMESCALE && !version.timestamp_object_ids())
 }
 
 /// The most Track Properties a relay forwards, leaving room for every one it restates

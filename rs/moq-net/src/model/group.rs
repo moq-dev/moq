@@ -1645,22 +1645,21 @@ impl GroupState {
 
 	/// Record a relayed object's wire `id` at frame `index` of the group starting at `start`.
 	///
-	/// A copy stays ordinal-aligned while each ID is its ordinal, or, on a timed track, the
-	/// moq-timestamp ID its timestamp takes after the previous object's (see
-	/// [`crate::ietf::object::timestamp_object_id`]): either way the same frame has the same
-	/// ID on every copy from frame 0. Anything else, or a copy whose first object is not the
-	/// group's, is sparse.
-	fn relayed(&mut self, id: u64, index: u64, start: u64, timestamp: Timestamp) {
+	/// A copy stays ordinal-aligned while each ID is its ordinal, or, on a track whose Object
+	/// IDs are timestamps (`timestamp_ids`), the moq-timestamp ID its timestamp takes after the
+	/// previous object's (see [`crate::ietf::object::timestamp_object_id`]): either way the
+	/// same frame has the same ID on every copy from frame 0. Anything else, or a copy whose
+	/// first object is not the group's, is sparse.
+	fn relayed(&mut self, id: u64, index: u64, start: u64, timestamp: Timestamp, timestamp_ids: bool) {
 		let offset = self.offset;
 		let Some(wire) = self.wire_mut() else {
 			return;
 		};
 		let prior = wire.last.replace(id);
-		let timed = timestamp.scale().is_some()
-			&& id == crate::ietf::object::timestamp_object_id(start, prior, timestamp.value()).0;
+		let timed = timestamp_ids && id == crate::ietf::object::timestamp_object_id(start, prior, timestamp.value()).0;
 		if offset == 0 {
 			wire.sparse |= (id != index && !timed) || (!wire.first_object && wire.first_id > 0);
-		} else if timestamp.scale().is_none() {
+		} else if !timestamp_ids {
 			wire.sparse |= id != index;
 		}
 	}
@@ -2241,7 +2240,8 @@ impl Producer {
 			state.charge.add(metadata_bytes);
 		}
 		let index = state.next_index as u64;
-		state.relayed(object_id, index, self.handle.info.start, timestamp);
+		let timestamp_ids = self.handle.track.timestamp_ids() == Some(true);
+		state.relayed(object_id, index, self.handle.info.start, timestamp, timestamp_ids);
 		let now = state.commit(entry);
 		state.next_index = next_index;
 		state.wrote = true;
@@ -2546,7 +2546,14 @@ impl Producer {
 			.as_ref()
 			.and_then(|partial| partial.fields.as_ref())
 			.map_or(state.next_index as u64, |fields| fields.id);
-		state.relayed(object_id, (next_index - 1) as u64, self.handle.info.start, timestamp);
+		let timestamp_ids = self.handle.track.timestamp_ids() == Some(true);
+		state.relayed(
+			object_id,
+			(next_index - 1) as u64,
+			self.handle.info.start,
+			timestamp,
+			timestamp_ids,
+		);
 		state.next_index = next_index;
 		state.wrote = true;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
@@ -2972,8 +2979,11 @@ impl Handle {
 				return Err(Error::MalformedTrack);
 			}
 			// A first object's gap may also cover IDs below where this copy starts. Timestamp
-			// Object IDs skip the ticks between frames with no Prior Object ID Gap.
-			if self.track.timestamp_ids() != Some(true) {
+			// Object IDs skip the ticks between frames with no Prior Object ID Gap, so on such a
+			// track only a stream starting at the group's first object proves its head is held.
+			if self.track.timestamp_ids() == Some(true) {
+				wire.fetchable &= wire.last.is_some() || wire.first_object;
+			} else {
 				wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
 			}
 		}
@@ -6365,6 +6375,40 @@ mod test {
 		assert_eq!(pool.used(), charged);
 		drop(consumer);
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// A timestamp-ID copy whose stream starts past the group's first object can't prove the
+	/// frames before it, so it answers no FETCH; one starting at the first object can.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_timestamp_id_suffix_is_not_fetchable() {
+		for first_object in [true, false] {
+			let mut info = track::Info::timed();
+			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+				version: crate::ietf::Version::Draft23,
+				values: Vec::new(),
+			}));
+			let cache = cache::Track::new(
+				cache::Pool::unbounded(),
+				Default::default(),
+				Default::default(),
+				kio::Weak::new(),
+			);
+			let group = Producer::new(Info::from(0u64), info, cache);
+			group
+				.set_wire(Wire {
+					sparse: false,
+					first_object,
+					first_id: 33,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			group.mark_gap(33, None).unwrap();
+			assert_eq!(group.wire().unwrap().fetchable, first_object);
+		}
 	}
 
 	#[test]

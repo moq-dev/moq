@@ -1,4 +1,4 @@
-import type { Reader, Writer } from "../stream.ts";
+import { Cursor, type Reader, type Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
 import { hasTimestampObjectIds, type IetfVersion } from "./version.ts";
@@ -20,6 +20,8 @@ const TIMESCALE = 0x40b70n;
 // registry: that one is only legal in SUBSCRIBE, PUBLISH_OK, and FETCH, where the
 // subscriber states its own preference.
 const DEFAULT_PUBLISHER_PRIORITY = 0x0en;
+/** Immutable Properties: a nested block of properties the publisher sealed. */
+const IMMUTABLE = 0x0bn;
 const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
 
 /**
@@ -101,6 +103,36 @@ export async function encode(w: Writer, properties: Properties, version: IetfVer
 export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
 	const properties: Properties = {};
 	const sparseIds = hasTimestampObjectIds(version);
+	// Each understood property holds one value, searched in both the top-level list and the
+	// Immutable Properties block, so a second occurrence is malformed, as in Rust.
+	const seen = new Set<bigint>();
+	const once = (key: bigint) => {
+		if (seen.has(key)) throw new Error(`repeated property: ${key}`);
+		seen.add(key);
+	};
+	const apply = (abs: bigint, value: bigint) => {
+		if (abs === 4n) {
+			once(abs);
+			properties.maxCacheDuration = value;
+		} else if (abs === TIMESCALE || (!sparseIds && abs === LEGACY_TIMESCALE)) {
+			once(TIMESCALE);
+			// A zero timescale is invalid; treat it as no declaration rather than
+			// failing the whole message over one property we could have ignored.
+			if (value > 0n) properties.timescale = Timescale(toNumber(value));
+		} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
+			once(abs);
+			if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
+			properties.priority = Number(value);
+		} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
+			once(abs);
+			// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
+			// fields, 0x0 has no "publisher decides" meaning to fall back on.
+			if (value < 1n || value > 2n) {
+				throw new Error(`unknown group order: ${value}`);
+			}
+			properties.groupOrder = Number(value);
+		}
+	};
 	let prevType = 0n;
 	let i = 0;
 
@@ -112,30 +144,21 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 
 		if (abs % 2n === 0n) {
 			// Even type: single varint value
-			const value = await r.u62();
-			if (abs === 4n) {
-				properties.maxCacheDuration = value;
-			} else if (abs === TIMESCALE && value > 0n) {
-				// A zero timescale is invalid; treat it as no declaration rather than
-				// failing the whole message over one property we could have ignored.
-				properties.timescale = Timescale(toNumber(value));
-			} else if (!sparseIds && abs === LEGACY_TIMESCALE && value > 0n) {
-				properties.timescale = Timescale(toNumber(value));
-			} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
-				if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
-				properties.priority = Number(value);
-			} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
-				// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
-				// fields, 0x0 has no "publisher decides" meaning to fall back on.
-				if (value < 1n || value > 2n) {
-					throw new Error(`unknown group order: ${value}`);
-				}
-				properties.groupOrder = Number(value);
-			}
-		} else {
-			// Odd type: length-prefixed bytes
-			const len = await r.u53();
-			await r.read(len);
+			apply(abs, await r.u62());
+			continue;
+		}
+		// Odd type: length-prefixed bytes
+		const bytes = await r.read(await r.u53());
+		if (abs !== IMMUTABLE) continue;
+		// A sealed property applies as a mutable one does: ID_TIMESCALE there still picks the
+		// Object ID scheme.
+		const block = new Cursor(bytes, r.version);
+		let prev = 0n;
+		while (block.remaining > 0) {
+			const id = prev + block.u62();
+			prev = id;
+			if (id % 2n === 0n) apply(id, block.u62());
+			else block.read(block.u53());
 		}
 	}
 

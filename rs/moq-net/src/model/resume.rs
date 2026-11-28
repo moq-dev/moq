@@ -15192,7 +15192,13 @@ mod test {
 		drop(frame);
 		dense.clone().abort(Error::Dropped).unwrap();
 
-		let sparse = copy();
+		// Relayed from a draft-23 publisher, whose Object IDs are timestamps.
+		let mut info = crate::track::Info::timed();
+		info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: crate::ietf::Version::Draft23,
+			values: Vec::new(),
+		}));
+		let sparse = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
 		let mut group = sparse.create_group(group::Info { start: 0 }).unwrap();
 		group
 			.set_wire(group::Wire {

@@ -143,7 +143,7 @@ export function frameHeader(
 	inflated: number | undefined,
 	size: number,
 	lengthFirst: boolean,
-	first = false,
+	first: boolean,
 ) {
 	const parts: Uint8Array[] = [];
 	if (lengthFirst) parts.push(encodeVarint(size + 1, version));

@@ -329,7 +329,7 @@ impl<'a> Message<'a> for TrackProperties {
 		if properties
 			.values
 			.iter()
-			.any(|property| crate::ietf::properties::understood(property.id))
+			.any(|property| crate::ietf::properties::understood(property.id, version))
 		{
 			return Err(DecodeError::InvalidValue);
 		}
@@ -569,6 +569,15 @@ mod tests {
 		assert!(
 			decode(&wire(&[opaque(0x40B70)], draft18)).is_err(),
 			"an understood property"
+		);
+		// A draft-18..22 track's timescale is `0x08`, which TRACK_INFO carries; on draft-23 it is opaque.
+		assert!(
+			decode(&wire(&[opaque(0x08)], draft18)).is_err(),
+			"a draft-18..22 timescale"
+		);
+		assert!(
+			decode(&wire(&[opaque(0x08)], code(Draft::Draft23))).is_ok(),
+			"an opaque 0x08 on draft-23"
 		);
 		assert!(
 			decode(&wire(&[opaque(0x40)], 0)).is_err(),

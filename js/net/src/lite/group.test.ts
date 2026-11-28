@@ -161,7 +161,8 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		const lengthFirst = hasLengthFirst(version);
 		const decode = frameDecoder({ scale: SCALE, lengthFirst });
 		// Only the header: the cap must not wait for any payload bytes.
-		const header = (size: number) => streamOf([frameHeader(version, 0n, undefined, size, lengthFirst)], version);
+		const header = (size: number) =>
+			streamOf([frameHeader(version, 0n, undefined, size, lengthFirst, true)], version);
 		expect(((await header(MAX_FRAME_BYTES).decode(decode)) as WireFrame).size).toBe(MAX_FRAME_BYTES);
 		await expect(header(MAX_FRAME_BYTES + 1).decode(decode)).rejects.toThrow(FrameTooLarge);
 		const producer = new Producer(0n);
@@ -306,7 +307,7 @@ test("a scale-less lite-07 FRAME carries no timestamp", async () => {
 	// With no timestamps the End counts from the group's start.
 	expect(end).toBe(12n);
 	// The publisher writes no delta either.
-	const header = frameHeader(Version.DRAFT_07, undefined, undefined, 1, true);
+	const header = frameHeader(Version.DRAFT_07, undefined, undefined, 1, true, true);
 	expect(Array.from(header)).toEqual([2]);
 });
 
@@ -346,7 +347,7 @@ test("a lite-07 stream ending at the Payload Length ends the group", async () =>
 // refused as a protocol violation rather than counted wrong.
 test("a lite-07 frame numbered past the safe integer range is refused", async () => {
 	const version = Version.DRAFT_07;
-	const frame = concat([frameHeader(version, 0n, undefined, 1, true), new Uint8Array([7])]);
+	const frame = concat([frameHeader(version, 0n, undefined, 1, true, true), new Uint8Array([7])]);
 	const start = Number.MAX_SAFE_INTEGER - 1;
 	const producer = new Producer(0n);
 	hooks.startGroup(producer, start);

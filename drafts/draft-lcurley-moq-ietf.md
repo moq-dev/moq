@@ -88,7 +88,7 @@ Each track has one immutable Version.
 The {{moqt}} Track Properties forwarded without interpretation, delta-encoded in ascending ID order using the track Version's varints.
 At most one Immutable Properties block (`0x0b`) may appear, forwarded verbatim in the same encoding.
 
-A message MUST NOT carry more than 64 properties, nor any of the six properties a relay interprets into `TRACK_INFO`: `MAX_CACHE_DURATION` (`0x04`), `DEFAULT_PUBLISHER_PRIORITY` (`0x0e`), `DEFAULT_PUBLISHER_GROUP_ORDER` (`0x22`), `DYNAMIC_GROUPS` (`0x30`), `COMPRESSION` (`0x40B6C`), and `ID_TIMESCALE` (`0x40B70`).
+A message MUST NOT carry more than 64 properties, nor any of the six properties a relay interprets into `TRACK_INFO`: `MAX_CACHE_DURATION` (`0x04`), `DEFAULT_PUBLISHER_PRIORITY` (`0x0e`), `DEFAULT_PUBLISHER_GROUP_ORDER` (`0x22`), `DYNAMIC_GROUPS` (`0x30`), `COMPRESSION` (`0x40B6C`), and `ID_TIMESCALE` (`0x40B70`), or the legacy `TIMESCALE` (`0x08`) in its place on a track published over draft-18 to draft-22.
 Violating either rule is malformed.
 
 Because a relay restates up to five of those from `TRACK_INFO` (never `MAX_CACHE_DURATION`), it forwards at most 58 opaque properties and refuses a track with more as unsupported.
