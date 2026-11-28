@@ -337,8 +337,9 @@ it("shares the parent's resolution across catalog updates", async () => {
 			}),
 		);
 
-		// An update keeps the same handle rather than resolving the path again.
-		catalog.set(entries());
+		// An update keeps the same handle rather than resolving the path again. Forced, since an
+		// equal catalog would not notify.
+		catalog.set(entries(), true);
 		await settle();
 		expect(sibling.out.active.peek()).toBe(held);
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
