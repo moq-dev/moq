@@ -1,4 +1,4 @@
-# [S] `just check` passes on macOS through the package rename test
+# [S] just check passes on macOS through the package rename test
 
 ## Goal
 
