@@ -1768,7 +1768,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn audio_groups_carry_one_hundred_milliseconds() {
 		gst::init().unwrap();
-		for (duration, expected) in [(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]), (None, [40, 40, 10])] {
+		for (duration, expected) in [
+			(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]),
+			(None, [40, 40, 10]),
+		] {
 			let (broadcast, catalog) = producers();
 			let consumer = broadcast.consume();
 			let mut pad = Pad::new();

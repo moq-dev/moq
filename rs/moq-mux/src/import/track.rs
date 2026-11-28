@@ -1222,7 +1222,9 @@ mod tests {
 				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
 				.unwrap();
 		}
-		import.decode(b"a", Some(Timestamp::from_micros(40_000).unwrap())).unwrap();
+		import
+			.decode(b"a", Some(Timestamp::from_micros(40_000).unwrap()))
+			.unwrap();
 		for ts in [2_000_000, 2_020_000] {
 			import
 				.decode(OPUS_20MS, Some(Timestamp::from_micros(ts).unwrap()))
@@ -1257,7 +1259,13 @@ mod tests {
 		let mp3 = [0xFF, 0xFB, 0x90, 0x44];
 		let cases = [
 			// 1024 samples at 48 kHz never land on 100 ms, so a group takes the frame past it.
-			(AudioFormat::Aac, aac.encode().unwrap().to_vec(), vec![0x21, 0x10], 21_333, [5, 5]),
+			(
+				AudioFormat::Aac,
+				aac.encode().unwrap().to_vec(),
+				vec![0x21, 0x10],
+				21_333,
+				[5, 5],
+			),
 			// 4096-sample blocks, about 85 ms each.
 			(
 				AudioFormat::Flac,
@@ -1267,7 +1275,13 @@ mod tests {
 				[2, 2],
 			),
 			// 1152 samples at 44.1 kHz.
-			(AudioFormat::Mp3, mp3.to_vec(), [&mp3[..], &[0; 8]].concat(), 26_122, [4, 4]),
+			(
+				AudioFormat::Mp3,
+				mp3.to_vec(),
+				[&mp3[..], &[0; 8]].concat(),
+				26_122,
+				[4, 4],
+			),
 		];
 		for (format, init, frame, step, expected) in cases {
 			let (broadcast, catalog) = new_broadcast();
