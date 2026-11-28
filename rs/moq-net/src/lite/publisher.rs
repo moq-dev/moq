@@ -12905,7 +12905,6 @@ mod serve_group_test {
 							.unwrap()
 							.subscribe(
 								track::Subscription::default()
-									.with_range(0..)
 									.with_max(Duration::from_secs(60)),
 							)
 							.await
@@ -12939,11 +12938,9 @@ mod serve_group_test {
 				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 20);
 				starts.push(kio::wait(|waiter| live.poll_start(waiter)).await);
 			}
-			assert_eq!(
-				starts,
-				[Some(20), Some(20)],
-				"{version}: cold and warm relay starts differ"
-			);
+			// A Lite05/06 start names a sequence number, which keys no start in the copy.
+			let start = (!version.rekeys()).then_some(20);
+			assert_eq!(starts, [start, start], "{version}: cold and warm relay starts differ");
 		}
 	}
 

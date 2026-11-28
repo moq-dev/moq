@@ -14649,11 +14649,10 @@ mod test {
 			}
 		}
 
-		/// Re-poll after the first change to the replacement. The refused recovery fetch
-		/// parked on the replacement's track state once, so that change wakes the group
-		/// whatever it is; from here on only the expiry index can.
+		/// Re-poll after the first change to the replacement, forgetting any wake it caused, so
+		/// from here on only the expiry index can wake the group. The legacy copy refuses the
+		/// recovery fetch at once, without parking on its track state.
 		fn settle(&mut self) {
-			assert!(self.woken());
 			assert!(!self.is_old());
 		}
 

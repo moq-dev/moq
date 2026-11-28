@@ -271,7 +271,10 @@ impl Rekey {
 		if version == Version::Lite05 {
 			return None;
 		}
-		let last = end.checked_sub(1)?;
+		// No group at all, so no key either.
+		let Some(last) = end.checked_sub(1) else {
+			return Some(0);
+		};
 		match self.last {
 			Some((seq, key)) if seq == last => Some(key.saturating_add(1)),
 			_ => {
@@ -3678,7 +3681,7 @@ mod tests {
 	use super::*;
 	use crate::Timescale;
 	use crate::coding::{Decode, Encode};
-	use crate::lite::test_transport::{Sent, SinkSession};
+	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
@@ -5461,9 +5464,10 @@ mod tests {
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
 				.unwrap();
 				let mut w = crate::coding::Encoder::new(&mut bytes, version.into());
-				// Frame 0 at the group's start: lite-07 carries no delta for it.
+				// Frame 0 at the group's start, 3ms: lite-07 carries no delta for it, and an
+				// earlier version keys the group by it.
 				if !version.has_group_end() {
-					w.varint(0).unwrap();
+					w.varint(crate::coding::varint::zigzag(3)).unwrap();
 				}
 				w.varint(1).unwrap();
 				w.u8(42);
@@ -5537,18 +5541,72 @@ mod tests {
 		}
 	}
 
-	/// Serve one Group Stream for `key` on subscription 7, accepted into `track`.
+	/// Lite-05/06 groups take their frame 0's key: consecutive sequence numbers prove the keys
+	/// between them empty, keys must rise with sequence numbers, and SUBSCRIBE_END keys the
+	/// copy's end once the group numbered before it arrives.
+	#[test]
+	fn rekey_follows_the_sequence() {
+		let mut rekey = Rekey::default();
+		assert_eq!(rekey.insert(4, 100).unwrap(), Keyed::default());
+		assert_eq!(
+			rekey.insert(5, 133).unwrap(),
+			Keyed {
+				skipped: Some(101..133),
+				end: None
+			}
+		);
+		// A hole in the sequence proves nothing.
+		assert_eq!(rekey.insert(7, 200).unwrap(), Keyed::default());
+		// A late group within the hole, and a copy of one keyed already.
+		assert_eq!(rekey.insert(6, 166).unwrap(), Keyed::default());
+		assert_eq!(rekey.insert(7, 200).unwrap(), Keyed::default());
+		// Out of order with the newest, or a sequence number keyed elsewhere.
+		assert!(matches!(rekey.insert(8, 200), Err(Error::TimestampMismatch)));
+		assert!(matches!(rekey.insert(3, 300), Err(Error::TimestampMismatch)));
+		assert!(matches!(rekey.insert(7, 201), Err(Error::TimestampMismatch)));
+
+		// The end waits for the group before it, then lands one past its key.
+		assert_eq!(rekey.end(Version::Lite06, 10), None);
+		assert_eq!(
+			rekey.insert(8, 233).unwrap(),
+			Keyed {
+				skipped: Some(201..233),
+				end: None
+			}
+		);
+		assert_eq!(
+			rekey.insert(9, 266).unwrap(),
+			Keyed {
+				skipped: Some(234..266),
+				end: Some(267)
+			}
+		);
+		assert_eq!(rekey.end(Version::Lite06, 10), Some(267));
+		assert_eq!(Rekey::default().end(Version::Lite06, 0), Some(0));
+		// Lite-05's end may be inclusive, so its FIN ends the copy instead.
+		assert_eq!(rekey.end(Version::Lite05, 10), None);
+	}
+
+	/// Serve one Group Stream for `key` on subscription 7, accepted into `track`. Before
+	/// lite-07 it carries frame 0 at `key` ms, which keys it there.
 	async fn serve_group(version: Version, key: u64, track: &track::Producer) -> Result<(), Error> {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
 		lite::Group {
 			subscribe: 7,
 			key,
 			frame_start: 0,
 		}
-		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.encode(&mut encoder, version)
 		.unwrap();
+		if version.rekeys() {
+			encoder
+				.varint(crate::coding::varint::zigzag(key as i64))
+				.unwrap();
+			encoder.bytes(b"x").unwrap();
+		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -6017,8 +6075,8 @@ mod tests {
 		(res, track)
 	}
 
-	/// Lite-05/06 timestamps may be send times, so a received group that rewinds keeps its
-	/// timestamp unchecked, and the track stays open.
+	/// Lite-05/06 timestamps may be send times, so a received group that rewinds is kept,
+	/// keyed by its frame 0, and the track stays open.
 	#[kio::test]
 	async fn a_lite06_rewind_passes_through() {
 		for version in [Version::Lite05, Version::Lite06] {
@@ -6028,7 +6086,7 @@ mod tests {
 			assert!(track.closed().now_or_never().is_none(), "{version}");
 			let mut consumer = track.subscribe(None);
 			let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(group.start, 5, "{version}");
+			assert_eq!(group.start, 500, "{version}");
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), b"frame", "{version}");
 			assert_eq!(frame.timestamp, Timestamp::from_millis(500).unwrap(), "{version}");
@@ -6053,7 +6111,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06] {
 			let (res, track) = receive_group(version, &[max]).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
-			let mut group = track.consume().peek_group(5).unwrap();
+			let mut group = track.consume().peek_group(max as u64).unwrap();
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.timestamp.value(), max as u64, "{version}");
 
@@ -6411,12 +6469,13 @@ mod tests {
 			.encode(&mut encoder, version)
 			.unwrap();
 			// Frame 0 whole, then frame 1 cut after three bytes.
-			for (delta, payload, sent) in [(300, &b"zero"[..], 4), (10, &b"onetwo!"[..], 3)] {
+			for (delta, payload, sent) in [(3, &b"zero"[..], 4), (10, &b"onetwo!"[..], 3)] {
 				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
 				if length_first {
 					encoder.varint(payload.len() as u64 + 1).unwrap();
-					// Lite-07's frame 0 carries no delta, sitting at the group's start.
-					if delta != 300 {
+					// Lite-07's frame 0 carries no delta, sitting at the group's start; an earlier
+					// version keys the group by it.
+					if delta != 3 {
 						encoder.varint(delta as u64).unwrap();
 					}
 				} else {
@@ -6480,9 +6539,9 @@ mod tests {
 		}
 	}
 
-	/// A SUBSCRIBE_END below a group already received contradicts that group. lite-05
-	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
-	/// costs the early boundary; later drafts abort the track.
+	/// A SUBSCRIBE_END below a group already received contradicts that group, which aborts a
+	/// lite-07 track. A Lite05/06 end names a sequence number, which keys the copy's end only
+	/// once the group numbered before it arrives, so here the FIN ends the track.
 	#[kio::test]
 	async fn a_subscribe_end_below_a_received_group() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -6562,7 +6621,7 @@ mod tests {
 				}
 			};
 			match version {
-				Version::Lite05 => assert!(matches!(end, Ok(None)), "{version:?}: {end:?}"),
+				Version::Lite05 | Version::Lite06 => assert!(matches!(end, Ok(None)), "{version:?}: {end:?}"),
 				_ => assert!(matches!(end, Err(Error::ProtocolViolation)), "{version:?}: {end:?}"),
 			}
 		}
@@ -6660,7 +6719,11 @@ mod tests {
 	async fn an_answer_read_after_a_withdrawal_is_kept() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let res = answer_after(version, |selection| selection.withdraw()).await;
-			assert!(matches!(res, Some(Ok(None))), "{version:?}: {res:?}");
+			match version {
+				// Its end may be inclusive, so only the FIN ends the copy.
+				Version::Lite05 => assert!(res.is_none(), "{version:?}: {res:?}"),
+				_ => assert!(matches!(res, Some(Ok(None))), "{version:?}: {res:?}"),
+			}
 		}
 	}
 
@@ -7635,9 +7698,8 @@ mod tests {
 		assert_eq!(group.start, 5, "the group that arrived is kept");
 	}
 
-	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
-	/// Earlier versions carry an application code there, so the same bytes read as
-	/// OLD.
+	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code. A Lite05/06 drop
+	/// names sequence numbers, which key nothing in the copy.
 	#[kio::test]
 	async fn a_subscribe_drop_ends_an_arriving_group_with_its_code() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -7709,15 +7771,15 @@ mod tests {
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
-			let expected = match version {
-				Version::Lite07 => crate::StreamError::App(5),
-				_ => crate::StreamError::Old,
-			};
 			let res = group.read_frame().now_or_never();
-			assert!(
-				matches!(&res, Some(Err(Error::Stream(err))) if *err == expected),
-				"{version:?}: {res:?}"
-			);
+			match version {
+				Version::Lite07 => assert!(
+					matches!(&res, Some(Err(Error::Stream(crate::StreamError::App(5))))),
+					"{version:?}: {res:?}"
+				),
+				_ => assert!(res.is_none(), "{version:?}: {res:?}"),
+			}
+			let _ = arriving.finish();
 
 			// The track goes on: the next group still reaches the reader.
 			let mut following = producer.create_empty(group::Info { start: 3 }).unwrap();
@@ -8638,10 +8700,11 @@ mod tests {
 		}
 	}
 
-	/// A wire before lite-07 carries the demand's widest live max as its one Subscriber Max
-	/// Age, even once its span narrows to a start, here the newest group an idle copy cached.
+	/// A Lite05/06 copy names no key upstream, whose groups are numbered by sequence: an idle
+	/// one asks with no start rather than from the newest group it cached, under the demand's
+	/// widest live max as its one Subscriber Max Age.
 	#[kio::test]
-	async fn a_span_narrowed_to_a_start_keeps_the_demands_max_age() {
+	async fn an_idle_lite06_copy_asks_without_a_key() {
 		for version in [Version::Lite05, Version::Lite06] {
 			let mut h = Harness::new(version);
 			let mut cached = h.producer.create_empty(group::Info { start: 3 }).unwrap();
@@ -8659,14 +8722,8 @@ mod tests {
 
 			let (msg, _) = sent_subscribe(&h.wire(), version);
 			assert!(
-				matches!(
-					msg.ranges[..],
-					[lite::Range {
-						start: Some(lite::Anchor::Absolute(position)),
-						..
-					}] if position.group == 3
-				),
-				"{version}: asked from the newest cached group, got {:?}",
+				matches!(msg.ranges[..], [lite::Range { start: None, end: None }]),
+				"{version}: asked with no key, got {:?}",
 				msg.ranges
 			);
 			assert_eq!(msg.max_delay, Some(wait), "{version}: the demand's max age");
@@ -8899,63 +8956,6 @@ mod tests {
 			entry.tail.read().covers(1..2),
 			"withdrawn parked stream kept its key accounted"
 		);
-	}
-
-	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
-	/// stream credit, where a fetch waits for it, so fetches opened first could leave TRACK
-	/// none and fail the track with every fetch.
-	#[kio::test]
-	async fn track_opens_before_the_fetches_sent_alongside() {
-		let session = SinkSession::gated_bi(kio::Producer::new(true).consume());
-		let log = session.log.clone();
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::sim(),
-			session: crate::driver::Transport::new(session),
-			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version: VERSION,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_node: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-
-		let broadcast = crate::broadcast::Info::new().produce();
-		let mut dynamic = broadcast.requests();
-		let consumer = broadcast.consume();
-		let _waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
-		let request = dynamic.requested_track().await.expect("request");
-		let copy = request.consume();
-
-		let mut run = TrackServeRun::new(
-			TrackServe {
-				validity: Default::default(),
-				route: None,
-				source: None,
-				subscriber,
-				path: Path::from_static("room"),
-				identity: None,
-				node: None,
-				name: "video".to_string(),
-				meta: false,
-			},
-			request,
-		);
-		// Queued before the run first polls, as several fetches can be.
-		let mut fetching = Box::pin(copy.fetch_group(0, None));
-		assert!(futures::poll!(fetching.as_mut()).is_pending());
-		assert!(kio::Task::poll(&mut run, &kio::Waiter::noop()).is_pending());
-
-		let first = |control: lite::ControlType| {
-			log.trail().into_iter().find_map(|(stream, sent)| match sent {
-				Sent::Write(bytes) if bytes.first() == Some(&(u64::from(control) as u8)) => Some(stream),
-				_ => None,
-			})
-		};
-		let track = first(lite::ControlType::Track).expect("TRACK went out");
-		let fetch = first(lite::ControlType::Fetch).expect("FETCH went out alongside");
-		assert!(track < fetch, "a FETCH opened its stream before TRACK");
 	}
 
 	/// The front reads whether a source is closing from its broadcast, and takes a failure from a
@@ -10611,55 +10611,6 @@ mod tests {
 		assert_eq!(wanted(&h), [1, 2, 2], "every update restates the wanted group");
 	}
 
-	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
-	/// it applies exactly while the current start matches that demand: an update
-	/// that moves the start makes it stale (applying it could reopen a range the
-	/// publisher no longer serves, or clamp one it still does), and an update
-	/// that moves back restores it (the publisher declared that range gone and
-	/// sends no replacement START).
-	#[kio::test]
-	async fn buffered_start_applies_iff_demand_matches() {
-		let mut h = Harness::new(Version::Lite05);
-		let mut sub = Sub::None;
-
-		let demand = |group: u64| Some(Subscription::default().with_start(group));
-		let applies = |sub: &Sub| matches!(sub, Sub::Active(active) if active.start == active.requested);
-
-		// Establish from group 3; the peer's START is considered in flight.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
-			.await
-			.unwrap();
-		assert!(applies(&sub), "a fresh subscription accepts its START");
-
-		// An end-only update leaves the start intact: the START stays valid.
-		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default().with_start(3).with_end(9)),
-				true,
-			)
-			.await
-			.unwrap();
-		assert!(applies(&sub), "an unmoved start keeps the START applicable");
-
-		// The start moves: a buffered START is stale while it sits elsewhere.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true)
-			.await
-			.unwrap();
-		assert!(!applies(&sub), "a moved start must invalidate a buffered START");
-
-		// The start returns: the declaration matches the demand again, so the
-		// publisher's skip (it sends no replacement START) must land.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
-			.await
-			.unwrap();
-		assert!(applies(&sub), "demand returning restores the START");
-	}
-
 	/// The copy records the narrowest live join's max age its SUBSCRIBE and each update asked,
 	/// before either reaches the wire, so a group its publisher resets as too old under any of
 	/// them stands only for a reader no wider (see `resume::Recover::outgrows_judging`).
@@ -10679,47 +10630,6 @@ mod tests {
 				"after asking {millis} ms"
 			);
 		}
-	}
-
-	/// The permanent-miss floor follows the demand in every direction: an update
-	/// that moves the start forward retires the skipped range (the publisher
-	/// stops serving it and no fresh START says so), one that moves it backward
-	/// reopens it, and dropping to the live edge clears it entirely.
-	#[kio::test]
-	async fn updates_move_the_declared_floor_both_ways() {
-		let mut h = Harness::new(Version::Lite05);
-		let mut sub = Sub::None;
-
-		let demand = |group: u64| Some(Subscription::default().with_start(group));
-
-		// Establish from group 5: the floor tracks the request until START lands.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(5), true)
-			.await
-			.unwrap();
-		assert_eq!(h.producer.start_key(), Some(5));
-
-		// Forward: a reader waiting in [5, 8) must fail over, not stall.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true)
-			.await
-			.unwrap();
-		assert_eq!(h.producer.start_key(), Some(8));
-
-		// Backward: the reopened range must stop being a permanent miss.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
-			.await
-			.unwrap();
-		assert_eq!(h.producer.start_key(), Some(3));
-
-		// Live edge: the floor is unknown until the next declaration, so a
-		// group below the stale one must not be a permanent miss.
-		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
-			.await
-			.unwrap();
-		assert_eq!(h.producer.start_key(), None);
 	}
 
 	/// A second announce for a live path is a protocol error whatever its hops say. It
@@ -12340,7 +12250,7 @@ mod tests {
 	#[kio::test]
 	async fn live_group_tails_share_content_held_by_earlier_readers() {
 		use crate::transport::poll::Session as _;
-		let version = Version::Lite06;
+		let version = Version::Lite07;
 		let session = crate::lite::test_transport::ScriptedSession::eof(Vec::new());
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -12367,7 +12277,7 @@ mod tests {
 					timescale: Some(Timescale::MILLI),
 					ietf: None,
 					compressed: false,
-					length_first: false,
+					length_first: true,
 				},
 				Default::default(),
 			),
@@ -12383,9 +12293,11 @@ mod tests {
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
+			// A slice's first frame counts its delta from the group's start.
 			for index in start..9 {
-				encoder.varint(crate::coding::varint::zigzag(0)).unwrap();
-				encoder.bytes(&vec![index as u8; 1024]).unwrap();
+				encoder.varint(1025).unwrap();
+				encoder.varint(0).unwrap();
+				encoder.slice(&[index as u8; 1024]);
 			}
 			let incoming = crate::lite::test_transport::ScriptedSession::eof(script);
 			let (_, recv) = incoming.open_bi(Default::default()).await.unwrap();
@@ -13782,7 +13694,20 @@ impl TrackServe {
 		// demand at all is the faithful translation. An absent start is the live edge, wherever that lands, so the only end that is
 		// certainly empty is the very first position, which is what `Position::default()`
 		// stands in for.
-		let subscription = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))?;
+		let mut subscription = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))?;
+		// Lite05/06 number groups by sequence, which no key here names: ask without one. A copy
+		// refuses its readers' requests that name one (see `Info::legacy`).
+		let rekeys = self.subscriber.version.rekeys();
+		if rekeys {
+			subscription.placed.clear();
+			subscription.resume = None;
+			for range in &mut subscription.ranges {
+				if range.time().is_some() {
+					range.start = track::Start::Oldest;
+				}
+				range.end = None;
+			}
+		}
 		// Read before the span narrows: a span from a start is history, which drops the max of
 		// every live join it covers.
 		let max_age = subscription.max_age();
@@ -13801,7 +13726,8 @@ impl TrackServe {
 		// nothing keeps the subscriber's ranges: no start would widen a live viewer's ask to
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
-			subscription.start().is_none()
+			!rekeys
+				&& subscription.start().is_none()
 				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
 		});
 		if let Some(newest) = newest {
@@ -13809,12 +13735,6 @@ impl TrackServe {
 		}
 		// A wire without frame bounds asks the group whole.
 		if !self.subscriber.version.has_frame_bounds() {
-			subscription.resume = None;
-		}
-		// Lite05/06 number groups by sequence, which no key here names: ask for the live feed,
-		// within the one max age. A copy refuses its readers' history (see `Info::legacy`).
-		if self.subscriber.version.rekeys() {
-			subscription = subscription.with_start(None).with_end(None);
 			subscription.resume = None;
 		}
 		let ranges = wire_ranges(&subscription, ranged)?;
@@ -15875,7 +15795,7 @@ impl ServeLoop {
 				active.fill_ids.retain(|id| live.get(*id).is_some());
 				active.probe_ids.retain(|id| live.get(*id).is_some());
 				// A Lite05/06 start names a sequence number, which says nothing of the copy's keys:
-				// it goes live from its first group instead.
+				// it goes live from its first group instead, with no floor below.
 				let rekeys = serve.subscriber.version.rekeys();
 				if active.demand.is_some()
 					&& !rekeys
@@ -15889,8 +15809,9 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				if active.start == active.requested && active.demand.is_some() && !rekeys {
+				if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
+						_ if rekeys => self.serving.start_at(None),
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
 					};

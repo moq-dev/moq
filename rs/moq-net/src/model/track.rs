@@ -6667,14 +6667,6 @@ impl Producer {
 		Ok(())
 	}
 
-	/// The declared first key of the live feed, once [`Self::start_at`]
-	/// declared one. `None` while nothing was declared.
-	#[cfg(test)]
-	#[cfg(feature = "async")]
-	pub(crate) fn start_key(&self) -> Option<u64> {
-		self.state.read().start.key()
-	}
-
 	/// The cached groups' keys in the order they arrived, which no reader's Group Order changes.
 	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn arrival_order(&self) -> Vec<u64> {
@@ -8685,6 +8677,7 @@ impl Consumer {
 				frame_end,
 				priority: options.priority,
 				judges_drift: true,
+				by_key: true,
 				result: None,
 				hit: Some(Box::new(group)),
 				stats: self.stats.clone(),
@@ -8705,6 +8698,7 @@ impl Consumer {
 				frame_end,
 				priority: options.priority,
 				judges_drift: true,
+				by_key: true,
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
@@ -9210,6 +9204,9 @@ pub struct Fetching {
 	// Whether this fetch refuses a group the publisher's max age expired, judged across the
 	// whole cache. A cursor's head fill leaves it to the cursor, which judges its window.
 	judges_drift: bool,
+	// Whether the caller names the group by key, which a legacy copy refuses (see
+	// `Info::legacy`), rather than a cursor reading its subscription's own groups.
+	by_key: bool,
 	// The fill this fetch joined; `None` on a cache hit, or when no handler existed to
 	// queue on. Boxed: a miss already allocates, and the handle stays small.
 	result: Option<Box<fill::Join>>,
@@ -9259,6 +9256,7 @@ impl Fetching {
 			frame_end: request.end,
 			priority: request.options.priority,
 			judges_drift: true,
+			by_key: true,
 			result,
 			hit,
 			stats,
@@ -9268,9 +9266,10 @@ impl Fetching {
 
 	/// Leave staleness to the caller, a cursor filling a head: it judges the group against
 	/// its own window when it hands it out, where a newer group outside that window
-	/// supersedes nothing.
+	/// supersedes nothing. Its subscription already placed the group, so it names no key.
 	fn unjudged(mut self) -> Self {
 		self.judges_drift = false;
+		self.by_key = false;
 		self
 	}
 }
@@ -9314,7 +9313,7 @@ impl Fetching {
 			return Poll::Ready(Ok(group.with_meter(self.stats.meter())));
 		}
 		// Whatever the cache holds, as a cold copy could never ask its upstream.
-		if self.state.read().info.as_ref().is_some_and(|info| info.legacy) {
+		if self.by_key && self.state.read().info.as_ref().is_some_and(|info| info.legacy) {
 			return Poll::Ready(Err(Error::Unsupported));
 		}
 		let (state, fills, key, frame_start, result) = (
@@ -16492,6 +16491,31 @@ mod test {
 
 	/// A copy a transport bound cut short finishes only its own range, so the largest group
 	/// may still grow and the stream stays open past the end.
+	/// A legacy copy's upstream can't be asked by key, so the copy refuses a fetch, or a
+	/// subscription naming a key, whatever it holds: a cold copy would answer the same.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_legacy_copy_refuses_requests_by_key() {
+		let mut producer = track_producer(
+			"test",
+			Info {
+				legacy: true,
+				..Info::timed()
+			},
+		);
+		producer.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		let consumer = producer.consume();
+		let fetched = consumer.fetch_group(0, None).await;
+		assert!(matches!(fetched, Err(Error::Unsupported)), "{:?}", fetched.err());
+		let history = consumer.subscribe(Subscription::default().with_range(0..)).await;
+		assert!(matches!(history, Err(Error::Unsupported)), "{:?}", history.err());
+
+		let mut live = consumer.subscribe(None).await.unwrap();
+		let updated = live.update(Subscription::default().with_range(..5));
+		assert!(matches!(updated, Err(Error::Unsupported)), "{updated:?}");
+		assert_eq!(live.recv_group().await.unwrap().unwrap().start, 0);
+	}
+
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_finished_bounded_copy_keeps_the_largest_open() {
